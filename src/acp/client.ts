@@ -1,0 +1,161 @@
+import { spawn, ChildProcessWithoutNullStreams } from "child_process";
+import { EventEmitter } from "events";
+import { JsonRpcConnection } from "./connection";
+import {
+  ContentBlock,
+  InitializeResult,
+  NewSessionResult,
+  PromptResult,
+  ReadTextFileParams,
+  RequestPermissionParams,
+  RequestPermissionResult,
+  SessionUpdateNotification,
+  WriteTextFileParams
+} from "./types";
+
+export interface AcpClientOptions {
+  cliPath: string;
+  cwd: string;
+  env?: NodeJS.ProcessEnv;
+}
+
+// Callbacks the host (extension) provides so the client can serve the
+// agent's client-side requests (permissions, file reads/writes).
+export interface AcpHost {
+  requestPermission(params: RequestPermissionParams): Promise<RequestPermissionResult>;
+  readTextFile(params: ReadTextFileParams): Promise<{ content: string }>;
+  writeTextFile(params: WriteTextFileParams): Promise<null>;
+}
+
+// Emitted events:
+//  "update"  -> SessionUpdateNotification
+//  "log"     -> string
+//  "exit"    -> void
+export class AcpClient extends EventEmitter {
+  private child?: ChildProcessWithoutNullStreams;
+  private conn?: JsonRpcConnection;
+  private host?: AcpHost;
+  initializeResult?: InitializeResult;
+
+  constructor(private readonly options: AcpClientOptions) {
+    super();
+  }
+
+  setHost(host: AcpHost): void {
+    this.host = host;
+  }
+
+  start(): void {
+    const child = spawn(this.options.cliPath, ["acp"], {
+      cwd: this.options.cwd,
+      env: { ...process.env, ...this.options.env },
+      stdio: ["pipe", "pipe", "pipe"]
+    }) as ChildProcessWithoutNullStreams;
+
+    child.on("error", (err) => this.emit("log", `[spawn-error] ${err.message}`));
+    child.on("close", (code) => {
+      this.emit("log", `[acp-exit] code=${code}`);
+      this.emit("exit");
+    });
+
+    this.child = child;
+    this.conn = new JsonRpcConnection(
+      child,
+      (method, params) => this.handleRequest(method, params),
+      (method, params) => this.handleNotification(method, params),
+      (line) => this.emit("log", line)
+    );
+  }
+
+  private async handleRequest(method: string, params: unknown): Promise<unknown> {
+    if (!this.host) {
+      throw new Error("No ACP host registered");
+    }
+    switch (method) {
+      case "session/request_permission":
+        return this.host.requestPermission(params as RequestPermissionParams);
+      case "fs/read_text_file":
+        return this.host.readTextFile(params as ReadTextFileParams);
+      case "fs/write_text_file":
+        return this.host.writeTextFile(params as WriteTextFileParams);
+      default:
+        // Unknown/custom client method: reply with null to keep the agent moving.
+        this.emit("log", `[unhandled-request] ${method}`);
+        return null;
+    }
+  }
+
+  private handleNotification(method: string, params: unknown): void {
+    if (method === "session/update") {
+      this.emit("update", params as SessionUpdateNotification);
+      return;
+    }
+    // Devin custom notifications (logs, mcp status) start with `_cognition.ai/`.
+    this.emit("log", `[notify] ${method}`);
+  }
+
+  async initialize(): Promise<InitializeResult> {
+    const result = await this.rpc<InitializeResult>("initialize", {
+      protocolVersion: 1,
+      clientCapabilities: {
+        fs: { readTextFile: true, writeTextFile: true },
+        terminal: false
+      }
+    });
+    this.initializeResult = result;
+    return result;
+  }
+
+  authenticate(methodId: string): Promise<unknown> {
+    return this.rpc("authenticate", { methodId });
+  }
+
+  newSession(mcpServers: unknown[] = []): Promise<NewSessionResult> {
+    return this.rpc<NewSessionResult>("session/new", {
+      cwd: this.options.cwd,
+      mcpServers
+    });
+  }
+
+  loadSession(sessionId: string, mcpServers: unknown[] = []): Promise<unknown> {
+    return this.rpc("session/load", {
+      sessionId,
+      cwd: this.options.cwd,
+      mcpServers
+    });
+  }
+
+  prompt(sessionId: string, blocks: ContentBlock[]): Promise<PromptResult> {
+    return this.rpc<PromptResult>("session/prompt", { sessionId, prompt: blocks });
+  }
+
+  cancel(sessionId: string): void {
+    this.conn?.notify("session/cancel", { sessionId });
+  }
+
+  setMode(sessionId: string, modeId: string): Promise<unknown> {
+    return this.rpc("session/set_mode", { sessionId, modeId });
+  }
+
+  // Devin exposes both `mode` and `model` as config options set through this
+  // custom method: { sessionId, configId, value }.
+  setConfigOption(sessionId: string, configId: string, value: string): Promise<unknown> {
+    return this.rpc("session/set_config_option", { sessionId, configId, value });
+  }
+
+  private rpc<T>(method: string, params?: unknown): Promise<T> {
+    if (!this.conn) {
+      return Promise.reject(new Error("ACP connection not started"));
+    }
+    return this.conn.request<T>(method, params);
+  }
+
+  dispose(): void {
+    this.conn?.dispose();
+    try {
+      this.child?.kill();
+    } catch {
+      // ignore
+    }
+  }
+}

@@ -1,0 +1,138 @@
+{
+  "name": "devin-vscode",
+  "displayName": "Devin for VS Code",
+  "description": "A native chat panel for the Devin CLI, powered by the Agent Client Protocol. Streaming replies, per workspace sessions, and trackable diffs.",
+  "version": "0.1.0",
+  "publisher": "shayanline",
+  "author": "Shayan Khaksar",
+  "license": "AGPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/shayanline/devin-vscode.git"
+  },
+  "engines": {
+    "vscode": "^1.92.0"
+  },
+  "categories": [
+    "AI",
+    "Chat",
+    "Machine Learning",
+    "Other"
+  ],
+  "keywords": [
+    "devin",
+    "devin-cli",
+    "acp",
+    "agent",
+    "chat",
+    "ai"
+  ],
+  "activationEvents": [],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "devin",
+          "title": "Devin",
+          "icon": "resources/activity-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "devin": [
+        {
+          "type": "webview",
+          "id": "devin.chatView",
+          "name": "Chat"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "devin.newSession",
+        "title": "New Session",
+        "category": "Devin",
+        "icon": "$(add)"
+      },
+      {
+        "command": "devin.showSessions",
+        "title": "Show Sessions",
+        "category": "Devin",
+        "icon": "$(history)"
+      },
+      {
+        "command": "devin.focusChat",
+        "title": "Open Chat",
+        "category": "Devin",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "devin.cancel",
+        "title": "Cancel Current Turn",
+        "category": "Devin",
+        "icon": "$(stop-circle)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "devin.newSession",
+          "when": "view == devin.chatView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "devin.showSessions",
+          "when": "view == devin.chatView",
+          "group": "navigation@2"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Devin",
+      "properties": {
+        "devin.cliPath": {
+          "type": "string",
+          "default": "devin",
+          "description": "Path to the Devin CLI executable. Use an absolute path if it is not on your PATH."
+        },
+        "devin.defaultModel": {
+          "type": "string",
+          "default": "",
+          "description": "Default model alias to request for new sessions (e.g. auto, sonnet, opus, gpt). Empty uses the CLI default (Adaptive)."
+        },
+        "devin.defaultMode": {
+          "type": "string",
+          "enum": [
+            "accept-edits",
+            "ask",
+            "plan",
+            "bypass"
+          ],
+          "enumDescriptions": [
+            "Code: write and edit code (auto-approves edits in the workspace)",
+            "Ask: answer questions without code changes",
+            "Plan: plan changes before implementing (read-only)",
+            "Bypass: auto-approve all tool calls"
+          ],
+          "default": "accept-edits",
+          "description": "Session mode for new sessions."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "node esbuild.js --production",
+    "watch": "node esbuild.js --watch",
+    "compile": "node esbuild.js",
+    "check-types": "tsc --noEmit",
+    "package": "npx @vscode/vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/vscode": "^1.92.0",
+    "esbuild": "^0.23.1",
+    "typescript": "^5.5.4"
+  }
+}
