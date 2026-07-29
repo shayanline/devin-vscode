@@ -429,6 +429,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     this.sessionId = undefined;
     this.starting = undefined;
     this.changes.clear();
+    this.focus();
+    this.post({ type: "body", body: "thread" });
     this.post({ type: "clear" });
     await this.ensureSession();
   }
@@ -928,6 +930,31 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     this.setBusy(false);
   }
 
+  // Status-bar info popup: CLI version, sign-in state, current model/mode, and
+  // a link to Devin Cloud.
+  async showInfo(): Promise<void> {
+    type Item = vscode.QuickPickItem & { action?: "cloud" | "login" };
+    const items: Item[] = [
+      { label: "$(link-external) Open Devin Cloud", detail: "https://app.devin.ai", action: "cloud" },
+      { label: "$(versions) CLI version", description: this.health?.version || "unknown" }
+    ];
+    items.push(
+      this.isReady()
+        ? { label: "$(pass-filled) Signed in", description: this.resolvedCli }
+        : { label: "$(error) Not signed in", description: "Click to sign in", action: "login" }
+    );
+    const detail = [this.currentModel, this.currentMode].filter(Boolean).join("  /  ");
+    if (detail) {
+      items.push({ label: "$(sparkle) Model / mode", description: detail });
+    }
+    const picked = await vscode.window.showQuickPick(items, { title: "Devin", placeHolder: "Devin status" });
+    if (picked?.action === "cloud") {
+      await vscode.env.openExternal(vscode.Uri.parse("https://app.devin.ai"));
+    } else if (picked?.action === "login") {
+      await this.authenticate();
+    }
+  }
+
   async showSessionsView(): Promise<void> {
     this.focus();
     this.post({ type: "body", body: "list" });
@@ -1142,6 +1169,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
       vscode.Uri.joinPath(this.context.extensionUri, "media", "codicon", "codicon.css")
     );
     const logoUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "media", "devin-logo.svg"));
+    const modelIcon = (f: string) =>
+      webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "media", "models", f)).toString();
+    const modelIcons = JSON.stringify({
+      claude: modelIcon("claude.svg"),
+      openai: modelIcon("openai.svg"),
+      grok: modelIcon("grok.svg")
+    }).replace(/"/g, "&quot;");
     const csp = [
       `default-src 'none'`,
       `style-src ${webview.cspSource} 'unsafe-inline'`,
@@ -1160,17 +1194,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
   <link href="${styleUri}" rel="stylesheet" />
   <title>Devin</title>
 </head>
-<body data-logo="${logoUri}">
+<body data-logo="${logoUri}" data-model-icons="${modelIcons}">
   <div id="app">
     <div id="setup" class="hidden"></div>
 
     <div id="chat" class="hidden">
       <div id="chat-header">
-        <button id="history-btn" class="icon-btn" title="Show chat history"><i class="codicon codicon-history"></i></button>
-        <span id="chat-title">Chat</span>
+        <button id="history-btn" class="icon-btn" title="Back to sessions"><i class="codicon codicon-arrow-left"></i></button>
+        <button id="title-btn" class="title-btn"><span id="chat-title">Chat</span><i class="codicon codicon-chevron-down title-chev"></i></button>
         <span class="spacer"></span>
         <span id="status"></span>
-        <button id="newchat-btn" class="icon-btn" title="New chat"><i class="codicon codicon-add"></i></button>
       </div>
 
       <div id="body">
