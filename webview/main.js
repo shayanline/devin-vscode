@@ -30,6 +30,11 @@ import { renderMarkdown } from "./markdown.js";
   let assistantEl = null;
   let assistantBuffer = "";
   let thinkingEl = null;
+  let thinkingBodyEl = null;
+  let thinkingLabelEl = null;
+  let thinkingBuffer = "";
+  let thinkingStart = 0;
+  let thinkingDone = false;
   const toolEls = new Map();
 
   let commands = [];
@@ -288,10 +293,27 @@ import { renderMarkdown } from "./markdown.js";
     scrollToBottom();
     return bubble;
   }
-  function startAssistant() { assistantBuffer = ""; thinkingEl = null; assistantEl = addMessage("assistant"); }
-  function endAssistant() { assistantEl = null; thinkingEl = null; assistantBuffer = ""; }
+  function startAssistant() {
+    assistantBuffer = "";
+    thinkingEl = null;
+    thinkingBodyEl = null;
+    thinkingLabelEl = null;
+    thinkingBuffer = "";
+    thinkingStart = 0;
+    thinkingDone = false;
+    assistantEl = addMessage("assistant");
+  }
+  function endAssistant() {
+    finalizeThinking();
+    assistantEl = null;
+    thinkingEl = null;
+    thinkingBodyEl = null;
+    thinkingLabelEl = null;
+    assistantBuffer = "";
+  }
   function appendAssistant(text) {
     if (!assistantEl) startAssistant();
+    finalizeThinking();
     assistantBuffer += text;
     assistantEl.innerHTML = renderMarkdown(assistantBuffer);
     scrollToBottom();
@@ -299,12 +321,32 @@ import { renderMarkdown } from "./markdown.js";
   function appendThought(text) {
     if (!assistantEl) startAssistant();
     if (!thinkingEl) {
-      thinkingEl = document.createElement("div");
+      thinkingEl = document.createElement("details");
       thinkingEl.className = "thinking";
+      const summary = document.createElement("summary");
+      const chev = document.createElement("i");
+      chev.className = "codicon codicon-chevron-right thinking-chevron";
+      thinkingLabelEl = document.createElement("span");
+      thinkingLabelEl.className = "thinking-label";
+      thinkingLabelEl.textContent = "Thinking\u2026";
+      summary.appendChild(chev);
+      summary.appendChild(thinkingLabelEl);
+      thinkingBodyEl = document.createElement("div");
+      thinkingBodyEl.className = "thinking-body";
+      thinkingEl.appendChild(summary);
+      thinkingEl.appendChild(thinkingBodyEl);
       assistantEl.parentElement.insertBefore(thinkingEl, assistantEl);
+      thinkingStart = Date.now();
     }
-    thinkingEl.textContent += text;
+    thinkingBuffer += text;
+    thinkingBodyEl.innerHTML = renderMarkdown(thinkingBuffer);
     scrollToBottom();
+  }
+  function finalizeThinking() {
+    if (!thinkingEl || thinkingDone) return;
+    thinkingDone = true;
+    const secs = Math.max(1, Math.round((Date.now() - thinkingStart) / 1000));
+    if (thinkingLabelEl) thinkingLabelEl.textContent = `Thought for ${secs}s`;
   }
   function renderPlan(entries) {
     const box = document.createElement("div");

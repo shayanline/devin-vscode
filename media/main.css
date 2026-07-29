@@ -496,9 +496,44 @@ body {
 .thinking {
   border-left: 2px solid var(--vscode-panel-border);
   padding-left: 8px;
+}
+
+.thinking > summary {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  list-style: none;
+  cursor: pointer;
   opacity: 0.7;
-  font-style: italic;
-  white-space: pre-wrap;
+  font-size: 0.9em;
+  user-select: none;
+}
+
+.thinking > summary::-webkit-details-marker {
+  display: none;
+}
+
+.thinking > summary:hover {
+  opacity: 1;
+}
+
+.thinking-chevron {
+  font-size: 13px;
+  transition: transform 0.12s ease;
+}
+
+.thinking[open] > summary .thinking-chevron {
+  transform: rotate(90deg);
+}
+
+.thinking-body {
+  margin-top: 4px;
+  opacity: 0.75;
+  font-size: 0.95em;
+}
+
+.thinking-body p:first-child {
+  margin-top: 0;
 }
 
 /* Plan */
