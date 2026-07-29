@@ -141,6 +141,30 @@ export interface TerminalExitStatus {
   signal: string | null;
 }
 
+// _cognition.ai/revert/* (verified extension; unlocked by advertising
+// clientCapabilities._meta["cognition.ai/revert"] = true).
+export interface RevertParams {
+  sessionId: string;
+  targetNodeId: number;
+  force?: boolean;
+  skipFileUndo?: boolean;
+}
+
+export interface RevertFileAction {
+  path?: string;
+  // "restore" | "delete" | "recreate" and similar
+  action?: string;
+  additions?: number;
+  deletions?: number;
+  [k: string]: unknown;
+}
+
+export interface RevertPreviewResult {
+  fileActions: RevertFileAction[];
+  irreversibleWarnings: { toolName?: string; description?: string }[];
+  conflicts: unknown[];
+}
+
 // fs/* client methods
 export interface ReadTextFileParams {
   sessionId: string;

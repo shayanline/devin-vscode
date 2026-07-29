@@ -129,62 +129,106 @@ and buttons enable/disable correctly:
 
 ---
 
-## 2. Backend mapping: Devin already has the primitives
+## 2. Backend mapping: verified ACP revert protocol
 
-From the Devin CLI command reference (`reference/commands.mdx`, Session
-Management):
+**Status: verified against `devin 3000.2.17` on 2026-07-29 by probing `devin acp`
+directly.** The Devin CLI has `/steps`, `/revert <step>`, and `/fork [step]` in
+the TUI, but those slash commands are **not** executed over ACP (sending
+`/steps` as a prompt is treated as ordinary chat text, and they are not in the
+`available_commands_update` list). However, Devin exposes a proper **revert
+capability and JSON-RPC methods** over ACP, which is what we will use.
 
-| Devin command | Behaviour | Maps to VS Code feature |
-|---|---|---|
-| `/steps` | List conversation steps (used with `/fork` and `/revert`) | The turn to id mapping (checkpoints) |
-| `/revert <step>` | Revert file changes from a step onward **and rewind the conversation to before that step** | Restore checkpoint, edit-in-place truncation, undo/redo |
-| `/fork [step]` | Fork the current session to a new session, optionally from a specific step | Fork Conversation |
-| `/export` (or `--export` flag) | Session export | Export session (backlog item) |
+### 2.1 The revert capability (verified)
 
-This is a very clean match. `/revert` in particular does **exactly** what VS
-Code's restore does: revert the files and truncate the conversation, in the same
-session. `/fork [step]` is exactly VS Code's "Fork conversation from this point".
+Advertise it in `initialize` under client capabilities:
 
-### 2.1 The one critical unknown to verify first
-
-These are interactive CLI commands. **We must confirm whether they are reachable
-over ACP**, because our extension talks to `devin acp`, not the TUI. Three
-possibilities, in order of preference:
-
-1. **They are advertised as ACP session commands** (via
-   `available_commands_update`, the same channel that already feeds our `/`
-   autocomplete). If so, we invoke them by sending `/revert 3` etc. as a prompt,
-   and Devin performs the rewind/fork server side. This is the ideal case and
-   makes all four features straightforward.
-2. **They run but return unstructured text** (for example `/steps` prints a human
-   readable list). Then we can still drive them, but we must parse the step list
-   from the agent's text output, which is fragile. Acceptable as a stopgap.
-3. **They are TUI only and not exposed over ACP.** Then we need either a Devin
-   side change to expose them (a custom `_cognition.ai/session/...` method,
-   like the existing rename), or we fall back to the client-side approach in
-   1.2 (our own snapshots) plus session replay for fork.
-
-**Action for the implementer**: before building, run `devin acp` and inspect the
-`available_commands_update` payload (already logged to our output channel) for
-`fork`, `revert`, and `steps`, and try sending `/steps` as a prompt to see what
-comes back. The result decides how much of Parts 3.1 to 3.4 is a thin wrapper
-versus a client-side reconstruction. Everything about the **UI/UX** below is the
-same either way; only the "on submit / on confirm" backend call changes.
-
-### 2.2 New ACP client methods to add
-
-Regardless of which path, wrap the calls in `src/acp/client.ts` so the rest of
-the code is clean, mirroring the existing `renameSession` custom method:
-
-```
-steps(sessionId)              // list steps -> [{ stepId, index, summary }]
-revert(sessionId, stepId)     // rewind + revert files
-fork(sessionId, stepId?)      // -> new sessionId
+```json
+"clientCapabilities": {
+  "fs": { "readTextFile": true, "writeTextFile": true },
+  "terminal": true,
+  "elicitation": { "form": {}, "url": {} },
+  "_meta": { "cognition.ai/revert": true }
+}
 ```
 
-If path 1 (ACP commands), these send the slash command through
-`session/prompt`. If Devin exposes proper methods later, swap the bodies without
-touching the UI.
+When set, the agent advertises `agentCapabilities._meta["cognition.ai/revert"]:
+true` in the `initialize` result. (Without the client flag the agent logs
+`revert=false` and the methods below reject.)
+
+### 2.2 The revert methods (verified)
+
+Two JSON-RPC methods, both taking the same params:
+
+```
+_cognition.ai/revert/preview   { sessionId, targetNodeId, force, skipFileUndo }
+_cognition.ai/revert/execute   { sessionId, targetNodeId, force, skipFileUndo }
+```
+
+- `targetNodeId` is a **number**: a node id on the session's "expanded chain".
+- `force` (bool): proceed despite conflicts.
+- `skipFileUndo` (bool): rewind the conversation without reverting files.
+- **preview** returns, without mutating anything:
+  ```json
+  {
+    "fileActions": [ ... ],
+    "irreversibleWarnings": [ { "toolName": "...", "description": "..." } ],
+    "conflicts": [ ... ]
+  }
+  ```
+  This is precisely what powers VS Code's "revert preview" (the file diff stats,
+  the irreversible-action warnings, and the conflict list for the inline
+  "Discard Edits" confirmation).
+- **execute** performs the rewind: it undoes the file edits made from
+  `targetNodeId` onward **and** truncates the conversation back to that node, in
+  the same session. Verified end to end (a file the agent created was removed
+  after execute).
+
+Invalid or off-chain targets return
+`-32602 Invalid params` with `data` like *"target node N is not on the expanded
+chain from head H (only expanded-chain IDs are valid revert targets)"*. This is
+also how we read the current **head** node id cheaply (probe with a large
+invalid id and parse `head H` from the error).
+
+### 2.3 Mapping a user turn to a node id (the one gap, solved)
+
+Node ids are **not** surfaced in the `session/update` stream (message/tool chunks
+carry no node id in `_meta`), `session/load` returns only `{ modes, configOptions }`,
+and there is no reachable "list steps" method. So we track it ourselves:
+
+- **After each user turn completes**, probe `_cognition.ai/revert/preview` with a
+  large invalid `targetNodeId` and parse `head H` from the error. Store
+  `turn.headAfter = H`. The head is always a valid revert target.
+- To **truncate at turn K** (edit-in-place submit, restore checkpoint, undo):
+  `revert/execute` to `turn[K-1].headAfter` (the tip just before turn K). For the
+  **first** turn there is no prior head with history (the agent reports "Session
+  has no conversation history to revert"), so editing/restoring turn 1 is handled
+  by starting a fresh session and resending.
+- Always call `revert/preview` first to render the confirmation (files affected +
+  irreversible warnings), matching VS Code's inline "Discard Edits" flow.
+
+### 2.4 Fork is not available over ACP (verified)
+
+Every fork method name (`_cognition.ai/revert/fork`, `_cognition.ai/fork`,
+`_cognition.ai/session/fork`) returns `-32601 Method not found`, and `/fork` is
+TUI only. So true server-side fork is not exposable today. Options for the Fork
+feature: (a) approximate it by opening a **new** session and replaying the user
+prompts up to the chosen turn (re-runs the agent, non-deterministic, costs
+tokens), (b) request that Cognition expose a fork ACP method, or (c) defer Fork
+and ship edit/checkpoints/undo (all powered by revert) first. Recommended: (c)
+now, revisit (a) or (b) later. This is a decision for Shayan (see Part 8).
+
+### 2.5 New ACP client methods to add
+
+Wrap the calls in `src/acp/client.ts`, mirroring the existing `renameSession`
+custom method:
+
+```
+revertPreview(sessionId, targetNodeId, opts?)   // -> { fileActions, irreversibleWarnings, conflicts }
+revertExecute(sessionId, targetNodeId, opts?)   // rewind + file undo
+currentHead(sessionId)                          // probe preview(bigId), parse "head H"
+```
+
+And advertise `_meta["cognition.ai/revert"]` in `initialize`.
 
 ---
 
