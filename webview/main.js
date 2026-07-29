@@ -18,6 +18,7 @@ import { renderMarkdown } from "./markdown.js";
     send: $("send"),
     stop: $("stop"),
     attach: $("attach"),
+    mention: $("mention"),
     modeDD: $("mode-dd"),
     modelDD: $("model-dd"),
     permissionTray: $("permission-tray"),
@@ -28,14 +29,10 @@ import { renderMarkdown } from "./markdown.js";
   };
 
   let body = "list"; // "list" | "thread"
-  let assistantEl = null;
-  let assistantBuffer = "";
-  let thinkingEl = null;
-  let thinkingBodyEl = null;
-  let thinkingLabelEl = null;
-  let thinkingBuffer = "";
-  let thinkingStart = 0;
-  let thinkingDone = false;
+  // The thread is a flat sequence of blocks rendered in stream order. `block`
+  // is the currently open block; a new block starts on a role change, a
+  // messageId change, or after a tool/plan/error interrupts the flow.
+  let block = null; // { kind: "user"|"assistant"|"thinking", mid, bubble|body, buffer, start?, label? }
   const toolEls = new Map();
   const terminalCache = new Map();
 
@@ -61,7 +58,7 @@ import { renderMarkdown } from "./markdown.js";
     el.sessionsList.classList.toggle("hidden", !list);
     el.thread.classList.toggle("hidden", list);
     el.chatTitle.textContent = list ? "Sessions" : currentTitle;
-    el.input.placeholder = list ? "Start a new chat" : "Ask Devin";
+    el.input.placeholder = list ? "Start a new chat\u2026" : "Ask Devin, or type @ to add a file";
   }
 
   el.historyBtn.addEventListener("click", () => {
@@ -94,6 +91,14 @@ import { renderMarkdown } from "./markdown.js";
   el.send.addEventListener("click", send);
   el.stop.addEventListener("click", () => vscode.postMessage({ type: "cancel" }));
   el.attach.addEventListener("click", () => vscode.postMessage({ type: "addContext" }));
+  el.mention.addEventListener("click", () => {
+    const v = el.input.value;
+    const needsSpace = v.length && !/\s$/.test(v);
+    el.input.value = v + (needsSpace ? " @" : "@");
+    el.input.focus();
+    autosize();
+    updateAutocomplete();
+  });
 
   el.input.addEventListener("keydown", (e) => {
     if (ac) {
@@ -336,7 +341,7 @@ import { renderMarkdown } from "./markdown.js";
     const bar = document.createElement("div");
     bar.className = "msg-actions";
     bar.appendChild(actionBtn("codicon-copy", "Copy", (b) => {
-      vscode.postMessage({ type: "copyText", text: role === "user" ? (rawText || "") : bubble.textContent });
+      vscode.postMessage({ type: "copyText", text: rawText || bubble.textContent || "" });
       flashCheck(b);
     }));
     if (role === "user") {
@@ -389,64 +394,96 @@ import { renderMarkdown } from "./markdown.js";
       pre.appendChild(bar);
     });
   }
-  function startAssistant() {
-    hideWelcome();
-    assistantBuffer = "";
-    thinkingEl = null;
-    thinkingBodyEl = null;
-    thinkingLabelEl = null;
-    thinkingBuffer = "";
-    thinkingStart = 0;
-    thinkingDone = false;
-    assistantEl = addMessage("assistant");
+  function sameMid(a, b) { return (a || null) === (b || null); }
+
+  // Rendering is throttled to animation frames so a fast stream doesn't
+  // re-parse the whole buffer on every chunk (which is O(n^2) for long turns).
+  let renderScheduled = false;
+  function scheduleRender() {
+    if (renderScheduled) return;
+    renderScheduled = true;
+    requestAnimationFrame(() => { renderScheduled = false; renderOpenBlock(); });
   }
-  function endAssistant() {
-    finalizeThinking();
-    if (assistantEl) enhanceCodeBlocks(assistantEl);
-    assistantEl = null;
-    thinkingEl = null;
-    thinkingBodyEl = null;
-    thinkingLabelEl = null;
-    assistantBuffer = "";
+  function renderOpenBlock() {
+    if (!block) return;
+    const atBottom = el.thread.scrollHeight - el.thread.scrollTop - el.thread.clientHeight < 60;
+    if (block.kind === "thinking") {
+      block.body.innerHTML = renderMarkdown(block.buffer);
+    } else {
+      block.bubble.innerHTML = renderMarkdown(block.buffer);
+      if (block.kind === "assistant") enhanceCodeBlocks(block.bubble);
+    }
+    if (atBottom) scrollToBottom();
   }
-  function appendAssistant(text) {
-    if (!assistantEl) startAssistant();
-    finalizeThinking();
-    assistantBuffer += text;
-    assistantEl.innerHTML = renderMarkdown(assistantBuffer);
-    scrollToBottom();
+
+  // Close the current block, running any finalisation it needs.
+  function finalizeBlock() {
+    if (!block) return;
+    renderOpenBlock();
+    if (block.kind === "thinking") {
+      const secs = Math.max(1, Math.round((Date.now() - block.start) / 1000));
+      if (block.label) block.label.textContent = `Thought for ${secs}s`;
+    }
+    block = null;
   }
-  function appendThought(text) {
-    if (!assistantEl) startAssistant();
-    if (!thinkingEl) {
-      thinkingEl = document.createElement("details");
-      thinkingEl.className = "thinking";
+
+  function appendAssistant(text, mid) {
+    if (!(block && block.kind === "assistant" && sameMid(block.mid, mid))) {
+      finalizeBlock();
+      hideWelcome();
+      block = { kind: "assistant", mid, bubble: addMessage("assistant"), buffer: "" };
+    }
+    block.buffer += text;
+    scheduleRender();
+  }
+
+  function appendThought(text, mid) {
+    if (!(block && block.kind === "thinking" && sameMid(block.mid, mid))) {
+      finalizeBlock();
+      hideWelcome();
+      const details = document.createElement("details");
+      details.className = "thinking";
       const summary = document.createElement("summary");
       const chev = document.createElement("i");
       chev.className = "codicon codicon-chevron-right thinking-chevron";
-      thinkingLabelEl = document.createElement("span");
-      thinkingLabelEl.className = "thinking-label";
-      thinkingLabelEl.textContent = "Thinking\u2026";
+      const label = document.createElement("span");
+      label.className = "thinking-label";
+      label.textContent = "Thinking\u2026";
       summary.appendChild(chev);
-      summary.appendChild(thinkingLabelEl);
-      thinkingBodyEl = document.createElement("div");
-      thinkingBodyEl.className = "thinking-body";
-      thinkingEl.appendChild(summary);
-      thinkingEl.appendChild(thinkingBodyEl);
-      assistantEl.parentElement.insertBefore(thinkingEl, assistantEl);
-      thinkingStart = Date.now();
+      summary.appendChild(label);
+      const bodyEl = document.createElement("div");
+      bodyEl.className = "thinking-body";
+      details.appendChild(summary);
+      details.appendChild(bodyEl);
+      el.thread.appendChild(details);
+      block = { kind: "thinking", mid, body: bodyEl, label, buffer: "", start: Date.now() };
     }
-    thinkingBuffer += text;
-    thinkingBodyEl.innerHTML = renderMarkdown(thinkingBuffer);
-    scrollToBottom();
+    block.buffer += text;
+    scheduleRender();
   }
-  function finalizeThinking() {
-    if (!thinkingEl || thinkingDone) return;
-    thinkingDone = true;
-    const secs = Math.max(1, Math.round((Date.now() - thinkingStart) / 1000));
-    if (thinkingLabelEl) thinkingLabelEl.textContent = `Thought for ${secs}s`;
+
+  // A user turn streamed during history replay (user_message_chunk).
+  function appendUserChunk(text, mid) {
+    if (!(block && block.kind === "user" && sameMid(block.mid, mid))) {
+      finalizeBlock();
+      hideWelcome();
+      block = { kind: "user", mid, bubble: addMessage("user"), buffer: "" };
+    }
+    block.buffer += text;
+    lastUserText = block.buffer;
+    scheduleRender();
+  }
+
+  // A user turn we already have in full (live echo from the host).
+  function addUserMessage(text) {
+    finalizeBlock();
+    hideWelcome();
+    lastUserText = text;
+    addMessage("user", text);
   }
   function renderPlan(entries) {
+    finalizeBlock();
+    hideWelcome();
     const box = document.createElement("div");
     box.className = "plan";
     const title = document.createElement("div");
@@ -492,6 +529,8 @@ import { renderMarkdown } from "./markdown.js";
   function upsertTool(m) {
     let entry = toolEls.get(m.id);
     if (!entry) {
+      finalizeBlock();
+      hideWelcome();
       const node = document.createElement("details");
       node.className = "tool";
       const summary = document.createElement("summary");
@@ -629,6 +668,8 @@ import { renderMarkdown } from "./markdown.js";
     }
   }
   function addFileChange(path) {
+    finalizeBlock();
+    hideWelcome();
     const node = document.createElement("div");
     node.className = "tool-line completed";
     const icon = document.createElement("i");
@@ -984,6 +1025,7 @@ import { renderMarkdown } from "./markdown.js";
   // --- Error rendering -----------------------------------------------------
 
   function renderError(text) {
+    finalizeBlock();
     hideWelcome();
     const box = document.createElement("div");
     box.className = "tray-card error-card";
@@ -1078,6 +1120,7 @@ import { renderMarkdown } from "./markdown.js";
         break;
       case "sessions": renderSessions(m.sessions, m.activeId, m.folders); break;
       case "sessionReady": el.status.textContent = ""; break;
+      case "status": el.status.textContent = m.text || ""; break;
       case "clear":
         el.thread.innerHTML = "";
         el.permissionTray.innerHTML = "";
@@ -1085,21 +1128,20 @@ import { renderMarkdown } from "./markdown.js";
         renderWorkingSet([]);
         renderAttachments([]);
         toolEls.clear();
-        endAssistant();
+        block = null;
         el.usage.textContent = "";
         el.usage.title = "";
         if (body === "thread") renderWelcome();
         break;
       case "userMessage":
         if (currentTitle === "Chat") { currentTitle = m.text.slice(0, 40); el.chatTitle.textContent = currentTitle; }
-        lastUserText = m.text;
-        hideWelcome();
-        addMessage("user", m.text);
+        addUserMessage(m.text);
         break;
-      case "assistantStart": startAssistant(); break;
-      case "assistantChunk": appendAssistant(m.text); break;
-      case "thoughtChunk": appendThought(m.text); break;
-      case "assistantEnd": endAssistant(); break;
+      case "userChunk": appendUserChunk(m.text, m.messageId); break;
+      case "assistantStart": finalizeBlock(); break;
+      case "assistantChunk": appendAssistant(m.text, m.messageId); break;
+      case "thoughtChunk": appendThought(m.text, m.messageId); break;
+      case "assistantEnd": finalizeBlock(); break;
       case "plan": renderPlan(m.entries); break;
       case "toolCall":
       case "toolCallUpdate": upsertTool(m); break;
@@ -1113,7 +1155,7 @@ import { renderMarkdown } from "./markdown.js";
       case "model": if (m.model) modelDropdown.setCurrent(m.model); break;
       case "terminalOutput": updateTerminal(m); break;
       case "usage": renderUsage(m); break;
-      case "error": endAssistant(); renderError(m.text); break;
+      case "error": renderError(m.text); break;
       default: break;
     }
   });

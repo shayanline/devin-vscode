@@ -278,6 +278,30 @@ body {
   gap: 2px;
 }
 
+/* Add-context button (icon + label, like VS Code's attach affordance) */
+.context-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px 3px 6px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 12px;
+  background: transparent;
+  color: var(--vscode-foreground);
+  font-family: inherit;
+  font-size: 0.85em;
+  cursor: pointer;
+}
+
+.context-btn:hover {
+  background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
+  border-color: var(--vscode-focusBorder);
+}
+
+.context-btn .codicon {
+  font-size: 13px;
+}
+
 /* Autocomplete */
 #autocomplete {
   border: 1px solid var(--vscode-menu-border, var(--vscode-panel-border));

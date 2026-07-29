@@ -7,8 +7,19 @@ export class SessionStore {
   private static readonly IDS_KEY = "devin.sessionIds.v1";
   private static readonly ACTIVE_KEY = "devin.activeSession.v1";
   private static readonly TITLES_KEY = "devin.sessionTitles.v1";
+  private static readonly OPTIONS_KEY = "devin.options.v1";
 
   constructor(private readonly state: vscode.Memento) {}
+
+  // Cache the last-known mode/model options so the composer dropdowns are
+  // populated immediately on open, before any session exists.
+  options(): unknown | undefined {
+    return this.state.get<unknown>(SessionStore.OPTIONS_KEY, undefined);
+  }
+
+  cacheOptions(payload: unknown): void {
+    void this.state.update(SessionStore.OPTIONS_KEY, payload);
+  }
 
   titles(): Record<string, string> {
     return this.state.get<Record<string, string>>(SessionStore.TITLES_KEY, {});
