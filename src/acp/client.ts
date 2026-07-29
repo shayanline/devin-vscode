@@ -61,12 +61,17 @@ export class AcpClient extends EventEmitter {
     const child = spawn(this.options.cliPath, args, {
       cwd: this.options.cwd,
       env: this.options.env ? { ...this.options.env } : { ...process.env },
-      stdio: ["pipe", "pipe", "pipe"]
+      stdio: ["pipe", "pipe", "pipe"],
+      // Own process group so we can signal the whole tree (the agent spawns
+      // MCP servers as children that do NOT die when only the agent is killed).
+      detached: process.platform !== "win32"
     }) as ChildProcessWithoutNullStreams;
 
     child.on("error", (err) => this.emit("log", `[spawn-error] ${err.message}`));
     child.on("close", (code) => {
       this.emit("log", `[acp-exit] code=${code}`);
+      // Reap any MCP children that outlived the agent.
+      this.killTree("SIGKILL");
       this.emit("exit");
     });
 
@@ -237,10 +242,36 @@ export class AcpClient extends EventEmitter {
 
   dispose(): void {
     this.conn?.dispose();
+    // SIGTERM the whole group (lets the agent + docker-based MCP shut down
+    // cleanly), then SIGKILL any stragglers shortly after.
+    this.killTree("SIGTERM");
+    const pid = this.child?.pid;
+    if (pid) {
+      setTimeout(() => {
+        try {
+          process.kill(-pid, "SIGKILL");
+        } catch {
+          // group already gone
+        }
+      }, 1500).unref?.();
+    }
+  }
+
+  // Signal the agent's entire process group. Falls back to signalling just the
+  // child if the group send fails (e.g. Windows, or the group is already gone).
+  private killTree(signal: NodeJS.Signals): void {
+    const pid = this.child?.pid;
+    if (!pid) {
+      return;
+    }
     try {
-      this.child?.kill();
+      process.kill(-pid, signal); // negative pid => process group
     } catch {
-      // ignore
+      try {
+        this.child?.kill(signal);
+      } catch {
+        // ignore
+      }
     }
   }
 }
