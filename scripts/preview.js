@@ -72,6 +72,7 @@ const SCENARIOS = {
     { type: "toolCall", id: "t1", title: "Read src/auth/token.ts", kind: "read", status: "completed", locations: [{ path: "src/auth/token.ts", line: 42 }] },
     { type: "toolCall", id: "t2", title: "Edit src/auth/token-service.ts", kind: "edit", status: "completed", rawInput: { path: "src/auth/token-service.ts" }, content: [{ type: "diff", path: "src/auth/token-service.ts" }] },
     { type: "toolCall", id: "t3", title: "Run npm test", kind: "execute", status: "completed", rawInput: { command: "npm test" }, content: [{ type: "text", text: "PASS  auth.test.ts\n  \u2713 issues a token (12 ms)\n  \u2713 rejects an expired token (4 ms)\n\nTests: 2 passed, 2 total" }] },
+    { type: "fileChange", path: "src/auth/token-service.ts" },
     { type: "assistantChunk", text: "All tests pass. Token handling now lives in `TokenService`, and the callers were updated to use it. Anything else you'd like adjusted?" },
     { type: "assistantEnd" },
     { type: "permission", requestId: "p1", title: "Devin wants to run: `git push origin main`", options: [
@@ -87,6 +88,14 @@ const SCENARIOS = {
         ] }
       }
     } }
+  ],
+  // Pending state: after send, before the first token arrives.
+  working: [
+    { type: "ready" },
+    { type: "body", body: "thread" },
+    { type: "capabilities", revert: true, editRequests: "inline", checkpoints: true },
+    { type: "userMessage", text: "Refactor the auth module and run the tests." },
+    { type: "assistantStart" }
   ]
 };
 

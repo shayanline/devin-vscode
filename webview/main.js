@@ -825,7 +825,25 @@ import { renderMarkdown } from "./markdown.js";
     block = null;
   }
 
+  // A subtle "Working…" placeholder shown after send, until the first token,
+  // thought, tool or plan arrives (mirrors VS Code's pending indicator).
+  let workingEl = null;
+  function showWorking() {
+    hideWorking();
+    ensureTurn();
+    const w = document.createElement("div");
+    w.className = "working";
+    w.innerHTML = '<i class="codicon codicon-loading codicon-modifier-spin"></i><span>Working\u2026</span>';
+    respTarget().appendChild(w);
+    workingEl = w;
+    scrollToBottom();
+  }
+  function hideWorking() {
+    if (workingEl) { workingEl.remove(); workingEl = null; }
+  }
+
   function appendAssistant(text, mid) {
+    hideWorking();
     if (!(block && block.kind === "assistant" && sameMid(block.mid, mid))) {
       finalizeBlock();
       hideWelcome();
@@ -840,6 +858,7 @@ import { renderMarkdown } from "./markdown.js";
   }
 
   function appendThought(text, mid) {
+    hideWorking();
     if (!(block && block.kind === "thinking" && sameMid(block.mid, mid))) {
       finalizeBlock();
       hideWelcome();
@@ -900,6 +919,7 @@ import { renderMarkdown } from "./markdown.js";
     newTurn(undefined, text);
   }
   function renderPlan(entries) {
+    hideWorking();
     finalizeBlock();
     hideWelcome();
     ensureTurn();
@@ -973,6 +993,7 @@ import { renderMarkdown } from "./markdown.js";
   }
 
   function upsertTool(m) {
+    hideWorking();
     let entry = toolEls.get(m.id);
     if (!entry) {
       finalizeBlock();
@@ -1713,6 +1734,7 @@ import { renderMarkdown } from "./markdown.js";
   // --- Error rendering -----------------------------------------------------
 
   function renderError(text) {
+    hideWorking();
     finalizeBlock();
     hideWelcome();
     const box = document.createElement("div");
@@ -1881,6 +1903,7 @@ import { renderMarkdown } from "./markdown.js";
       case "sessionReady": el.status.textContent = ""; break;
       case "status": el.status.textContent = m.text || ""; break;
       case "clear":
+        workingEl = null;
         el.thread.innerHTML = "";
         turns = [];
         currentTurn = null;
@@ -1913,10 +1936,10 @@ import { renderMarkdown } from "./markdown.js";
         addUserMessage(m.text);
         break;
       case "userChunk": appendUserChunk(m.text, m.messageId); break;
-      case "assistantStart": finalizeBlock(); break;
+      case "assistantStart": finalizeBlock(); showWorking(); break;
       case "assistantChunk": appendAssistant(m.text, m.messageId); break;
       case "thoughtChunk": appendThought(m.text, m.messageId); break;
-      case "assistantEnd": finalizeBlock(); break;
+      case "assistantEnd": hideWorking(); finalizeBlock(); break;
       case "plan": renderPlan(m.entries); break;
       case "toolCall":
       case "toolCallUpdate": upsertTool(m); break;
