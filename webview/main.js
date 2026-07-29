@@ -30,6 +30,7 @@ import { renderMarkdown } from "./markdown.js";
   };
 
   let body = "list"; // "list" | "thread"
+  let busy = false; // whether a turn is in flight; gates edit/restore chrome
   // The thread is a flat sequence of blocks rendered in stream order. `block`
   // is the currently open block; a new block starts on a role change, a
   // messageId change, or after a tool/plan/error interrupts the flow.
@@ -1509,12 +1510,13 @@ import { renderMarkdown } from "./markdown.js";
     b.addEventListener("click", onClick);
     return b;
   }
-  function setBusy(busy) {
-    el.send.classList.toggle("hidden", busy);
-    el.stop.classList.toggle("hidden", !busy);
+  function setBusy(value) {
+    busy = value;
+    el.send.classList.toggle("hidden", value);
+    el.stop.classList.toggle("hidden", !value);
     // Copilot-style animated indicator on the input instead of a "Working…" label.
-    el.inputBox.classList.toggle("busy", busy);
-    if (!busy) el.status.textContent = "";
+    el.inputBox.classList.toggle("busy", value);
+    if (!value) el.status.textContent = "";
   }
 
   // --- Welcome / empty state ----------------------------------------------
