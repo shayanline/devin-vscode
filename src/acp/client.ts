@@ -149,18 +149,23 @@ export class AcpClient extends EventEmitter {
     return this.rpc("authenticate", { methodId });
   }
 
-  newSession(additionalDirectories: string[] = [], mcpServers: unknown[] = []): Promise<NewSessionResult> {
+  newSession(cwd: string, additionalDirectories: string[] = [], mcpServers: unknown[] = []): Promise<NewSessionResult> {
     return this.rpc<NewSessionResult>("session/new", {
-      cwd: this.options.cwd,
+      cwd: cwd || this.options.cwd,
       mcpServers,
       ...(additionalDirectories.length ? { additionalDirectories } : {})
     });
   }
 
-  loadSession(sessionId: string, additionalDirectories: string[] = [], mcpServers: unknown[] = []): Promise<unknown> {
+  loadSession(
+    sessionId: string,
+    cwd: string,
+    additionalDirectories: string[] = [],
+    mcpServers: unknown[] = []
+  ): Promise<unknown> {
     return this.rpc("session/load", {
       sessionId,
-      cwd: this.options.cwd,
+      cwd: cwd || this.options.cwd,
       mcpServers,
       ...(additionalDirectories.length ? { additionalDirectories } : {})
     });
