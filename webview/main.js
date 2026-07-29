@@ -11,6 +11,7 @@ import { renderMarkdown } from "./markdown.js";
     historyBtn: $("history-btn"),
     newchatBtn: $("newchat-btn"),
     status: $("status"),
+    usage: $("usage"),
     sessionsList: $("sessions-list"),
     thread: $("thread"),
     input: $("input"),
@@ -41,6 +42,7 @@ import { renderMarkdown } from "./markdown.js";
   let ac = null;
   let fileQueryToken = "";
   let currentTitle = "Chat";
+  let lastUserText = "";
 
   const modeDropdown = createDropdown(el.modeDD, (v) => vscode.postMessage({ type: "setMode", mode: v }));
   const modelDropdown = createDropdown(el.modelDD, (v) => vscode.postMessage({ type: "setModel", model: v }));
@@ -130,6 +132,21 @@ import { renderMarkdown } from "./markdown.js";
   function scrollToBottom() {
     el.thread.scrollTop = el.thread.scrollHeight;
   }
+
+  // Clickable anchors in assistant/user text: external links open in the
+  // browser, everything else is treated as a file path and opened in the editor.
+  el.thread.addEventListener("click", (e) => {
+    const a = e.target.closest && e.target.closest("a[href]");
+    if (!a) return;
+    const href = a.getAttribute("href") || "";
+    if (!href || href.startsWith("#")) return;
+    e.preventDefault();
+    if (/^https?:\/\//i.test(href)) {
+      vscode.postMessage({ type: "openExternal", url: href });
+    } else {
+      vscode.postMessage({ type: "openFile", path: href.replace(/^file:\/\//, "") });
+    }
+  });
 
   // --- Dropdown component (VS Code style) ----------------------------------
 
@@ -292,9 +309,48 @@ import { renderMarkdown } from "./markdown.js";
     }
     msg.appendChild(roleEl);
     msg.appendChild(bubble);
+    msg.appendChild(messageActions(role, bubble, text));
     el.thread.appendChild(msg);
     scrollToBottom();
     return bubble;
+  }
+
+  function actionBtn(icon, title, onClick) {
+    const b = document.createElement("button");
+    b.className = "msg-action";
+    b.title = title;
+    b.innerHTML = `<i class="codicon ${icon}"></i>`;
+    b.addEventListener("click", () => onClick(b));
+    return b;
+  }
+
+  function flashCheck(b) {
+    const i = b.querySelector("i");
+    const prev = i.className;
+    i.className = "codicon codicon-check";
+    setTimeout(() => { i.className = prev; }, 1200);
+  }
+
+  function messageActions(role, bubble, rawText) {
+    const bar = document.createElement("div");
+    bar.className = "msg-actions";
+    bar.appendChild(actionBtn("codicon-copy", "Copy", (b) => {
+      vscode.postMessage({ type: "copyText", text: role === "user" ? (rawText || "") : bubble.textContent });
+      flashCheck(b);
+    }));
+    if (role === "user") {
+      bar.appendChild(actionBtn("codicon-edit", "Edit & resend", () => {
+        el.input.value = rawText || bubble.textContent || "";
+        el.input.focus();
+        el.input.setSelectionRange(el.input.value.length, el.input.value.length);
+        autosize();
+      }));
+    } else {
+      bar.appendChild(actionBtn("codicon-refresh", "Retry", () => {
+        if (lastUserText) vscode.postMessage({ type: "send", text: lastUserText, newSession: false });
+      }));
+    }
+    return bar;
   }
 
   const SHELL_LANGS = new Set(["bash", "sh", "shell", "zsh", "console", "powershell", "ps", "ps1", "bat", "cmd"]);
@@ -333,6 +389,7 @@ import { renderMarkdown } from "./markdown.js";
     });
   }
   function startAssistant() {
+    hideWelcome();
     assistantBuffer = "";
     thinkingEl = null;
     thinkingBodyEl = null;
@@ -471,6 +528,12 @@ import { renderMarkdown } from "./markdown.js";
     entry.statEl.className = "codicon tool-status " + statusIcon(d.status);
     entry.label.textContent = d.title || "Tool";
     renderToolBody(entry);
+    // Inline progress: reflect the running tool in the header status.
+    if (d.status === "in_progress" && d.title) {
+      el.status.textContent = d.title;
+    } else if (d.status === "completed" || d.status === "failed") {
+      el.status.textContent = "Working\u2026";
+    }
     scrollToBottom();
   }
 
@@ -666,6 +729,7 @@ import { renderMarkdown } from "./markdown.js";
     label.textContent = `${files.length} changed file${files.length > 1 ? "s" : ""}`;
     const actions = document.createElement("div");
     actions.className = "ws-actions";
+    actions.appendChild(btn("Open all", "secondary", () => vscode.postMessage({ type: "openAllDiffs" })));
     actions.appendChild(btn("Keep all", "primary", () => vscode.postMessage({ type: "acceptAll" })));
     actions.appendChild(btn("Undo all", "secondary", () => vscode.postMessage({ type: "rejectAll" })));
     header.appendChild(label);
@@ -852,7 +916,107 @@ import { renderMarkdown } from "./markdown.js";
   function setBusy(busy) {
     el.send.classList.toggle("hidden", busy);
     el.stop.classList.toggle("hidden", !busy);
-    el.status.textContent = busy ? "Working..." : "";
+    el.status.textContent = busy ? "Working\u2026" : "";
+  }
+
+  // --- Welcome / empty state ----------------------------------------------
+
+  const STARTER_PROMPTS = [
+    "Explain how this codebase is structured",
+    "Find and fix a bug in the current file",
+    "Write tests for the file I have open",
+    "Review my recent changes"
+  ];
+
+  function renderWelcome() {
+    if (el.thread.querySelector(".welcome")) return;
+    if (el.thread.querySelector(".msg")) return;
+    const box = document.createElement("div");
+    box.className = "welcome";
+    const icon = document.createElement("i");
+    icon.className = "codicon codicon-comment-discussion welcome-icon";
+    const title = document.createElement("div");
+    title.className = "welcome-title";
+    title.textContent = "Ask Devin anything";
+    const sub = document.createElement("div");
+    sub.className = "welcome-sub muted";
+    sub.textContent = "Devin can read your workspace, run tools, and edit files. Try one of these:";
+    box.appendChild(icon);
+    box.appendChild(title);
+    box.appendChild(sub);
+    const chips = document.createElement("div");
+    chips.className = "welcome-prompts";
+    STARTER_PROMPTS.forEach((p) => {
+      const chip = document.createElement("button");
+      chip.className = "welcome-chip";
+      chip.textContent = p;
+      chip.addEventListener("click", () => { el.input.value = p; el.input.focus(); autosize(); send(); });
+      chips.appendChild(chip);
+    });
+    box.appendChild(chips);
+    el.thread.appendChild(box);
+  }
+
+  function hideWelcome() {
+    const w = el.thread.querySelector(".welcome");
+    if (w) w.remove();
+  }
+
+  // --- Error rendering -----------------------------------------------------
+
+  function renderError(text) {
+    hideWelcome();
+    const box = document.createElement("div");
+    box.className = "tray-card error-card";
+    const head = document.createElement("div");
+    head.className = "error-head";
+    const icon = document.createElement("i");
+    icon.className = "codicon codicon-error";
+    const msg = document.createElement("span");
+    const low = (text || "").toLowerCase();
+    const loggedOut = /not logged in|log ?in|authenticat|unauthori[sz]ed|401/.test(low);
+    const rateLimited = /rate limit|429|too many requests|quota/.test(low);
+    msg.textContent = loggedOut
+      ? "You're not logged in to Devin."
+      : rateLimited
+        ? "Devin is rate limited right now."
+        : (text || "Something went wrong.");
+    head.appendChild(icon);
+    head.appendChild(msg);
+    box.appendChild(head);
+    const row = document.createElement("div");
+    row.className = "options";
+    if (loggedOut) {
+      row.appendChild(btn("Log in", "primary", () => vscode.postMessage({ type: "authenticate" })));
+      row.appendChild(btn("Re-check", "secondary", () => vscode.postMessage({ type: "recheck" })));
+    } else {
+      row.appendChild(btn("Retry", "primary", () => { if (lastUserText) vscode.postMessage({ type: "send", text: lastUserText, newSession: false }); }));
+    }
+    box.appendChild(row);
+    el.thread.appendChild(box);
+    scrollToBottom();
+  }
+
+  // --- Usage / cost --------------------------------------------------------
+
+  function fmtTokens(n) {
+    if (!n && n !== 0) return "";
+    if (n >= 1000) return (n / 1000).toFixed(n >= 10000 ? 0 : 1) + "k";
+    return String(n);
+  }
+
+  function renderUsage(m) {
+    if (!m.used || !m.size) { el.usage.textContent = ""; el.usage.title = ""; return; }
+    const pct = Math.round((m.used / m.size) * 100);
+    let label = pct + "%";
+    let title = `${fmtTokens(m.used)} / ${fmtTokens(m.size)} tokens (${pct}% of context)`;
+    if (m.cost && typeof m.cost.amount === "number") {
+      const cost = m.cost.amount < 1 ? "$" + m.cost.amount.toFixed(3) : "$" + m.cost.amount.toFixed(2);
+      label += " \u00b7 " + cost;
+      title += ` \u00b7 ${cost} ${m.cost.currency || ""}`.trimEnd();
+    }
+    el.usage.textContent = label;
+    el.usage.title = title;
   }
   function shorten(p) { return p.split(/[\\/]/).slice(-2).join("/"); }
   function baseName(p) { return p.split(/[\\/]/).filter(Boolean).pop() || p; }
@@ -886,9 +1050,14 @@ import { renderMarkdown } from "./markdown.js";
         renderAttachments([]);
         toolEls.clear();
         endAssistant();
+        el.usage.textContent = "";
+        el.usage.title = "";
+        if (body === "thread") renderWelcome();
         break;
       case "userMessage":
         if (currentTitle === "Chat") { currentTitle = m.text.slice(0, 40); el.chatTitle.textContent = currentTitle; }
+        lastUserText = m.text;
+        hideWelcome();
         addMessage("user", m.text);
         break;
       case "assistantStart": startAssistant(); break;
@@ -906,8 +1075,8 @@ import { renderMarkdown } from "./markdown.js";
       case "busy": setBusy(m.value); break;
       case "mode": if (m.mode) modeDropdown.setCurrent(m.mode); break;
       case "model": if (m.model) modelDropdown.setCurrent(m.model); break;
-      case "usage": el.status.textContent = m.used && m.size ? `${Math.round((m.used / m.size) * 100)}%` : ""; break;
-      case "error": addMessage("assistant", "**Error:** " + m.text); endAssistant(); break;
+      case "usage": renderUsage(m); break;
+      case "error": endAssistant(); renderError(m.text); break;
       default: break;
     }
   });

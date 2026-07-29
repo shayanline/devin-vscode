@@ -137,6 +137,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
         case "runInTerminal":
           this.runInTerminal(String(msg.text || ""));
           return;
+        case "openExternal":
+          if (msg.url) {
+            await vscode.env.openExternal(vscode.Uri.parse(String(msg.url)));
+          }
+          return;
+        case "openAllDiffs":
+          await this.openAllDiffs();
+          return;
         case "acceptFile":
           this.changes.accept(String(msg.path || ""));
           return;
@@ -633,6 +641,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     if (!fsPath) {
       return;
     }
+    if (!path.isAbsolute(fsPath)) {
+      fsPath = path.join(this.cwd(), fsPath);
+    }
     try {
       const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(fsPath));
       const options: vscode.TextDocumentShowOptions = {};
@@ -670,6 +681,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
         b.replace(full, text);
       }
     });
+  }
+
+  private async openAllDiffs(): Promise<void> {
+    await this.changes.openAll();
   }
 
   // Insert the command into a terminal without auto-running it, so the user
@@ -1015,6 +1030,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
         <button id="history-btn" class="icon-btn" title="Show chats"><i class="codicon codicon-list-unordered"></i></button>
         <span id="chat-title">Chat</span>
         <span class="spacer"></span>
+        <span id="usage" title=""></span>
         <span id="status"></span>
         <button id="newchat-btn" class="icon-btn" title="New chat"><i class="codicon codicon-add"></i></button>
       </div>

@@ -89,6 +89,23 @@ export class ChangeTracker
     await vscode.commands.executeCommand("vscode.diff", left, right, `${path.basename(fsPath)} (Devin)`);
   }
 
+  // Open every tracked change in a single multi-diff editor, falling back to
+  // individual diffs if the multi-diff command is unavailable.
+  async openAll(): Promise<void> {
+    const paths = this.changedPaths();
+    if (!paths.length) {
+      return;
+    }
+    const list = paths.map((p) => [vscode.Uri.file(p), this.originalUri(p), vscode.Uri.file(p)]);
+    try {
+      await vscode.commands.executeCommand("vscode.changes", "Devin Changes", list);
+    } catch {
+      for (const p of paths) {
+        await this.openDiff(p);
+      }
+    }
+  }
+
   // Accept: keep the current content, stop tracking the file.
   accept(fsPath?: string): void {
     if (!fsPath) {
