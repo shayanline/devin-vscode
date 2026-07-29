@@ -6,8 +6,29 @@ import * as vscode from "vscode";
 export class SessionStore {
   private static readonly IDS_KEY = "devin.sessionIds.v1";
   private static readonly ACTIVE_KEY = "devin.activeSession.v1";
+  private static readonly TITLES_KEY = "devin.sessionTitles.v1";
 
   constructor(private readonly state: vscode.Memento) {}
+
+  titles(): Record<string, string> {
+    return this.state.get<Record<string, string>>(SessionStore.TITLES_KEY, {});
+  }
+
+  // Remember titles so names show instantly on reopen, before `devin list`
+  // has returned (or for sessions no longer in a listed directory).
+  cacheTitles(map: Record<string, string>): void {
+    const current = this.titles();
+    let changed = false;
+    for (const [id, title] of Object.entries(map)) {
+      if (title && current[id] !== title) {
+        current[id] = title;
+        changed = true;
+      }
+    }
+    if (changed) {
+      void this.state.update(SessionStore.TITLES_KEY, current);
+    }
+  }
 
   ids(): string[] {
     return this.state.get<string[]>(SessionStore.IDS_KEY, []);

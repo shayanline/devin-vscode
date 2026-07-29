@@ -19,9 +19,16 @@ If `devin` is not on your PATH, set an absolute path in
 - Streaming chat backed by a persistent `devin acp` session.
 - Model picker and session mode selector (Code, Ask, Plan, Bypass), populated
   from the CLI itself.
+- A chat history view: click History to see your sessions, click one to open
+  it, Back to return. Sessions are grouped by repository in multi root
+  workspaces, and persist across restarts.
 - Per workspace session list, scoped to the current window (separate lists for
   separate `.code-workspace` files), with resume, rename, and delete.
-- Multi root aware: every folder in a `.code-workspace` is passed to Devin.
+- Multi root aware: every folder in a `.code-workspace` is passed to Devin, and
+  its sessions are grouped by folder.
+- Slash commands and skills: type `/` to autocomplete Devin's commands and your
+  skills. Type `@` to search and attach workspace files.
+- The agent's questions are shown as clickable options in the chat.
 - Permission prompts surfaced as approve or deny buttons.
 - Agent file edits are tracked as a working set with native diffs and per file
   keep or undo, plus inline per hunk revert in the editor gutter.

@@ -21,7 +21,7 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.commands.registerCommand("devin.focusChat", () => provider.focus()),
     vscode.commands.registerCommand("devin.newSession", () => provider.newSession()),
-    vscode.commands.registerCommand("devin.showSessions", () => provider.refreshSessions()),
+    vscode.commands.registerCommand("devin.showSessions", () => provider.showSessionsView()),
     vscode.commands.registerCommand("devin.cancel", () => provider.cancel()),
     vscode.commands.registerCommand("devin.runSetup", () => provider.runSetup())
   );

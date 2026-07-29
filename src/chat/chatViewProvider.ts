@@ -149,6 +149,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
         case "removeAttachment":
           this.removeAttachment(String(msg.id || ""));
           return;
+        case "queryFiles":
+          await this.queryFiles(String(msg.query || ""));
+          return;
+        case "addMention":
+          await this.addFile(String(msg.path || ""));
+          return;
+        case "elicitationResponse":
+          this.resolveElicitation(String(msg.requestId), String(msg.action || "cancel"), msg.content);
+          return;
         case "browseCli":
           await this.browseCli();
           return;
@@ -415,14 +424,32 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     if (!this.isReady()) {
       return;
     }
+    const folders = this.folders();
     const sessions = await listSessions({
       cliPath: this.resolvedCli || "devin",
       env: this.env,
-      folders: this.folders(),
+      folders,
       trackedIds: this.store.ids(),
       scope: this.scope()
     });
-    this.post({ type: "sessions", sessions, activeId: this.sessionId });
+    // Persist titles, and fill any tracked session whose title we only know
+    // from the cache (e.g. its directory is not currently listed).
+    const cached = this.store.titles();
+    const freshTitles: Record<string, string> = {};
+    for (const s of sessions) {
+      if (s.title) {
+        freshTitles[s.id] = s.title;
+      } else if (cached[s.id]) {
+        s.title = cached[s.id];
+      }
+    }
+    this.store.cacheTitles(freshTitles);
+    this.post({
+      type: "sessions",
+      sessions,
+      activeId: this.sessionId,
+      folders: folders.map((f) => ({ path: f, name: path.basename(f) }))
+    });
   }
 
   private async renameSession(id: string, currentTitle?: string): Promise<void> {
@@ -631,6 +658,27 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     this.postAttachments();
   }
 
+  private fileCache?: { at: number; uris: vscode.Uri[] };
+
+  private async queryFiles(query: string): Promise<void> {
+    const now = Date.now();
+    if (!this.fileCache || now - this.fileCache.at > 15000) {
+      const uris = await vscode.workspace.findFiles(
+        "**/*",
+        "**/{node_modules,.git,dist,out,build,.venv,__pycache__,target}/**",
+        3000
+      );
+      this.fileCache = { at: now, uris };
+    }
+    const q = query.toLowerCase();
+    const scored = this.fileCache.uris
+      .map((u) => ({ u, rel: vscode.workspace.asRelativePath(u) }))
+      .filter((x) => !q || x.rel.toLowerCase().includes(q))
+      .slice(0, 20)
+      .map((x) => ({ path: x.u.fsPath, label: path.basename(x.u.fsPath), detail: x.rel }));
+    this.post({ type: "fileSuggestions", query, items: scored });
+  }
+
   private attachImage(name: unknown, mime: unknown, data: unknown): void {
     if (typeof data !== "string" || typeof mime !== "string") {
       return;
@@ -683,7 +731,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
       resolve({ outcome: { outcome: "cancelled" } });
     }
     this.permissionResolvers.clear();
+    for (const [, resolve] of this.elicitationResolvers) {
+      resolve({ action: "cancel" });
+    }
+    this.elicitationResolvers.clear();
     this.setBusy(false);
+  }
+
+  async showSessionsView(): Promise<void> {
+    this.focus();
+    this.post({ type: "view", view: "sessions" });
+    await this.refreshSessions();
   }
 
   private setBusy(value: boolean): void {
@@ -770,6 +828,38 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     }
   }
 
+  // The agent asks the user a structured question (e.g. ask_user_question).
+  private readonly elicitationResolvers = new Map<string, (res: unknown) => void>();
+  private elicitationSeq = 0;
+
+  createElicitation(params: any): Promise<unknown> {
+    const requestId = `elicit-${++this.elicitationSeq}`;
+    this.post({
+      type: "elicitation",
+      requestId,
+      mode: params?.mode || "form",
+      message: params?.message || "",
+      schema: params?.requestedSchema,
+      url: params?.url
+    });
+    return new Promise((resolve) => {
+      this.elicitationResolvers.set(requestId, resolve);
+    });
+  }
+
+  private resolveElicitation(requestId: string, action: string, content: unknown): void {
+    const resolve = this.elicitationResolvers.get(requestId);
+    if (!resolve) {
+      return;
+    }
+    this.elicitationResolvers.delete(requestId);
+    if (action === "accept") {
+      resolve({ action: "accept", content: content ?? null });
+    } else {
+      resolve({ action: action === "decline" ? "decline" : "cancel" });
+    }
+  }
+
   async readTextFile(params: ReadTextFileParams): Promise<{ content: string }> {
     const full = params.path;
     let content = await fs.promises.readFile(full, "utf8");
@@ -823,16 +913,33 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
 <body>
   <div id="app">
     <div id="setup" class="hidden"></div>
+
+    <div id="sessions-view" class="hidden">
+      <div class="view-header">
+        <button id="back-to-chat" class="secondary" title="Back to chat">&#8592; Back</button>
+        <span class="view-title">Chats</span>
+        <button id="new-from-list" title="New chat">+ New</button>
+      </div>
+      <div id="sessions-list"></div>
+    </div>
+
     <div id="chat">
-      <div id="sessions-bar" class="hidden"></div>
+      <div id="chat-header">
+        <span id="chat-title">Devin</span>
+        <span class="spacer"></span>
+        <button id="history-btn" class="secondary" title="Chat history">History</button>
+        <button id="newchat-btn" class="secondary" title="New chat">New</button>
+      </div>
       <div id="thread"></div>
       <div id="composer">
         <div id="working-set" class="hidden"></div>
+        <div id="elicitation-tray"></div>
         <div id="permission-tray"></div>
         <div id="attachments" class="hidden"></div>
+        <div id="autocomplete" class="hidden"></div>
         <div id="input-row">
           <button id="attach" title="Add context (@)">@</button>
-          <textarea id="input" rows="1" placeholder="Ask Devin, @ to add context, Shift+Enter for newline..."></textarea>
+          <textarea id="input" rows="1" placeholder="Ask Devin. Type / for commands, @ for context. Shift+Enter for newline."></textarea>
           <button id="send" title="Send">Send</button>
           <button id="stop" class="hidden" title="Stop">Stop</button>
         </div>

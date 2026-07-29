@@ -1,29 +1,64 @@
 (function () {
   const vscode = acquireVsCodeApi();
 
+  const $ = (id) => document.getElementById(id);
   const el = {
-    setup: document.getElementById("setup"),
-    chat: document.getElementById("chat"),
-    sessionsBar: document.getElementById("sessions-bar"),
-    thread: document.getElementById("thread"),
-    input: document.getElementById("input"),
-    send: document.getElementById("send"),
-    stop: document.getElementById("stop"),
-    mode: document.getElementById("mode"),
-    model: document.getElementById("model"),
-    status: document.getElementById("status"),
-    permissionTray: document.getElementById("permission-tray"),
-    workingSet: document.getElementById("working-set"),
-    attach: document.getElementById("attach"),
-    attachments: document.getElementById("attachments")
+    setup: $("setup"),
+    sessionsView: $("sessions-view"),
+    sessionsList: $("sessions-list"),
+    chat: $("chat"),
+    chatTitle: $("chat-title"),
+    backToChat: $("back-to-chat"),
+    newFromList: $("new-from-list"),
+    historyBtn: $("history-btn"),
+    newchatBtn: $("newchat-btn"),
+    thread: $("thread"),
+    input: $("input"),
+    send: $("send"),
+    stop: $("stop"),
+    attach: $("attach"),
+    mode: $("mode"),
+    model: $("model"),
+    status: $("status"),
+    permissionTray: $("permission-tray"),
+    elicitationTray: $("elicitation-tray"),
+    workingSet: $("working-set"),
+    attachments: $("attachments"),
+    autocomplete: $("autocomplete")
   };
 
-  let assistantEl = null; // current assistant bubble
+  let assistantEl = null;
   let assistantBuffer = "";
   let thinkingEl = null;
   const toolEls = new Map();
 
-  // --- Sending -------------------------------------------------------------
+  let commands = []; // advertised slash commands / skills
+  let ac = null; // active autocomplete: { kind, items, index, token }
+  let fileQueryToken = "";
+
+  // --- View switching ------------------------------------------------------
+
+  function showView(view) {
+    el.setup.classList.toggle("hidden", view !== "setup");
+    el.sessionsView.classList.toggle("hidden", view !== "sessions");
+    el.chat.classList.toggle("hidden", view !== "chat");
+  }
+
+  el.historyBtn.addEventListener("click", () => {
+    vscode.postMessage({ type: "refreshSessions" });
+    showView("sessions");
+  });
+  el.backToChat.addEventListener("click", () => showView("chat"));
+  el.newchatBtn.addEventListener("click", () => {
+    vscode.postMessage({ type: "newSession" });
+    showView("chat");
+  });
+  el.newFromList.addEventListener("click", () => {
+    vscode.postMessage({ type: "newSession" });
+    showView("chat");
+  });
+
+  // --- Composer ------------------------------------------------------------
 
   function send() {
     const text = el.input.value.trim();
@@ -32,32 +67,58 @@
     }
     vscode.postMessage({ type: "send", text });
     el.input.value = "";
+    closeAutocomplete();
     autosize();
   }
 
   el.send.addEventListener("click", send);
   el.stop.addEventListener("click", () => vscode.postMessage({ type: "cancel" }));
+  el.attach.addEventListener("click", () => vscode.postMessage({ type: "addContext" }));
+
   el.input.addEventListener("keydown", (e) => {
+    if (ac) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        ac.index = (ac.index + 1) % ac.items.length;
+        renderAutocomplete();
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        ac.index = (ac.index - 1 + ac.items.length) % ac.items.length;
+        renderAutocomplete();
+        return;
+      }
+      if (e.key === "Enter" || e.key === "Tab") {
+        if (ac.items.length) {
+          e.preventDefault();
+          acceptAutocomplete(ac.items[ac.index]);
+          return;
+        }
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closeAutocomplete();
+        return;
+      }
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       send();
-    } else if (e.key === "@" && el.input.value.trim() === "") {
-      e.preventDefault();
-      vscode.postMessage({ type: "addContext" });
     }
   });
-  el.input.addEventListener("input", autosize);
-  el.attach.addEventListener("click", () => vscode.postMessage({ type: "addContext" }));
 
-  // Paste an image from the clipboard as context.
+  el.input.addEventListener("input", () => {
+    autosize();
+    updateAutocomplete();
+  });
+
   el.input.addEventListener("paste", (e) => {
     const items = (e.clipboardData && e.clipboardData.items) || [];
     for (const it of items) {
       if (it.type && it.type.indexOf("image/") === 0) {
         const file = it.getAsFile();
-        if (!file) {
-          continue;
-        }
+        if (!file) continue;
         e.preventDefault();
         const reader = new FileReader();
         reader.onload = () => {
@@ -70,48 +131,8 @@
     }
   });
 
-  function renderAttachments(items) {
-    el.attachments.innerHTML = "";
-    if (!items || items.length === 0) {
-      el.attachments.classList.add("hidden");
-      return;
-    }
-    el.attachments.classList.remove("hidden");
-    items.forEach((a) => {
-      const chip = document.createElement("span");
-      chip.className = "chip";
-      const icon = a.type === "image" ? "\u{1F5BC}" : a.type === "selection" ? "\u2702" : "\u{1F4C4}";
-      const label = document.createElement("span");
-      label.textContent = `${icon} ${a.label}`;
-      const x = document.createElement("button");
-      x.className = "chip-x";
-      x.textContent = "\u2715";
-      x.addEventListener("click", () => vscode.postMessage({ type: "removeAttachment", id: a.id }));
-      chip.appendChild(label);
-      chip.appendChild(x);
-      el.attachments.appendChild(chip);
-    });
-  }
-  el.mode.addEventListener("change", () =>
-    vscode.postMessage({ type: "setMode", mode: el.mode.value })
-  );
-  el.model.addEventListener("change", () =>
-    vscode.postMessage({ type: "setModel", model: el.model.value })
-  );
-
-  function fillSelect(select, items, current) {
-    select.innerHTML = "";
-    (items || []).forEach((it) => {
-      const opt = document.createElement("option");
-      opt.value = it.value;
-      opt.textContent = it.name;
-      select.appendChild(opt);
-    });
-    if (current) {
-      select.value = current;
-    }
-    select.classList.toggle("hidden", !items || items.length === 0);
-  }
+  el.mode.addEventListener("change", () => vscode.postMessage({ type: "setMode", mode: el.mode.value }));
+  el.model.addEventListener("change", () => vscode.postMessage({ type: "setModel", model: el.model.value }));
 
   function autosize() {
     el.input.style.height = "auto";
@@ -122,7 +143,121 @@
     el.thread.scrollTop = el.thread.scrollHeight;
   }
 
-  // --- Rendering helpers ---------------------------------------------------
+  // --- Autocomplete (/ commands and @ files) -------------------------------
+
+  function updateAutocomplete() {
+    const value = el.input.value;
+    const caret = el.input.selectionStart || value.length;
+
+    if (value.startsWith("/") && value.indexOf(" ") === -1) {
+      const q = value.slice(1).toLowerCase();
+      const items = commands
+        .filter((c) => c.name.toLowerCase().includes(q))
+        .slice(0, 30)
+        .map((c) => ({ kind: "slash", name: c.name, description: c.description || "" }));
+      openAutocomplete("slash", items);
+      return;
+    }
+
+    const before = value.slice(0, caret);
+    const at = before.match(/@([^\s@]*)$/);
+    if (at) {
+      fileQueryToken = at[1];
+      vscode.postMessage({ type: "queryFiles", query: fileQueryToken });
+      // Items arrive asynchronously via "fileSuggestions".
+      return;
+    }
+
+    closeAutocomplete();
+  }
+
+  function openAutocomplete(kind, items) {
+    if (!items.length) {
+      closeAutocomplete();
+      return;
+    }
+    ac = { kind, items, index: 0 };
+    renderAutocomplete();
+  }
+
+  function renderAutocomplete() {
+    if (!ac) {
+      return;
+    }
+    el.autocomplete.innerHTML = "";
+    el.autocomplete.classList.remove("hidden");
+    ac.items.forEach((it, i) => {
+      const row = document.createElement("div");
+      row.className = "ac-item" + (i === ac.index ? " active" : "");
+      const primary = document.createElement("span");
+      primary.className = "ac-primary";
+      primary.textContent = it.kind === "slash" ? "/" + it.name : it.label;
+      const secondary = document.createElement("span");
+      secondary.className = "ac-secondary";
+      secondary.textContent = it.description || it.detail || "";
+      row.appendChild(primary);
+      row.appendChild(secondary);
+      row.addEventListener("mousedown", (ev) => {
+        ev.preventDefault();
+        acceptAutocomplete(it);
+      });
+      el.autocomplete.appendChild(row);
+    });
+  }
+
+  function closeAutocomplete() {
+    ac = null;
+    el.autocomplete.classList.add("hidden");
+    el.autocomplete.innerHTML = "";
+  }
+
+  function acceptAutocomplete(item) {
+    if (item.kind === "slash") {
+      el.input.value = "/" + item.name + " ";
+      el.input.focus();
+      closeAutocomplete();
+      autosize();
+      return;
+    }
+    // file mention
+    const value = el.input.value;
+    const caret = el.input.selectionStart || value.length;
+    const before = value.slice(0, caret).replace(/@([^\s@]*)$/, "");
+    el.input.value = before + value.slice(caret);
+    vscode.postMessage({ type: "addMention", path: item.path });
+    el.input.focus();
+    closeAutocomplete();
+    autosize();
+  }
+
+  // --- Markdown ------------------------------------------------------------
+
+  function escapeHtml(s) {
+    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }
+
+  function renderMarkdown(src) {
+    const parts = src.split(/```/);
+    let html = "";
+    for (let i = 0; i < parts.length; i++) {
+      if (i % 2 === 1) {
+        const code = parts[i].replace(/^([a-zA-Z0-9_+-]+)\n/, "");
+        html += "<pre><code>" + escapeHtml(code) + "</code></pre>";
+      } else {
+        html += renderInline(parts[i]);
+      }
+    }
+    return html;
+  }
+
+  function renderInline(text) {
+    const escaped = escapeHtml(text);
+    const withCode = escaped.replace(/`([^`]+)`/g, "<code>$1</code>");
+    const withBold = withCode.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+    return withBold.split(/\n{2,}/).map((p) => "<p>" + p.replace(/\n/g, "<br/>") + "</p>").join("");
+  }
+
+  // --- Thread rendering ----------------------------------------------------
 
   function addMessage(role, text) {
     const msg = document.createElement("div");
@@ -155,18 +290,14 @@
   }
 
   function appendAssistant(text) {
-    if (!assistantEl) {
-      startAssistant();
-    }
+    if (!assistantEl) startAssistant();
     assistantBuffer += text;
     assistantEl.innerHTML = renderMarkdown(assistantBuffer);
     scrollToBottom();
   }
 
   function appendThought(text) {
-    if (!assistantEl) {
-      startAssistant();
-    }
+    if (!assistantEl) startAssistant();
     if (!thinkingEl) {
       thinkingEl = document.createElement("div");
       thinkingEl.className = "thinking";
@@ -213,9 +344,7 @@
       toolEls.set(id, node);
     }
     node.className = "tool " + (status || "pending");
-    if (title) {
-      node.querySelector(".label").textContent = title;
-    }
+    if (title) node.querySelector(".label").textContent = title;
     scrollToBottom();
   }
 
@@ -235,6 +364,8 @@
     scrollToBottom();
   }
 
+  // --- Permissions ---------------------------------------------------------
+
   function showPermission(data) {
     const box = document.createElement("div");
     box.className = "permission";
@@ -243,20 +374,121 @@
     const options = document.createElement("div");
     options.className = "options";
     (data.options || []).forEach((opt) => {
-      const btn = document.createElement("button");
       const reject = /reject/.test(opt.kind || "");
-      btn.className = reject ? "secondary" : "";
-      btn.textContent = opt.name || opt.optionId;
-      btn.addEventListener("click", () => {
+      const b = btn(opt.name || opt.optionId, reject ? "secondary" : "", () => {
         vscode.postMessage({ type: "permission", requestId: data.requestId, optionId: opt.optionId });
         box.remove();
       });
-      options.appendChild(btn);
+      options.appendChild(b);
     });
     box.appendChild(title);
     box.appendChild(options);
     el.permissionTray.appendChild(box);
   }
+
+  // --- Elicitation (the agent asks a question) -----------------------------
+
+  function showElicitation(data) {
+    const box = document.createElement("div");
+    box.className = "permission elicitation";
+    const msg = document.createElement("div");
+    msg.textContent = data.message || "Devin has a question";
+    box.appendChild(msg);
+
+    const respond = (action, content) => {
+      vscode.postMessage({ type: "elicitationResponse", requestId: data.requestId, action, content });
+      box.remove();
+    };
+
+    if (data.mode === "url" && data.url) {
+      const url = document.createElement("div");
+      url.className = "setup-desc";
+      url.textContent = data.url;
+      box.appendChild(url);
+      const row = document.createElement("div");
+      row.className = "options";
+      row.appendChild(btn("Open", "", () => respond("accept")));
+      row.appendChild(btn("Decline", "secondary", () => respond("decline")));
+      box.appendChild(row);
+      el.elicitationTray.appendChild(box);
+      return;
+    }
+
+    const props = (data.schema && data.schema.properties) || {};
+    const names = Object.keys(props);
+
+    // Single enum question -> one-click option buttons.
+    if (names.length === 1 && Array.isArray(props[names[0]].enum)) {
+      const key = names[0];
+      const row = document.createElement("div");
+      row.className = "options";
+      props[key].enum.forEach((v) => {
+        row.appendChild(btn(String(v), "", () => respond("accept", { [key]: v })));
+      });
+      box.appendChild(row);
+      const cancelRow = document.createElement("div");
+      cancelRow.className = "options";
+      cancelRow.appendChild(btn("Cancel", "secondary", () => respond("cancel")));
+      box.appendChild(cancelRow);
+      el.elicitationTray.appendChild(box);
+      return;
+    }
+
+    // General form.
+    const controls = {};
+    names.forEach((key) => {
+      const spec = props[key];
+      const field = document.createElement("div");
+      field.className = "elicit-field";
+      const lab = document.createElement("label");
+      lab.textContent = spec.description || key;
+      field.appendChild(lab);
+      let input;
+      if (Array.isArray(spec.enum)) {
+        input = document.createElement("select");
+        spec.enum.forEach((v) => {
+          const o = document.createElement("option");
+          o.value = String(v);
+          o.textContent = String(v);
+          input.appendChild(o);
+        });
+      } else if (spec.type === "boolean") {
+        input = document.createElement("input");
+        input.type = "checkbox";
+      } else if (spec.type === "number" || spec.type === "integer") {
+        input = document.createElement("input");
+        input.type = "number";
+      } else {
+        input = document.createElement("input");
+        input.type = "text";
+      }
+      if (spec.default !== undefined && input.type !== "checkbox") {
+        input.value = String(spec.default);
+      }
+      controls[key] = { input, spec };
+      field.appendChild(input);
+      box.appendChild(field);
+    });
+
+    const row = document.createElement("div");
+    row.className = "options";
+    row.appendChild(
+      btn("Submit", "", () => {
+        const content = {};
+        Object.entries(controls).forEach(([k, c]) => {
+          if (c.input.type === "checkbox") content[k] = c.input.checked;
+          else if (c.input.type === "number") content[k] = Number(c.input.value);
+          else content[k] = c.input.value;
+        });
+        respond("accept", content);
+      })
+    );
+    row.appendChild(btn("Decline", "secondary", () => respond("decline")));
+    box.appendChild(row);
+    el.elicitationTray.appendChild(box);
+  }
+
+  // --- Working set ---------------------------------------------------------
 
   function renderWorkingSet(files) {
     el.workingSet.innerHTML = "";
@@ -265,7 +497,6 @@
       return;
     }
     el.workingSet.classList.remove("hidden");
-
     const header = document.createElement("div");
     header.className = "ws-header";
     const label = document.createElement("span");
@@ -277,7 +508,6 @@
     header.appendChild(label);
     header.appendChild(actions);
     el.workingSet.appendChild(header);
-
     files.forEach((f) => {
       const row = document.createElement("div");
       row.className = "ws-file";
@@ -286,32 +516,133 @@
       link.textContent = f.name;
       link.title = f.path;
       link.addEventListener("click", () => vscode.postMessage({ type: "openDiff", path: f.path }));
-      const keep = btn("Keep", "tiny", () => vscode.postMessage({ type: "acceptFile", path: f.path }));
-      const undo = btn("Undo", "tiny secondary", () => vscode.postMessage({ type: "rejectFile", path: f.path }));
-      row.appendChild(link);
       const grp = document.createElement("div");
       grp.className = "ws-file-actions";
-      grp.appendChild(keep);
-      grp.appendChild(undo);
+      grp.appendChild(btn("Keep", "tiny", () => vscode.postMessage({ type: "acceptFile", path: f.path })));
+      grp.appendChild(btn("Undo", "tiny secondary", () => vscode.postMessage({ type: "rejectFile", path: f.path })));
+      row.appendChild(link);
       row.appendChild(grp);
       el.workingSet.appendChild(row);
     });
   }
 
-  function showSetup(show) {
-    el.setup.classList.toggle("hidden", !show);
-    el.chat.classList.toggle("hidden", show);
+  // --- Attachments ---------------------------------------------------------
+
+  function renderAttachments(items) {
+    el.attachments.innerHTML = "";
+    if (!items || items.length === 0) {
+      el.attachments.classList.add("hidden");
+      return;
+    }
+    el.attachments.classList.remove("hidden");
+    items.forEach((a) => {
+      const chip = document.createElement("span");
+      chip.className = "chip";
+      const icon = a.type === "image" ? "\u{1F5BC}" : a.type === "selection" ? "\u2702" : "\u{1F4C4}";
+      const label = document.createElement("span");
+      label.textContent = `${icon} ${a.label}`;
+      const x = document.createElement("button");
+      x.className = "chip-x";
+      x.textContent = "\u2715";
+      x.addEventListener("click", () => vscode.postMessage({ type: "removeAttachment", id: a.id }));
+      chip.appendChild(label);
+      chip.appendChild(x);
+      el.attachments.appendChild(chip);
+    });
   }
 
-  function renderSetup(health) {
-    showSetup(true);
-    el.setup.innerHTML = "";
+  // --- Sessions list (grouped by directory) --------------------------------
 
+  function renderSessions(sessions, activeId, folders) {
+    el.sessionsList.innerHTML = "";
+    if (!sessions || sessions.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "sessions-empty";
+      empty.textContent = "No sessions yet in this workspace.";
+      el.sessionsList.appendChild(empty);
+      return;
+    }
+
+    const folderNames = new Map((folders || []).map((f) => [f.path, f.name]));
+    const groups = new Map();
+    const orderedKeys = [];
+    const keyFor = (s) => {
+      const wd = s.working_directory || "";
+      for (const f of folders || []) {
+        if (wd === f.path || wd.startsWith(f.path + "/") || wd.startsWith(f.path + "\\")) {
+          return f.path;
+        }
+      }
+      return wd || "__workspace__";
+    };
+    sessions.forEach((s) => {
+      const key = keyFor(s);
+      if (!groups.has(key)) {
+        groups.set(key, []);
+        orderedKeys.push(key);
+      }
+      groups.get(key).push(s);
+    });
+
+    const showGroups = (folders || []).length > 1 || orderedKeys.length > 1;
+
+    orderedKeys.forEach((key) => {
+      if (showGroups) {
+        const header = document.createElement("div");
+        header.className = "group-header";
+        header.textContent =
+          folderNames.get(key) || (key === "__workspace__" ? "This workspace" : baseName(key));
+        el.sessionsList.appendChild(header);
+      }
+      groups.get(key).forEach((s) => el.sessionsList.appendChild(sessionRow(s, activeId)));
+    });
+  }
+
+  function sessionRow(s, activeId) {
+    const item = document.createElement("div");
+    item.className = "session-item" + (s.id === activeId ? " active" : "");
+    const main = document.createElement("div");
+    main.className = "session-main";
+    const title = document.createElement("div");
+    title.className = "session-title";
+    title.textContent = s.title || s.short_id || s.id;
+    const meta = document.createElement("div");
+    meta.className = "session-meta";
+    meta.textContent = [s.last_activity_ago, s.tracked ? "" : "cli"].filter(Boolean).join("  \u00b7  ");
+    main.appendChild(title);
+    main.appendChild(meta);
+    main.addEventListener("click", () => {
+      vscode.postMessage({ type: "loadSession", id: s.id });
+      showView("chat");
+    });
+    const actions = document.createElement("div");
+    actions.className = "session-actions";
+    const rename = btn("\u270e", "tiny secondary", (e) => {
+      e.stopPropagation();
+      vscode.postMessage({ type: "renameSession", id: s.id, title: s.title || "" });
+    });
+    rename.title = "Rename";
+    const del = btn("\u2715", "tiny secondary", (e) => {
+      e.stopPropagation();
+      vscode.postMessage({ type: "deleteSession", id: s.id, title: s.title || s.id });
+    });
+    del.title = "Delete";
+    actions.appendChild(rename);
+    actions.appendChild(del);
+    item.appendChild(main);
+    item.appendChild(actions);
+    return item;
+  }
+
+  // --- Setup panel ---------------------------------------------------------
+
+  function renderSetup(health) {
+    showView("setup");
+    el.setup.innerHTML = "";
     const h = document.createElement("h2");
     h.textContent = "Set up Devin";
     el.setup.appendChild(h);
 
-    // Step 1: CLI
     const cliOk = !!health.found;
     el.setup.appendChild(
       stepBlock(
@@ -326,7 +657,6 @@
       )
     );
 
-    // Step 2: Auth (only meaningful once the CLI is found)
     if (cliOk) {
       const authed = health.loggedIn !== false;
       el.setup.appendChild(
@@ -343,35 +673,14 @@
       );
     }
 
-    // Step 3: default mode
     if (cliOk && health.loggedIn !== false) {
-      const modes = [
-        { value: "accept-edits", name: "Code" },
-        { value: "ask", name: "Ask" },
-        { value: "plan", name: "Plan" },
-        { value: "bypass", name: "Bypass" }
-      ];
-      const sel = document.createElement("select");
-      modes.forEach((mo) => {
-        const o = document.createElement("option");
-        o.value = mo.value;
-        o.textContent = mo.name;
-        sel.appendChild(o);
-      });
-      sel.addEventListener("change", () =>
-        vscode.postMessage({ type: "saveDefaults", mode: sel.value })
-      );
-      el.setup.appendChild(stepBlock("Default mode", "", [sel]));
-      el.setup.appendChild(
-        btn("Start chatting", "", () => vscode.postMessage({ type: "finishSetup" }))
-      );
+      el.setup.appendChild(btn("Start chatting", "", () => vscode.postMessage({ type: "finishSetup" })));
     }
 
-    const err = health.error;
-    if (err && !cliOk) {
+    if (health.error && !cliOk) {
       const p = document.createElement("p");
       p.className = "setup-error";
-      p.textContent = err;
+      p.textContent = health.error;
       el.setup.appendChild(p);
     }
   }
@@ -398,58 +707,26 @@
     return box;
   }
 
+  // --- Shared helpers ------------------------------------------------------
+
   function btn(label, cls, onClick) {
     const b = document.createElement("button");
-    if (cls) {
-      b.className = cls;
-    }
+    if (cls) b.className = cls;
     b.textContent = label;
     b.addEventListener("click", onClick);
     return b;
   }
 
-  function renderSessions(sessions, activeId) {
-    el.sessionsBar.innerHTML = "";
-    if (!sessions || sessions.length === 0) {
-      el.sessionsBar.classList.add("hidden");
-      return;
-    }
-    el.sessionsBar.classList.remove("hidden");
-    sessions.forEach((s) => {
-      const item = document.createElement("div");
-      item.className = "session-item" + (s.id === activeId ? " active" : "");
-
-      const main = document.createElement("div");
-      main.className = "session-main";
-      const title = document.createElement("div");
-      title.className = "session-title";
-      title.textContent = s.title || s.short_id || s.id;
-      const meta = document.createElement("div");
-      meta.className = "session-meta";
-      meta.textContent = s.last_activity_ago || "";
-      main.appendChild(title);
-      main.appendChild(meta);
-      main.addEventListener("click", () => vscode.postMessage({ type: "loadSession", id: s.id }));
-
-      const actions = document.createElement("div");
-      actions.className = "session-actions";
-      const rename = btn("\u270e", "tiny secondary", (e) => {
-        e.stopPropagation();
-        vscode.postMessage({ type: "renameSession", id: s.id, title: s.title || "" });
-      });
-      rename.title = "Rename";
-      const del = btn("\u2715", "tiny secondary", (e) => {
-        e.stopPropagation();
-        vscode.postMessage({ type: "deleteSession", id: s.id, title: s.title || s.id });
-      });
-      del.title = "Delete";
-      actions.appendChild(rename);
-      actions.appendChild(del);
-
-      item.appendChild(main);
-      item.appendChild(actions);
-      el.sessionsBar.appendChild(item);
+  function fillSelect(select, items, current) {
+    select.innerHTML = "";
+    (items || []).forEach((it) => {
+      const opt = document.createElement("option");
+      opt.value = it.value;
+      opt.textContent = it.name;
+      select.appendChild(opt);
     });
+    if (current) select.value = current;
+    select.classList.toggle("hidden", !items || items.length === 0);
   }
 
   function setBusy(busy) {
@@ -458,45 +735,11 @@
     el.status.textContent = busy ? "Devin is working..." : "";
   }
 
-  // --- Minimal, safe markdown ----------------------------------------------
-
-  function escapeHtml(s) {
-    return s
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;")
-      .replace(/'/g, "&#39;");
-  }
-
-  function renderMarkdown(src) {
-    const parts = src.split(/```/);
-    let html = "";
-    for (let i = 0; i < parts.length; i++) {
-      if (i % 2 === 1) {
-        // Drop an optional leading language tag line (e.g. ```ts).
-        const code = parts[i].replace(/^([a-zA-Z0-9_+-]+)\n/, "");
-        html += "<pre><code>" + escapeHtml(code) + "</code></pre>";
-      } else {
-        html += renderInline(parts[i]);
-      }
-    }
-    return html;
-  }
-
-  function renderInline(text) {
-    const escaped = escapeHtml(text);
-    const withCode = escaped.replace(/`([^`]+)`/g, "<code>$1</code>");
-    const withBold = withCode.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-    return withBold
-      .split(/\n{2,}/)
-      .map((p) => "<p>" + p.replace(/\n/g, "<br/>") + "</p>")
-      .join("");
-  }
-
   function shorten(p) {
-    const parts = p.split(/[\\/]/);
-    return parts.slice(-2).join("/");
+    return p.split(/[\\/]/).slice(-2).join("/");
+  }
+  function baseName(p) {
+    return p.split(/[\\/]/).filter(Boolean).pop() || p;
   }
 
   // --- Inbound messages ----------------------------------------------------
@@ -504,25 +747,35 @@
   window.addEventListener("message", (event) => {
     const m = event.data;
     switch (m.type) {
-      case "config":
-        break;
       case "setup":
         renderSetup(m.health || {});
         break;
       case "ready":
-        showSetup(false);
+        showView("chat");
+        break;
+      case "view":
+        showView(m.view === "sessions" ? "sessions" : "chat");
         break;
       case "workspace":
-        document.title = m.name || "Devin";
-        break;
-      case "authStarted":
+        el.chatTitle.textContent = m.name || "Devin";
         break;
       case "options":
         fillSelect(el.mode, m.modes, m.currentMode);
         fillSelect(el.model, m.models, m.currentModel);
         break;
+      case "commands":
+        commands = Array.isArray(m.commands) ? m.commands : [];
+        break;
+      case "fileSuggestions":
+        if (m.query === fileQueryToken) {
+          openAutocomplete(
+            "file",
+            (m.items || []).map((f) => ({ kind: "file", path: f.path, label: f.label, detail: f.detail }))
+          );
+        }
+        break;
       case "sessions":
-        renderSessions(m.sessions, m.activeId);
+        renderSessions(m.sessions, m.activeId, m.folders);
         break;
       case "sessionReady":
         el.status.textContent = "";
@@ -530,6 +783,7 @@
       case "clear":
         el.thread.innerHTML = "";
         el.permissionTray.innerHTML = "";
+        el.elicitationTray.innerHTML = "";
         renderWorkingSet([]);
         renderAttachments([]);
         toolEls.clear();
@@ -554,8 +808,6 @@
         renderPlan(m.entries);
         break;
       case "toolCall":
-        upsertTool(m.id, m.title, m.status);
-        break;
       case "toolCallUpdate":
         upsertTool(m.id, m.title, m.status);
         break;
@@ -571,18 +823,17 @@
       case "permission":
         showPermission(m);
         break;
+      case "elicitation":
+        showElicitation(m);
+        break;
       case "busy":
         setBusy(m.value);
         break;
       case "mode":
-        if (m.mode) {
-          el.mode.value = m.mode;
-        }
+        if (m.mode) el.mode.value = m.mode;
         break;
       case "model":
-        if (m.model) {
-          el.model.value = m.model;
-        }
+        if (m.model) el.model.value = m.model;
         break;
       case "usage":
         el.status.textContent = m.used && m.size ? `${Math.round((m.used / m.size) * 100)}% context` : "";
