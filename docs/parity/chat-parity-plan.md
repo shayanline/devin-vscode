@@ -234,12 +234,24 @@ Playwright preview screenshot before moving on.
   `confirm()` edit-discard dialog with an in-thread `.cw` confirm carrying a
   "Don't ask again" checkbox that persists via a new allowlisted `setConfig`
   host message (`devin.editing.confirmEditRequestRemoval`). (§2.3, §2.6)
-- **Phase 4, question carousel.** One-card-at-a-time elicitation with nav
-  arrows, a step indicator, and a submit button. (§2.3)
-- **Phase 5, tools + code + edits polish.** Tool card re-skin to the box recipe
-  + `.show-checkmarks`, risk badge, code-block radius/tokens + copy→check, edit
-  pill with +/- counts and fill animation, per-turn changes-summary pill,
-  inline anchor chips. (§2.3)
+- **Phase 4, question carousel. ✅ Done (v0.6.18).** Elicitation forms now
+  render as a `.qc` carousel matching VS Code's `chat-question-carousel`: a
+  prompt header with a close (cancel) action, a body showing one question at a
+  time, and a footer with prev/next arrows, a "N / M" step indicator, and a
+  right-aligned Submit. Submit validates every question and jumps to the first
+  unanswered one with a validation line. Single-question prompts collapse the
+  nav and step. URL prompts stay a simple `.cw` confirmation. (§2.3)
+- **Phase 5, tools + code + edits polish. ✅ Mostly done (v0.6.19).** Shipped:
+  edit pills with **+added / -removed line counts** (computed host side via an
+  LCS line diff in `diffStat`, forwarded on `fileChange` and diff tool content),
+  a `filePill` shared by file-change rows and tool diff rows (file icon, name,
+  coloured counts), **inline anchor chips** for file/symbol refs in assistant
+  prose (`enhanceAnchors`), and code-block / tool-pre radius aligned to the
+  tokens (copy→check already existed). Deferred: the **risk badge** (ACP does
+  not surface a risk level, needs agent support) and the diff-fill sweep
+  animation (cosmetic). The per-turn changes summary is already covered by the
+  working-set card plus the inline edit pills, so no separate pill was added.
+  (§2.3)
 - **Phase 6, progress + references + notifications.** Inline progress rows with
   shimmer + checkmarks, the "Used N references" collapsible (needs host
   tracking of attachments + tool reads), warning/notification rows. (§2.3, §2.6)

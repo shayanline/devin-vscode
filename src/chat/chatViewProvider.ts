@@ -1202,7 +1202,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     for (const c of content) {
       if (c && c.type === "diff" && typeof c.path === "string") {
         this.changes.recordDiff(c.path, c.oldText ?? null, c.newText ?? "");
-        this.post({ type: "fileChange", path: c.path });
+        const s = diffStat(c.oldText, c.newText);
+        this.post({ type: "fileChange", path: c.path, added: s.added, removed: s.removed });
       }
     }
   }
@@ -1326,7 +1327,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     await fs.promises.mkdir(path.dirname(full), { recursive: true });
     await fs.promises.writeFile(full, params.content, "utf8");
     this.changes.recordDiff(full, original, params.content);
-    this.post({ type: "fileChange", path: full });
+    const s = diffStat(original, params.content);
+    this.post({ type: "fileChange", path: full, added: s.added, removed: s.removed });
     return null;
   }
 
@@ -1379,18 +1381,44 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
   }
 }
 
+// Added/removed line counts for a diff, from an LCS over lines (so the edit
+// pills can show +N/-M like VS Code). Capped to avoid O(n*m) blowups on huge
+// files, where it falls back to the net line delta.
+function diffStat(oldText: string | null | undefined, newText: string | null | undefined): { added: number; removed: number } {
+  const a = oldText ? oldText.split("\n") : [];
+  const b = newText ? newText.split("\n") : [];
+  if (!a.length) return { added: b.length, removed: 0 };
+  if (!b.length) return { added: 0, removed: a.length };
+  if (a.length > 4000 || b.length > 4000) {
+    return { added: Math.max(0, b.length - a.length), removed: Math.max(0, a.length - b.length) };
+  }
+  const m = a.length;
+  const n = b.length;
+  let prev = new Array<number>(n + 1).fill(0);
+  for (let i = 1; i <= m; i++) {
+    const cur = new Array<number>(n + 1).fill(0);
+    for (let j = 1; j <= n; j++) {
+      cur[j] = a[i - 1] === b[j - 1] ? prev[j - 1] + 1 : Math.max(prev[j], cur[j - 1]);
+    }
+    prev = cur;
+  }
+  const lcs = prev[n];
+  return { added: n - lcs, removed: m - lcs };
+}
+
 // Flatten ACP tool-call content into renderable items for the webview.
-function normalizeToolContent(content: any): { type: string; text?: string; path?: string; terminalId?: string }[] {
+function normalizeToolContent(content: any): { type: string; text?: string; path?: string; terminalId?: string; added?: number; removed?: number }[] {
   if (!Array.isArray(content)) {
     return [];
   }
-  const out: { type: string; text?: string; path?: string; terminalId?: string }[] = [];
+  const out: { type: string; text?: string; path?: string; terminalId?: string; added?: number; removed?: number }[] = [];
   for (const c of content) {
     if (!c) {
       continue;
     }
     if (c.type === "diff" && typeof c.path === "string") {
-      out.push({ type: "diff", path: c.path });
+      const s = diffStat(c.oldText, c.newText);
+      out.push({ type: "diff", path: c.path, added: s.added, removed: s.removed });
     } else if (c.type === "terminal" && typeof c.terminalId === "string") {
       out.push({ type: "terminal", terminalId: c.terminalId });
     } else if (c.type === "content") {
