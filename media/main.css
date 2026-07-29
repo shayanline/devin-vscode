@@ -1444,6 +1444,53 @@ body {
   padding: 4px 6px;
 }
 
+.elicit-field {
+  margin-bottom: 4px;
+}
+
+.elicit-q {
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+.elicit-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.elicit-option:hover {
+  background: var(--vscode-list-hoverBackground, rgba(127, 127, 127, 0.1));
+}
+
+.elicit-option input {
+  flex: 0 0 auto;
+  margin: 0;
+}
+
+.elicit-option span {
+  flex: 1 1 auto;
+}
+
+.elicit-option .elicit-other {
+  flex: 1 1 auto;
+  min-width: 120px;
+}
+
+.elicit-actions {
+  margin-top: 4px;
+}
+
+/* Highlight unanswered required questions after a failed submit. */
+.elicit-invalid .elicit-field:has(input:required) .elicit-q,
+.elicit-invalid .elicit-q.elicit-missing {
+  color: var(--vscode-errorForeground);
+}
+
 /* Working set */
 #working-set {
   border: 1px solid var(--vscode-panel-border);

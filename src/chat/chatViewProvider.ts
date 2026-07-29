@@ -1237,6 +1237,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
       mode: params?.mode || "form",
       message: params?.message || "",
       schema: params?.requestedSchema,
+      allowOther: params?._meta?.["cognition.ai/allowOther"] === true,
       url: params?.url
     });
     return new Promise((resolve) => {
