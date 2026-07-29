@@ -19,7 +19,7 @@ export class StatusBar {
 
   constructor() {
     this.item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 90);
-    this.item.command = "devin.focusChat";
+    this.item.command = "devin.showInfo";
     this.render();
     this.item.show();
   }
