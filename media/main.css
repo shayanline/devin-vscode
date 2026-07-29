@@ -806,6 +806,17 @@ body {
 
 .turn-response {
   line-height: 1.5;
+  /* Vertical rhythm between response parts (text, tool cards, thinking, plan)
+     so tool containers are not flush against the text above/below or each
+     other. Smaller than the between-turn gap to keep a turn reading as a unit. */
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Runs of file-change rows read as one list, so keep them tight. */
+.turn-response .tool-line + .tool-line {
+  margin-top: -4px;
 }
 
 .resp-text {
