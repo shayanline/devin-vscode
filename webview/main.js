@@ -9,7 +9,7 @@ import { renderMarkdown } from "./markdown.js";
     chat: $("chat"),
     chatTitle: $("chat-title"),
     historyBtn: $("history-btn"),
-    newchatBtn: $("newchat-btn"),
+    titleBtn: $("title-btn"),
     status: $("status"),
     usage: $("usage"),
     sessionsList: $("sessions-list"),
@@ -37,6 +37,8 @@ import { renderMarkdown } from "./markdown.js";
   const toolEls = new Map();
   const terminalCache = new Map();
   const collapsedGroups = new Set();
+  let lastSessions = [];
+  let lastActiveId = null;
 
   let commands = [];
   let ac = null;
@@ -54,10 +56,20 @@ import { renderMarkdown } from "./markdown.js";
   // Icon shown on the model button only (not in the dropdown rows): sparkle for
   // Adaptive, generic chip otherwise. Brand icons can slot in here once
   // provided as SVGs (keyed by family).
+  function brandIconUrl(fam) {
+    let icons = {};
+    try { icons = JSON.parse(document.body.dataset.modelIcons || "{}"); } catch { icons = {}; }
+    const s = ((fam.name || "") + " " + (fam.id || "")).toLowerCase();
+    if (/claude/.test(s)) return icons.claude;
+    if (/gpt|openai/.test(s)) return icons.openai;
+    if (/grok/.test(s)) return icons.grok;
+    return null;
+  }
   function modelButtonIcon(familyId) {
     const fam = familyById(familyId);
     if (!fam || isAdaptive(fam)) return "codicon-sparkle";
-    return "codicon-chip";
+    const url = brandIconUrl(fam);
+    return url ? "img:" + url : "codicon-chip";
   }
 
   function familyById(id) { return modelFamilies.find((f) => f.id === id); }
@@ -116,19 +128,20 @@ import { renderMarkdown } from "./markdown.js";
     el.thread.classList.toggle("hidden", list);
     el.chatTitle.textContent = list ? "Sessions" : currentTitle;
     el.input.placeholder = list ? "Start a new chat\u2026" : "Ask Devin, or type @ to add a file";
-    // The New chat "+" is only meaningful from the list view.
-    el.newchatBtn.classList.toggle("hidden", !list);
+    // Back arrow + title switcher only make sense inside a session (thread view).
+    el.historyBtn.classList.toggle("hidden", list);
+    el.titleBtn.classList.toggle("as-heading", list);
+    if (list) closeTitleMenu();
   }
 
   el.historyBtn.addEventListener("click", () => {
     vscode.postMessage({ type: "refreshSessions" });
     setBody("list");
   });
-  el.newchatBtn.addEventListener("click", () => {
-    vscode.postMessage({ type: "newSession" });
-    currentTitle = "Chat";
-    setBody("thread");
-    el.input.focus();
+  el.titleBtn.addEventListener("click", (e) => {
+    if (body === "list") return;
+    e.stopPropagation();
+    toggleTitleMenu();
   });
 
   // --- Composer ------------------------------------------------------------
@@ -228,8 +241,8 @@ import { renderMarkdown } from "./markdown.js";
     opts = opts || {};
     const btn = document.createElement("button");
     btn.className = "dd-btn";
-    const btnIcon = document.createElement("i");
-    btnIcon.className = "codicon dd-icon";
+    const btnIcon = document.createElement("span");
+    btnIcon.className = "dd-icon";
     const label = document.createElement("span");
     label.className = "dd-label";
     const chev = document.createElement("i");
@@ -246,8 +259,11 @@ import { renderMarkdown } from "./markdown.js";
     }
     function updateBtnIcon() {
       const ic = iconFor(current);
-      btnIcon.className = "codicon dd-icon " + ic;
       btnIcon.classList.toggle("hidden", !ic);
+      if (!ic) { btnIcon.innerHTML = ""; return; }
+      btnIcon.innerHTML = ic.indexOf("img:") === 0
+        ? `<img class="dd-brand" src="${ic.slice(4)}" alt="" />`
+        : `<i class="codicon ${ic}"></i>`;
     }
     const menu = document.createElement("div");
     menu.className = "dd-menu hidden";
@@ -359,6 +375,7 @@ import { renderMarkdown } from "./markdown.js";
   document.addEventListener("click", () => {
     document.querySelectorAll(".dd-menu").forEach((m) => m.classList.add("hidden"));
     closeUsagePopup();
+    closeTitleMenu();
   });
 
   // --- Autocomplete --------------------------------------------------------
@@ -559,6 +576,7 @@ import { renderMarkdown } from "./markdown.js";
     if (!block) return;
     renderOpenBlock();
     if (block.kind === "thinking") {
+      if (block.timer) clearInterval(block.timer);
       const secs = Math.max(1, Math.round((Date.now() - block.start) / 1000));
       if (block.label) block.label.textContent = `Thought for ${secs}s`;
     }
@@ -594,7 +612,13 @@ import { renderMarkdown } from "./markdown.js";
       details.appendChild(summary);
       details.appendChild(bodyEl);
       el.thread.appendChild(details);
-      block = { kind: "thinking", mid, body: bodyEl, label, buffer: "", start: Date.now() };
+      block = { kind: "thinking", mid, body: bodyEl, label, buffer: "", start: Date.now(), timer: null };
+      const tb = block;
+      tb.timer = setInterval(() => {
+        if (!tb.label) return;
+        const secs = Math.max(1, Math.round((Date.now() - tb.start) / 1000));
+        tb.label.textContent = `Thinking\u2026 ${secs}s`;
+      }, 1000);
     }
     block.buffer += text;
     scheduleRender();
@@ -975,9 +999,75 @@ import { renderMarkdown } from "./markdown.js";
     });
   }
 
+  // --- Title session switcher (dropdown from the header title) -------------
+
+  function toggleTitleMenu() {
+    if (document.getElementById("title-menu")) { closeTitleMenu(); return; }
+    vscode.postMessage({ type: "refreshSessions" });
+    const menu = document.createElement("div");
+    menu.id = "title-menu";
+    menu.className = "title-menu";
+    menu.addEventListener("click", (e) => e.stopPropagation());
+    el.titleBtn.parentElement.appendChild(menu);
+    renderTitleMenu(menu);
+  }
+
+  function closeTitleMenu() {
+    const m = document.getElementById("title-menu");
+    if (m) m.remove();
+  }
+
+  function renderTitleMenu(menu) {
+    menu.innerHTML = "";
+    const nw = document.createElement("div");
+    nw.className = "tm-item tm-new";
+    nw.innerHTML = '<i class="codicon codicon-add"></i><span>New chat</span>';
+    nw.addEventListener("click", () => { closeTitleMenu(); vscode.postMessage({ type: "newSession" }); });
+    menu.appendChild(nw);
+    if (lastSessions.length) {
+      const sep = document.createElement("div");
+      sep.className = "dd-sep";
+      menu.appendChild(sep);
+    }
+    const rows = document.createElement("div");
+    rows.className = "tm-rows";
+    lastSessions.forEach((s) => {
+      const item = document.createElement("div");
+      item.className = "tm-item" + (s.id === lastActiveId ? " active" : "");
+      const main = document.createElement("div");
+      main.className = "tm-main";
+      const t = document.createElement("div");
+      t.className = "tm-title";
+      t.textContent = s.title || s.short_id || s.id;
+      const meta = document.createElement("div");
+      meta.className = "tm-meta";
+      meta.textContent = s.last_activity_ago || agoFrom(s.last_activity_at) || "";
+      main.appendChild(t);
+      main.appendChild(meta);
+      main.addEventListener("click", () => {
+        closeTitleMenu();
+        currentTitle = s.title || "Chat";
+        el.chatTitle.textContent = currentTitle;
+        vscode.postMessage({ type: "loadSession", id: s.id });
+        setBody("thread");
+      });
+      const del = iconBtn("codicon-trash", "Delete", (e) => {
+        e.stopPropagation();
+        vscode.postMessage({ type: "deleteSession", id: s.id, title: s.title || s.id });
+      });
+      item.appendChild(main);
+      item.appendChild(del);
+      rows.appendChild(item);
+    });
+    menu.appendChild(rows);
+  }
+
   // --- Sessions list -------------------------------------------------------
 
   function renderSessions(sessions, activeId, folders) {
+    lastSessions = sessions || [];
+    lastActiveId = activeId;
+    if (document.getElementById("title-menu")) renderTitleMenu(document.getElementById("title-menu"));
     el.sessionsList.innerHTML = "";
     if (!sessions || sessions.length === 0) {
       const empty = document.createElement("div");
@@ -1383,6 +1473,7 @@ import { renderMarkdown } from "./markdown.js";
         renderWorkingSet([]);
         renderAttachments([]);
         toolEls.clear();
+        if (block && block.timer) clearInterval(block.timer);
         block = null;
         el.usage.classList.add("hidden");
         el.usage.innerHTML = "";

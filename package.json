@@ -81,6 +81,12 @@
         "icon": "$(gear)"
       },
       {
+        "command": "devin.showInfo",
+        "title": "About / Status",
+        "category": "Devin",
+        "icon": "$(info)"
+      },
+      {
         "command": "devin.acceptChange",
         "title": "Accept Change",
         "category": "Devin",
@@ -124,6 +130,13 @@
         {
           "command": "devin.openChangeDiff",
           "when": "false"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "devin.newSession",
+          "when": "view == devin.chatView",
+          "group": "navigation@1"
         }
       ],
       "scm/title": [
