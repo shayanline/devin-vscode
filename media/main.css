@@ -92,12 +92,30 @@ body {
   border-radius: 4px;
   cursor: pointer;
   display: flex;
-  flex-direction: column;
-  gap: 2px;
+  align-items: center;
+  gap: 6px;
 }
 
 .session-item:hover {
   background: var(--vscode-list-hoverBackground);
+}
+
+.session-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.session-actions {
+  display: none;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+
+.session-item:hover .session-actions {
+  display: flex;
 }
 
 .session-item.active {
@@ -247,6 +265,47 @@ body {
   text-decoration: underline;
 }
 
+/* Working set */
+#working-set {
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 6px;
+  margin: 8px;
+  overflow: hidden;
+}
+
+.ws-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  background: var(--vscode-editorWidget-background, transparent);
+  font-size: 0.9em;
+  font-weight: 600;
+}
+
+.ws-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.ws-file {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 10px;
+  border-top: 1px solid var(--vscode-panel-border);
+}
+
+.ws-file-actions {
+  display: flex;
+  gap: 4px;
+}
+
+button.tiny {
+  padding: 2px 8px;
+  font-size: 0.85em;
+}
+
 /* Permission tray */
 #permission-tray .permission {
   border: 1px solid var(--vscode-inputValidation-warningBorder, var(--vscode-panel-border));
@@ -275,6 +334,48 @@ body {
   display: flex;
   gap: 6px;
   align-items: flex-end;
+}
+
+#attach {
+  color: var(--vscode-button-secondaryForeground);
+  background: var(--vscode-button-secondaryBackground);
+  font-weight: 700;
+}
+
+#attach:hover {
+  background: var(--vscode-button-secondaryHoverBackground);
+}
+
+/* Attachment chips */
+#attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px 2px 8px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 12px;
+  font-size: 0.85em;
+  background: var(--vscode-input-background);
+}
+
+.chip-x {
+  padding: 0 4px;
+  background: transparent;
+  color: var(--vscode-foreground);
+  border-radius: 8px;
+  font-size: 0.9em;
+  line-height: 1;
+}
+
+.chip-x:hover {
+  background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
 }
 
 #input {

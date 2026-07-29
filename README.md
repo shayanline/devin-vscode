@@ -17,9 +17,24 @@ If `devin` is not on your PATH, set an absolute path in
 ## Features
 
 - Streaming chat backed by a persistent `devin acp` session.
-- Per workspace session list (resume a previous conversation in one click).
-- Permission prompts (Normal, Accept Edits, Plan, Bypass) surfaced as buttons.
-- File edits made by the agent are tracked and viewable as native diffs.
+- Model picker and session mode selector (Code, Ask, Plan, Bypass), populated
+  from the CLI itself.
+- Per workspace session list, scoped to the current window (separate lists for
+  separate `.code-workspace` files), with resume, rename, and delete.
+- Multi root aware: every folder in a `.code-workspace` is passed to Devin.
+- Permission prompts surfaced as approve or deny buttons.
+- Agent file edits are tracked as a working set with native diffs and per file
+  keep or undo, plus inline per hunk revert in the editor gutter.
+- Context attachments: add files or the current selection, and paste images.
+- First run setup panel with CLI detection and login, and a status bar item.
+
+## Settings
+
+- `devin.cliPath`: path to the devin executable (auto detected if on PATH).
+- `devin.defaultModel`, `devin.defaultMode`: defaults for new sessions.
+- `devin.sessionScope`: `both`, `workspace`, or `directory`.
+- `devin.autoResumeLast`: resume the last session when the chat opens.
+- `devin.showThinking`, `devin.extraArgs`, `devin.env`.
 
 ## Status
 

@@ -2,7 +2,7 @@
   "name": "devin-vscode",
   "displayName": "Devin for VS Code",
   "description": "A native chat panel for the Devin CLI, powered by the Agent Client Protocol. Streaming replies, per workspace sessions, and trackable diffs.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "shayanline",
   "author": "Shayan Khaksar",
   "license": "MIT",
@@ -78,9 +78,44 @@
         "title": "Run Setup",
         "category": "Devin",
         "icon": "$(gear)"
+      },
+      {
+        "command": "devin.acceptChange",
+        "title": "Accept Change",
+        "category": "Devin",
+        "icon": "$(check)"
+      },
+      {
+        "command": "devin.rejectChange",
+        "title": "Reject Change",
+        "category": "Devin",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "devin.acceptAllChanges",
+        "title": "Accept All Changes",
+        "category": "Devin",
+        "icon": "$(check-all)"
+      },
+      {
+        "command": "devin.rejectAllChanges",
+        "title": "Reject All Changes",
+        "category": "Devin",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "devin.openChangeDiff",
+        "title": "Open Diff",
+        "category": "Devin",
+        "icon": "$(diff)"
       }
     ],
     "menus": {
+      "commandPalette": [
+        { "command": "devin.acceptChange", "when": "false" },
+        { "command": "devin.rejectChange", "when": "false" },
+        { "command": "devin.openChangeDiff", "when": "false" }
+      ],
       "view/title": [
         {
           "command": "devin.newSession",
@@ -91,6 +126,35 @@
           "command": "devin.showSessions",
           "when": "view == devin.chatView",
           "group": "navigation@2"
+        }
+      ],
+      "scm/title": [
+        {
+          "command": "devin.acceptAllChanges",
+          "when": "scmProvider == devin",
+          "group": "navigation@1"
+        },
+        {
+          "command": "devin.rejectAllChanges",
+          "when": "scmProvider == devin",
+          "group": "navigation@2"
+        }
+      ],
+      "scm/resourceState/context": [
+        {
+          "command": "devin.acceptChange",
+          "when": "scmProvider == devin",
+          "group": "inline@1"
+        },
+        {
+          "command": "devin.rejectChange",
+          "when": "scmProvider == devin",
+          "group": "inline@2"
+        },
+        {
+          "command": "devin.openChangeDiff",
+          "when": "scmProvider == devin",
+          "group": "navigation@1"
         }
       ]
     },
