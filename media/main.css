@@ -204,6 +204,40 @@ body {
   right: 0;
 }
 
+.dd-filter {
+  position: sticky;
+  top: 0;
+  width: 100%;
+  margin-bottom: 4px;
+  padding: 4px 6px;
+  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+  border-radius: 4px;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  font-family: inherit;
+  font-size: 0.9em;
+  outline: none;
+}
+
+.dd-filter:focus {
+  border-color: var(--vscode-focusBorder);
+}
+
+.dd-group {
+  padding: 6px 8px 2px;
+  font-size: 0.72em;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  opacity: 0.55;
+  font-weight: 600;
+}
+
+.dd-empty {
+  padding: 8px;
+  opacity: 0.6;
+  font-size: 0.9em;
+}
+
 .dd-item {
   display: flex;
   align-items: center;

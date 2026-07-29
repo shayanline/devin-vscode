@@ -21,7 +21,7 @@ import { SessionStore } from "../session/sessionStore";
 import { ChangeTracker } from "../diff/changeTracker";
 import { StatusBar } from "../ui/statusBar";
 import { checkHealth, CliHealth, loginShellEnv } from "../cli/locate";
-import { listModels } from "../cli/models";
+import { listModels, modelGroupOf } from "../cli/models";
 
 export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
   public static readonly viewType = "devin.chatView";
@@ -566,7 +566,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     this.currentModel = modelOpt?.currentValue || this.currentModel;
     this.statusBar.set({ connected: this.isReady(), mode: this.currentMode, model: this.currentModel });
     const modes = (modeOpt?.options || []).map((c) => ({ value: c.value, name: c.name || c.value }));
-    const models = (modelOpt?.options || []).map((c) => ({ value: c.value, name: c.name || c.value }));
+    const models = (modelOpt?.options || []).map((c) => ({
+      value: c.value,
+      name: c.name || c.value,
+      group: modelGroupOf(c.value)
+    }));
     const payload = { type: "options", modes, currentMode: this.currentMode, models, currentModel: this.currentModel };
     if (modes.length || models.length) {
       this.store.cacheOptions(payload);
