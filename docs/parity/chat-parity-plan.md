@@ -260,9 +260,14 @@ Playwright preview screenshot before moving on.
   rendered with the shared file pills. Deferred: standalone warning /
   notification content rows, since ACP does not emit a distinct warning part
   (errors are already handled by the error card). (§2.3, §2.6)
-- **Phase 7, plan/todo widget + streaming animations.** Re-skin the plan card to
-  the todo-widget look, optional incremental streaming reveal animations and
-  `collapseCompletedResponses`. (§2.3)
+- **Phase 7, plan/todo widget + streaming animations. ✅ Mostly done (v0.6.21).**
+  Re-skinned the plan card to VS Code's todo-widget look (bordered card on the
+  token radius, status glyphs: green check + strikethrough for done, a spinner
+  for active, an outline for pending), and added a gentle `dv-appear` entrance
+  animation on each response part as it streams in, gated by reduced motion.
+  Deferred: the full set of incremental-render variants (fade/rise/blur/slide)
+  and `collapseCompletedResponses` (collapsing intermediate work in a finished
+  response), which are larger and lower value. (§2.3)
 - **Phase 8, behaviour gaps + settings.** Conversational undo/redo via ACP
   revert, the "Checkpoint Restored" row, and the `devin.*` settings that map to
   VS Code keys. (§2.6, §2.7)
