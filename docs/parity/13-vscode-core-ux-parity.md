@@ -66,6 +66,44 @@ top of the current flat stream will not work and should not be attempted.
 
 ---
 
+## 0.1 Implementation status (as of v0.6.8)
+
+Most of Milestones A and B in this report are now built. The turn model, the
+ACP revert protocol, edit-in-place, and restore checkpoints all shipped. Fork
+and conversational undo/redo did not, and the layout decision (Part 4) was
+answered by keeping bubbles rather than switching to the VS Code transcript.
+
+| Part | Feature | Status | Where |
+|---|---|---|---|
+| 1 | Turn model in the webview (request/response turns, per-turn DOM subtree) | ✅ Done | `webview/main.js` (`turns`, `newTurn`, `buildTurnChrome`) |
+| 1.2 | Per-turn file snapshots | ✅ Done (via Devin `/revert`, the preferred option, not client-side snapshots) | `src/acp/client.ts` |
+| 1.3 | State tracking: `editing`, `busy` | ✅ Done. `canUndo`/`canRedo` ❌ (no undo/redo yet) | `webview/main.js` |
+| 2 | ACP revert protocol (capability + preview + execute + head probe) | ✅ Done, verified | `src/acp/client.ts` (`supportsRevert`, `revertPreview`, `revertExecute`, `currentHead`) |
+| 2.4 | Fork over ACP | ❌ Not available (methods return `-32601`); not implemented | n/a |
+| 3.1 | Edit a request in place | ✅ Done (`inline` + `hover`), revert-then-resend | `webview/main.js` (`startEditing`) |
+| 3.2 | Restore checkpoints + inline two-state confirm | ✅ Done. 🟡 The per-turn "N files changed" summary pill is not rendered yet (setting exists, unused) | `webview/main.js` (`renderCheckpointRow`) |
+| 3.3 | Undo / redo edits (conversational) | ❌ Not implemented (only working-set "Undo all") | n/a |
+| 3.4 | Fork conversation | ❌ Not implemented (blocked on ACP, see 2.4) | n/a |
+| 4 | Turn layout / chrome | 🟡 Turn grouping done; kept bubbles (right-aligned request bubble) rather than the VS Code transcript layout | `webview/main.js`, `media/main.css` |
+| 6 | Settings | 🟡 4 of 5 added (`editRequests` without `input`, `checkpoints.enabled`, `checkpoints.showFileChanges`, `editing.confirmEditRequestRemoval`); no `bubbleLayout` | `package.json` |
+
+Known divergences on the shipped features:
+
+- **Edit-in-place** supports `inline`/`hover`/`none`, not VS Code's fourth
+  `input` value.
+- **Confirmation before discarding later turns** uses a native `window.confirm`
+  dialog rather than the in-thread widget, and "Don't ask again" is not
+  persisted (the `devin.editing.confirmEditRequestRemoval` setting only gates
+  whether the prompt shows at all).
+- **Restore** rewinds and re-seeds, but there is no post-restore "Checkpoint
+  Restored" row with Undo/Redo, and no per-turn changes-summary pill yet.
+
+The remaining spec below is kept as written for reference. The
+"Devin today" paragraphs describe the pre-implementation state, each feature
+now also carries a "**Status (v0.6.8)**" line.
+
+---
+
 ## 1. Foundational refactor: a real turn model in the webview
 
 VS Code's chat is a virtualised list where each row is one `request` or
@@ -309,6 +347,13 @@ first, initially wired to "revert then resend".
 **Effort:** M for the UI, plus the turn-model refactor (L, shared across all
 features).
 
+**Status (v0.6.8): ✅ Done.** Implemented in `webview/main.js` (`startEditing`).
+`inline` (click the bubble) and `hover` (Edit Request button) both edit in
+place, seeded from the turn; submit reverts to the turn's `headBefore` and
+resends, Escape cancels. Divergences: no `input` mode value, and the discard
+confirmation is a native `window.confirm` rather than the in-thread widget with
+a persisted "Don't ask again".
+
 ### 3.2 Restore checkpoints (restore to a point)
 
 **VS Code behaviour (verified):**
@@ -379,6 +424,15 @@ that case (see 3.4).
 
 **Effort:** M (UI) once the turn model exists.
 
+**Status (v0.6.8): ✅ Done, with one gap.** The checkpoint row
+(`renderCheckpointRow` in `webview/main.js`) renders between request and
+response with the gradient lines and a "Restore Checkpoint" button, gated by
+`devin.checkpoints.enabled` and the revert capability. The inline two-state
+"Discard Edits"/Cancel confirm is implemented, and restore calls `revertExecute`
+to the turn's `headBefore`. 🟡 **Not done**: the per-turn "N files changed"
+summary pill (item 5) is not rendered even though `devin.checkpoints.showFileChanges`
+exists, and there is no post-restore "Checkpoint Restored" row with Undo/Redo.
+
 ### 3.3 Undo / redo edits
 
 **VS Code behaviour (verified):**
@@ -415,6 +469,11 @@ true replay, which is an honest divergence to document.
 
 **Effort:** S once restore (3.2) exists.
 
+**Status (v0.6.8): ❌ Not implemented.** There is still only the working-set
+"Undo all" (the "Undo All Edits" analogue). No conversational Undo/Redo Last
+Edit title actions, and no `canUndo`/`canRedo` state. This is the top remaining
+follow-up.
+
 ### 3.4 Fork conversation
 
 **VS Code behaviour (verified):**
@@ -445,6 +504,12 @@ is likely the easiest to confirm because fork is inherently a session-creating
 command.
 
 **Effort:** S to M.
+
+**Status (v0.6.8): ❌ Not implemented (blocked).** As verified in 2.4, no fork
+method is reachable over ACP (`-32601 Method not found`), and `/fork` is TUI
+only, so a faithful server-side fork cannot ship today. Deferred pending either
+a Devin-side ACP fork method or a decision to accept the replay-based
+approximation.
 
 ---
 
@@ -483,6 +548,13 @@ the top open decision (Part 8) rather than assumed. My recommendation is to matc
 VS Code (full-width, avatar + name header, no bubbles, centred column, footer
 toolbar on responses), because the user asked for the same UI/UX everywhere and
 this is the core layout everything else sits inside.
+
+**Status (v0.6.8): 🟡 Turn grouping done, bubbles kept.** Content is now grouped
+under per-turn request/response containers (Part 1), but the decision went the
+other way from the recommendation above: we kept bubbles and refined them (a
+right-aligned request bubble) rather than switching to the transcript layout.
+The transcript layout (avatar + name header, no bubbles, centred column, footer
+toolbar) remains an open option, not a shipped one.
 
 **Implementation (if we match):**
 
@@ -554,27 +626,29 @@ To keep behaviour configurable the way VS Code is, add:
 
 ## 7. Prioritised plan
 
+Status markers reflect v0.6.8. ✅ done, 🟡 partial, ❌ not started/blocked.
+
 **Milestone A, the foundation (do first, nothing else works without it):**
 
-1. Turn model in the webview (Part 1). L.
-2. Verify `/steps`, `/revert`, `/fork` reachability over ACP (Part 2.1) and add
-   the client wrappers (Part 2.2). S, but gates the semantics of B.
+1. ✅ Turn model in the webview (Part 1). L.
+2. ✅ Verify `/steps`, `/revert`, `/fork` reachability over ACP (Part 2.1) and add
+   the client wrappers (Part 2.2). Revert wrappers shipped; fork is unreachable.
 
 **Milestone B, the four headline features (the user's explicit asks):**
 
-3. Edit a request in place (3.1), initially wired to revert-then-resend. M.
-4. Restore checkpoints with the inline two-state confirm and the per-turn
-   changes summary (3.2). M.
-5. Undo / redo edits (3.3). S.
-6. Fork conversation (3.4). S to M (likely the easiest backend path).
+3. ✅ Edit a request in place (3.1), wired to revert-then-resend. M.
+4. 🟡 Restore checkpoints with the inline two-state confirm (done) and the
+   per-turn changes summary (not done, see 3.2). M.
+5. ❌ Undo / redo edits (3.3). S. Top remaining follow-up.
+6. ❌ Fork conversation (3.4). Blocked on ACP (2.4).
 
 **Milestone C, layout and chrome parity:**
 
-7. Decide bubbles vs transcript (Part 8), then implement the full-width
-   avatar + name + footer-toolbar layout (Part 4). M.
-8. Re-skin confirmation/elicitation to the VS Code confirmation widget (Part 5).
+7. 🟡 Decide bubbles vs transcript (Part 8): decided to keep bubbles; the
+   full-width transcript layout (Part 4) was not implemented. M.
+8. ❌ Re-skin confirmation/elicitation to the VS Code confirmation widget (Part 5).
    S.
-9. Code block copy-to-check animation and hover-scope polish (Part 5). S.
+9. ❌ Code block copy-to-check animation and hover-scope polish (Part 5). S.
 
 **Milestone D, smaller parity items** (from 01 to 12 that still stand): richer
 `#` context types, request timestamps, "Used references", session
@@ -587,18 +661,21 @@ feel native. Do not start B before A.
 
 ## 8. Decisions needed from Shayan
 
-1. **Bubbles vs VS Code transcript layout (Part 4).** VS Code has no bubbles;
-   turns are full-width rows with an avatar + name header. We recently added
-   bubbles. Do we switch to match VS Code (my recommendation, given the "same
-   UI/UX everywhere" goal), keep bubbles, or make it a setting?
-2. **Backend path for truncation (Part 2.1).** Should the implementer spend time
-   confirming `/revert` and `/fork` over ACP first (recommended), and if they are
-   TUI-only, do we (a) request a Devin side ACP method, or (b) accept the
-   client-side snapshot + fork-based fallback with its limitations?
-3. **Where this work lands.** One large branch that does Milestone A then B, or
-   incremental PRs per feature on top of A?
-4. **Fork destination.** Open the forked session in the same sidebar (like VS
-   Code navigating the pane) or offer "open to the side" as well?
+1. ✅ **Resolved (v0.6.8): keep bubbles.** Bubbles vs VS Code transcript layout
+   (Part 4). We kept and refined bubbles (right-aligned request bubble) rather
+   than switching to the transcript layout. The transcript layout stays an open
+   option if we later want full parity.
+2. ✅ **Resolved (v0.6.8): revert over ACP, fork deferred.** `/revert` is
+   reachable via the verified `_cognition.ai/revert/*` methods and is what
+   powers edit + restore. `/fork` is not reachable over ACP, so fork is deferred
+   pending a Devin-side ACP method (option a) rather than the replay fallback.
+3. **Still open: undo/redo and the changes-summary pill.** The remaining
+   follow-ups (conversational Undo/Redo Last Edit, and the per-turn "N files
+   changed" summary pill) are not built yet. Ship as one small PR on top of the
+   existing turn model.
+4. **Fork destination.** Moot until fork is unblocked: open the forked session in
+   the same sidebar (like VS Code navigating the pane) or offer "open to the
+   side" as well?
 
 ---
 

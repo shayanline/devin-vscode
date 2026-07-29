@@ -22,16 +22,22 @@ T shirt size (S < 1 day, M 1-3 days, L > 3 days) for a webview + ACP client.
 
 ## Tier 2, high value native affordances
 
-6. **Checkpoints / restore to a step** (`04`) — M. Use Devin `/steps`,
-   `/revert`, `/fork` to offer "restore to here" on prior turns.
-7. **Edit a previous request and resend; retry/regenerate** (`01`) — M.
+6. ✅ **Done (v0.6.8). Checkpoints / restore to a step** (`04`, `13`) — M. Per-turn
+   "Restore Checkpoint" row with the inline "Discard Edits"/Cancel confirm, via
+   the ACP `_cognition.ai/revert/*` methods. Remaining: per-turn "N files
+   changed" summary pill.
+7. ✅ **Done (v0.6.8). Edit a previous request in place; resend** (`01`, `13`) — M.
+   Inline (click the bubble) and hover (Edit Request) editing that rewinds via
+   `/revert` and re-runs. Remaining: conversational Undo/Redo Last Edit (`13` §3.3).
 8. **Richer `#` context types** (`03`) — M. Active editor, open editors,
    problems/diagnostics, terminal last command/selection, git changes, folder,
    codebase. Auto attach current file as a removable pill.
 9. **Editor context menu + keybindings** (`09`, `10`) — M. "Ask Devin about
    selection", "Explain", "Fix", each opening the panel with the selection
    attached and a preset prompt; add focus/new chat keybindings.
-10. **Multi diff "Review all changes" + reveal edits live** (`04`) — S/M.
+10. 🟡 **Partly done (v0.6.8). Multi diff "Review all changes" + reveal edits
+    live** (`04`) — S/M. Working-set "Open all" opens a single multi-diff editor.
+    Remaining: reveal/auto-open edits live as files change.
 11. **New chat welcome / greeting with starter prompts** (`01`) — S.
 12. **Actionable error states** (auth expired, rate limited, offline) (`01`) — S.
 
@@ -45,7 +51,8 @@ T shirt size (S < 1 day, M 1-3 days, L > 3 days) for a webview + ACP client.
 15. **Commit message generation** in the SCM input (`09`) — M.
 16. **Review changes** using Devin's review agent / `/review` (`09`) — M.
 17. **Session extras**: search/filter, export to markdown, clear all, open chat
-    in the editor area, fork (`02`) — M total.
+    in the editor area, fork (`02`) — M total. Note: **fork is blocked** over ACP
+    (no reachable method, see `13` §2.4), so defer that sub-item.
 18. **Context / usage meter** with a compact action, near the input (`01`,
     `05`) — S.
 19. **Custom modes** mapped to Devin subagent profiles; per mode model (`06`,
@@ -76,5 +83,8 @@ Do Tier 1 as one milestone (it directly answers the user's feedback and makes
 the chat feel complete), then Tier 2. Tiers 3 and 4 can be picked up
 opportunistically. Every Tier 1 and 2 item is webview rendering plus existing
 ACP data, so no backend/protocol work is required beyond enabling the ACP
-terminal capability (item 5) and using the existing `/steps` `/revert` `/fork`
-slash commands (item 6).
+terminal capability (item 5) and the ACP revert methods used for checkpoints and
+edit-in-place (item 6, shipped in v0.6.8). Note the TUI slash commands
+(`/steps`, `/revert`, `/fork`) are **not** reachable over ACP; revert is instead
+done through the `_cognition.ai/revert/*` methods, and fork has no ACP method
+yet (see `13` §2).

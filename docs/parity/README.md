@@ -71,12 +71,16 @@ Status legend:
 | `10-settings-commands.md` | Settings, commands, keybindings, context menus, status bar, walkthrough |
 | `11-out-of-scope.md` | Copilot features that are N/A for Devin |
 | `12-backlog.md` | Prioritised implementation proposal |
-| `13-vscode-core-ux-parity.md` | **True VS Code core chat UI/UX parity**: the turn model, edit-in-place, checkpoints/restore, undo/redo, fork, and layout. Re-analysed against `microsoft/vscode` core (not the Copilot extension). Start here for edit/checkpoint/undo/fork work. |
+| `13-vscode-core-ux-parity.md` | **True VS Code core chat UI/UX parity**: the turn model, edit-in-place, checkpoints/restore, undo/redo, fork, and layout. Re-analysed against `microsoft/vscode` core (not the Copilot extension). Start here for edit/checkpoint/undo/fork work; includes an "Implementation status (as of v0.6.8)" section. |
 
 ## Source snapshot
 
 - `microsoft/vscode-copilot-chat` cloned at analysis time (version line ~0.41,
   `package.json` ~220 KB, 134 commands, 37 tools, 9 chat participants, 11 model
   providers, 3 chat session types, 159 settings).
-- `devin-vscode` at v0.5.0: 10 commands, 8 settings, 1 webview view, custom
-  webview UI, ACP backend.
+- `devin-vscode` originally analysed at v0.5.0 (10 commands, 8 settings, 1
+  webview view, custom webview UI, ACP backend). **Current: v0.6.8**, which added
+  the turn model, ACP revert (checkpoints + edit-in-place), and the related
+  settings. For the up-to-date status of the VS Code core chat UX work
+  (edit-in-place, checkpoints, undo/redo, fork, layout), see the
+  "Implementation status" section at the top of `13-vscode-core-ux-parity.md`.

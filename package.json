@@ -267,6 +267,7 @@
     "pretest": "npm run compile",
     "test": "node --test scripts/*.test.js",
     "harness": "node scripts/webview-harness.js",
+    "preview": "npm run compile && node scripts/preview.js",
     "package": "npx @vscode/vsce package --no-dependencies"
   },
   "devDependencies": {
