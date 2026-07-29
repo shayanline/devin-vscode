@@ -8,6 +8,7 @@ export class SessionStore {
   private static readonly ACTIVE_KEY = "devin.activeSession.v1";
   private static readonly TITLES_KEY = "devin.sessionTitles.v1";
   private static readonly OPTIONS_KEY = "devin.options.v1";
+  private static readonly CWDS_KEY = "devin.sessionCwd.v1";
 
   constructor(private readonly state: vscode.Memento) {}
 
@@ -45,17 +46,44 @@ export class SessionStore {
     return this.state.get<string[]>(SessionStore.IDS_KEY, []);
   }
 
-  add(id: string): void {
+  // The exact directory each tracked session was created in. `devin list` is
+  // exact-match on cwd, so we query these to reconcile which sessions still
+  // exist, and the webview groups by them.
+  cwds(): Record<string, string> {
+    return this.state.get<Record<string, string>>(SessionStore.CWDS_KEY, {});
+  }
+
+  setCwd(id: string, cwd: string): void {
+    if (!id || !cwd) {
+      return;
+    }
+    const map = this.cwds();
+    if (map[id] === cwd) {
+      return;
+    }
+    map[id] = cwd;
+    void this.state.update(SessionStore.CWDS_KEY, map);
+  }
+
+  add(id: string, cwd?: string): void {
     if (!id) {
       return;
     }
     const ids = this.ids().filter((x) => x !== id);
     ids.unshift(id);
     void this.state.update(SessionStore.IDS_KEY, ids.slice(0, 200));
+    if (cwd) {
+      this.setCwd(id, cwd);
+    }
   }
 
   remove(id: string): void {
     void this.state.update(SessionStore.IDS_KEY, this.ids().filter((x) => x !== id));
+    const cwds = this.cwds();
+    if (id in cwds) {
+      delete cwds[id];
+      void this.state.update(SessionStore.CWDS_KEY, cwds);
+    }
     if (this.activeId() === id) {
       this.setActive(undefined);
     }

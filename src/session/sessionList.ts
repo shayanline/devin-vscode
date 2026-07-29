@@ -1,5 +1,4 @@
 import { execFile } from "child_process";
-import * as path from "path";
 
 export interface DevinSession {
   id: string;
@@ -12,56 +11,89 @@ export interface DevinSession {
   tracked?: boolean;
 }
 
-export type SessionScope = "both" | "workspace" | "directory";
-
 interface ListOptions {
   cliPath: string;
   env?: NodeJS.ProcessEnv;
-  folders: string[];
+  // Session ids this VS Code window owns (from workspaceState).
   trackedIds: string[];
-  scope: SessionScope;
+  // Exact directory each tracked id was created in.
+  cwdById: Record<string, string>;
+  // Workspace folders, queried as a fallback for ids with no recorded cwd.
+  folders: string[];
 }
 
-// `devin list --format json` scopes to the given cwd, so we run it once per
-// workspace folder and union the results. Sessions are then filtered by scope:
-//  - directory: any session whose working_directory is inside a workspace folder
-//  - workspace: only sessions tracked for this VS Code workspace
-//  - both:      the union of the two
-export async function listSessions(opts: ListOptions): Promise<DevinSession[]> {
-  const folders = opts.folders.length ? opts.folders : [process.cwd()];
-  const perFolder = await Promise.all(folders.map((f) => runList(opts.cliPath, f, opts.env)));
+export interface ListResult {
+  // Tracked sessions that still exist in Devin, with fresh metadata.
+  sessions: DevinSession[];
+  // Tracked ids Devin no longer knows about, safe to drop from the store.
+  prunedIds: string[];
+}
+
+// Membership is workspaceState (tracked ids); the CLI is only the source of
+// truth for existence and metadata. `devin list --format json` is exact-match
+// on cwd, so we query each distinct directory a tracked session was created in,
+// then keep only the tracked ids the CLI still returns. Ids whose directory was
+// queried successfully but no longer contains them are pruned; ids whose query
+// failed are left untouched so a transient CLI error never wipes the list.
+export async function listSessions(opts: ListOptions): Promise<ListResult> {
+  const dirs = new Set<string>();
+  for (const id of opts.trackedIds) {
+    const cwd = opts.cwdById[id];
+    if (cwd) {
+      dirs.add(cwd);
+    }
+  }
+  for (const f of opts.folders) {
+    dirs.add(f);
+  }
+  if (dirs.size === 0) {
+    dirs.add(process.cwd());
+  }
+
+  const queried = await Promise.all([...dirs].map((d) => runList(opts.cliPath, d, opts.env)));
 
   const byId = new Map<string, DevinSession>();
-  for (const list of perFolder) {
-    for (const s of list) {
+  const okDirs = new Set<string>();
+  queried.forEach((res, i) => {
+    const dir = [...dirs][i];
+    if (!res.ok) {
+      return;
+    }
+    okDirs.add(dir);
+    for (const s of res.sessions) {
       if (s && s.id && !byId.has(s.id)) {
         byId.set(s.id, s);
       }
     }
-  }
+  });
 
-  const tracked = new Set(opts.trackedIds);
-  const inWorkspace = (s: DevinSession) => folders.some((f) => within(f, s.working_directory));
-
-  const result: DevinSession[] = [];
-  for (const s of byId.values()) {
-    const isTracked = tracked.has(s.id);
-    const isDir = inWorkspace(s);
-    // "workspace" now means VS Code initiated AND belonging to this workspace,
-    // so opening an external session once no longer taints the list. Only
-    // sessions the CLI actually lists are shown, so every row has metadata.
-    const include =
-      opts.scope === "workspace" ? isTracked && isDir : opts.scope === "directory" ? isDir : isTracked || isDir;
-    if (include) {
-      result.push({ ...s, tracked: isTracked });
+  const sessions: DevinSession[] = [];
+  const prunedIds: string[] = [];
+  for (const id of opts.trackedIds) {
+    const found = byId.get(id);
+    if (found) {
+      sessions.push({ ...found, tracked: true });
+      continue;
+    }
+    // Absent: prune only if the directory we expected it in was queried
+    // successfully (so we know it is genuinely gone, not a failed call).
+    const cwd = opts.cwdById[id];
+    const dirKnown = cwd ? okDirs.has(cwd) : okDirs.size === dirs.size;
+    if (dirKnown) {
+      prunedIds.push(id);
     }
   }
 
-  result.sort((a, b) => (b.last_activity_at || 0) - (a.last_activity_at || 0));
-  return result;
+  sessions.sort((a, b) => (b.last_activity_at || 0) - (a.last_activity_at || 0));
+  return { sessions, prunedIds };
 }
 
-function runList(cliPath: string, cwd: string, env?: NodeJS.ProcessEnv): Promise<DevinSession[]> {
+interface RunResult {
+  ok: boolean;
+  sessions: DevinSession[];
+}
+
+function runList(cliPath: string, cwd: string, env?: NodeJS.ProcessEnv): Promise<RunResult> {
   return new Promise((resolve) => {
     execFile(
       cliPath,
@@ -69,29 +101,16 @@ function runList(cliPath: string, cwd: string, env?: NodeJS.ProcessEnv): Promise
       { cwd, env, windowsHide: true, timeout: 15000, maxBuffer: 8 * 1024 * 1024 },
       (err, stdout) => {
         if (err && !stdout) {
-          resolve([]);
+          resolve({ ok: false, sessions: [] });
           return;
         }
         try {
           const parsed = JSON.parse(stdout) as DevinSession[];
-          resolve(Array.isArray(parsed) ? parsed : []);
+          resolve({ ok: true, sessions: Array.isArray(parsed) ? parsed : [] });
         } catch {
-          resolve([]);
+          resolve({ ok: false, sessions: [] });
         }
       }
     );
   });
-}
-
-// True when `child` is the same directory as `parent` or nested inside it.
-function within(parent: string, child: string | undefined): boolean {
-  if (!parent || !child) {
-    return false;
-  }
-  const rel = path.relative(normalize(parent), normalize(child));
-  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
-}
-
-function normalize(p: string): string {
-  return p.replace(/[\\/]+$/, "");
 }

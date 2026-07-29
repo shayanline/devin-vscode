@@ -2,7 +2,7 @@
   "name": "devin-vscode",
   "displayName": "Devin for VS Code",
   "description": "A native chat panel for the Devin CLI, powered by the Agent Client Protocol. Streaming replies, per workspace sessions, and trackable diffs.",
-  "version": "0.6.2",
+  "version": "0.6.4",
   "publisher": "shayanline",
   "author": "Shayan Khaksar",
   "license": "AGPL-3.0-or-later",
@@ -198,21 +198,6 @@
           ],
           "default": "accept-edits",
           "description": "Session mode for new sessions."
-        },
-        "devin.sessionScope": {
-          "type": "string",
-          "enum": [
-            "workspace",
-            "directory",
-            "both"
-          ],
-          "enumDescriptions": [
-            "Only sessions started or opened from this extension in this window (VS Code initiated). Recommended.",
-            "Any session whose working directory is inside this workspace, including ones you started in a terminal",
-            "The union of both: VS Code initiated sessions plus any whose directory is inside this workspace"
-          ],
-          "default": "workspace",
-          "description": "Which sessions the list shows. By default only sessions you started inside VS Code are listed; widen this to also include sessions started outside VS Code (e.g. the terminal)."
         },
         "devin.autoResumeLast": {
           "type": "boolean",

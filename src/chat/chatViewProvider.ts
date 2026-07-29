@@ -16,7 +16,7 @@ import {
   WriteTextFileParams
 } from "../acp/types";
 import { TerminalManager } from "../acp/terminal";
-import { DevinSession, listSessions, SessionScope } from "../session/sessionList";
+import { DevinSession, listSessions } from "../session/sessionList";
 import { SessionStore } from "../session/sessionStore";
 import { ChangeTracker } from "../diff/changeTracker";
 import { StatusBar } from "../ui/statusBar";
@@ -32,6 +32,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
   private starting?: Promise<void>;
   private busy = false;
   private initialized = false;
+  // Working directory of the active session (used for the terminal and for
+  // resolving relative file paths against the right folder).
+  private activeCwd?: string;
 
   private health?: CliHealth;
   private resolvedCli = "devin";
@@ -278,8 +281,24 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     return this.folders()[0] || process.env.HOME || process.cwd();
   }
 
-  private additionalDirs(): string[] {
-    return this.folders().slice(1);
+  // A multi-root workspace has no single root, so a new session belongs to the
+  // folder the user is actually working in: the active editor's workspace
+  // folder, falling back to the first folder (then HOME).
+  private resolveNewSessionCwd(): string {
+    const active = vscode.window.activeTextEditor?.document.uri;
+    if (active) {
+      const folder = vscode.workspace.getWorkspaceFolder(active);
+      if (folder) {
+        return folder.uri.fsPath;
+      }
+    }
+    return this.cwd();
+  }
+
+  // All workspace folders except the session's own cwd, passed as extra
+  // context so the agent can still reach the rest of the workspace.
+  private additionalDirs(cwd: string): string[] {
+    return this.folders().filter((f) => f !== cwd);
   }
 
   private workspaceName(): string {
@@ -287,11 +306,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
       return path.basename(vscode.workspace.workspaceFile.fsPath).replace(/\.code-workspace$/, "");
     }
     return vscode.workspace.workspaceFolders?.[0]?.name || "no folder open";
-  }
-
-  private scope(): SessionScope {
-    const v = this.cfg().get<string>("sessionScope", "workspace");
-    return v === "directory" || v === "both" ? v : "workspace";
   }
 
   // --- CLI health + setup --------------------------------------------------
@@ -384,6 +398,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
       this.sessionId = undefined;
       this.starting = undefined;
       this.initialized = false;
+      this.activeCwd = undefined;
       this.terminals?.disposeAll();
       this.terminals = undefined;
       this.setBusy(false);
@@ -424,9 +439,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     this.starting = (async () => {
       const client = await this.ensureInitialized();
       this.postCapabilities();
-      const res = await client.newSession(this.additionalDirs());
+      const cwd = this.resolveNewSessionCwd();
+      const res = await client.newSession(cwd, this.additionalDirs(cwd));
       this.sessionId = res.sessionId;
-      this.store.add(res.sessionId);
+      this.activeCwd = cwd;
+      this.store.add(res.sessionId, cwd);
       this.store.setActive(res.sessionId);
       this.publishOptions(res.configOptions, res.modes?.currentModeId);
       await this.applyDefaults(res);
@@ -471,9 +488,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     try {
       const client = await this.ensureInitialized();
       this.postCapabilities();
-      const res = (await client.loadSession(id, this.additionalDirs())) as NewSessionResult | undefined;
+      // Reuse the session's own directory if we know it; otherwise adopt the
+      // active-editor folder (e.g. an external session opened for the first time).
+      const cwd = this.store.cwds()[id] || this.resolveNewSessionCwd();
+      const res = (await client.loadSession(id, cwd, this.additionalDirs(cwd))) as NewSessionResult | undefined;
       this.sessionId = id;
-      this.store.add(id);
+      this.activeCwd = cwd;
+      this.store.add(id, cwd);
       this.store.setActive(id);
       if (res && (res.configOptions || res.modes)) {
         this.publishOptions(res.configOptions, res.modes?.currentModeId);
@@ -507,13 +528,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
       sessions = this.sessionsCache.sessions;
     } else {
       this.post({ type: "sessionsLoading" });
-      sessions = await listSessions({
+      const { sessions: live, prunedIds } = await listSessions({
         cliPath: this.resolvedCli || "devin",
         env: this.env,
         folders,
         trackedIds: this.store.ids(),
-        scope: this.scope()
+        cwdById: this.store.cwds()
       });
+      // Drop tracked ids Devin no longer knows about so stale rows self-heal.
+      for (const id of prunedIds) {
+        this.store.remove(id);
+      }
+      sessions = live;
       this.sessionsCache = { at: Date.now(), sessions };
     }
     // Persist titles, and fill any tracked session whose title we only know
@@ -768,7 +794,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
       return;
     }
     if (!path.isAbsolute(fsPath)) {
-      fsPath = path.join(this.cwd(), fsPath);
+      fsPath = path.join(this.activeCwd || this.cwd(), fsPath);
     }
     try {
       const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(fsPath));
@@ -1220,7 +1246,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     if (!this.terminals) {
       this.terminals = new TerminalManager(
         this.clientEnv(),
-        this.cwd(),
+        this.activeCwd || this.cwd(),
         (terminalId, output, exitStatus) => this.post({ type: "terminalOutput", terminalId, output, exitStatus }),
         (line) => this.log(line)
       );
