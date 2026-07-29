@@ -12,8 +12,11 @@ import {
   SessionUpdateNotification,
   WriteTextFileParams
 } from "../acp/types";
-import { listSessions } from "../session/sessionList";
+import { listSessions, SessionScope } from "../session/sessionList";
+import { SessionStore } from "../session/sessionStore";
 import { ChangeTracker } from "../diff/changeTracker";
+import { StatusBar } from "../ui/statusBar";
+import { checkHealth, CliHealth, loginShellEnv } from "../cli/locate";
 
 export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
   public static readonly viewType = "devin.chatView";
@@ -24,12 +27,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
   private starting?: Promise<void>;
   private busy = false;
 
+  private health?: CliHealth;
+  private resolvedCli = "devin";
+  private env?: NodeJS.ProcessEnv;
+  private currentMode?: string;
+  private currentModel?: string;
+
   private readonly permissionResolvers = new Map<string, (res: RequestPermissionResult) => void>();
   private permissionSeq = 0;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
+    private readonly store: SessionStore,
     private readonly changes: ChangeTracker,
+    private readonly statusBar: StatusBar,
     private readonly output: vscode.OutputChannel
   ) {}
 
@@ -63,8 +74,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     try {
       switch (msg?.type) {
         case "ready":
-          this.postConfig();
-          void this.refreshSessions();
+          await this.onWebviewReady();
           return;
         case "send":
           await this.handleSend(String(msg.text || ""));
@@ -93,6 +103,22 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
         case "openDiff":
           await this.changes.openDiff(String(msg.path || ""));
           return;
+        case "browseCli":
+          await this.browseCli();
+          return;
+        case "recheck":
+          await this.runHealthCheck();
+          await this.pushReadiness();
+          return;
+        case "authenticate":
+          await this.authenticate();
+          return;
+        case "saveDefaults":
+          await this.saveDefaults(msg.model, msg.mode);
+          return;
+        case "finishSetup":
+          this.post({ type: "ready" });
+          return;
         default:
           return;
       }
@@ -103,35 +129,145 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     }
   }
 
-  private postConfig(): void {
-    const cfg = vscode.workspace.getConfiguration("devin");
-    this.post({
-      type: "config",
-      mode: cfg.get<string>("defaultMode", "normal"),
-      model: cfg.get<string>("defaultModel", ""),
-      workspace: this.workspaceName()
+  private async onWebviewReady(): Promise<void> {
+    this.post({ type: "workspace", name: this.workspaceName() });
+    await this.runHealthCheck();
+    await this.pushReadiness();
+  }
+
+  async runSetup(): Promise<void> {
+    this.focus();
+    await this.runHealthCheck();
+    this.post({ type: "setup", health: this.publicHealth() });
+  }
+
+  // Decides whether the webview shows the setup panel or the chat.
+  private async pushReadiness(): Promise<void> {
+    if (this.isReady()) {
+      this.post({ type: "ready" });
+      await this.refreshSessions();
+      if (this.cfg().get<boolean>("autoResumeLast", false)) {
+        const last = this.store.activeId();
+        if (last && !this.sessionId) {
+          await this.loadSession(last);
+        }
+      }
+    } else {
+      this.post({ type: "setup", health: this.publicHealth() });
+    }
+  }
+
+  // --- Config + workspace helpers -----------------------------------------
+
+  private cfg(): vscode.WorkspaceConfiguration {
+    return vscode.workspace.getConfiguration("devin");
+  }
+
+  private folders(): string[] {
+    return (vscode.workspace.workspaceFolders || []).map((f) => f.uri.fsPath);
+  }
+
+  private cwd(): string {
+    return this.folders()[0] || process.env.HOME || process.cwd();
+  }
+
+  private additionalDirs(): string[] {
+    return this.folders().slice(1);
+  }
+
+  private workspaceName(): string {
+    if (vscode.workspace.workspaceFile) {
+      return path.basename(vscode.workspace.workspaceFile.fsPath).replace(/\.code-workspace$/, "");
+    }
+    return vscode.workspace.workspaceFolders?.[0]?.name || "no folder open";
+  }
+
+  private scope(): SessionScope {
+    const v = this.cfg().get<string>("sessionScope", "both");
+    return v === "workspace" || v === "directory" ? v : "both";
+  }
+
+  // --- CLI health + setup --------------------------------------------------
+
+  private isReady(): boolean {
+    return !!this.health?.found && this.health?.loggedIn !== false;
+  }
+
+  private publicHealth() {
+    return {
+      found: !!this.health?.found,
+      loggedIn: this.health?.loggedIn,
+      version: this.health?.version,
+      path: this.health?.path,
+      error: this.health?.error
+    };
+  }
+
+  private async runHealthCheck(): Promise<void> {
+    const setting = this.cfg().get<string>("cliPath", "devin") || "devin";
+    this.health = await checkHealth(setting);
+    this.resolvedCli = this.health.path || "devin";
+    this.env = await loginShellEnv();
+    this.log(
+      `[health] path=${this.health.path} found=${this.health.found} loggedIn=${this.health.loggedIn} version=${this.health.version || ""} ${this.health.error || ""}`
+    );
+    this.statusBar.set({ connected: this.isReady(), mode: this.currentMode, model: this.currentModel });
+  }
+
+  private async browseCli(): Promise<void> {
+    const picked = await vscode.window.showOpenDialog({
+      canSelectFiles: true,
+      canSelectFolders: false,
+      canSelectMany: false,
+      openLabel: "Select the devin executable"
     });
+    if (!picked || !picked.length) {
+      return;
+    }
+    await this.cfg().update("cliPath", picked[0].fsPath, vscode.ConfigurationTarget.Global);
+    await this.runHealthCheck();
+    await this.pushReadiness();
+  }
+
+  private async authenticate(): Promise<void> {
+    const bin = this.resolvedCli || "devin";
+    const term = vscode.window.createTerminal({ name: "Devin Login", env: this.env });
+    term.show(true);
+    term.sendText(`${quote(bin)} auth login`);
+    this.post({ type: "authStarted" });
+  }
+
+  private async saveDefaults(model: unknown, mode: unknown): Promise<void> {
+    if (typeof model === "string") {
+      await this.cfg().update("defaultModel", model, vscode.ConfigurationTarget.Global);
+    }
+    if (typeof mode === "string") {
+      await this.cfg().update("defaultMode", mode, vscode.ConfigurationTarget.Global);
+    }
   }
 
   // --- Session management --------------------------------------------------
 
-  private cwd(): string {
-    return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.env.HOME || process.cwd();
+  private extraArgs(): string[] {
+    const v = this.cfg().get<string[]>("extraArgs", []);
+    return Array.isArray(v) ? v.map(String) : [];
   }
 
-  private workspaceName(): string {
-    return vscode.workspace.workspaceFolders?.[0]?.name || "no folder open";
-  }
-
-  private cliPath(): string {
-    return vscode.workspace.getConfiguration("devin").get<string>("cliPath", "devin") || "devin";
+  private clientEnv(): NodeJS.ProcessEnv {
+    const extra = this.cfg().get<Record<string, string>>("env", {}) || {};
+    return { ...(this.env || process.env), ...extra };
   }
 
   private ensureClient(): AcpClient {
     if (this.client) {
       return this.client;
     }
-    const client = new AcpClient({ cliPath: this.cliPath(), cwd: this.cwd() });
+    const client = new AcpClient({
+      cliPath: this.resolvedCli || "devin",
+      cwd: this.cwd(),
+      env: this.clientEnv(),
+      extraArgs: this.extraArgs()
+    });
     client.setHost(this);
     client.on("log", (line: string) => this.log(line));
     client.on("update", (n: SessionUpdateNotification) => this.onUpdate(n));
@@ -140,10 +276,22 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
       this.sessionId = undefined;
       this.starting = undefined;
       this.setBusy(false);
+      this.statusBar.set({ connected: false });
     });
     client.start();
     this.client = client;
     return client;
+  }
+
+  private async ensureReady(): Promise<boolean> {
+    if (!this.health) {
+      await this.runHealthCheck();
+    }
+    if (!this.isReady()) {
+      this.post({ type: "setup", health: this.publicHealth() });
+      return false;
+    }
+    return true;
   }
 
   private async ensureSession(): Promise<void> {
@@ -156,8 +304,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     this.starting = (async () => {
       const client = this.ensureClient();
       await client.initialize();
-      const res = await client.newSession();
+      const res = await client.newSession(this.additionalDirs());
       this.sessionId = res.sessionId;
+      this.store.add(res.sessionId);
+      this.store.setActive(res.sessionId);
       this.publishOptions(res.configOptions, res.modes?.currentModeId);
       await this.applyDefaults(res);
       this.post({ type: "sessionReady", sessionId: this.sessionId });
@@ -171,6 +321,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
   }
 
   async newSession(): Promise<void> {
+    if (!(await this.ensureReady())) {
+      return;
+    }
     this.client?.dispose();
     this.client = undefined;
     this.sessionId = undefined;
@@ -181,7 +334,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
   }
 
   private async loadSession(id: string): Promise<void> {
-    if (!id) {
+    if (!id || !(await this.ensureReady())) {
       return;
     }
     this.client?.dispose();
@@ -193,29 +346,44 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     const client = this.ensureClient();
     await client.initialize();
     this.post({ type: "assistantStart" });
-    await client.loadSession(id);
+    await client.loadSession(id, this.additionalDirs());
     this.sessionId = id;
+    this.store.add(id);
+    this.store.setActive(id);
     this.post({ type: "assistantEnd" });
     this.post({ type: "sessionReady", sessionId: id });
+    void this.refreshSessions();
   }
 
   async refreshSessions(): Promise<void> {
-    const sessions = await listSessions(this.cliPath(), this.cwd());
+    if (!this.isReady()) {
+      return;
+    }
+    const sessions = await listSessions({
+      cliPath: this.resolvedCli || "devin",
+      env: this.env,
+      folders: this.folders(),
+      trackedIds: this.store.ids(),
+      scope: this.scope()
+    });
     this.post({ type: "sessions", sessions, activeId: this.sessionId });
   }
 
-  // Surface the mode + model pickers to the webview from the session's
-  // configOptions (Devin returns both, with full choice lists).
+  // --- Mode + model --------------------------------------------------------
+
   private publishOptions(options: ConfigOption[] | undefined, currentModeId?: string): void {
     const byId = new Map((options || []).map((o) => [o.id, o]));
     const modeOpt = byId.get("mode");
     const modelOpt = byId.get("model");
+    this.currentMode = modeOpt?.currentValue || currentModeId || this.currentMode;
+    this.currentModel = modelOpt?.currentValue || this.currentModel;
+    this.statusBar.set({ connected: this.isReady(), mode: this.currentMode, model: this.currentModel });
     this.post({
       type: "options",
       modes: (modeOpt?.options || []).map((c) => ({ value: c.value, name: c.name || c.value })),
-      currentMode: modeOpt?.currentValue || currentModeId,
+      currentMode: this.currentMode,
       models: (modelOpt?.options || []).map((c) => ({ value: c.value, name: c.name || c.value })),
-      currentModel: modelOpt?.currentValue
+      currentModel: this.currentModel
     });
   }
 
@@ -223,26 +391,27 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     if (!this.sessionId || !this.client) {
       return;
     }
-    const cfg = vscode.workspace.getConfiguration("devin");
-    const mode = cfg.get<string>("defaultMode", "accept-edits");
-    const model = cfg.get<string>("defaultModel", "");
+    const mode = this.cfg().get<string>("defaultMode", "accept-edits");
+    const model = this.cfg().get<string>("defaultModel", "");
     const currentMode = res.modes?.currentModeId;
     try {
       if (mode && mode !== currentMode) {
         await this.client.setConfigOption(this.sessionId, "mode", mode);
+        this.currentMode = mode;
       }
       if (model) {
         await this.client.setConfigOption(this.sessionId, "model", model);
+        this.currentModel = model;
       }
+      this.statusBar.set({ connected: true, mode: this.currentMode, model: this.currentModel });
     } catch (err) {
       this.log(`[apply-defaults-failed] ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
   private async setMode(mode: string): Promise<void> {
-    await vscode.workspace
-      .getConfiguration("devin")
-      .update("defaultMode", mode, vscode.ConfigurationTarget.Workspace);
+    await this.cfg().update("defaultMode", mode, vscode.ConfigurationTarget.Workspace);
+    this.currentMode = mode;
     if (this.sessionId && this.client) {
       try {
         await this.client.setConfigOption(this.sessionId, "mode", mode);
@@ -250,13 +419,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
         this.log(`[set-mode-failed] ${err instanceof Error ? err.message : String(err)}`);
       }
     }
+    this.statusBar.set({ connected: this.isReady(), mode: this.currentMode, model: this.currentModel });
     this.post({ type: "mode", mode });
   }
 
   private async setModel(model: string): Promise<void> {
-    await vscode.workspace
-      .getConfiguration("devin")
-      .update("defaultModel", model, vscode.ConfigurationTarget.Workspace);
+    await this.cfg().update("defaultModel", model, vscode.ConfigurationTarget.Workspace);
+    this.currentModel = model;
     if (this.sessionId && this.client) {
       try {
         await this.client.setConfigOption(this.sessionId, "model", model);
@@ -264,6 +433,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
         this.log(`[set-model-failed] ${err instanceof Error ? err.message : String(err)}`);
       }
     }
+    this.statusBar.set({ connected: this.isReady(), mode: this.currentMode, model: this.currentModel });
     this.post({ type: "model", model });
   }
 
@@ -271,6 +441,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
 
   private async handleSend(text: string): Promise<void> {
     if (!text.trim() || this.busy) {
+      return;
+    }
+    if (!(await this.ensureReady())) {
       return;
     }
     await this.ensureSession();
@@ -297,7 +470,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     if (this.sessionId) {
       this.client?.cancel(this.sessionId);
     }
-    // Reject pending permission prompts as cancelled.
     for (const [, resolve] of this.permissionResolvers) {
       resolve({ outcome: { outcome: "cancelled" } });
     }
@@ -319,7 +491,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
         this.post({ type: "assistantChunk", text: textOf(u.content) });
         return;
       case "agent_thought_chunk":
-        this.post({ type: "thoughtChunk", text: textOf(u.content) });
+        if (this.cfg().get<boolean>("showThinking", true)) {
+          this.post({ type: "thoughtChunk", text: textOf(u.content) });
+        }
         return;
       case "plan":
         this.post({ type: "plan", entries: u.entries });
@@ -339,6 +513,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
         this.post({ type: "commands", commands: u.availableCommands });
         return;
       case "current_mode_update":
+        this.currentMode = u.currentModeId || this.currentMode;
+        this.statusBar.set({ connected: this.isReady(), mode: this.currentMode, model: this.currentModel });
         this.post({ type: "mode", mode: u.currentModeId });
         return;
       default:
@@ -416,12 +592,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
 
   private getHtml(webview: vscode.Webview): string {
     const nonce = getNonce();
-    const scriptUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this.context.extensionUri, "media", "main.js")
-    );
-    const styleUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this.context.extensionUri, "media", "main.css")
-    );
+    const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "media", "main.js"));
+    const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "media", "main.css"));
     const csp = [
       `default-src 'none'`,
       `style-src ${webview.cspSource} 'unsafe-inline'`,
@@ -441,19 +613,22 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
 </head>
 <body>
   <div id="app">
-    <div id="sessions-bar" class="hidden"></div>
-    <div id="thread"></div>
-    <div id="composer">
-      <div id="permission-tray"></div>
-      <div id="input-row">
-        <textarea id="input" rows="1" placeholder="Ask Devin, @ to add context..."></textarea>
-        <button id="send" title="Send">Send</button>
-        <button id="stop" class="hidden" title="Stop">Stop</button>
-      </div>
-      <div id="controls">
-        <select id="mode" title="Session mode"></select>
-        <select id="model" title="Model"></select>
-        <span id="status"></span>
+    <div id="setup" class="hidden"></div>
+    <div id="chat">
+      <div id="sessions-bar" class="hidden"></div>
+      <div id="thread"></div>
+      <div id="composer">
+        <div id="permission-tray"></div>
+        <div id="input-row">
+          <textarea id="input" rows="1" placeholder="Ask Devin, Shift+Enter for newline..."></textarea>
+          <button id="send" title="Send">Send</button>
+          <button id="stop" class="hidden" title="Stop">Stop</button>
+        </div>
+        <div id="controls">
+          <select id="mode" title="Session mode"></select>
+          <select id="model" title="Model"></select>
+          <span id="status"></span>
+        </div>
       </div>
     </div>
   </div>
@@ -474,6 +649,10 @@ function textOf(content: any): string {
     return content.text || "";
   }
   return "";
+}
+
+function quote(p: string): string {
+  return /\s/.test(p) ? `"${p}"` : p;
 }
 
 function getNonce(): string {

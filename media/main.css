@@ -23,8 +23,60 @@ body {
   height: 100vh;
 }
 
+#chat {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
 .hidden {
   display: none !important;
+}
+
+/* Setup panel */
+#setup {
+  padding: 16px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+#setup h2 {
+  margin: 0;
+  font-size: 1.1em;
+}
+
+.setup-step {
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.setup-title {
+  font-weight: 600;
+}
+
+.setup-desc {
+  font-size: 0.9em;
+  opacity: 0.8;
+  word-break: break-all;
+}
+
+.setup-controls {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.setup-error {
+  color: var(--vscode-errorForeground);
+  font-size: 0.9em;
 }
 
 /* Sessions bar */

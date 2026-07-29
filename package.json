@@ -2,7 +2,7 @@
   "name": "devin-vscode",
   "displayName": "Devin for VS Code",
   "description": "A native chat panel for the Devin CLI, powered by the Agent Client Protocol. Streaming replies, per workspace sessions, and trackable diffs.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "shayanline",
   "author": "Shayan Khaksar",
   "license": "MIT",
@@ -72,6 +72,12 @@
         "title": "Cancel Current Turn",
         "category": "Devin",
         "icon": "$(stop-circle)"
+      },
+      {
+        "command": "devin.runSetup",
+        "title": "Run Setup",
+        "category": "Devin",
+        "icon": "$(gear)"
       }
     ],
     "menus": {
@@ -117,6 +123,47 @@
           ],
           "default": "accept-edits",
           "description": "Session mode for new sessions."
+        },
+        "devin.sessionScope": {
+          "type": "string",
+          "enum": [
+            "both",
+            "workspace",
+            "directory"
+          ],
+          "enumDescriptions": [
+            "Sessions started in this workspace plus any whose directory is inside it",
+            "Only sessions started from this extension in this workspace",
+            "Any session whose working directory is inside this workspace"
+          ],
+          "default": "both",
+          "description": "How the session list is scoped to the current window."
+        },
+        "devin.autoResumeLast": {
+          "type": "boolean",
+          "default": false,
+          "description": "When the chat opens, resume the last session used in this workspace."
+        },
+        "devin.showThinking": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the agent's reasoning/thinking stream in the chat."
+        },
+        "devin.extraArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Extra arguments passed to `devin acp` when starting a session."
+        },
+        "devin.env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Extra environment variables for the Devin CLI process (e.g. proxy settings)."
         }
       }
     }
