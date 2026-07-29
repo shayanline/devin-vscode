@@ -125,6 +125,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
         case "openFile":
           await this.openFile(String(msg.path || ""), typeof msg.line === "number" ? msg.line : undefined);
           return;
+        case "copyText":
+          await vscode.env.clipboard.writeText(String(msg.text || ""));
+          return;
+        case "insertAtCursor":
+          await this.insertAtCursor(String(msg.text || ""));
+          return;
+        case "applyToFile":
+          await this.applyToFile(String(msg.text || ""));
+          return;
+        case "runInTerminal":
+          this.runInTerminal(String(msg.text || ""));
+          return;
         case "acceptFile":
           this.changes.accept(String(msg.path || ""));
           return;
@@ -632,6 +644,41 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     } catch (err) {
       this.log(`[open-file-failed] ${err instanceof Error ? err.message : String(err)}`);
     }
+  }
+
+  private async insertAtCursor(text: string): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+      void vscode.window.showInformationMessage("Open a file to insert this code into.");
+      return;
+    }
+    await editor.edit((b) => b.insert(editor.selection.active, text));
+  }
+
+  private async applyToFile(text: string): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+      void vscode.window.showInformationMessage("Open a file to apply this code to.");
+      return;
+    }
+    const doc = editor.document;
+    await editor.edit((b) => {
+      if (!editor.selection.isEmpty) {
+        b.replace(editor.selection, text);
+      } else {
+        const full = new vscode.Range(doc.positionAt(0), doc.positionAt(doc.getText().length));
+        b.replace(full, text);
+      }
+    });
+  }
+
+  // Insert the command into a terminal without auto-running it, so the user
+  // reviews it before pressing Enter.
+  private runInTerminal(text: string): void {
+    const existing = vscode.window.terminals.find((t) => t.name === "Devin");
+    const term = existing || vscode.window.createTerminal({ name: "Devin", env: this.env });
+    term.show(true);
+    term.sendText(text, false);
   }
 
   private async addFile(fsPath: string): Promise<void> {

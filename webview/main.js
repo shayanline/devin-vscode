@@ -286,12 +286,51 @@ import { renderMarkdown } from "./markdown.js";
     roleEl.textContent = role === "user" ? "You" : "Devin";
     const bubble = document.createElement("div");
     bubble.className = "bubble";
-    if (text !== undefined) bubble.innerHTML = renderMarkdown(text);
+    if (text !== undefined) {
+      bubble.innerHTML = renderMarkdown(text);
+      enhanceCodeBlocks(bubble);
+    }
     msg.appendChild(roleEl);
     msg.appendChild(bubble);
     el.thread.appendChild(msg);
     scrollToBottom();
     return bubble;
+  }
+
+  const SHELL_LANGS = new Set(["bash", "sh", "shell", "zsh", "console", "powershell", "ps", "ps1", "bat", "cmd"]);
+
+  function codeBtn(icon, title, onClick) {
+    const b = document.createElement("button");
+    b.className = "code-btn";
+    b.title = title;
+    b.innerHTML = `<i class="codicon ${icon}"></i>`;
+    b.addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); onClick(b); });
+    return b;
+  }
+
+  function enhanceCodeBlocks(container) {
+    if (!container) return;
+    container.querySelectorAll("pre.code-block").forEach((pre) => {
+      if (pre.dataset.enhanced) return;
+      pre.dataset.enhanced = "1";
+      const code = pre.querySelector("code");
+      const getText = () => (code ? code.textContent : pre.textContent) || "";
+      const lang = (pre.getAttribute("data-lang") || "").toLowerCase();
+      const bar = document.createElement("div");
+      bar.className = "code-toolbar";
+      bar.appendChild(codeBtn("codicon-copy", "Copy", (b) => {
+        vscode.postMessage({ type: "copyText", text: getText() });
+        const i = b.querySelector("i");
+        i.className = "codicon codicon-check";
+        setTimeout(() => { i.className = "codicon codicon-copy"; }, 1200);
+      }));
+      bar.appendChild(codeBtn("codicon-insert", "Insert at cursor", () => vscode.postMessage({ type: "insertAtCursor", text: getText() })));
+      bar.appendChild(codeBtn("codicon-go-to-file", "Apply to file", () => vscode.postMessage({ type: "applyToFile", text: getText() })));
+      if (SHELL_LANGS.has(lang)) {
+        bar.appendChild(codeBtn("codicon-terminal", "Run in terminal", () => vscode.postMessage({ type: "runInTerminal", text: getText() })));
+      }
+      pre.appendChild(bar);
+    });
   }
   function startAssistant() {
     assistantBuffer = "";
@@ -305,6 +344,7 @@ import { renderMarkdown } from "./markdown.js";
   }
   function endAssistant() {
     finalizeThinking();
+    if (assistantEl) enhanceCodeBlocks(assistantEl);
     assistantEl = null;
     thinkingEl = null;
     thinkingBodyEl = null;
