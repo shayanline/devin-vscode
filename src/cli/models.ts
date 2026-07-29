@@ -67,6 +67,18 @@ function effortLabel(familyLabel: string, variantLabel: string): string {
   return e || variantLabel;
 }
 
+// Best-effort ordering of thinking effort, lowest to highest.
+function effortRank(name: string): number {
+  const s = name.toLowerCase();
+  if (/no\s*thinking|none/.test(s)) return 0;
+  if (/x-?high|xhigh|extra/.test(s)) return 4;
+  if (/\bmax\b/.test(s)) return 5;
+  if (/high/.test(s)) return 3;
+  if (/medium|\bmed\b/.test(s)) return 2;
+  if (/low/.test(s)) return 1;
+  return 2.5; // unknown efforts sit in the middle, keeping their original order
+}
+
 function run(cliPath: string, env?: NodeJS.ProcessEnv): Promise<ModelFamily[]> {
   return new Promise((resolve) => {
     execFile(
@@ -92,6 +104,8 @@ function run(cliPath: string, env?: NodeJS.ProcessEnv): Promise<ModelFamily[]> {
             if (!variants.length) {
               continue;
             }
+            // Sort effort variants low -> high; the lowest becomes the default.
+            variants.sort((a, b) => effortRank(a.name) - effortRank(b.name));
             out.push({
               id: fam.slug || fam.family_uid || variants[0].value,
               name: label || variants[0].value,

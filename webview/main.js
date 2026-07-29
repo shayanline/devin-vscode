@@ -71,9 +71,17 @@ import { renderMarkdown } from "./markdown.js";
       el.thinkingDD.classList.add("hidden");
     }
   }
+  function isAdaptive(f) { return f.id === "adaptive" || /adaptive/i.test(f.name || ""); }
+
   function applyModelOptions(families, currentModel) {
-    modelFamilies = Array.isArray(families) ? families : [];
-    const items = modelFamilies.map((f) => ({ value: f.id, name: f.name }));
+    const list = Array.isArray(families) ? families.slice() : [];
+    const adaptive = list.filter(isAdaptive);
+    const rest = list.filter((f) => !isAdaptive(f)).sort((a, b) => a.name.localeCompare(b.name));
+    modelFamilies = [...adaptive, ...rest];
+    const items = [];
+    modelFamilies.forEach((f) => items.push({ value: f.id, name: f.name }));
+    // Separator after Adaptive, before the alphabetical list.
+    if (adaptive.length && rest.length) items.splice(adaptive.length, 0, { sep: true });
     const fam = familyOfUid(currentModel) || modelFamilies[0];
     modelDropdown.set(items, fam ? fam.id : "");
     updateThinking(fam, currentModel);
@@ -269,6 +277,10 @@ import { renderMarkdown } from "./markdown.js";
         let lastGroup = null;
         let shown = 0;
         items.forEach((it) => {
+          if (it.sep) {
+            if (!q) rows.appendChild(Object.assign(document.createElement("div"), { className: "dd-sep" }));
+            return;
+          }
           if (q && !it.name.toLowerCase().includes(q) && !(it.group || "").toLowerCase().includes(q)) return;
           if (it.group && it.group !== lastGroup) {
             const h = document.createElement("div");

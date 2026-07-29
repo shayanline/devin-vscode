@@ -280,6 +280,12 @@ body {
   font-size: 0.9em;
 }
 
+.dd-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--vscode-panel-border);
+}
+
 .dd-item {
   display: flex;
   align-items: center;
