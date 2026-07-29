@@ -220,6 +220,19 @@ body {
   font-size: 20px;
 }
 
+/* Pending "Working…" line shown after send, until the first output arrives. */
+.working {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.92em;
+  color: var(--vscode-descriptionForeground, #9d9d9d);
+}
+
+.working .codicon {
+  font-size: 14px;
+}
+
 /* Buttons */
 .icon-btn {
   display: inline-flex;
@@ -1423,13 +1436,23 @@ body {
   color: var(--vscode-testing-iconPassed, #3fb950);
 }
 
+/* File / directory references as inline pills (VS Code style). */
 .file-change {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--vscode-badge-background, rgba(127, 127, 127, 0.16));
+  color: var(--vscode-foreground);
   cursor: pointer;
-  color: var(--vscode-textLink-foreground);
+  text-decoration: none;
+  vertical-align: baseline;
 }
 
 .file-change:hover {
-  text-decoration: underline;
+  background: var(--vscode-list-hoverBackground);
+  text-decoration: none;
 }
 
 /* Trays (permissions / questions) */
