@@ -81,12 +81,6 @@
         "icon": "$(gear)"
       },
       {
-        "command": "devin.showInfo",
-        "title": "About / Status",
-        "category": "Devin",
-        "icon": "$(info)"
-      },
-      {
         "command": "devin.acceptChange",
         "title": "Accept Change",
         "category": "Devin",

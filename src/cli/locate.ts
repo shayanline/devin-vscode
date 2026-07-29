@@ -3,11 +3,19 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 
+export interface CliAccount {
+  name?: string;
+  email?: string;
+  tier?: string;
+  plan?: string;
+}
+
 export interface CliHealth {
   path: string;
   found: boolean;
   version?: string;
   loggedIn?: boolean;
+  account?: CliAccount;
   error?: string;
 }
 
@@ -126,5 +134,20 @@ export async function checkHealth(setting: string): Promise<CliHealth> {
   }
   const auth = await run(resolved, ["auth", "status"], env);
   const loggedIn = /logged in/i.test(auth.out);
-  return { path: resolved, found: true, version: version.out, loggedIn };
+  const account = loggedIn ? parseAccount(auth.out) : undefined;
+  return { path: resolved, found: true, version: cleanVersion(version.out), loggedIn, account };
+}
+
+function cleanVersion(out: string): string {
+  const line = (out || "").split(/\r?\n/)[0].trim();
+  return line.replace(/^devin\s+/i, "");
+}
+
+// Parses the human-readable `devin auth status` output.
+function parseAccount(out: string): CliAccount {
+  const pick = (label: string) => {
+    const m = new RegExp(`^\\s*${label}:\\s*(.+)$`, "mi").exec(out);
+    return m ? m[1].trim() : undefined;
+  };
+  return { name: pick("Name"), email: pick("Email"), tier: pick("Tier"), plan: pick("Plan") };
 }

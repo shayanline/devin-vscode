@@ -23,8 +23,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("devin.newSession", () => provider.newSession()),
     vscode.commands.registerCommand("devin.showSessions", () => provider.showSessionsView()),
     vscode.commands.registerCommand("devin.cancel", () => provider.cancel()),
-    vscode.commands.registerCommand("devin.runSetup", () => provider.runSetup()),
-    vscode.commands.registerCommand("devin.showInfo", () => provider.showInfo())
+    vscode.commands.registerCommand("devin.runSetup", () => provider.runSetup())
   );
 }
 
