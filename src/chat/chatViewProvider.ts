@@ -565,7 +565,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     this.currentMode = modeOpt?.currentValue || currentModeId || this.currentMode;
     this.currentModel = modelOpt?.currentValue || this.currentModel;
     this.statusBar.set({ connected: this.isReady(), mode: this.currentMode, model: this.currentModel });
-    const modes = (modeOpt?.options || []).map((c) => ({ value: c.value, name: c.name || c.value }));
+    // Devin's modes are fixed, so use our labelled + iconed list for consistent
+    // naming (e.g. "Accept Edits") regardless of what the session reports.
+    const modes = ChatViewProvider.STATIC_MODES;
     const models = (modelOpt?.options || []).map((c) => ({
       value: c.value,
       name: c.name || c.value,
@@ -582,10 +584,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
   // session exists. (The model list only comes from a session, so it can only
   // be a cached list or a "default" placeholder until one is created.)
   private static readonly STATIC_MODES = [
-    { value: "accept-edits", name: "Code" },
-    { value: "ask", name: "Ask" },
-    { value: "plan", name: "Plan" },
-    { value: "bypass", name: "Bypass" }
+    { value: "accept-edits", name: "Accept Edits", icon: "codicon-code" },
+    { value: "ask", name: "Ask", icon: "codicon-comment-discussion" },
+    { value: "plan", name: "Plan", icon: "codicon-checklist" },
+    { value: "bypass", name: "Bypass", icon: "codicon-unlock" }
   ];
 
   // Populate the dropdowns before any session exists so they are never empty.
@@ -1146,7 +1148,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
         <button id="history-btn" class="icon-btn" title="Show chats"><i class="codicon codicon-list-unordered"></i></button>
         <span id="chat-title">Chat</span>
         <span class="spacer"></span>
-        <span id="usage" title=""></span>
         <span id="status"></span>
         <button id="newchat-btn" class="icon-btn" title="New chat"><i class="codicon codicon-add"></i></button>
       </div>
@@ -1166,11 +1167,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
           <textarea id="input" rows="1" placeholder="Ask Devin"></textarea>
           <div id="toolbar">
             <div class="toolbar-left">
-              <button id="attach" class="context-btn" title="Add files, selection, or images as context"><i class="codicon codicon-add"></i><span>Context</span></button>
-              <button id="mention" class="icon-btn" title="Reference a file (@)"><i class="codicon codicon-mention"></i></button>
+              <button id="attach" class="icon-btn" title="Add context: files, selection, images (or type @)"><i class="codicon codicon-add"></i></button>
               <div id="mode-dd" class="dd"></div>
             </div>
             <div class="toolbar-right">
+              <span id="usage" class="usage-pill" title=""></span>
               <div id="model-dd" class="dd right"></div>
               <button id="send" class="icon-btn send" title="Send"><i class="codicon codicon-send"></i></button>
               <button id="stop" class="icon-btn hidden" title="Stop"><i class="codicon codicon-debug-stop"></i></button>
