@@ -97,6 +97,32 @@ body {
   flex: 0 0 auto;
 }
 
+.thread-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin: auto 0;
+  padding: 40px 0;
+  opacity: 0.7;
+}
+
+.thread-loading .codicon {
+  font-size: 18px;
+}
+
+.list-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 40px 0;
+  opacity: 0.7;
+}
+
+.list-loading .codicon {
+  font-size: 20px;
+}
+
 /* Buttons */
 .icon-btn {
   display: inline-flex;
@@ -334,24 +360,37 @@ body {
   border-color: var(--vscode-focusBorder);
 }
 
-/* Copilot-style indeterminate progress along the bottom edge while generating */
-#input-box.busy::after {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: -1px;
-  height: 2px;
-  border-radius: 0 0 8px 8px;
-  background: linear-gradient(90deg, transparent, var(--vscode-progressBar-background), transparent);
-  background-size: 40% 100%;
-  background-repeat: no-repeat;
-  animation: devin-progress 1.2s linear infinite;
+/* While generating, run a moving blue highlight around the input border
+   (blue-ish, matching the focus colour). Uses a masked gradient ring. */
+#input-box.busy {
+  border-color: transparent;
 }
 
-@keyframes devin-progress {
-  0% { background-position: -40% 0; }
-  100% { background-position: 140% 0; }
+#input-box.busy::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: 8px;
+  padding: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--vscode-focusBorder, #3794ff) 25%,
+    var(--vscode-focusBorder, #3794ff) 50%,
+    transparent 75%
+  );
+  background-size: 300% 100%;
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  pointer-events: none;
+  animation: devin-border 1.6s linear infinite;
+}
+
+@keyframes devin-border {
+  0% { background-position: 150% 0; }
+  100% { background-position: -150% 0; }
 }
 
 #input {
@@ -390,6 +429,11 @@ body {
   min-width: 0;
 }
 
+.toolbar-right {
+  position: relative;
+  flex: 0 0 auto;
+}
+
 /* Add-context "+" button, sized to match the dropdown buttons */
 .tool-ctl {
   display: inline-flex;
@@ -412,6 +456,18 @@ body {
 .tool-ctl .codicon {
   font-size: 15px;
 }
+
+/* Responsive composer tiers (classes toggled by a ResizeObserver) */
+#input-box.cmp-sm .dd-label { display: none; }
+#input-box.cmp-sm .dd-btn { max-width: none; }
+#input-box.cmp-sm #thinking-dd { display: none !important; }
+#input-box.cmp-sm .usage-pct { display: none; }
+
+#input-box.cmp-xs #model-dd,
+#input-box.cmp-xs #usage { display: none !important; }
+
+#input-box.cmp-xxs #mode-dd,
+#input-box.cmp-xxs #attach { display: none !important; }
 
 /* Context-window usage ring (click for a details popover) */
 .usage-ring {
@@ -439,8 +495,8 @@ body {
 
 .usage-popup {
   position: absolute;
-  right: 6px;
-  bottom: calc(100% + 6px);
+  right: 0;
+  bottom: calc(100% + 8px);
   z-index: 60;
   width: 220px;
   padding: 10px 12px;
@@ -574,11 +630,22 @@ body {
   font-weight: 600;
 }
 
+/* User request: a left-aligned bubble that hugs its content (Copilot-style). */
+.msg.user {
+  align-items: flex-start;
+}
+
 .msg.user .bubble {
-  background: var(--vscode-input-background);
-  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
-  border-radius: 6px;
-  padding: 8px 10px;
+  align-self: flex-start;
+  max-width: 92%;
+  background: var(--vscode-chat-requestBackground, var(--vscode-input-background));
+  border: 1px solid var(--vscode-chat-requestBorder, var(--vscode-input-border, var(--vscode-panel-border)));
+  border-radius: 10px;
+  padding: 8px 12px;
+}
+
+.msg.user .role {
+  display: none;
 }
 
 .msg .bubble {
@@ -1224,8 +1291,28 @@ body {
 }
 
 .session-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-size: 0.82em;
+}
+
+.session-time {
   opacity: 0.6;
+}
+
+.session-code {
+  padding: 0 5px;
+  border-radius: 8px;
+  font-size: 0.92em;
+  font-family: var(--vscode-editor-font-family, monospace);
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+  opacity: 0.85;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 120px;
 }
 
 .session-actions {

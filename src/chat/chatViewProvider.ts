@@ -443,8 +443,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     // Reuse the existing ACP connection (it supports multiple sessions); only
     // respawn if there is no live process. This makes switching sessions fast.
     this.changes.clear();
-    this.post({ type: "clear" });
-    this.post({ type: "status", text: "Loading history\u2026" });
+    this.post({ type: "clear", loading: true });
     try {
       const client = await this.ensureInitialized();
       const res = (await client.loadSession(id, this.additionalDirs())) as NewSessionResult | undefined;
@@ -461,7 +460,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     } catch (err) {
       this.post({ type: "error", text: err instanceof Error ? err.message : String(err) });
     } finally {
-      this.post({ type: "status", text: "" });
+      this.post({ type: "loaded" });
       void this.refreshSessions();
     }
   }
@@ -480,6 +479,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     if (!force && this.sessionsCache && Date.now() - this.sessionsCache.at < 4000) {
       sessions = this.sessionsCache.sessions;
     } else {
+      this.post({ type: "sessionsLoading" });
       sessions = await listSessions({
         cliPath: this.resolvedCli || "devin",
         env: this.env,
