@@ -3,6 +3,7 @@ import { EventEmitter } from "events";
 import { JsonRpcConnection } from "./connection";
 import {
   ContentBlock,
+  CreateTerminalParams,
   InitializeResult,
   NewSessionResult,
   PromptResult,
@@ -10,6 +11,8 @@ import {
   RequestPermissionParams,
   RequestPermissionResult,
   SessionUpdateNotification,
+  TerminalExitStatus,
+  TerminalRef,
   WriteTextFileParams
 } from "./types";
 
@@ -27,6 +30,11 @@ export interface AcpHost {
   readTextFile(params: ReadTextFileParams): Promise<{ content: string }>;
   writeTextFile(params: WriteTextFileParams): Promise<null>;
   createElicitation(params: unknown): Promise<unknown>;
+  createTerminal(params: CreateTerminalParams): { terminalId: string };
+  terminalOutput(params: TerminalRef): { output: string; truncated: boolean; exitStatus: TerminalExitStatus | null };
+  waitForTerminalExit(params: TerminalRef): Promise<TerminalExitStatus>;
+  killTerminal(params: TerminalRef): null;
+  releaseTerminal(params: TerminalRef): null;
 }
 
 // Emitted events:
@@ -83,6 +91,16 @@ export class AcpClient extends EventEmitter {
         return this.host.writeTextFile(params as WriteTextFileParams);
       case "elicitation/create":
         return this.host.createElicitation(params);
+      case "terminal/create":
+        return this.host.createTerminal(params as CreateTerminalParams);
+      case "terminal/output":
+        return this.host.terminalOutput(params as TerminalRef);
+      case "terminal/wait_for_exit":
+        return this.host.waitForTerminalExit(params as TerminalRef);
+      case "terminal/kill":
+        return this.host.killTerminal(params as TerminalRef);
+      case "terminal/release":
+        return this.host.releaseTerminal(params as TerminalRef);
       default:
         // Unknown/custom client method: reply with null to keep the agent moving.
         this.emit("log", `[unhandled-request] ${method}`);
@@ -104,7 +122,7 @@ export class AcpClient extends EventEmitter {
       protocolVersion: 1,
       clientCapabilities: {
         fs: { readTextFile: true, writeTextFile: true },
-        terminal: false,
+        terminal: true,
         elicitation: { form: {}, url: {} }
       }
     });

@@ -5,13 +5,17 @@ import { AcpClient, AcpHost } from "../acp/client";
 import {
   ConfigOption,
   ContentBlock,
+  CreateTerminalParams,
   NewSessionResult,
   ReadTextFileParams,
   RequestPermissionParams,
   RequestPermissionResult,
   SessionUpdateNotification,
+  TerminalExitStatus,
+  TerminalRef,
   WriteTextFileParams
 } from "../acp/types";
+import { TerminalManager } from "../acp/terminal";
 import { listSessions, SessionScope } from "../session/sessionList";
 import { SessionStore } from "../session/sessionStore";
 import { ChangeTracker } from "../diff/changeTracker";
@@ -39,6 +43,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
 
   private attachments: { id: string; label: string; type: string; block: ContentBlock }[] = [];
   private attachSeq = 0;
+
+  private terminals?: TerminalManager;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -355,6 +361,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
       this.sessionId = undefined;
       this.starting = undefined;
       this.initialized = false;
+      this.terminals?.disposeAll();
+      this.terminals = undefined;
       this.setBusy(false);
       this.statusBar.set({ connected: false });
     });
@@ -424,6 +432,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     this.sessionId = undefined;
     this.starting = undefined;
     this.initialized = false;
+    this.terminals?.disposeAll();
+    this.terminals = undefined;
   }
 
   private async loadSession(id: string): Promise<void> {
@@ -979,6 +989,40 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     return { content };
   }
 
+  private ensureTerminals(): TerminalManager {
+    if (!this.terminals) {
+      this.terminals = new TerminalManager(
+        this.clientEnv(),
+        this.cwd(),
+        (terminalId, output, exitStatus) => this.post({ type: "terminalOutput", terminalId, output, exitStatus }),
+        (line) => this.log(line)
+      );
+    }
+    return this.terminals;
+  }
+
+  createTerminal(params: CreateTerminalParams): { terminalId: string } {
+    return this.ensureTerminals().create(params);
+  }
+
+  terminalOutput(params: TerminalRef): { output: string; truncated: boolean; exitStatus: TerminalExitStatus | null } {
+    return this.ensureTerminals().output(params.terminalId);
+  }
+
+  waitForTerminalExit(params: TerminalRef): Promise<TerminalExitStatus> {
+    return this.ensureTerminals().waitForExit(params.terminalId);
+  }
+
+  killTerminal(params: TerminalRef): null {
+    this.terminals?.kill(params.terminalId);
+    return null;
+  }
+
+  releaseTerminal(params: TerminalRef): null {
+    this.terminals?.release(params.terminalId);
+    return null;
+  }
+
   async writeTextFile(params: WriteTextFileParams): Promise<null> {
     const full = params.path;
     let original: string | null = null;
@@ -1070,17 +1114,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
 }
 
 // Flatten ACP tool-call content into renderable items for the webview.
-function normalizeToolContent(content: any): { type: string; text?: string; path?: string }[] {
+function normalizeToolContent(content: any): { type: string; text?: string; path?: string; terminalId?: string }[] {
   if (!Array.isArray(content)) {
     return [];
   }
-  const out: { type: string; text?: string; path?: string }[] = [];
+  const out: { type: string; text?: string; path?: string; terminalId?: string }[] = [];
   for (const c of content) {
     if (!c) {
       continue;
     }
     if (c.type === "diff" && typeof c.path === "string") {
       out.push({ type: "diff", path: c.path });
+    } else if (c.type === "terminal" && typeof c.terminalId === "string") {
+      out.push({ type: "terminal", terminalId: c.terminalId });
     } else if (c.type === "content") {
       const text = textOf(c.content);
       if (text) {
