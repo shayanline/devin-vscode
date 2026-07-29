@@ -20,6 +20,8 @@ import { renderMarkdown } from "./markdown.js";
     attach: $("attach"),
     modeDD: $("mode-dd"),
     modelDD: $("model-dd"),
+    thinkingDD: $("thinking-dd"),
+    inputBox: $("input-box"),
     permissionTray: $("permission-tray"),
     elicitationTray: $("elicitation-tray"),
     workingSet: $("working-set"),
@@ -34,6 +36,7 @@ import { renderMarkdown } from "./markdown.js";
   let block = null; // { kind: "user"|"assistant"|"thinking", mid, bubble|body, buffer, start?, label? }
   const toolEls = new Map();
   const terminalCache = new Map();
+  const collapsedGroups = new Set();
 
   let commands = [];
   let ac = null;
@@ -42,7 +45,45 @@ import { renderMarkdown } from "./markdown.js";
   let lastUserText = "";
 
   const modeDropdown = createDropdown(el.modeDD, (v) => vscode.postMessage({ type: "setMode", mode: v }));
-  const modelDropdown = createDropdown(el.modelDD, (v) => vscode.postMessage({ type: "setModel", model: v }), { staticIcon: "codicon-sparkle" });
+  // Model picker lists families; a separate thinking picker holds the effort
+  // variants of the selected family (Copilot-style).
+  let modelFamilies = [];
+  const modelDropdown = createDropdown(el.modelDD, onModelSelect, { staticIcon: "codicon-sparkle" });
+  const thinkingDropdown = createDropdown(el.thinkingDD, onThinkingSelect, { staticIcon: "codicon-lightbulb" });
+
+  function familyById(id) { return modelFamilies.find((f) => f.id === id); }
+  function familyOfUid(uid) { return modelFamilies.find((f) => (f.variants || []).some((v) => v.value === uid)); }
+
+  function onModelSelect(familyId) {
+    const fam = familyById(familyId);
+    if (!fam) return;
+    vscode.postMessage({ type: "setModel", model: fam.default });
+    updateThinking(fam, fam.default);
+  }
+  function onThinkingSelect(uid) {
+    vscode.postMessage({ type: "setModel", model: uid });
+  }
+  function updateThinking(fam, currentUid) {
+    if (fam && (fam.variants || []).length > 1) {
+      thinkingDropdown.set(fam.variants, currentUid);
+      el.thinkingDD.classList.remove("hidden");
+    } else {
+      el.thinkingDD.classList.add("hidden");
+    }
+  }
+  function applyModelOptions(families, currentModel) {
+    modelFamilies = Array.isArray(families) ? families : [];
+    const items = modelFamilies.map((f) => ({ value: f.id, name: f.name }));
+    const fam = familyOfUid(currentModel) || modelFamilies[0];
+    modelDropdown.set(items, fam ? fam.id : "");
+    updateThinking(fam, currentModel);
+  }
+  function selectModelUid(uid) {
+    const fam = familyOfUid(uid);
+    if (!fam) return;
+    modelDropdown.setCurrent(fam.id);
+    updateThinking(fam, uid);
+  }
 
   // --- View state ----------------------------------------------------------
 
@@ -58,6 +99,8 @@ import { renderMarkdown } from "./markdown.js";
     el.thread.classList.toggle("hidden", list);
     el.chatTitle.textContent = list ? "Sessions" : currentTitle;
     el.input.placeholder = list ? "Start a new chat\u2026" : "Ask Devin, or type @ to add a file";
+    // The New chat "+" is only meaningful from the list view.
+    el.newchatBtn.classList.toggle("hidden", !list);
   }
 
   el.historyBtn.addEventListener("click", () => {
@@ -85,6 +128,7 @@ import { renderMarkdown } from "./markdown.js";
     el.input.value = "";
     closeAutocomplete();
     autosize();
+    updateSendState();
   }
 
   el.send.addEventListener("click", send);
@@ -101,7 +145,11 @@ import { renderMarkdown } from "./markdown.js";
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
   });
 
-  el.input.addEventListener("input", () => { autosize(); updateAutocomplete(); });
+  el.input.addEventListener("input", () => { autosize(); updateAutocomplete(); updateSendState(); });
+
+  function updateSendState() {
+    el.send.disabled = !el.input.value.trim();
+  }
 
   el.input.addEventListener("paste", (e) => {
     const items = (e.clipboardData && e.clipboardData.items) || [];
@@ -123,7 +171,7 @@ import { renderMarkdown } from "./markdown.js";
 
   function autosize() {
     el.input.style.height = "auto";
-    el.input.style.height = Math.min(el.input.scrollHeight, 200) + "px";
+    el.input.style.height = Math.min(Math.max(el.input.scrollHeight, 52), 240) + "px";
   }
 
   function scrollToBottom() {
@@ -276,6 +324,7 @@ import { renderMarkdown } from "./markdown.js";
 
   document.addEventListener("click", () => {
     document.querySelectorAll(".dd-menu").forEach((m) => m.classList.add("hidden"));
+    closeUsagePopup();
   });
 
   // --- Autocomplete --------------------------------------------------------
@@ -404,6 +453,7 @@ import { renderMarkdown } from "./markdown.js";
         el.input.focus();
         el.input.setSelectionRange(el.input.value.length, el.input.value.length);
         autosize();
+        updateSendState();
       }));
     } else {
       bar.appendChild(actionBtn("codicon-refresh", "Retry", () => {
@@ -626,7 +676,7 @@ import { renderMarkdown } from "./markdown.js";
     if (d.status === "in_progress" && d.title) {
       el.status.textContent = d.title;
     } else if (d.status === "completed" || d.status === "failed") {
-      el.status.textContent = "Working\u2026";
+      el.status.textContent = "";
     }
     scrollToBottom();
   }
@@ -917,15 +967,44 @@ import { renderMarkdown } from "./markdown.js";
       if (!groups.has(key)) { groups.set(key, []); orderedKeys.push(key); }
       groups.get(key).push(s);
     });
+    // Workspace-folder groups first (in folder order), then everything else in
+    // first-seen order (V8 sort is stable, so equal ranks keep their order).
+    const folderOrder = (folders || []).map((f) => f.path);
+    const rank = (k) => { const i = folderOrder.indexOf(k); return i === -1 ? folderOrder.length + 1 : i; };
+    orderedKeys.sort((a, b) => rank(a) - rank(b));
+
     const showGroups = (folders || []).length > 1 || orderedKeys.length > 1;
     orderedKeys.forEach((key) => {
+      const rows = groups.get(key);
       if (showGroups) {
+        const collapsed = collapsedGroups.has(key);
         const header = document.createElement("div");
-        header.className = "group-header";
-        header.textContent = folderNames.get(key) || (key === "__workspace__" ? "This workspace" : baseName(key));
+        header.className = "group-header" + (collapsed ? " collapsed" : "");
+        const chev = document.createElement("i");
+        chev.className = "codicon codicon-chevron-down group-chevron";
+        const txt = document.createElement("span");
+        txt.className = "group-label";
+        txt.textContent = folderNames.get(key) || (key === "__workspace__" ? "This workspace" : baseName(key));
+        const count = document.createElement("span");
+        count.className = "group-count";
+        count.textContent = String(rows.length);
+        header.appendChild(chev);
+        header.appendChild(txt);
+        header.appendChild(count);
+        const container = document.createElement("div");
+        container.className = "group-items" + (collapsed ? " hidden" : "");
+        rows.forEach((s) => container.appendChild(sessionRow(s, activeId)));
+        header.addEventListener("click", () => {
+          const nowCollapsed = !collapsedGroups.has(key);
+          if (nowCollapsed) collapsedGroups.add(key); else collapsedGroups.delete(key);
+          container.classList.toggle("hidden", nowCollapsed);
+          header.classList.toggle("collapsed", nowCollapsed);
+        });
         el.sessionsList.appendChild(header);
+        el.sessionsList.appendChild(container);
+      } else {
+        rows.forEach((s) => el.sessionsList.appendChild(sessionRow(s, activeId)));
       }
-      groups.get(key).forEach((s) => el.sessionsList.appendChild(sessionRow(s, activeId)));
     });
   }
 
@@ -1030,7 +1109,9 @@ import { renderMarkdown } from "./markdown.js";
   function setBusy(busy) {
     el.send.classList.toggle("hidden", busy);
     el.stop.classList.toggle("hidden", !busy);
-    el.status.textContent = busy ? "Working\u2026" : "";
+    // Copilot-style animated indicator on the input instead of a "Working…" label.
+    el.inputBox.classList.toggle("busy", busy);
+    if (!busy) el.status.textContent = "";
   }
 
   // --- Welcome / empty state ----------------------------------------------
@@ -1120,19 +1201,67 @@ import { renderMarkdown } from "./markdown.js";
     return String(n);
   }
 
-  function renderUsage(m) {
-    if (!m.used || !m.size) { el.usage.textContent = ""; el.usage.title = ""; return; }
-    const pct = Math.round((m.used / m.size) * 100);
-    let label = pct + "%";
-    let title = `${fmtTokens(m.used)} / ${fmtTokens(m.size)} tokens (${pct}% of context)`;
-    if (m.cost && typeof m.cost.amount === "number") {
-      const cost = m.cost.amount < 1 ? "$" + m.cost.amount.toFixed(3) : "$" + m.cost.amount.toFixed(2);
-      label += " \u00b7 " + cost;
-      title += ` \u00b7 ${cost} ${m.cost.currency || ""}`.trimEnd();
-    }
-    el.usage.textContent = label;
-    el.usage.title = title;
+  let lastUsage = null;
+
+  function fmtCost(cost) {
+    if (!cost || typeof cost.amount !== "number") return "";
+    return (cost.amount < 1 ? "$" + cost.amount.toFixed(3) : "$" + cost.amount.toFixed(2));
   }
+
+  function ringSvg(pct) {
+    const r = 7, c = 2 * Math.PI * r;
+    const off = c * (1 - Math.min(100, Math.max(0, pct)) / 100);
+    const warn = pct >= 85 ? "var(--vscode-charts-red, #f14c4c)" : "var(--vscode-progressBar-background)";
+    return (
+      `<svg width="16" height="16" viewBox="0 0 18 18" aria-hidden="true">` +
+      `<circle cx="9" cy="9" r="7" fill="none" stroke="var(--vscode-panel-border)" stroke-width="2.5"/>` +
+      `<circle cx="9" cy="9" r="7" fill="none" stroke="${warn}" stroke-width="2.5" stroke-linecap="round"` +
+      ` stroke-dasharray="${c.toFixed(2)}" stroke-dashoffset="${off.toFixed(2)}" transform="rotate(-90 9 9)"/></svg>`
+    );
+  }
+
+  function renderUsage(m) {
+    if (!m.used || !m.size) { el.usage.classList.add("hidden"); lastUsage = null; closeUsagePopup(); return; }
+    lastUsage = m;
+    const pct = Math.round((m.used / m.size) * 100);
+    el.usage.innerHTML = ringSvg(pct) + `<span class="usage-pct">${pct}%</span>`;
+    el.usage.title = "Context used \u2014 click for details";
+    el.usage.classList.remove("hidden");
+    refreshUsagePopup();
+  }
+
+  function closeUsagePopup() {
+    const p = document.getElementById("usage-popup");
+    if (p) p.remove();
+  }
+
+  function refreshUsagePopup() {
+    const pop = document.getElementById("usage-popup");
+    if (pop && lastUsage) pop.innerHTML = usagePopupHtml(lastUsage);
+  }
+
+  function usagePopupHtml(m) {
+    const pct = Math.round((m.used / m.size) * 100);
+    const cost = fmtCost(m.cost);
+    return (
+      `<div class="usage-row"><span>Context window</span><span>${pct}%</span></div>` +
+      `<div class="usage-bar"><div style="width:${Math.min(100, pct)}%"></div></div>` +
+      `<div class="usage-row muted"><span>Tokens</span><span>${fmtTokens(m.used)} / ${fmtTokens(m.size)}</span></div>` +
+      (cost ? `<div class="usage-row muted"><span>Cost this turn</span><span>${cost}</span></div>` : "")
+    );
+  }
+
+  el.usage.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (document.getElementById("usage-popup")) { closeUsagePopup(); return; }
+    if (!lastUsage) return;
+    const pop = document.createElement("div");
+    pop.id = "usage-popup";
+    pop.className = "usage-popup";
+    pop.innerHTML = usagePopupHtml(lastUsage);
+    pop.addEventListener("click", (ev) => ev.stopPropagation());
+    el.inputBox.appendChild(pop);
+  });
 
   // Live terminal output streamed from the extension host.
   function updateTerminal(m) {
@@ -1164,7 +1293,7 @@ import { renderMarkdown } from "./markdown.js";
       case "workspace": break;
       case "options":
         modeDropdown.set(m.modes, m.currentMode);
-        modelDropdown.set(m.models, m.currentModel);
+        applyModelOptions(m.models, m.currentModel);
         break;
       case "commands": commands = Array.isArray(m.commands) ? m.commands : []; break;
       case "fileSuggestions":
@@ -1183,8 +1312,10 @@ import { renderMarkdown } from "./markdown.js";
         renderAttachments([]);
         toolEls.clear();
         block = null;
-        el.usage.textContent = "";
-        el.usage.title = "";
+        el.usage.classList.add("hidden");
+        el.usage.innerHTML = "";
+        lastUsage = null;
+        closeUsagePopup();
         if (body === "thread") renderWelcome();
         break;
       case "userMessage":
@@ -1206,7 +1337,7 @@ import { renderMarkdown } from "./markdown.js";
       case "elicitation": showElicitation(m); break;
       case "busy": setBusy(m.value); break;
       case "mode": if (m.mode) modeDropdown.setCurrent(m.mode); break;
-      case "model": if (m.model) modelDropdown.setCurrent(m.model); break;
+      case "model": if (m.model) selectModelUid(m.model); break;
       case "terminalOutput": updateTerminal(m); break;
       case "usage": renderUsage(m); break;
       case "error": renderError(m.text); break;

@@ -21,7 +21,7 @@ import { SessionStore } from "../session/sessionStore";
 import { ChangeTracker } from "../diff/changeTracker";
 import { StatusBar } from "../ui/statusBar";
 import { checkHealth, CliHealth, loginShellEnv } from "../cli/locate";
-import { listModels, modelGroupOf } from "../cli/models";
+import { cachedFamilies, listModelFamilies, ModelFamily } from "../cli/models";
 
 export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
   public static readonly viewType = "devin.chatView";
@@ -565,19 +565,32 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     this.currentMode = modeOpt?.currentValue || currentModeId || this.currentMode;
     this.currentModel = modelOpt?.currentValue || this.currentModel;
     this.statusBar.set({ connected: this.isReady(), mode: this.currentMode, model: this.currentModel });
-    // Devin's modes are fixed, so use our labelled + iconed list for consistent
-    // naming (e.g. "Accept Edits") regardless of what the session reports.
-    const modes = ChatViewProvider.STATIC_MODES;
-    const models = (modelOpt?.options || []).map((c) => ({
-      value: c.value,
-      name: c.name || c.value,
-      group: modelGroupOf(c.value)
-    }));
-    const payload = { type: "options", modes, currentMode: this.currentMode, models, currentModel: this.currentModel };
-    if (modes.length || models.length) {
+    this.postModelOptions(this.currentModel || "adaptive");
+  }
+
+  // Posts the mode + model-family options. Model families come from
+  // `devin models list` (cached); if not fetched yet, fetch and re-post.
+  private postModelOptions(currentModel: string): void {
+    const families = cachedFamilies();
+    const payload = {
+      type: "options",
+      modes: ChatViewProvider.STATIC_MODES,
+      currentMode: this.currentMode || "accept-edits",
+      models: families,
+      currentModel
+    };
+    if (families.length) {
       this.store.cacheOptions(payload);
     }
     this.post(payload);
+    if (!families.length) {
+      void listModelFamilies(this.resolvedCli || "devin", this.env).then((f) => {
+        if (f.length) {
+          this.post({ ...payload, models: f });
+          this.store.cacheOptions({ ...payload, models: f });
+        }
+      });
+    }
   }
 
   // Devin's session modes are fixed, so we can always show them even before a
@@ -597,23 +610,27 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
   private async publishInitialOptions(): Promise<void> {
     const cfgMode = this.cfg().get<string>("defaultMode", "accept-edits");
     const cfgModel = this.cfg().get<string>("defaultModel", "");
-    let models: { value: string; name: string }[] = [];
+    let families: ModelFamily[] = [];
     try {
-      models = await listModels(this.resolvedCli || "devin", this.env);
+      families = await listModelFamilies(this.resolvedCli || "devin", this.env);
     } catch (err) {
       this.log(`[models-failed] ${err instanceof Error ? err.message : String(err)}`);
     }
-    if (!models.length) {
-      const cached = this.store.options() as { models?: { value: string; name: string }[] } | undefined;
-      models = cached?.models?.length ? cached.models : [{ value: "adaptive", name: "Adaptive" }];
+    if (!families.length) {
+      const cached = this.store.options() as { models?: ModelFamily[] } | undefined;
+      families = cached?.models?.length
+        ? cached.models
+        : [{ id: "adaptive", name: "Adaptive", default: "adaptive", variants: [{ value: "adaptive", name: "Adaptive" }] }];
     }
-    this.post({
+    const payload = {
       type: "options",
       modes: ChatViewProvider.STATIC_MODES,
       currentMode: cfgMode || "accept-edits",
-      models,
+      models: families,
       currentModel: cfgModel || "adaptive"
-    });
+    };
+    this.store.cacheOptions(payload);
+    this.post(payload);
   }
 
   private async applyDefaults(res: NewSessionResult): Promise<void> {
@@ -1167,14 +1184,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
           <textarea id="input" rows="1" placeholder="Ask Devin"></textarea>
           <div id="toolbar">
             <div class="toolbar-left">
-              <button id="attach" class="icon-btn" title="Add context: files, selection, images (or type @)"><i class="codicon codicon-add"></i></button>
+              <button id="attach" class="tool-ctl" title="Add context: files, selection, images (or type @)"><i class="codicon codicon-add"></i></button>
               <div id="mode-dd" class="dd"></div>
+              <div id="model-dd" class="dd"></div>
+              <div id="thinking-dd" class="dd hidden"></div>
             </div>
             <div class="toolbar-right">
-              <span id="usage" class="usage-pill" title=""></span>
-              <div id="model-dd" class="dd right"></div>
-              <button id="send" class="icon-btn send" title="Send"><i class="codicon codicon-send"></i></button>
-              <button id="stop" class="icon-btn hidden" title="Stop"><i class="codicon codicon-debug-stop"></i></button>
+              <button id="usage" class="usage-ring hidden" title=""></button>
+              <button id="send" class="send-btn" title="Send" disabled><i class="codicon codicon-arrow-up"></i></button>
+              <button id="stop" class="send-btn stop hidden" title="Stop"><i class="codicon codicon-primitive-square"></i></button>
             </div>
           </div>
         </div>
