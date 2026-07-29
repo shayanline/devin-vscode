@@ -40,7 +40,13 @@ const VARS = {
   "chat-requestBubbleBackground": "#2b2b2b",
   "chat-requestBorder": "transparent",
   "focusBorder": "#0078d4",
-  "descriptionForeground": "#9d9d9d"
+  "descriptionForeground": "#9d9d9d",
+  "button-background": "#0078d4",
+  "button-foreground": "#ffffff",
+  "button-hoverBackground": "#026ec1",
+  "button-secondaryBackground": "#313131",
+  "button-secondaryForeground": "#cccccc",
+  "button-secondaryHoverBackground": "#3c3c3c"
 };
 
 const rootVars = Object.entries(VARS)
