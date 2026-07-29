@@ -4,10 +4,11 @@
   /* Design tokens for the chat transcript, our own scale aligned to the
      VS Code chat conventions (radii, spacing, and em-based body sizes on a
      13px base). Components reference these rather than hard-coded values. */
+  --dv-radius-xs: 2px;
   --dv-radius-sm: 4px;
   --dv-radius-md: 6px;
   --dv-radius-lg: 8px;
-  --dv-radius-xl: 16px;
+  --dv-radius-xl: 12px;
 
   --dv-space-1: 2px;
   --dv-space-2: 4px;
@@ -27,6 +28,23 @@
   /* Structural border used across cards/tables/connectors. */
   --dv-border: var(--vscode-chat-requestBorder, var(--vscode-panel-border));
   --dv-dim: var(--vscode-descriptionForeground, #9d9d9d);
+  /* Highlight swept across the "Thinking…" label while the model reasons. */
+  --dv-thinking-shimmer: var(--vscode-chat-thinkingShimmer, var(--vscode-foreground, #ffffff));
+}
+
+@keyframes dv-thinking-shimmer {
+  0% { background-position: 120% 0; }
+  100% { background-position: -120% 0; }
+}
+
+/* Shared box recipe for card-like content parts, mirroring VS Code where every
+   boxed part is a 1px requestBorder outline on a radius from the ramp. Radius
+   defaults to medium (code, confirmations, terminal); list-like parts override
+   to small via --dv-card-radius. */
+.dv-card {
+  border: 1px solid var(--dv-border);
+  border-radius: var(--dv-card-radius, var(--dv-radius-md));
+  background: transparent;
 }
 
 * {
@@ -212,13 +230,17 @@ body {
   padding: 12px;
   display: flex;
   flex-direction: column;
+  align-items: center;
   gap: 16px;
 }
 
-/* Keep each item at its natural height; the thread scrolls instead of
-   flex-shrinking children down to nothing when it fills up. */
+/* Keep each item at its natural height (the thread scrolls instead of
+   flex-shrinking children to nothing), and centre the transcript in a
+   max-width column so it stays readable in a wide editor, like VS Code. */
 #thread > * {
   flex: 0 0 auto;
+  width: 100%;
+  max-width: 950px;
 }
 
 .thread-loading {
@@ -815,7 +837,7 @@ body {
 .turn-request .req-body {
   background: var(--vscode-chat-requestBubbleBackground, var(--vscode-chat-requestBackground, rgba(127, 127, 127, 0.12)));
   border: 1px solid var(--vscode-chat-requestBorder, transparent);
-  border-radius: var(--vscode-cornerRadius-xLarge, 16px);
+  border-radius: var(--dv-radius-xl);
   padding: 8px 12px;
   width: fit-content;
   max-width: 90%;
@@ -1002,8 +1024,10 @@ body {
   border-radius: 4px;
 }
 
-.turn-request:hover .msg-actions,
-.msg-actions:focus-within {
+/* Reveal the request toolbar on hover/focus of the whole turn (VS Code's
+   group-hovered scope), not just the request bubble. */
+.turn:hover .req-actions,
+.turn:focus-within .req-actions {
   opacity: 0.9;
 }
 
@@ -1025,6 +1049,55 @@ body {
 
 .msg-action .codicon {
   font-size: 13px;
+}
+
+/* Response footer toolbar (Copy, Retry, completion time). Persistent under the
+   most recent completed response; hover/focus on older ones, mirroring VS
+   Code's ChatMessageFooter. Hidden entirely until the turn completes. */
+.chat-footer {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: 2px;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.turn:not(.complete) .chat-footer {
+  display: none;
+}
+
+.turn.complete:last-child .chat-footer,
+.turn.complete:hover .chat-footer,
+.turn.complete:focus-within .chat-footer {
+  opacity: 0.9;
+}
+
+/* Headless (assistant-first) turns have no request, so retrying the empty
+   request text is meaningless: hide the footer's Retry there. */
+.turn.headless .chat-footer .msg-action:nth-child(2) {
+  display: none;
+}
+
+.chat-footer-details {
+  margin-left: auto;
+  font-size: var(--dv-fs-xs);
+  color: var(--dv-dim);
+  opacity: 0.7;
+}
+
+/* Request timestamp under the bubble, revealed with the turn's hover chrome. */
+.turn-ts {
+  margin-top: 2px;
+  font-size: var(--dv-fs-xs);
+  color: var(--dv-dim);
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.turn:hover .turn-ts,
+.turn:focus-within .turn-ts {
+  opacity: 0.7;
 }
 
 /* Welcome / empty state */
@@ -1164,18 +1237,32 @@ body {
   white-space: pre-wrap;
 }
 
+/* Heading scale mirrors VS Code's chat markdown: body-l/xl/xxl on the token
+   scale, weight 600, generous top margin. */
 .bubble h1,
 .bubble h2,
 .bubble h3,
-.bubble h4 {
-  margin: 12px 0 6px;
+.bubble h4,
+.bubble h5,
+.bubble h6 {
+  margin: 1.5em 0 0.5em;
   line-height: 1.3;
+  font-weight: 600;
 }
 
-.bubble h1 { font-size: 1.3em; }
-.bubble h2 { font-size: 1.2em; }
-.bubble h3 { font-size: 1.1em; }
-.bubble h4 { font-size: 1em; }
+.bubble h1:first-child,
+.bubble h2:first-child,
+.bubble h3:first-child,
+.bubble h4:first-child {
+  margin-top: 0;
+}
+
+.bubble h1 { font-size: var(--dv-fs-xxl); }
+.bubble h2 { font-size: var(--dv-fs-xl); }
+.bubble h3 { font-size: var(--dv-fs-l); }
+.bubble h4,
+.bubble h5,
+.bubble h6 { font-size: var(--dv-fs-m); }
 
 .bubble ul,
 .bubble ol {
@@ -1254,14 +1341,20 @@ body {
 .hljs-emphasis { font-style: italic; }
 .hljs-strong { font-weight: 600; }
 
+/* Thinking, rendered as a VS Code style chain of thought: a collapsible box
+   whose body is a vertical timeline of reasoning steps, each on a connector
+   line with a node icon. The header label shimmers while the model reasons. */
+.thinking {
+  color: var(--dv-dim);
+}
+
 .thinking > summary {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--dv-space-2);
   list-style: none;
   cursor: pointer;
-  opacity: 0.7;
-  font-size: 0.9em;
+  font-size: var(--dv-fs-s);
   user-select: none;
 }
 
@@ -1269,15 +1362,27 @@ body {
   display: none;
 }
 
-.thinking > summary:hover {
-  opacity: 1;
-}
-
 /* Label takes the row; the chevron sits at the far right and reveals on
    hover/open, matching VS Code's collapsible headers. */
 .thinking-label {
   flex: 1;
   min-width: 0;
+}
+
+/* Swept highlight while thinking is active; a plain dimmed label once done. */
+.thinking.thinking-active .thinking-label {
+  background: linear-gradient(90deg,
+      var(--dv-dim) 0%,
+      var(--dv-dim) 30%,
+      var(--dv-thinking-shimmer) 50%,
+      var(--dv-dim) 70%,
+      var(--dv-dim) 100%);
+  background-size: 400% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: dv-thinking-shimmer 2s linear infinite;
+  will-change: background-position;
 }
 
 .thinking-chevron {
@@ -1297,16 +1402,81 @@ body {
 }
 
 .thinking-body {
-  margin-top: 4px;
-  margin-left: 6px;
-  padding-left: 8px;
-  border-left: 2px solid var(--vscode-panel-border);
-  opacity: 0.75;
-  font-size: 0.95em;
+  position: relative;
+  margin-top: var(--dv-space-2);
+  margin-left: var(--dv-space-3);
+  font-size: var(--dv-fs-s);
 }
 
-.thinking-body p:first-child {
+/* One reasoning step. The node icon is pinned to the connector line and the
+   content is inset to clear it. */
+.thinking-item {
+  position: relative;
+  padding: var(--dv-space-3) var(--dv-space-6) var(--dv-space-3) 24px;
+}
+
+/* Vertical connector running through the node icons, with a mask that opens a
+   gap around each node so the line reads as a chain rather than a solid rule. */
+.thinking-item::before {
+  content: "";
+  position: absolute;
+  left: 10.5px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background-color: var(--dv-border);
+  mask-image: linear-gradient(to bottom, #000 0 5px, transparent 5px 25px, #000 24px 100%);
+  -webkit-mask-image: linear-gradient(to bottom, #000 0 5px, transparent 5px 25px, #000 24px 100%);
+}
+
+.thinking-item:first-child::before {
+  mask-image: linear-gradient(to bottom, transparent 0 25px, #000 25px 100%);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0 25px, #000 25px 100%);
+}
+
+.thinking-item:last-child::before {
+  mask-image: linear-gradient(to bottom, #000 0 5px, transparent 5px 100%);
+  -webkit-mask-image: linear-gradient(to bottom, #000 0 5px, transparent 5px 100%);
+}
+
+.thinking-item:only-child::before {
+  background: none;
+  mask-image: none;
+  -webkit-mask-image: none;
+}
+
+.thinking-icon {
+  position: absolute;
+  left: 5px;
+  top: 9px;
+  width: 12px;
+  height: 12px;
+  font-size: 12px;
+  line-height: 12px;
+  text-align: center;
+  color: var(--dv-dim);
+}
+
+/* Curved connector dropping from the header into the first node, matching the
+   VS Code rounded corner (only while the box is expanded). */
+.thinking[open] .thinking-body::before {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: -10px;
+  height: 16px;
+  width: 7.5px;
+  border-left: 1px solid var(--dv-border);
+  border-bottom: 1px solid var(--dv-border);
+  border-bottom-left-radius: 5px;
+}
+
+.thinking-item-content > :first-child {
   margin-top: 0;
+}
+
+.thinking-item-content > :last-child {
+  margin-bottom: 0;
 }
 
 /* Plan */
@@ -1501,22 +1671,53 @@ body {
   text-decoration: none;
 }
 
-/* Trays (permissions / questions) */
-.tray-card {
-  border: 1px solid var(--vscode-panel-border);
-  border-radius: 6px;
-  padding: 8px 10px;
-  margin-bottom: 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  background: var(--vscode-editorWidget-background, transparent);
+/* Confirmation widget (permissions, questions, edit-discard), mirroring VS
+   Code's chat-confirmation-widget2: a bordered card with a bold title row, an
+   optional message/body section with a subtle fill, and a right-aligned
+   primary/secondary button row. */
+.cw {
+  border: 1px solid var(--dv-border);
+  border-radius: var(--dv-radius-md);
+  margin-bottom: var(--dv-space-4);
+  overflow: hidden;
+  background: transparent;
 }
 
-.options {
+.cw-title {
+  padding: var(--dv-space-2) var(--dv-space-4);
+  font-weight: 600;
+  border-bottom: 1px solid var(--dv-border);
+}
+
+.cw-body {
+  padding: var(--dv-space-3) var(--dv-space-4);
   display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: var(--dv-space-3);
+  background: var(--vscode-chat-requestBackground, transparent);
+  border-bottom: 1px solid var(--dv-border);
+}
+
+.cw-message {
+  color: var(--dv-dim);
+  font-size: var(--dv-fs-s);
+}
+
+.cw-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--dv-space-2);
+  padding: var(--dv-space-2) var(--dv-space-4);
+}
+
+.cw-dontask {
+  display: flex;
+  align-items: center;
+  gap: var(--dv-space-2);
+  font-size: var(--dv-fs-s);
+  color: var(--dv-dim);
+  cursor: pointer;
+  user-select: none;
 }
 
 .elicit-field {
@@ -1572,25 +1773,16 @@ body {
   min-width: 120px;
 }
 
-.elicit-actions {
-  margin-top: 4px;
-}
-
 /* Highlight unanswered required questions after a failed submit. */
 .elicit-invalid .elicit-field:has(input:required) .elicit-q,
 .elicit-invalid .elicit-q.elicit-missing {
   color: var(--vscode-errorForeground);
 }
 
-/* Tray heading (permission title / question message). */
-.tray-title {
-  font-weight: 600;
-}
-
 /* Persistent Q/A recap left in the transcript after answering a question. */
 .qa-recap {
-  border: 1px solid var(--vscode-panel-border);
-  border-radius: 6px;
+  border: 1px solid var(--dv-border);
+  border-radius: var(--dv-radius-md);
   padding: 8px 10px;
 }
 

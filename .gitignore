@@ -5,3 +5,6 @@ out/
 .DS_Store
 .vscode-test/
 scripts/.preview/
+
+# playwright-cli scratch artifacts
+.playwright-cli/

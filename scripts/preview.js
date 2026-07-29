@@ -78,8 +78,9 @@ const SCENARIOS = {
     { type: "body", body: "thread" },
     { type: "capabilities", revert: true, editRequests: "inline", checkpoints: true, showFileChanges: true },
     { type: "userMessage", text: "Refactor the auth module to centralise token handling, then run the tests." },
+    { type: "busy", value: true },
     { type: "assistantStart" },
-    { type: "thoughtChunk", text: "They want a refactor plus a test run. I'll read the current module, extract a TokenService, then run the suite." },
+    { type: "thoughtChunk", text: "They want a refactor plus a test run, so I should start by understanding the current shape of the auth module.\n\nToken creation and refresh look tangled together in `token.ts`, so pulling them into a dedicated `TokenService` would isolate the logic and make it testable.\n\nOnce the callers are updated I can run the suite to confirm nothing regressed." },
     { type: "assistantChunk", text: "Sure. Here's the plan, then I'll get started." },
     { type: "plan", entries: [
       { content: "Read the current auth module", status: "completed" },
@@ -92,6 +93,7 @@ const SCENARIOS = {
     { type: "fileChange", path: "src/auth/token-service.ts" },
     { type: "assistantChunk", text: "All tests pass. Token handling now lives in `TokenService`, and the callers were updated to use it. Anything else you'd like adjusted?" },
     { type: "assistantEnd" },
+    { type: "busy", value: false },
     { type: "permission", requestId: "p1", title: "Devin wants to run: `git push origin main`", options: [
       { optionId: "allow", name: "Allow", kind: "allow" },
       { optionId: "reject", name: "Reject", kind: "reject" }
