@@ -898,7 +898,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
 
   private getHtml(webview: vscode.Webview): string {
     const nonce = getNonce();
-    const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "media", "main.js"));
+    const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "dist", "webview.js"));
     const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "media", "main.css"));
     const codiconUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this.context.extensionUri, "media", "codicon", "codicon.css")

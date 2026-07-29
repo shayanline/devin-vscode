@@ -1,3 +1,5 @@
+import { renderMarkdown } from "./markdown.js";
+
 (function () {
   const vscode = acquireVsCodeApi();
   const $ = (id) => document.getElementById(id);
@@ -267,31 +269,6 @@
     el.input.focus();
     closeAutocomplete();
     autosize();
-  }
-
-  // --- Markdown ------------------------------------------------------------
-
-  function escapeHtml(s) {
-    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-  }
-  function renderMarkdown(src) {
-    const parts = src.split(/```/);
-    let html = "";
-    for (let i = 0; i < parts.length; i++) {
-      if (i % 2 === 1) {
-        const code = parts[i].replace(/^([a-zA-Z0-9_+-]+)\n/, "");
-        html += "<pre><code>" + escapeHtml(code) + "</code></pre>";
-      } else {
-        html += renderInline(parts[i]);
-      }
-    }
-    return html;
-  }
-  function renderInline(text) {
-    const escaped = escapeHtml(text);
-    const withCode = escaped.replace(/`([^`]+)`/g, "<code>$1</code>");
-    const withBold = withCode.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-    return withBold.split(/\n{2,}/).map((p) => "<p>" + p.replace(/\n/g, "<br/>") + "</p>").join("");
   }
 
   // --- Thread --------------------------------------------------------------
