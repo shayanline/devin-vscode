@@ -21,11 +21,12 @@ export interface AcpClientOptions {
 }
 
 // Callbacks the host (extension) provides so the client can serve the
-// agent's client-side requests (permissions, file reads/writes).
+// agent's client-side requests (permissions, file reads/writes, questions).
 export interface AcpHost {
   requestPermission(params: RequestPermissionParams): Promise<RequestPermissionResult>;
   readTextFile(params: ReadTextFileParams): Promise<{ content: string }>;
   writeTextFile(params: WriteTextFileParams): Promise<null>;
+  createElicitation(params: unknown): Promise<unknown>;
 }
 
 // Emitted events:
@@ -80,6 +81,8 @@ export class AcpClient extends EventEmitter {
         return this.host.readTextFile(params as ReadTextFileParams);
       case "fs/write_text_file":
         return this.host.writeTextFile(params as WriteTextFileParams);
+      case "elicitation/create":
+        return this.host.createElicitation(params);
       default:
         // Unknown/custom client method: reply with null to keep the agent moving.
         this.emit("log", `[unhandled-request] ${method}`);
@@ -101,7 +104,8 @@ export class AcpClient extends EventEmitter {
       protocolVersion: 1,
       clientCapabilities: {
         fs: { readTextFile: true, writeTextFile: true },
-        terminal: false
+        terminal: false,
+        elicitation: { form: {}, url: {} }
       }
     });
     this.initializeResult = result;
