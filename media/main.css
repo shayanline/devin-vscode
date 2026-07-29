@@ -559,6 +559,121 @@ body {
 
 /* Tool calls & file changes */
 .tool {
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 6px;
+  font-size: 0.92em;
+  overflow: hidden;
+}
+
+.tool > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.tool > summary::-webkit-details-marker {
+  display: none;
+}
+
+.tool > summary:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.tool .codicon {
+  font-size: 14px;
+  opacity: 0.8;
+}
+
+.tool .label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-chevron {
+  transition: transform 0.12s ease;
+  flex: 0 0 auto;
+}
+
+.tool[open] > summary .tool-chevron {
+  transform: rotate(90deg);
+}
+
+.tool-status {
+  flex: 0 0 auto;
+}
+
+/* When there's nothing to expand, hide the chevron and disable the toggle. */
+.tool.tool-empty > summary {
+  cursor: default;
+}
+
+.tool.tool-empty .tool-chevron {
+  visibility: hidden;
+}
+
+.tool-body {
+  padding: 2px 10px 8px 30px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tool-section {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.tool-section-title {
+  font-size: 0.85em;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.55;
+  font-weight: 600;
+}
+
+.tool-pre {
+  margin: 0;
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: var(--vscode-textCodeBlock-background);
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.92em;
+  white-space: pre-wrap;
+  overflow-x: auto;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.tool-file {
+  display: block;
+}
+
+.tool.in_progress .tool-status {
+  color: var(--vscode-progressBar-background);
+  opacity: 1;
+}
+
+.tool.completed .tool-status {
+  color: var(--vscode-testing-iconPassed, #3fb950);
+  opacity: 1;
+}
+
+.tool.failed .tool-status,
+.tool.cancelled .tool-status {
+  color: var(--vscode-testing-iconFailed, #f85149);
+  opacity: 1;
+}
+
+/* Single-line tool row (file changes) */
+.tool-line {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -568,21 +683,13 @@ body {
   font-size: 0.92em;
 }
 
-.tool .codicon {
+.tool-line .codicon {
   font-size: 14px;
   opacity: 0.8;
 }
 
-.tool.in_progress .codicon {
-  color: var(--vscode-progressBar-background);
-}
-
-.tool.completed .codicon {
+.tool-line.completed .codicon {
   color: var(--vscode-testing-iconPassed, #3fb950);
-}
-
-.tool.failed .codicon {
-  color: var(--vscode-testing-iconFailed, #f85149);
 }
 
 .file-change {

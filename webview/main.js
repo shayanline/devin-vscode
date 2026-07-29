@@ -369,27 +369,146 @@ import { renderMarkdown } from "./markdown.js";
     el.thread.appendChild(box);
     scrollToBottom();
   }
-  function upsertTool(id, title, status) {
-    let node = toolEls.get(id);
-    if (!node) {
-      node = document.createElement("div");
-      node.className = "tool " + (status || "pending");
-      const icon = document.createElement("i");
-      icon.className = "codicon codicon-tools";
+  const TOOL_KIND_ICONS = {
+    read: "codicon-file",
+    edit: "codicon-edit",
+    delete: "codicon-trash",
+    move: "codicon-arrow-right",
+    search: "codicon-search",
+    execute: "codicon-terminal",
+    think: "codicon-lightbulb",
+    fetch: "codicon-cloud-download",
+    other: "codicon-tools"
+  };
+
+  function statusIcon(status) {
+    switch (status) {
+      case "in_progress": return "codicon-loading codicon-modifier-spin";
+      case "completed": return "codicon-check";
+      case "failed": return "codicon-error";
+      case "cancelled": return "codicon-circle-slash";
+      default: return "codicon-circle-large-outline";
+    }
+  }
+
+  function upsertTool(m) {
+    let entry = toolEls.get(m.id);
+    if (!entry) {
+      const node = document.createElement("details");
+      node.className = "tool";
+      const summary = document.createElement("summary");
+      const chev = document.createElement("i");
+      chev.className = "codicon codicon-chevron-right tool-chevron";
+      const kindIcon = document.createElement("i");
+      kindIcon.className = "codicon tool-kind";
       const label = document.createElement("span");
       label.className = "label";
-      node.appendChild(icon);
-      node.appendChild(label);
+      const statEl = document.createElement("i");
+      statEl.className = "codicon tool-status";
+      summary.appendChild(chev);
+      summary.appendChild(kindIcon);
+      summary.appendChild(label);
+      summary.appendChild(statEl);
+      const bodyEl = document.createElement("div");
+      bodyEl.className = "tool-body";
+      node.appendChild(summary);
+      node.appendChild(bodyEl);
       el.thread.appendChild(node);
-      toolEls.set(id, node);
+      entry = { node, kindIcon, label, statEl, bodyEl, data: {} };
+      toolEls.set(m.id, entry);
     }
-    node.className = "tool " + (status || "pending");
-    if (title) node.querySelector(".label").textContent = title;
+    // Merge incrementally: updates may carry only some fields.
+    const d = entry.data;
+    if (m.title) d.title = m.title;
+    if (m.kind) d.kind = m.kind;
+    if (m.status) d.status = m.status;
+    if (m.rawInput !== undefined) d.rawInput = m.rawInput;
+    if (Array.isArray(m.content) && m.content.length) d.content = m.content;
+    if (Array.isArray(m.locations) && m.locations.length) d.locations = m.locations;
+
+    entry.node.className = "tool " + (d.status || "pending");
+    entry.kindIcon.className = "codicon tool-kind " + (TOOL_KIND_ICONS[d.kind] || TOOL_KIND_ICONS.other);
+    entry.statEl.className = "codicon tool-status " + statusIcon(d.status);
+    entry.label.textContent = d.title || "Tool";
+    renderToolBody(entry);
     scrollToBottom();
+  }
+
+  function renderToolBody(entry) {
+    const d = entry.data;
+    const body = entry.bodyEl;
+    body.innerHTML = "";
+    let hasContent = false;
+
+    if (d.rawInput && Object.keys(d.rawInput).length) {
+      hasContent = true;
+      const sec = document.createElement("div");
+      sec.className = "tool-section";
+      const h = document.createElement("div");
+      h.className = "tool-section-title";
+      h.textContent = "Input";
+      const pre = document.createElement("pre");
+      pre.className = "tool-pre";
+      pre.textContent = safeJson(d.rawInput);
+      sec.appendChild(h);
+      sec.appendChild(pre);
+      body.appendChild(sec);
+    }
+
+    const textItems = (d.content || []).filter((c) => c.type === "text" && c.text);
+    if (textItems.length) {
+      hasContent = true;
+      const sec = document.createElement("div");
+      sec.className = "tool-section";
+      const h = document.createElement("div");
+      h.className = "tool-section-title";
+      h.textContent = "Result";
+      const pre = document.createElement("pre");
+      pre.className = "tool-pre";
+      pre.textContent = textItems.map((c) => c.text).join("\n");
+      sec.appendChild(h);
+      sec.appendChild(pre);
+      body.appendChild(sec);
+    }
+
+    const diffItems = (d.content || []).filter((c) => c.type === "diff" && c.path);
+    const locs = (d.locations || []).slice();
+    const fileRows = [
+      ...diffItems.map((c) => ({ path: c.path, diff: true })),
+      ...locs.map((l) => ({ path: l.path, line: l.line, diff: false }))
+    ];
+    if (fileRows.length) {
+      hasContent = true;
+      const sec = document.createElement("div");
+      sec.className = "tool-section";
+      fileRows.forEach((f) => {
+        const link = document.createElement("a");
+        link.className = "file-change tool-file";
+        link.textContent = shorten(f.path) + (f.line ? ":" + f.line : "");
+        link.title = f.path;
+        link.addEventListener("click", () => {
+          if (f.diff) vscode.postMessage({ type: "openDiff", path: f.path });
+          else vscode.postMessage({ type: "openFile", path: f.path, line: f.line });
+        });
+        sec.appendChild(link);
+      });
+      body.appendChild(sec);
+    }
+
+    entry.node.classList.toggle("tool-empty", !hasContent);
+  }
+
+  function safeJson(v) {
+    try {
+      const s = JSON.stringify(v, null, 2);
+      return s && s.length > 4000 ? s.slice(0, 4000) + "\n…" : s;
+    } catch {
+      return String(v);
+    }
   }
   function addFileChange(path) {
     const node = document.createElement("div");
-    node.className = "tool completed";
+    node.className = "tool-line completed";
     const icon = document.createElement("i");
     icon.className = "codicon codicon-edit";
     const link = document.createElement("a");
@@ -738,7 +857,7 @@ import { renderMarkdown } from "./markdown.js";
       case "assistantEnd": endAssistant(); break;
       case "plan": renderPlan(m.entries); break;
       case "toolCall":
-      case "toolCallUpdate": upsertTool(m.id, m.title, m.status); break;
+      case "toolCallUpdate": upsertTool(m); break;
       case "fileChange": addFileChange(m.path); break;
       case "workingSet": renderWorkingSet(m.files); break;
       case "attachments": renderAttachments(m.items); break;
