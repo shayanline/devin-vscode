@@ -348,6 +348,7 @@ body {
 .dd-icon {
   display: inline-flex;
   align-items: center;
+  margin-right: 2px;
   opacity: 0.9;
 }
 
@@ -357,8 +358,8 @@ body {
 
 .dd-brand {
   display: block;
-  width: 13px;
-  height: 13px;
+  width: 12px;
+  height: 12px;
   background-color: currentColor;
   -webkit-mask-repeat: no-repeat;
   mask-repeat: no-repeat;
@@ -372,8 +373,8 @@ body {
    Grok (which has built-in padding); shrink them to visually match. */
 .dd-brand--claude,
 .dd-brand--openai {
-  width: 11px;
-  height: 11px;
+  width: 10px;
+  height: 10px;
 }
 
 .dd-item-icon {
