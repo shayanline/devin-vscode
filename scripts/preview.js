@@ -38,7 +38,6 @@ const VARS = {
   "testing-iconFailed": "#f85149",
   "errorForeground": "#f85149",
   "chat-requestBubbleBackground": "#2b2b2b",
-  "chat-requestBorder": "transparent",
   "focusBorder": "#0078d4",
   "descriptionForeground": "#9d9d9d",
   "button-background": "#0078d4",
@@ -46,7 +45,25 @@ const VARS = {
   "button-hoverBackground": "#026ec1",
   "button-secondaryBackground": "#313131",
   "button-secondaryForeground": "#cccccc",
-  "button-secondaryHoverBackground": "#3c3c3c"
+  "button-secondaryHoverBackground": "#3c3c3c",
+  "chat-requestBorder": "#3c3c3c",
+  "chat-requestBackground": "#1a1a1a",
+  "chat-thinkingShimmer": "#e6e6e6",
+  "textPreformat-foreground": "#d4d4d4",
+  "textPreformat-background": "rgba(127,127,127,0.18)",
+  "textPreformat-border": "rgba(127,127,127,0.22)",
+  "textBlockQuote-background": "rgba(127,127,127,0.08)",
+  "textBlockQuote-border": "#3c3c3c",
+  "badge-background": "rgba(127,127,127,0.22)",
+  "list-hoverBackground": "#2a2d2e",
+  "list-inactiveSelectionBackground": "#37373d",
+  "list-inactiveSelectionForeground": "#cccccc",
+  "list-activeSelectionBackground": "#04395e",
+  "list-activeSelectionForeground": "#ffffff",
+  "input-placeholderForeground": "#8b8b8b",
+  "panel-background": "#181818",
+  "editorWarning-foreground": "#cca700",
+  "icon-foreground": "#c5c5c5"
 };
 
 const rootVars = Object.entries(VARS)

@@ -1,4 +1,4 @@
 {
     "devin.defaultMode": "bypass",
-    "devin.defaultModel": "claude-sonnet-5-low"
+    "devin.defaultModel": "claude-opus-4-8-high"
 }
