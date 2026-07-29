@@ -90,7 +90,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
           await this.onWebviewReady();
           return;
         case "send":
-          await this.handleSend(String(msg.text || ""));
+          await this.handleSend(String(msg.text || ""), !!msg.newSession);
           return;
         case "cancel":
           this.cancel();
@@ -204,6 +204,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
       if (this.cfg().get<boolean>("autoResumeLast", false)) {
         const last = this.store.activeId();
         if (last && !this.sessionId) {
+          this.post({ type: "body", body: "thread" });
           await this.loadSession(last);
         }
       }
@@ -694,12 +695,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
 
   // --- Prompting -----------------------------------------------------------
 
-  private async handleSend(text: string): Promise<void> {
+  private async handleSend(text: string, startNew = false): Promise<void> {
     if (!text.trim() || this.busy) {
       return;
     }
     if (!(await this.ensureReady())) {
       return;
+    }
+    // Sending from the sessions list starts a fresh session.
+    if (startNew) {
+      this.resetClient();
+      this.changes.clear();
+      this.post({ type: "clear" });
     }
     await this.ensureSession();
     if (!this.sessionId || !this.client) {
@@ -740,7 +747,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
 
   async showSessionsView(): Promise<void> {
     this.focus();
-    this.post({ type: "view", view: "sessions" });
+    this.post({ type: "body", body: "list" });
     await this.refreshSessions();
   }
 
@@ -893,6 +900,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     const nonce = getNonce();
     const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "media", "main.js"));
     const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "media", "main.css"));
+    const codiconUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.context.extensionUri, "media", "codicon", "codicon.css")
+    );
     const csp = [
       `default-src 'none'`,
       `style-src ${webview.cspSource} 'unsafe-inline'`,
@@ -907,6 +917,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
   <meta charset="UTF-8" />
   <meta http-equiv="Content-Security-Policy" content="${csp}" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link href="${codiconUri}" rel="stylesheet" />
   <link href="${styleUri}" rel="stylesheet" />
   <title>Devin</title>
 </head>
@@ -914,39 +925,39 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
   <div id="app">
     <div id="setup" class="hidden"></div>
 
-    <div id="sessions-view" class="hidden">
-      <div class="view-header">
-        <button id="back-to-chat" class="secondary" title="Back to chat">&#8592; Back</button>
-        <span class="view-title">Chats</span>
-        <button id="new-from-list" title="New chat">+ New</button>
-      </div>
-      <div id="sessions-list"></div>
-    </div>
-
-    <div id="chat">
+    <div id="chat" class="hidden">
       <div id="chat-header">
-        <span id="chat-title">Devin</span>
+        <button id="history-btn" class="icon-btn" title="Show chats"><i class="codicon codicon-list-unordered"></i></button>
+        <span id="chat-title">Chat</span>
         <span class="spacer"></span>
-        <button id="history-btn" class="secondary" title="Chat history">History</button>
-        <button id="newchat-btn" class="secondary" title="New chat">New</button>
+        <span id="status"></span>
+        <button id="newchat-btn" class="icon-btn" title="New chat"><i class="codicon codicon-add"></i></button>
       </div>
-      <div id="thread"></div>
+
+      <div id="body">
+        <div id="sessions-list" class="hidden"></div>
+        <div id="thread"></div>
+      </div>
+
       <div id="composer">
         <div id="working-set" class="hidden"></div>
         <div id="elicitation-tray"></div>
         <div id="permission-tray"></div>
-        <div id="attachments" class="hidden"></div>
         <div id="autocomplete" class="hidden"></div>
-        <div id="input-row">
-          <button id="attach" title="Add context (@)">@</button>
-          <textarea id="input" rows="1" placeholder="Ask Devin. Type / for commands, @ for context. Shift+Enter for newline."></textarea>
-          <button id="send" title="Send">Send</button>
-          <button id="stop" class="hidden" title="Stop">Stop</button>
-        </div>
-        <div id="controls">
-          <select id="mode" title="Session mode"></select>
-          <select id="model" title="Model"></select>
-          <span id="status"></span>
+        <div id="input-box">
+          <div id="attachments" class="hidden"></div>
+          <textarea id="input" rows="1" placeholder="Ask Devin"></textarea>
+          <div id="toolbar">
+            <div class="toolbar-left">
+              <button id="attach" class="icon-btn" title="Add context"><i class="codicon codicon-attach"></i></button>
+              <div id="mode-dd" class="dd"></div>
+            </div>
+            <div class="toolbar-right">
+              <div id="model-dd" class="dd right"></div>
+              <button id="send" class="icon-btn send" title="Send"><i class="codicon codicon-send"></i></button>
+              <button id="stop" class="icon-btn hidden" title="Stop"><i class="codicon codicon-debug-stop"></i></button>
+            </div>
+          </div>
         </div>
       </div>
     </div>
