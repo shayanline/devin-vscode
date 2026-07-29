@@ -23,21 +23,24 @@ async function main() {
   client.on("log", () => {});
   client.start();
   await client.initialize();
-  const s = await client.newSession([]);
+  const s = await client.newSession(cwd, []);
   console.log("created:", s.sessionId);
 
   await client.renameSession(s.sessionId, "smoke rename OK");
   console.log("renamed without error");
 
-  const listed = await listSessions({ cliPath: cli, env, folders: [cwd], trackedIds: [], scope: "directory" });
-  const found = listed.find((x) => x.id === s.sessionId);
+  const tracked = [s.sessionId];
+  const cwdById = { [s.sessionId]: cwd };
+  const listed = await listSessions({ cliPath: cli, env, folders: [cwd], trackedIds: tracked, cwdById });
+  const found = listed.sessions.find((x) => x.id === s.sessionId);
   console.log("title after rename:", found ? found.title : "(not in list yet)");
 
   await client.deleteSession(s.sessionId);
   console.log("deleted without error");
 
-  const after = await listSessions({ cliPath: cli, env, folders: [cwd], trackedIds: [], scope: "directory" });
-  console.log("still present after delete:", after.some((x) => x.id === s.sessionId));
+  const after = await listSessions({ cliPath: cli, env, folders: [cwd], trackedIds: tracked, cwdById });
+  console.log("still present after delete:", after.sessions.some((x) => x.id === s.sessionId));
+  console.log("reconcile pruned it:", after.prunedIds.includes(s.sessionId));
 
   client.dispose();
   process.exit(0);
