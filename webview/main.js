@@ -1128,8 +1128,17 @@ import { renderMarkdown } from "./markdown.js";
     if (el.thread.querySelector(".msg")) return;
     const box = document.createElement("div");
     box.className = "welcome";
-    const icon = document.createElement("i");
-    icon.className = "codicon codicon-comment-discussion welcome-icon";
+    const logoSrc = document.body.dataset.logo;
+    let icon;
+    if (logoSrc) {
+      icon = document.createElement("img");
+      icon.className = "welcome-logo";
+      icon.src = logoSrc;
+      icon.alt = "Devin";
+    } else {
+      icon = document.createElement("i");
+      icon.className = "codicon codicon-comment-discussion welcome-icon";
+    }
     const title = document.createElement("div");
     title.className = "welcome-title";
     title.textContent = "Ask Devin anything";

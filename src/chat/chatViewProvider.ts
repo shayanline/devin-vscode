@@ -1141,6 +1141,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     const codiconUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this.context.extensionUri, "media", "codicon", "codicon.css")
     );
+    const logoUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "media", "devin-logo.svg"));
     const csp = [
       `default-src 'none'`,
       `style-src ${webview.cspSource} 'unsafe-inline'`,
@@ -1159,7 +1160,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
   <link href="${styleUri}" rel="stylesheet" />
   <title>Devin</title>
 </head>
-<body>
+<body data-logo="${logoUri}">
   <div id="app">
     <div id="setup" class="hidden"></div>
 
