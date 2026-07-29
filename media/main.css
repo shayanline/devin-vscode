@@ -71,6 +71,23 @@
   }
 }
 
+/* Gentle entrance for each response part as it streams in, echoing VS Code's
+   incremental rendering. Runs once per element when it enters the DOM. */
+@keyframes dv-appear {
+  from { opacity: 0; transform: translateY(2px); }
+  to { opacity: 1; transform: none; }
+}
+
+.turn-response > * {
+  animation: dv-appear 140ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .turn-response > * {
+    animation: none;
+  }
+}
+
 * {
   box-sizing: border-box;
 }
@@ -1546,25 +1563,46 @@ body {
   margin-left: var(--dv-space-4);
 }
 
-/* Plan */
+/* Plan / todo list, styled after VS Code's chat todo widget: a bordered card,
+   a heading, and rows with a status glyph (done / active / pending). */
 .plan {
-  border: 1px solid var(--vscode-panel-border);
-  border-radius: 6px;
-  padding: 8px 10px;
+  border: 1px solid var(--dv-border);
+  border-radius: var(--dv-radius-lg);
+  padding: var(--dv-space-4) var(--dv-space-5);
+  font-size: var(--dv-fs-s);
 }
 
 .plan .plan-entry {
   display: flex;
-  gap: 6px;
+  gap: var(--dv-space-3);
   align-items: center;
+  min-height: 22px;
 }
 
-.plan .plan-entry .codicon {
+.plan .plan-entry .plan-mark {
   font-size: 14px;
+  flex: 0 0 auto;
 }
 
-.plan .done {
+.plan .plan-done .plan-mark {
+  color: var(--vscode-testing-iconPassed, var(--vscode-charts-green, #3fb950));
+}
+
+.plan .plan-active .plan-mark {
+  color: var(--vscode-progressBar-background, var(--vscode-textLink-foreground));
+}
+
+.plan .plan-pending .plan-mark {
+  color: var(--dv-dim);
+}
+
+.plan .plan-done span {
   opacity: 0.6;
+  text-decoration: line-through;
+}
+
+.plan .plan-active span {
+  color: var(--vscode-foreground);
 }
 
 /* Tool calls & file changes. VS Code renders tool invocations as understated

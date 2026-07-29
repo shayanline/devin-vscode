@@ -1051,10 +1051,11 @@ import { renderMarkdown } from "./markdown.js";
     title.textContent = "Plan";
     box.appendChild(title);
     (entries || []).forEach((entry) => {
+      const st = entry.status === "completed" ? "done" : entry.status === "in_progress" ? "active" : "pending";
       const row = document.createElement("div");
-      row.className = "plan-entry" + (entry.status === "completed" ? " done" : "");
+      row.className = "plan-entry plan-" + st;
       const mark = document.createElement("i");
-      mark.className = "codicon " + (entry.status === "completed" ? "codicon-pass-filled" : entry.status === "in_progress" ? "codicon-sync" : "codicon-circle-large-outline");
+      mark.className = "codicon plan-mark " + (st === "done" ? "codicon-pass-filled" : st === "active" ? "codicon-loading codicon-modifier-spin" : "codicon-circle-large-outline");
       const txt = document.createElement("span");
       txt.textContent = entry.content;
       row.appendChild(mark);
