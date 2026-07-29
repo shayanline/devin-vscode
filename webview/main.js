@@ -48,8 +48,17 @@ import { renderMarkdown } from "./markdown.js";
   // Model picker lists families; a separate thinking picker holds the effort
   // variants of the selected family (Copilot-style).
   let modelFamilies = [];
-  const modelDropdown = createDropdown(el.modelDD, onModelSelect, { staticIcon: "codicon-sparkle" });
-  const thinkingDropdown = createDropdown(el.thinkingDD, onThinkingSelect, { staticIcon: "codicon-lightbulb" });
+  const modelDropdown = createDropdown(el.modelDD, onModelSelect, { buttonIcon: modelButtonIcon });
+  const thinkingDropdown = createDropdown(el.thinkingDD, onThinkingSelect);
+
+  // Icon shown on the model button only (not in the dropdown rows): sparkle for
+  // Adaptive, generic chip otherwise. Brand icons can slot in here once
+  // provided as SVGs (keyed by family).
+  function modelButtonIcon(familyId) {
+    const fam = familyById(familyId);
+    if (!fam || isAdaptive(fam)) return "codicon-sparkle";
+    return "codicon-chip";
+  }
 
   function familyById(id) { return modelFamilies.find((f) => f.id === id); }
   function familyOfUid(uid) { return modelFamilies.find((f) => (f.variants || []).some((v) => v.value === uid)); }
@@ -186,6 +195,18 @@ import { renderMarkdown } from "./markdown.js";
     el.thread.scrollTop = el.thread.scrollHeight;
   }
 
+  // Responsive composer: progressively drop labels, then whole controls, as the
+  // panel narrows, so the toolbar never overlaps. Worst case keeps just Send.
+  if (window.ResizeObserver) {
+    const ro = new ResizeObserver((entries) => {
+      const w = entries[0].contentRect.width;
+      el.inputBox.classList.toggle("cmp-sm", w < 380); // labels -> icons only
+      el.inputBox.classList.toggle("cmp-xs", w < 280); // hide mode/model/context
+      el.inputBox.classList.toggle("cmp-xxs", w < 190); // only Send remains
+    });
+    ro.observe(el.inputBox);
+  }
+
   // Clickable anchors in assistant/user text: external links open in the
   // browser, everything else is treated as a file path and opened in the editor.
   el.thread.addEventListener("click", (e) => {
@@ -218,6 +239,7 @@ import { renderMarkdown } from "./markdown.js";
     btn.appendChild(chev);
 
     function iconFor(v) {
+      if (opts.buttonIcon) return opts.buttonIcon(v) || "";
       if (opts.staticIcon) return opts.staticIcon;
       const it = items.find((x) => x.value === v);
       return it && it.icon ? it.icon : "";
@@ -1030,7 +1052,14 @@ import { renderMarkdown } from "./markdown.js";
     title.textContent = s.title || s.short_id || s.id;
     const meta = document.createElement("div");
     meta.className = "session-meta";
-    meta.textContent = s.last_activity_ago || "";
+    const time = document.createElement("span");
+    time.className = "session-time";
+    time.textContent = s.last_activity_ago || agoFrom(s.last_activity_at) || "";
+    const code = document.createElement("span");
+    code.className = "session-code";
+    code.textContent = s.short_id || s.id;
+    meta.appendChild(time);
+    meta.appendChild(code);
     main.appendChild(title);
     main.appendChild(meta);
     main.addEventListener("click", () => {
@@ -1176,6 +1205,20 @@ import { renderMarkdown } from "./markdown.js";
   function hideWelcome() {
     const w = el.thread.querySelector(".welcome");
     if (w) w.remove();
+    const l = el.thread.querySelector(".thread-loading");
+    if (l) l.remove();
+  }
+
+  function showThreadLoading() {
+    el.thread.innerHTML = "";
+    const d = document.createElement("div");
+    d.className = "thread-loading";
+    d.innerHTML = '<i class="codicon codicon-loading codicon-modifier-spin"></i><span>Loading session\u2026</span>';
+    el.thread.appendChild(d);
+  }
+
+  function threadHasContent() {
+    return !!el.thread.querySelector(".msg, .tool, .tool-line, .plan, .thinking");
   }
 
   // --- Error rendering -----------------------------------------------------
@@ -1281,7 +1324,7 @@ import { renderMarkdown } from "./markdown.js";
     pop.className = "usage-popup";
     pop.innerHTML = usagePopupHtml(lastUsage);
     pop.addEventListener("click", (ev) => ev.stopPropagation());
-    el.inputBox.appendChild(pop);
+    el.usage.parentElement.appendChild(pop);
   });
 
   // Live terminal output streamed from the extension host.
@@ -1302,6 +1345,14 @@ import { renderMarkdown } from "./markdown.js";
   }
   function shorten(p) { return p.split(/[\\/]/).slice(-2).join("/"); }
   function baseName(p) { return p.split(/[\\/]/).filter(Boolean).pop() || p; }
+  function agoFrom(ts) {
+    if (!ts) return "";
+    const d = Math.max(0, Date.now() / 1000 - ts);
+    if (d < 60) return "just now";
+    if (d < 3600) return Math.floor(d / 60) + "m ago";
+    if (d < 86400) return Math.floor(d / 3600) + "h ago";
+    return Math.floor(d / 86400) + "d ago";
+  }
 
   // --- Inbound messages ----------------------------------------------------
 
@@ -1337,7 +1388,15 @@ import { renderMarkdown } from "./markdown.js";
         el.usage.innerHTML = "";
         lastUsage = null;
         closeUsagePopup();
-        if (body === "thread") renderWelcome();
+        if (m.loading) showThreadLoading();
+        else if (body === "thread") renderWelcome();
+        break;
+      case "loaded":
+        { const l = el.thread.querySelector(".thread-loading"); if (l) l.remove(); }
+        if (body === "thread" && !threadHasContent()) renderWelcome();
+        break;
+      case "sessionsLoading":
+        el.sessionsList.innerHTML = '<div class="list-loading"><i class="codicon codicon-loading codicon-modifier-spin"></i></div>';
         break;
       case "userMessage":
         if (currentTitle === "Chat") { currentTitle = m.text.slice(0, 40); el.chatTitle.textContent = currentTitle; }

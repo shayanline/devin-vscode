@@ -47,17 +47,13 @@ export async function listSessions(opts: ListOptions): Promise<DevinSession[]> {
   for (const s of byId.values()) {
     const isTracked = tracked.has(s.id);
     const isDir = inWorkspace(s);
+    // "workspace" now means VS Code initiated AND belonging to this workspace,
+    // so opening an external session once no longer taints the list. Only
+    // sessions the CLI actually lists are shown, so every row has metadata.
     const include =
-      opts.scope === "workspace" ? isTracked : opts.scope === "directory" ? isDir : isTracked || isDir;
+      opts.scope === "workspace" ? isTracked && isDir : opts.scope === "directory" ? isDir : isTracked || isDir;
     if (include) {
       result.push({ ...s, tracked: isTracked });
-    }
-  }
-
-  // Tracked ids that did not appear in any listing (e.g. deleted dir) still show.
-  for (const id of opts.trackedIds) {
-    if (!byId.has(id) && opts.scope !== "directory") {
-      result.push({ id, short_id: id, working_directory: "", title: id, tracked: true });
     }
   }
 
