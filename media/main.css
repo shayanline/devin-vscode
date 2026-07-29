@@ -63,6 +63,17 @@ body {
 #status {
   font-size: 0.85em;
   opacity: 0.7;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#usage {
+  font-size: 0.82em;
+  opacity: 0.6;
+  font-variant-numeric: tabular-nums;
+  cursor: default;
 }
 
 /* Body */
@@ -375,6 +386,106 @@ body {
 .msg .bubble {
   line-height: 1.5;
   overflow-wrap: anywhere;
+}
+
+/* Per-message hover actions */
+.msg-actions {
+  display: flex;
+  gap: 2px;
+  margin-top: 2px;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.msg:hover .msg-actions,
+.msg-actions:focus-within {
+  opacity: 0.9;
+}
+
+.msg-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--vscode-icon-foreground, var(--vscode-foreground));
+  cursor: pointer;
+}
+
+.msg-action:hover {
+  background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
+}
+
+.msg-action .codicon {
+  font-size: 13px;
+}
+
+/* Welcome / empty state */
+.welcome {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 8px;
+  padding: 32px 16px;
+  margin: auto 0;
+}
+
+.welcome-icon {
+  font-size: 30px;
+  opacity: 0.5;
+}
+
+.welcome-title {
+  font-size: 1.15em;
+  font-weight: 600;
+}
+
+.welcome-sub {
+  max-width: 320px;
+}
+
+.welcome-prompts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  max-width: 340px;
+  margin-top: 6px;
+}
+
+.welcome-chip {
+  text-align: left;
+  padding: 8px 12px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--vscode-foreground);
+  font-family: inherit;
+  font-size: 0.92em;
+  cursor: pointer;
+}
+
+.welcome-chip:hover {
+  background: var(--vscode-list-hoverBackground);
+  border-color: var(--vscode-focusBorder);
+}
+
+/* Error card */
+.error-card {
+  border-color: var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground));
+}
+
+.error-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.error-head .codicon {
+  color: var(--vscode-errorForeground);
 }
 
 .bubble p {
