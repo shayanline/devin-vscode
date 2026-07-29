@@ -298,6 +298,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     this.log(
       `[health] path=${this.health.path} found=${this.health.found} loggedIn=${this.health.loggedIn} version=${this.health.version || ""} ${this.health.error || ""}`
     );
+    this.statusBar.setInfo({ version: this.health.version, account: this.health.account });
     this.statusBar.set({ connected: this.isReady(), mode: this.currentMode, model: this.currentModel });
   }
 
@@ -928,31 +929,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     }
     this.elicitationResolvers.clear();
     this.setBusy(false);
-  }
-
-  // Status-bar info popup: CLI version, sign-in state, current model/mode, and
-  // a link to Devin Cloud.
-  async showInfo(): Promise<void> {
-    type Item = vscode.QuickPickItem & { action?: "cloud" | "login" };
-    const items: Item[] = [
-      { label: "$(link-external) Open Devin Cloud", detail: "https://app.devin.ai", action: "cloud" },
-      { label: "$(versions) CLI version", description: this.health?.version || "unknown" }
-    ];
-    items.push(
-      this.isReady()
-        ? { label: "$(pass-filled) Signed in", description: this.resolvedCli }
-        : { label: "$(error) Not signed in", description: "Click to sign in", action: "login" }
-    );
-    const detail = [this.currentModel, this.currentMode].filter(Boolean).join("  /  ");
-    if (detail) {
-      items.push({ label: "$(sparkle) Model / mode", description: detail });
-    }
-    const picked = await vscode.window.showQuickPick(items, { title: "Devin", placeHolder: "Devin status" });
-    if (picked?.action === "cloud") {
-      await vscode.env.openExternal(vscode.Uri.parse("https://app.devin.ai"));
-    } else if (picked?.action === "login") {
-      await this.authenticate();
-    }
   }
 
   async showSessionsView(): Promise<void> {
