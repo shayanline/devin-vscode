@@ -47,6 +47,30 @@
   background: transparent;
 }
 
+/* Swept "working" highlight, clipped to the text. Shared by the thinking
+   label, the pending indicator, and progress rows. */
+.dv-shimmer {
+  background: linear-gradient(90deg,
+      var(--dv-dim) 0%,
+      var(--dv-dim) 30%,
+      var(--dv-thinking-shimmer) 50%,
+      var(--dv-dim) 70%,
+      var(--dv-dim) 100%);
+  background-size: 400% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: dv-thinking-shimmer 2s linear infinite;
+  will-change: background-position;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dv-shimmer,
+  .thinking.thinking-active .thinking-label {
+    animation: none;
+  }
+}
+
 * {
   box-sizing: border-box;
 }
@@ -1477,6 +1501,49 @@ body {
 
 .thinking-item-content > :last-child {
   margin-bottom: 0;
+}
+
+/* "Used N references" summary: a collapsed, low-weight list of the files the
+   turn read or searched, mirroring VS Code's used-context collapsible. */
+.used-refs {
+  font-size: var(--dv-fs-s);
+  color: var(--dv-dim);
+}
+
+.used-refs > summary {
+  display: flex;
+  align-items: center;
+  gap: var(--dv-space-2);
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+  opacity: 0.85;
+}
+
+.used-refs > summary::-webkit-details-marker {
+  display: none;
+}
+
+.used-refs > summary:hover {
+  opacity: 1;
+}
+
+.used-refs-chevron {
+  font-size: 13px;
+  transition: transform 0.12s ease;
+}
+
+.used-refs[open] > summary .used-refs-chevron {
+  transform: rotate(90deg);
+}
+
+.used-refs-body {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--dv-space-1);
+  margin-top: var(--dv-space-2);
+  margin-left: var(--dv-space-4);
 }
 
 /* Plan */

@@ -947,7 +947,7 @@ import { renderMarkdown } from "./markdown.js";
     ensureTurn();
     const w = document.createElement("div");
     w.className = "working";
-    w.innerHTML = '<i class="codicon codicon-loading codicon-modifier-spin"></i><span>Working\u2026</span>';
+    w.innerHTML = '<i class="codicon codicon-loading codicon-modifier-spin"></i><span class="dv-shimmer">Working\u2026</span>';
     respTarget().appendChild(w);
     workingEl = w;
     scrollToBottom();
@@ -1150,6 +1150,14 @@ import { renderMarkdown } from "./markdown.js";
     entry.statEl.className = "codicon tool-status " + statusIcon(d.status);
     setToolLabel(entry.label, d.title);
     renderToolBody(entry);
+    // Track files this turn looked at for a "Used N references" summary.
+    if (currentTurn && Array.isArray(d.locations) && ["read", "search", "fetch"].includes(d.kind)) {
+      currentTurn.refs = currentTurn.refs || new Map();
+      d.locations.forEach((l) => {
+        if (l && l.path && !currentTurn.refs.has(l.path)) currentTurn.refs.set(l.path, { path: l.path, line: l.line });
+      });
+      renderUsedRefs(currentTurn);
+    }
     // Inline progress: reflect the running tool in the header status.
     if (d.status === "in_progress" && d.title) {
       el.status.textContent = d.title;
@@ -1157,6 +1165,36 @@ import { renderMarkdown } from "./markdown.js";
       el.status.textContent = "";
     }
     scrollToBottom();
+  }
+
+  // A collapsed "Used N references" summary at the top of a turn's response,
+  // aggregating the files the agent read or searched (VS Code's used-context).
+  function renderUsedRefs(turn) {
+    if (!turn.refs || !turn.refs.size) return;
+    let box = turn.usedRefsEl;
+    if (!box) {
+      box = document.createElement("details");
+      box.className = "used-refs";
+      const summary = document.createElement("summary");
+      const chev = document.createElement("i");
+      chev.className = "codicon codicon-chevron-right used-refs-chevron";
+      const label = document.createElement("span");
+      label.className = "used-refs-label";
+      summary.appendChild(chev);
+      summary.appendChild(label);
+      const body = document.createElement("div");
+      body.className = "used-refs-body";
+      box.appendChild(summary);
+      box.appendChild(body);
+      turn.resp.insertBefore(box, turn.resp.firstChild);
+      turn.usedRefsEl = box;
+      turn.usedRefsBody = body;
+      turn.usedRefsLabel = label;
+    }
+    const n = turn.refs.size;
+    turn.usedRefsLabel.textContent = "Used " + n + " reference" + (n === 1 ? "" : "s");
+    turn.usedRefsBody.innerHTML = "";
+    turn.refs.forEach((f) => turn.usedRefsBody.appendChild(filePill({ path: f.path, line: f.line, diff: false })));
   }
 
   function renderToolBody(entry) {

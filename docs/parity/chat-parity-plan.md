@@ -252,9 +252,14 @@ Playwright preview screenshot before moving on.
   animation (cosmetic). The per-turn changes summary is already covered by the
   working-set card plus the inline edit pills, so no separate pill was added.
   (§2.3)
-- **Phase 6, progress + references + notifications.** Inline progress rows with
-  shimmer + checkmarks, the "Used N references" collapsible (needs host
-  tracking of attachments + tool reads), warning/notification rows. (§2.3, §2.6)
+- **Phase 6, progress + references + notifications. ✅ Mostly done (v0.6.20).**
+  Shipped: a shared `.dv-shimmer` "working" highlight applied to the pending
+  indicator (and reused by thinking), gated by reduced motion; and a collapsed
+  **"Used N references"** summary per turn (`renderUsedRefs`) that aggregates
+  and de-dupes the files the turn read or searched (from tool `locations`),
+  rendered with the shared file pills. Deferred: standalone warning /
+  notification content rows, since ACP does not emit a distinct warning part
+  (errors are already handled by the error card). (§2.3, §2.6)
 - **Phase 7, plan/todo widget + streaming animations.** Re-skin the plan card to
   the todo-widget look, optional incremental streaming reveal animations and
   `collapseCompletedResponses`. (§2.3)
