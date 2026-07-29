@@ -931,6 +931,36 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     this.setBusy(false);
   }
 
+  // Click-through popup for the status bar (the hover card can't be triggered
+  // by click; VS Code has no API for that), mirroring the same info.
+  async showInfo(): Promise<void> {
+    type Item = vscode.QuickPickItem & { action?: "cloud" | "login" };
+    const a = this.health?.account || {};
+    const items: Item[] = [{ label: "$(link-external) Open Devin Cloud", detail: "https://app.devin.ai", action: "cloud" }];
+    if (this.isReady()) {
+      if (a.name || a.email) {
+        items.push({ label: `$(account) ${a.name || a.email}`, description: a.name && a.email ? a.email : undefined });
+      }
+      const org = a.plan || a.tier;
+      if (org) {
+        items.push({ label: `$(organization) ${org}` });
+      }
+    } else {
+      items.push({ label: "$(error) Not signed in", description: "Sign in", action: "login" });
+    }
+    const mm = [this.currentModel, this.currentMode].filter(Boolean).join("  /  ");
+    if (mm) {
+      items.push({ label: `$(sparkle) ${mm}` });
+    }
+    items.push({ label: `$(versions) CLI ${this.health?.version || "unknown"}` });
+    const picked = await vscode.window.showQuickPick(items, { title: "Devin" });
+    if (picked?.action === "cloud") {
+      await vscode.env.openExternal(vscode.Uri.parse("https://app.devin.ai"));
+    } else if (picked?.action === "login") {
+      await this.authenticate();
+    }
+  }
+
   async showSessionsView(): Promise<void> {
     this.focus();
     this.post({ type: "body", body: "list" });
