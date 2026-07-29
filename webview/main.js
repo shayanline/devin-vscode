@@ -528,7 +528,8 @@ import { renderMarkdown } from "./markdown.js";
     el.thread.appendChild(container);
     const turn = {
       id: "t" + (++turnSeq), mid, container, req, reqBody, reqText, resp, checkpoint,
-      text: text || "", headBefore: lastHead, headAfter: null, editing: false
+      text: text || "", headBefore: lastHead, headAfter: null, editing: false,
+      createdAt: Date.now(), completedAt: null
     };
     turns.push(turn);
     currentTurn = turn;
@@ -544,10 +545,14 @@ import { renderMarkdown } from "./markdown.js";
     lastUserText = text;
   }
 
-  // Request hover toolbar (Edit) + response footer (Copy, Retry) + the
-  // checkpoint row (Restore). Rebuilt whenever caps change.
+  // Request hover toolbar (Copy, Edit) + a persistent response footer toolbar
+  // (Copy, Retry) + a hover timestamp + the checkpoint row (Restore). Rebuilt
+  // whenever caps or busy state change.
   function buildTurnChrome(turn) {
-    // Request toolbar (top-right, on hover): Edit.
+    // A turn is complete once it is no longer the one actively streaming.
+    turn.container.classList.toggle("complete", turn !== currentTurn || !busy);
+
+    // Request toolbar (top-right, on hover): Copy + Edit.
     let reqActions = turn.req.querySelector(".msg-actions");
     if (reqActions) reqActions.remove();
     reqActions = document.createElement("div");
@@ -561,6 +566,17 @@ import { renderMarkdown } from "./markdown.js";
     }
     turn.req.appendChild(reqActions);
 
+    // Request timestamp under the bubble, revealed with the turn hover chrome
+    // (live turns only; replayed history has no known original time).
+    let ts = turn.req.querySelector(".turn-ts");
+    if (ts) ts.remove();
+    if (!turn.replayed && turn.createdAt) {
+      ts = document.createElement("div");
+      ts.className = "turn-ts";
+      ts.textContent = "Sent " + fmtTime(turn.createdAt);
+      turn.req.appendChild(ts);
+    }
+
     // Inline (click-to-edit) affordance on the whole bubble.
     turn.reqBody.onclick = null;
     if (caps.editRequests === "inline" && canEditTurn(turn)) {
@@ -572,6 +588,32 @@ import { renderMarkdown } from "./markdown.js";
 
     // Checkpoint row (Restore Checkpoint) between request and response.
     renderCheckpointRow(turn);
+
+    // Response footer (Copy, Retry) + completion time, persistent under a
+    // completed response, mirroring VS Code's ChatMessageFooter.
+    buildTurnFooter(turn);
+  }
+
+  function buildTurnFooter(turn) {
+    let footer = turn.footer;
+    if (footer) footer.remove();
+    footer = document.createElement("div");
+    footer.className = "chat-footer";
+    footer.appendChild(actionBtn("codicon-copy", "Copy", (b) => {
+      vscode.postMessage({ type: "copyText", text: turn.resp.innerText.trim() });
+      flashCheck(b);
+    }));
+    footer.appendChild(actionBtn("codicon-refresh", "Retry", () => {
+      if (turn.text) vscode.postMessage({ type: "send", text: turn.text, newSession: false });
+    }));
+    if (!turn.replayed && turn.completedAt) {
+      const det = document.createElement("span");
+      det.className = "chat-footer-details";
+      det.textContent = fmtTime(turn.completedAt);
+      footer.appendChild(det);
+    }
+    turn.footer = footer;
+    turn.container.appendChild(footer);
   }
 
   function refreshTurnChrome() {
@@ -723,9 +765,7 @@ import { renderMarkdown } from "./markdown.js";
     text = (text || "").trim();
     if (!text) return;
     const needs = await revertNeedsConfirm(turn);
-    if (needs && !window.confirm("This will remove this request and everything after it, and undo any edits those turns made. Continue?")) {
-      return;
-    }
+    if (needs && !(await confirmDiscard())) return;
     finishEditing(turn);
     trimTurnsFrom(turn);
     if (turn.headBefore == null) {
@@ -741,6 +781,42 @@ import { renderMarkdown } from "./markdown.js";
     for (let i = idx; i < turns.length; i++) {
       turns[i].container.classList.toggle("discardable", on && i !== idx);
     }
+  }
+
+  // In-thread confirmation shown before an edit/restore discards later turns'
+  // file edits, replacing the native confirm() dialog. Resolves true to proceed.
+  // A "Don't ask again" checkbox persists the preference to the host setting.
+  function confirmDiscard() {
+    return new Promise((resolve) => {
+      const box = cwShell();
+      cwTitle(box, "Discard later edits?");
+      const body = cwBody(box);
+      const m = document.createElement("div");
+      m.className = "cw-message";
+      m.textContent = "This removes this request and everything after it, and undoes the file edits those turns made.";
+      body.appendChild(m);
+      const dont = document.createElement("label");
+      dont.className = "cw-dontask";
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      const sp = document.createElement("span");
+      sp.textContent = "Don't ask again";
+      dont.appendChild(cb);
+      dont.appendChild(sp);
+      body.appendChild(dont);
+      const row = cwButtons(box);
+      const done = (ok) => {
+        if (ok && cb.checked) {
+          caps.confirmRemoval = false;
+          vscode.postMessage({ type: "setConfig", key: "editing.confirmEditRequestRemoval", value: false });
+        }
+        box.remove();
+        resolve(ok);
+      };
+      row.appendChild(btn("Discard and resend", "primary", () => done(true)));
+      row.appendChild(btn("Cancel", "secondary", () => done(false)));
+      el.permissionTray.appendChild(box);
+    });
   }
 
   const SHELL_LANGS = new Set(["bash", "sh", "shell", "zsh", "console", "powershell", "ps", "ps1", "bat", "cmd"]);
@@ -788,11 +864,31 @@ import { renderMarkdown } from "./markdown.js";
     renderScheduled = true;
     requestAnimationFrame(() => { renderScheduled = false; renderOpenBlock(); });
   }
+  // Split the reasoning buffer into a chain of steps, one per blank-line
+  // separated block, and render each as a node on the connector timeline. A
+  // fenced code block can legally contain blank lines, so keep the whole
+  // buffer as a single step when one is present rather than tearing it apart.
+  function thinkingSteps(text) {
+    const trimmed = text.replace(/\s+$/, "");
+    if (!trimmed) return [];
+    if (trimmed.includes("```")) return [trimmed];
+    return trimmed.split(/\n{2,}/).map((s) => s.trim()).filter(Boolean);
+  }
+  function renderThinkingItems(b) {
+    const steps = thinkingSteps(b.buffer);
+    b.body.innerHTML = steps
+      .map(
+        (step) =>
+          '<div class="thinking-item"><i class="codicon codicon-circle-small-filled thinking-icon"></i>' +
+          '<div class="thinking-item-content">' + renderMarkdown(step) + "</div></div>"
+      )
+      .join("");
+  }
   function renderOpenBlock() {
     if (!block) return;
     const atBottom = el.thread.scrollHeight - el.thread.scrollTop - el.thread.clientHeight < 60;
     if (block.kind === "thinking") {
-      block.body.innerHTML = renderMarkdown(block.buffer);
+      renderThinkingItems(block);
     } else if (block.kind === "user") {
       if (block.turn) { block.turn.text = block.buffer; block.turn.reqText.innerHTML = renderMarkdown(block.buffer); }
     } else {
@@ -819,6 +915,7 @@ import { renderMarkdown } from "./markdown.js";
     renderOpenBlock();
     if (block.kind === "thinking") {
       if (block.timer) clearInterval(block.timer);
+      if (block.details) block.details.classList.remove("thinking-active");
       const secs = Math.max(1, Math.round((Date.now() - block.start) / 1000));
       if (block.label) block.label.textContent = `Thought for ${secs}s`;
     }
@@ -864,7 +961,7 @@ import { renderMarkdown } from "./markdown.js";
       hideWelcome();
       ensureTurn();
       const details = document.createElement("details");
-      details.className = "thinking";
+      details.className = "thinking thinking-active";
       const summary = document.createElement("summary");
       const chev = document.createElement("i");
       chev.className = "codicon codicon-chevron-right thinking-chevron";
@@ -878,7 +975,7 @@ import { renderMarkdown } from "./markdown.js";
       details.appendChild(summary);
       details.appendChild(bodyEl);
       respTarget().appendChild(details);
-      block = { kind: "thinking", mid, body: bodyEl, label, buffer: "", start: Date.now(), timer: null };
+      block = { kind: "thinking", mid, details, body: bodyEl, label, buffer: "", start: Date.now(), timer: null };
       const tb = block;
       tb.timer = setInterval(() => {
         if (!tb.label) return;
@@ -1156,32 +1253,53 @@ import { renderMarkdown } from "./markdown.js";
 
   // --- Permissions & elicitation -------------------------------------------
 
-  function showPermission(data) {
+  // VS Code chat-confirmation-widget2 shell: a bordered card with an optional
+  // bold title row (border-bottom), a message/body section, and a right-aligned
+  // primary/secondary button row. Used by the permission, elicitation, and
+  // edit-discard confirmations so they all read as one widget.
+  function cwShell() {
     const box = document.createElement("div");
-    box.className = "tray-card";
-    const title = document.createElement("div");
-    title.textContent = data.title || "Devin wants to run a tool";
-    const options = document.createElement("div");
-    options.className = "options";
+    box.className = "cw";
+    return box;
+  }
+  function cwTitle(box, text) {
+    const t = document.createElement("div");
+    t.className = "cw-title";
+    t.textContent = text;
+    box.appendChild(t);
+    return t;
+  }
+  function cwBody(box) {
+    const b = document.createElement("div");
+    b.className = "cw-body";
+    box.appendChild(b);
+    return b;
+  }
+  function cwButtons(box) {
+    const r = document.createElement("div");
+    r.className = "cw-buttons";
+    box.appendChild(r);
+    return r;
+  }
+
+  function showPermission(data) {
+    const box = cwShell();
+    cwTitle(box, data.title || "Devin wants to run a tool");
+    const row = cwButtons(box);
     (data.options || []).forEach((opt) => {
       const reject = /reject/.test(opt.kind || "");
-      options.appendChild(btn(opt.name || opt.optionId, reject ? "secondary" : "primary", () => {
+      row.appendChild(btn(opt.name || opt.optionId, reject ? "secondary" : "primary", () => {
         vscode.postMessage({ type: "permission", requestId: data.requestId, optionId: opt.optionId });
         box.remove();
       }));
     });
-    box.appendChild(title);
-    box.appendChild(options);
     el.permissionTray.appendChild(box);
   }
 
   function showElicitation(data) {
-    const box = document.createElement("div");
-    box.className = "tray-card";
-    const msg = document.createElement("div");
-    msg.className = "tray-title";
-    msg.textContent = data.message || "Devin has a question";
-    box.appendChild(msg);
+    const box = cwShell();
+    cwTitle(box, data.message || "Devin has a question");
+    const body = cwBody(box);
     // Post the response, drop the widget, and leave a Q/A recap in the
     // transcript (like VS Code), so the exchange stays visible.
     const finish = (action, content, recap) => {
@@ -1191,14 +1309,12 @@ import { renderMarkdown } from "./markdown.js";
     };
     if (data.mode === "url" && data.url) {
       const url = document.createElement("div");
-      url.className = "muted";
+      url.className = "cw-message muted";
       url.textContent = data.url;
-      box.appendChild(url);
-      const row = document.createElement("div");
-      row.className = "options";
+      body.appendChild(url);
+      const row = cwButtons(box);
       row.appendChild(btn("Open", "primary", () => finish("accept")));
       row.appendChild(btn("Decline", "secondary", () => finish("decline")));
-      box.appendChild(row);
       el.elicitationTray.appendChild(box);
       return;
     }
@@ -1210,10 +1326,9 @@ import { renderMarkdown } from "./markdown.js";
       required: required.includes(key),
       hideTitle: names.length === 1 && props[key].title === data.message
     }));
-    controls.forEach((c) => box.appendChild(c.el));
+    controls.forEach((c) => body.appendChild(c.el));
 
-    const row = document.createElement("div");
-    row.className = "options elicit-actions";
+    const row = cwButtons(box);
     row.appendChild(btn("Submit", "primary", () => {
       if (!controls.every((c) => c.valid())) {
         box.classList.add("elicit-invalid");
@@ -1229,7 +1344,6 @@ import { renderMarkdown } from "./markdown.js";
     row.appendChild(btn("Cancel", "secondary", () =>
       finish("cancel", undefined, controls.map((c) => ({ title: c.title, answer: "" })))
     ));
-    box.appendChild(row);
     el.elicitationTray.appendChild(box);
   }
 
@@ -1657,12 +1771,19 @@ import { renderMarkdown } from "./markdown.js";
     return b;
   }
   function setBusy(value) {
+    const wasBusy = busy;
     busy = value;
     el.send.classList.toggle("hidden", value);
     el.stop.classList.toggle("hidden", !value);
     // Copilot-style animated indicator on the input instead of a "Working…" label.
     el.inputBox.classList.toggle("busy", value);
-    if (!value) el.status.textContent = "";
+    if (!value) {
+      el.status.textContent = "";
+      // Stamp the just-finished turn's completion time (live turns only).
+      if (wasBusy && currentTurn && !currentTurn.replayed && !currentTurn.completedAt) {
+        currentTurn.completedAt = Date.now();
+      }
+    }
   }
 
   // --- Welcome / empty state ----------------------------------------------
@@ -1766,6 +1887,12 @@ import { renderMarkdown } from "./markdown.js";
     box.appendChild(row);
     respTarget().appendChild(box);
     scrollToBottom();
+  }
+
+  // Short local time (HH:MM) for turn timestamps.
+  function fmtTime(ts) {
+    try { return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
+    catch { return ""; }
   }
 
   // --- Usage / cost --------------------------------------------------------

@@ -227,6 +227,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
         case "saveDefaults":
           await this.saveDefaults(msg.model, msg.mode);
           return;
+        case "setConfig":
+          await this.setConfig(msg.key, msg.value);
+          return;
         case "finishSetup":
           this.post({ type: "ready" });
           return;
@@ -382,6 +385,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     if (typeof mode === "string") {
       await this.cfg().update("defaultMode", mode, vscode.ConfigurationTarget.Global);
     }
+  }
+
+  // Persist a UI preference the webview toggled (e.g. a "don't ask again"
+  // checkbox). Allowlisted so the webview cannot write arbitrary settings.
+  private static readonly WRITABLE_KEYS = new Set(["editing.confirmEditRequestRemoval"]);
+  private async setConfig(key: unknown, value: unknown): Promise<void> {
+    if (typeof key !== "string" || !ChatViewProvider.WRITABLE_KEYS.has(key)) return;
+    await this.cfg().update(key, value, vscode.ConfigurationTarget.Global);
   }
 
   // --- Session management --------------------------------------------------
