@@ -357,8 +357,8 @@ body {
 
 .dd-brand {
   display: block;
-  width: 12px;
-  height: 12px;
+  width: 13px;
+  height: 13px;
   background-color: currentColor;
   -webkit-mask-repeat: no-repeat;
   mask-repeat: no-repeat;
@@ -366,6 +366,14 @@ body {
   mask-position: center;
   -webkit-mask-size: contain;
   mask-size: contain;
+}
+
+/* Claude/OpenAI glyphs fill their whole 24x24 viewBox, so they read larger than
+   Grok (which has built-in padding); shrink them to visually match. */
+.dd-brand--claude,
+.dd-brand--openai {
+  width: 11px;
+  height: 11px;
 }
 
 .dd-item-icon {

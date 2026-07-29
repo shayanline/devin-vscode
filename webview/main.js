@@ -56,20 +56,20 @@ import { renderMarkdown } from "./markdown.js";
   // Icon shown on the model button only (not in the dropdown rows): sparkle for
   // Adaptive, generic chip otherwise. Brand icons can slot in here once
   // provided as SVGs (keyed by family).
-  function brandIconUrl(fam) {
+  function brandIconOf(fam) {
     let icons = {};
     try { icons = JSON.parse(document.body.dataset.modelIcons || "{}"); } catch { icons = {}; }
     const s = ((fam.name || "") + " " + (fam.id || "")).toLowerCase();
-    if (/claude/.test(s)) return icons.claude;
-    if (/gpt|openai/.test(s)) return icons.openai;
-    if (/grok/.test(s)) return icons.grok;
+    if (/claude/.test(s) && icons.claude) return { key: "claude", url: icons.claude };
+    if (/gpt|openai/.test(s) && icons.openai) return { key: "openai", url: icons.openai };
+    if (/grok/.test(s) && icons.grok) return { key: "grok", url: icons.grok };
     return null;
   }
   function modelButtonIcon(familyId) {
     const fam = familyById(familyId);
     if (!fam || isAdaptive(fam)) return "codicon-sparkle";
-    const url = brandIconUrl(fam);
-    return url ? "img:" + url : "codicon-chip";
+    const b = brandIconOf(fam);
+    return b ? `img:${b.key} ${b.url}` : "codicon-chip";
   }
 
   function familyById(id) { return modelFamilies.find((f) => f.id === id); }
@@ -264,8 +264,11 @@ import { renderMarkdown } from "./markdown.js";
       if (ic.indexOf("img:") === 0) {
         // Render brand SVGs as a currentColor mask so they are monochrome and
         // adapt to light/dark automatically (no separate variants needed).
-        const url = ic.slice(4).replace(/"/g, "%22");
-        btnIcon.innerHTML = `<span class="dd-brand" style="-webkit-mask-image:url('${url}');mask-image:url('${url}')"></span>`;
+        const rest = ic.slice(4);
+        const sp = rest.indexOf(" ");
+        const key = rest.slice(0, sp);
+        const url = rest.slice(sp + 1).replace(/"/g, "%22");
+        btnIcon.innerHTML = `<span class="dd-brand dd-brand--${key}" style="-webkit-mask-image:url('${url}');mask-image:url('${url}')"></span>`;
       } else {
         btnIcon.innerHTML = `<i class="codicon ${ic}"></i>`;
       }
