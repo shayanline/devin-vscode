@@ -1158,50 +1158,108 @@ import { renderMarkdown } from "./markdown.js";
     }
     const props = (data.schema && data.schema.properties) || {};
     const names = Object.keys(props);
-    if (names.length === 1 && Array.isArray(props[names[0]].enum)) {
-      const key = names[0];
-      const row = document.createElement("div");
-      row.className = "options";
-      props[key].enum.forEach((v) => row.appendChild(btn(String(v), "primary", () => respond("accept", { [key]: v }))));
-      row.appendChild(btn("Cancel", "secondary", () => respond("cancel")));
-      box.appendChild(row);
-      el.elicitationTray.appendChild(box);
-      return;
-    }
-    const controls = {};
-    names.forEach((key) => {
-      const spec = props[key];
-      const field = document.createElement("div");
-      field.className = "elicit-field";
-      const lab = document.createElement("label");
-      lab.textContent = spec.description || key;
-      field.appendChild(lab);
-      let input;
-      if (Array.isArray(spec.enum)) {
-        input = document.createElement("select");
-        spec.enum.forEach((v) => { const o = document.createElement("option"); o.value = String(v); o.textContent = String(v); input.appendChild(o); });
-      } else if (spec.type === "boolean") { input = document.createElement("input"); input.type = "checkbox"; }
-      else if (spec.type === "number" || spec.type === "integer") { input = document.createElement("input"); input.type = "number"; }
-      else { input = document.createElement("input"); input.type = "text"; }
-      if (spec.default !== undefined && input.type !== "checkbox") input.value = String(spec.default);
-      controls[key] = input;
-      field.appendChild(input);
-      box.appendChild(field);
-    });
-    const row = document.createElement("div");
-    row.className = "options";
-    row.appendChild(btn("Submit", "primary", () => {
-      const content = {};
-      Object.entries(controls).forEach(([k, input]) => {
-        if (input.type === "checkbox") content[k] = input.checked;
-        else if (input.type === "number") content[k] = Number(input.value);
-        else content[k] = input.value;
-      });
-      respond("accept", content);
+    const required = (data.schema && data.schema.required) || [];
+    // Each control returns { value(), valid() } for its question.
+    const controls = names.map((key) => buildElicitQuestion(key, props[key], {
+      allowOther: data.allowOther,
+      required: required.includes(key),
+      hideTitle: names.length === 1 && props[key].title === data.message
     }));
-    row.appendChild(btn("Decline", "secondary", () => respond("decline")));
+    controls.forEach((c) => box.appendChild(c.el));
+
+    const row = document.createElement("div");
+    row.className = "options elicit-actions";
+    const submit = btn("Submit", "primary", () => {
+      if (!controls.every((c) => c.valid())) {
+        box.classList.add("elicit-invalid");
+        return;
+      }
+      const content = {};
+      controls.forEach((c) => { content[c.key] = c.value(); });
+      respond("accept", content);
+    });
+    row.appendChild(submit);
+    row.appendChild(btn("Cancel", "secondary", () => respond("cancel")));
     box.appendChild(row);
     el.elicitationTray.appendChild(box);
+  }
+
+  // Builds one question block for an elicitation form. Handles single-select
+  // (oneOf), multi-select (type array, items.anyOf), an "Other" free-text
+  // choice, and a plain text/number/boolean fallback.
+  function buildElicitQuestion(key, spec, opts) {
+    const field = document.createElement("div");
+    field.className = "elicit-field";
+    if (!opts.hideTitle && (spec.title || spec.description)) {
+      const lab = document.createElement("div");
+      lab.className = "elicit-q";
+      lab.textContent = spec.title || spec.description;
+      field.appendChild(lab);
+    }
+
+    const isMulti = spec.type === "array";
+    const optionDefs = isMulti ? (spec.items && spec.items.anyOf) || [] : spec.oneOf || [];
+
+    // Free text / number / boolean when there are no discrete options.
+    if (!optionDefs.length && !isMulti) {
+      let input;
+      if (spec.type === "boolean") { input = document.createElement("input"); input.type = "checkbox"; }
+      else if (spec.type === "number" || spec.type === "integer") { input = document.createElement("input"); input.type = "number"; }
+      else { input = document.createElement("input"); input.type = "text"; }
+      input.className = "elicit-input";
+      if (spec.default !== undefined && input.type !== "checkbox") input.value = String(spec.default);
+      field.appendChild(input);
+      return {
+        key, el: field,
+        value: () => (input.type === "checkbox" ? input.checked : input.type === "number" ? Number(input.value) : input.value),
+        valid: () => (!opts.required || input.type === "checkbox" || String(input.value).trim() !== "")
+      };
+    }
+
+    const name = "elicit-" + key + "-" + Math.random().toString(36).slice(2, 7);
+    const inputs = [];
+    let otherRadio = null;
+    let otherText = null;
+
+    const addOption = (label, val, isOther) => {
+      const opt = document.createElement("label");
+      opt.className = "elicit-option";
+      const input = document.createElement("input");
+      input.type = isMulti ? "checkbox" : "radio";
+      input.name = name;
+      if (!isOther) input.value = val;
+      const span = document.createElement("span");
+      span.textContent = label;
+      opt.appendChild(input);
+      opt.appendChild(span);
+      if (isOther) {
+        otherRadio = input;
+        otherText = document.createElement("input");
+        otherText.type = "text";
+        otherText.className = "elicit-input elicit-other";
+        otherText.placeholder = "Type your answer";
+        otherText.addEventListener("input", () => { if (otherText.value && !input.checked) input.checked = true; });
+        opt.appendChild(otherText);
+      } else {
+        inputs.push(input);
+      }
+      field.appendChild(opt);
+    };
+
+    optionDefs.forEach((o) => addOption(o.title || String(o.const), o.const, false));
+    if (opts.allowOther) addOption("Other", null, true);
+
+    const selectedValues = () => {
+      const vals = inputs.filter((i) => i.checked).map((i) => i.value);
+      if (otherRadio && otherRadio.checked && otherText.value.trim()) vals.push(otherText.value.trim());
+      return vals;
+    };
+    const minItems = spec.minItems || (opts.required ? 1 : 0);
+    return {
+      key, el: field,
+      value: () => (isMulti ? selectedValues() : selectedValues()[0]),
+      valid: () => (isMulti ? selectedValues().length >= minItems : (!opts.required || selectedValues().length >= 1))
+    };
   }
 
   // --- Working set ---------------------------------------------------------

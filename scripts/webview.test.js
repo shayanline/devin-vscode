@@ -45,6 +45,55 @@ test("live user message renders without a handler error", async () => {
   assert.strictEqual(h.errors().length, 0, "webview handler threw: " + JSON.stringify(h.errors()));
 });
 
+test("elicitation renders oneOf/anyOf options and submits the chosen consts", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({
+    type: "elicitation",
+    requestId: "e1",
+    mode: "form",
+    message: "Focus",
+    allowOther: true,
+    schema: {
+      type: "object",
+      required: ["q0", "q1"],
+      properties: {
+        q0: {
+          type: "string",
+          title: "Focus",
+          description: "Focus",
+          oneOf: [{ const: "A", title: "Option A" }, { const: "B", title: "Option B" }]
+        },
+        q1: {
+          type: "array",
+          title: "Tasks",
+          description: "Tasks",
+          minItems: 1,
+          items: { anyOf: [{ const: "X", title: "Option X" }, { const: "Y", title: "Option Y" }] }
+        }
+      }
+    }
+  });
+  await h.settle(30);
+
+  const tray = h.window.document.getElementById("elicitation-tray");
+  assert.ok(tray.querySelectorAll(".elicit-option").length >= 4, "options should render");
+
+  const radios = [...tray.querySelectorAll('input[type="radio"]')];
+  const checks = [...tray.querySelectorAll('input[type="checkbox"]')];
+  radios.find((r) => r.value === "A").checked = true;
+  checks.find((c) => c.value === "X").checked = true;
+  [...tray.querySelectorAll("button")].find((b) => b.textContent === "Submit").click();
+  await h.settle(10);
+
+  const resp = h.posted.find((m) => m.type === "elicitationResponse");
+  assert.ok(resp, "an elicitationResponse should be posted");
+  assert.strictEqual(resp.action, "accept");
+  assert.deepStrictEqual(resp.content, { q0: "A", q1: ["X"] });
+  assert.strictEqual(h.errors().length, 0);
+});
+
 test("per-turn edit/restore chrome builds while busy (no throw)", async () => {
   const h = createHarness();
   h.replay([{ role: "user", text: "q" }, { role: "assistant", text: "a" }]);

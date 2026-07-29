@@ -37,7 +37,10 @@ function createHarness() {
 
   const posted = [];
   window.acquireVsCodeApi = () => ({
-    postMessage: (m) => posted.push(m),
+    // The real postMessage structured-clones to the host, which also strips the
+    // jsdom realm's prototypes. JSON round-trip mirrors that so assertions with
+    // deepStrictEqual see plain objects/arrays.
+    postMessage: (m) => posted.push(JSON.parse(JSON.stringify(m))),
     getState: () => undefined,
     setState: () => {}
   });

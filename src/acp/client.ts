@@ -95,6 +95,9 @@ export class AcpClient extends EventEmitter {
         return this.host.readTextFile(params as ReadTextFileParams);
       case "fs/write_text_file":
         return this.host.writeTextFile(params as WriteTextFileParams);
+      // Devin sends the Cognition-custom `_session/elicitation`; keep the
+      // standard MCP `elicitation/create` name working too.
+      case "_session/elicitation":
       case "elicitation/create":
         return this.host.createElicitation(params);
       case "terminal/create":
