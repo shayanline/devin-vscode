@@ -386,10 +386,46 @@ body {
 }
 
 .bubble pre {
+  position: relative;
   background: var(--vscode-textCodeBlock-background);
   padding: 8px 10px;
   border-radius: 6px;
   overflow-x: auto;
+}
+
+.code-toolbar {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.bubble pre:hover .code-toolbar,
+.code-toolbar:focus-within {
+  opacity: 1;
+}
+
+.code-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 4px;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  color: var(--vscode-icon-foreground, var(--vscode-foreground));
+  cursor: pointer;
+}
+
+.code-btn:hover {
+  background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
+}
+
+.code-btn .codicon {
+  font-size: 13px;
 }
 
 .bubble code {
