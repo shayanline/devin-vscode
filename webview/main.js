@@ -478,7 +478,7 @@ import { renderMarkdown } from "./markdown.js";
   // target ("checkpoint") is the head captured before it ran (headBefore).
   let lastHead = null;
   // Feature gates from the host (revert capability + settings).
-  let caps = { revert: false, editRequests: "inline", checkpoints: true, showFileChanges: true, confirmRemoval: true };
+  let caps = { revert: false, editRequests: "inline", checkpoints: true, showFileChanges: true, confirmRemoval: true, verbose: true, progressBorder: true, contextUsage: true };
   // Pending revert-preview requests keyed by token.
   const previewWaiters = new Map();
   let previewSeq = 0;
@@ -570,7 +570,7 @@ import { renderMarkdown } from "./markdown.js";
     // (live turns only; replayed history has no known original time).
     let ts = turn.req.querySelector(".turn-ts");
     if (ts) ts.remove();
-    if (!turn.replayed && turn.createdAt) {
+    if (caps.verbose && !turn.replayed && turn.createdAt) {
       ts = document.createElement("div");
       ts.className = "turn-ts";
       ts.textContent = "Sent " + fmtTime(turn.createdAt);
@@ -606,7 +606,7 @@ import { renderMarkdown } from "./markdown.js";
     footer.appendChild(actionBtn("codicon-refresh", "Retry", () => {
       if (turn.text) vscode.postMessage({ type: "send", text: turn.text, newSession: false });
     }));
-    if (!turn.replayed && turn.completedAt) {
+    if (caps.verbose && !turn.replayed && turn.completedAt) {
       const det = document.createElement("span");
       det.className = "chat-footer-details";
       det.textContent = fmtTime(turn.completedAt);
@@ -682,10 +682,33 @@ import { renderMarkdown } from "./markdown.js";
       vscode.postMessage({ type: "revertExecute", head: turn.headBefore });
     }
     trimTurnsFrom(turn);
+    renderRestoredRow();
     el.input.value = turn.text;
     el.input.focus();
     autosize();
     updateSendState();
+  }
+
+  // A "Checkpoint restored" divider left at the rewind point, matching VS Code's
+  // restored-checkpoint row (fading lines + label). Note: there is no redo, as
+  // re-running from a rewind is non-deterministic and ACP exposes no fork.
+  function renderRestoredRow() {
+    const prev = el.thread.querySelector(".restored-row");
+    if (prev) prev.remove();
+    const row = document.createElement("div");
+    row.className = "restored-row";
+    const left = document.createElement("span");
+    left.className = "restored-line";
+    const label = document.createElement("span");
+    label.className = "restored-label";
+    label.textContent = "Checkpoint restored";
+    const right = document.createElement("span");
+    right.className = "restored-line";
+    row.appendChild(left);
+    row.appendChild(label);
+    row.appendChild(right);
+    el.thread.appendChild(row);
+    scrollToBottom();
   }
 
   // Ask the host to preview the revert; returns true if it would discard edits
@@ -1915,14 +1938,24 @@ import { renderMarkdown } from "./markdown.js";
     busy = value;
     el.send.classList.toggle("hidden", value);
     el.stop.classList.toggle("hidden", !value);
-    // Copilot-style animated indicator on the input instead of a "Working…" label.
-    el.inputBox.classList.toggle("busy", value);
+    // Copilot-style animated indicator on the input (gated by progressBorder).
+    el.inputBox.classList.toggle("busy", value && caps.progressBorder);
     if (!value) {
       el.status.textContent = "";
       // Stamp the just-finished turn's completion time (live turns only).
       if (wasBusy && currentTurn && !currentTurn.replayed && !currentTurn.completedAt) {
         currentTurn.completedAt = Date.now();
       }
+    }
+  }
+
+  // Apply UI preference gates (progress border, context usage) when the host
+  // sends capabilities. Timestamps (verbose) are gated in buildTurnChrome.
+  function applyCapPrefs() {
+    el.inputBox.classList.toggle("busy", busy && caps.progressBorder);
+    if (!caps.contextUsage) {
+      el.usage.classList.add("hidden");
+      closeUsagePopup();
     }
   }
 
@@ -2063,6 +2096,7 @@ import { renderMarkdown } from "./markdown.js";
   }
 
   function renderUsage(m) {
+    if (!caps.contextUsage) { el.usage.classList.add("hidden"); lastUsage = null; return; }
     if (!m.used || !m.size) { el.usage.classList.add("hidden"); lastUsage = null; closeUsagePopup(); return; }
     lastUsage = m;
     const pct = Math.round((m.used / m.size) * 100);
@@ -2227,8 +2261,12 @@ import { renderMarkdown } from "./markdown.js";
           editRequests: m.editRequests || caps.editRequests,
           checkpoints: m.checkpoints !== undefined ? !!m.checkpoints : caps.checkpoints,
           showFileChanges: m.showFileChanges !== undefined ? !!m.showFileChanges : caps.showFileChanges,
-          confirmRemoval: m.confirmRemoval !== undefined ? !!m.confirmRemoval : caps.confirmRemoval
+          confirmRemoval: m.confirmRemoval !== undefined ? !!m.confirmRemoval : caps.confirmRemoval,
+          verbose: m.verbose !== undefined ? !!m.verbose : caps.verbose,
+          progressBorder: m.progressBorder !== undefined ? !!m.progressBorder : caps.progressBorder,
+          contextUsage: m.contextUsage !== undefined ? !!m.contextUsage : caps.contextUsage
         });
+        applyCapPrefs();
         refreshTurnChrome();
         break;
       case "turnHead":

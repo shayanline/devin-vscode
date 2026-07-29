@@ -1003,6 +1003,36 @@ body {
   mask-image: linear-gradient(to left, transparent, black);
 }
 
+/* "Checkpoint restored" divider left at a rewind point. */
+.restored-row {
+  display: flex;
+  align-items: center;
+  gap: var(--dv-space-4);
+  width: 100%;
+}
+
+.restored-label {
+  font-size: var(--dv-fs-s);
+  color: var(--dv-dim);
+  white-space: nowrap;
+}
+
+.restored-line {
+  flex: 1;
+  height: 1px;
+  background: var(--vscode-chat-checkpointSeparator, var(--dv-border));
+}
+
+.restored-line:first-child {
+  -webkit-mask-image: linear-gradient(to right, transparent, black);
+  mask-image: linear-gradient(to right, transparent, black);
+}
+
+.restored-line:last-child {
+  -webkit-mask-image: linear-gradient(to left, transparent, black);
+  mask-image: linear-gradient(to left, transparent, black);
+}
+
 .checkpoint-restore,
 .checkpoint-cancel {
   display: inline-flex;
