@@ -1328,6 +1328,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
       vscode.Uri.joinPath(this.context.extensionUri, "media", "codicon", "codicon.css")
     );
     const logoUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "media", "devin-logo.svg"));
+    // The panel markup lives in a standalone file so the webview harness
+    // (scripts/webview-harness.js) can mount the exact same DOM in tests.
+    const appBody = fs.readFileSync(
+      vscode.Uri.joinPath(this.context.extensionUri, "media", "webview-body.html").fsPath,
+      "utf8"
+    );
     const modelIcon = (f: string) =>
       webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "media", "models", f)).toString();
     const modelIcons = JSON.stringify({
@@ -1354,47 +1360,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
   <title>Devin</title>
 </head>
 <body data-logo="${logoUri}" data-model-icons="${modelIcons}">
-  <div id="app">
-    <div id="setup" class="hidden"></div>
-
-    <div id="chat" class="hidden">
-      <div id="chat-header">
-        <button id="history-btn" class="icon-btn" title="Back to sessions"><i class="codicon codicon-arrow-left"></i></button>
-        <button id="title-btn" class="title-btn"><span id="chat-title">Chat</span><i class="codicon codicon-chevron-down title-chev"></i></button>
-        <span class="spacer"></span>
-        <span id="status"></span>
-      </div>
-
-      <div id="body">
-        <div id="sessions-list" class="hidden"></div>
-        <div id="thread"></div>
-      </div>
-
-      <div id="composer">
-        <div id="working-set" class="hidden"></div>
-        <div id="elicitation-tray"></div>
-        <div id="permission-tray"></div>
-        <div id="autocomplete" class="hidden"></div>
-        <div id="input-box">
-          <div id="attachments" class="hidden"></div>
-          <textarea id="input" rows="1" placeholder="Ask Devin"></textarea>
-          <div id="toolbar">
-            <div class="toolbar-left">
-              <button id="attach" class="tool-ctl" title="Add context: files, selection, images (or type @)"><i class="codicon codicon-add"></i></button>
-              <div id="mode-dd" class="dd"></div>
-              <div id="model-dd" class="dd"></div>
-              <div id="thinking-dd" class="dd hidden"></div>
-            </div>
-            <div class="toolbar-right">
-              <button id="usage" class="usage-ring hidden" title=""></button>
-              <button id="send" class="send-btn" title="Send (Enter)" disabled><i class="codicon codicon-newline"></i></button>
-              <button id="stop" class="send-btn stop hidden" title="Stop"><i class="codicon codicon-primitive-square"></i></button>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
+  ${appBody}
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;
