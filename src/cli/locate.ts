@@ -78,18 +78,29 @@ function commonLocations(): string[] {
   ];
 }
 
+// Resolve a binary by scanning the (already login-shell-resolved) PATH
+// directly, instead of spawning another interactive login shell, which on a
+// heavy shell profile can add several seconds to startup.
 function which(binary: string, env: NodeJS.ProcessEnv): Promise<string | undefined> {
-  return new Promise((resolve) => {
-    const isWin = process.platform === "win32";
-    const bin = isWin ? "where" : env.SHELL || "/bin/zsh";
-    const args = isWin ? [binary] : ["-lic", `command -v ${binary}`];
-    execFile(bin, args, { timeout: 5000, env, windowsHide: true }, (_err, stdout) => {
-      const line = String(stdout || "")
-        .split(/\r?\n/)
-        .find((l) => l.trim().length > 0);
-      resolve(line && line.trim() ? line.trim() : undefined);
-    });
-  });
+  const isWin = process.platform === "win32";
+  const exts = isWin ? (env.PATHEXT || ".EXE;.CMD;.BAT").split(";") : [""];
+  const dirs = String(env.PATH || process.env.PATH || "").split(isWin ? ";" : ":");
+  for (const dir of dirs) {
+    if (!dir) {
+      continue;
+    }
+    for (const ext of exts) {
+      const candidate = path.join(dir, binary + ext);
+      try {
+        if (fs.existsSync(candidate)) {
+          return Promise.resolve(candidate);
+        }
+      } catch {
+        // ignore unreadable dirs
+      }
+    }
+  }
+  return Promise.resolve(undefined);
 }
 
 // Resolves the devin binary using: explicit setting, login-shell PATH lookup,
@@ -128,11 +139,15 @@ export async function checkHealth(setting: string): Promise<CliHealth> {
   if (!resolved) {
     return { path: setting || "devin", found: false, error: "Devin CLI not found" };
   }
-  const version = await run(resolved, ["--version"], env);
+  // Version and auth status are independent; run them together to save a
+  // whole CLI round-trip on startup.
+  const [version, auth] = await Promise.all([
+    run(resolved, ["--version"], env),
+    run(resolved, ["auth", "status"], env)
+  ]);
   if (!version.ok) {
     return { path: resolved, found: false, error: version.out || "Failed to run devin --version" };
   }
-  const auth = await run(resolved, ["auth", "status"], env);
   const loggedIn = /logged in/i.test(auth.out);
   const account = loggedIn ? parseAccount(auth.out) : undefined;
   return { path: resolved, found: true, version: cleanVersion(version.out), loggedIn, account };
