@@ -71,6 +71,7 @@ Status legend:
 | `10-settings-commands.md` | Settings, commands, keybindings, context menus, status bar, walkthrough |
 | `11-out-of-scope.md` | Copilot features that are N/A for Devin |
 | `12-backlog.md` | Prioritised implementation proposal |
+| `13-vscode-core-ux-parity.md` | **True VS Code core chat UI/UX parity**: the turn model, edit-in-place, checkpoints/restore, undo/redo, fork, and layout. Re-analysed against `microsoft/vscode` core (not the Copilot extension). Start here for edit/checkpoint/undo/fork work. |
 
 ## Source snapshot
 
