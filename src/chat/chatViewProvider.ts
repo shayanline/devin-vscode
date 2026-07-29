@@ -242,9 +242,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
 
   private async onWebviewReady(): Promise<void> {
     this.post({ type: "workspace", name: this.workspaceName() });
+    // The CLI health check spawns a login shell and calls the CLI, which can
+    // take several seconds. Paint the chat shell immediately using the last
+    // known readiness so the sidebar is never blank while it runs; the check
+    // below then reconciles (switching to setup only if the CLI is missing or
+    // signed out).
+    if (this.context.globalState.get<boolean>(ChatViewProvider.READY_HINT, false)) {
+      this.post({ type: "ready" });
+      void this.publishInitialOptions();
+    }
     await this.runHealthCheck();
     await this.pushReadiness();
   }
+
+  private static readonly READY_HINT = "devin.readyHint.v1";
 
   async runSetup(): Promise<void> {
     this.focus();
@@ -254,6 +265,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
 
   // Decides whether the webview shows the setup panel or the chat.
   private async pushReadiness(): Promise<void> {
+    // Remember readiness so the next launch can paint the chat shell instantly.
+    void this.context.globalState.update(ChatViewProvider.READY_HINT, this.isReady());
     if (this.isReady()) {
       this.post({ type: "ready" });
       void this.publishInitialOptions();
