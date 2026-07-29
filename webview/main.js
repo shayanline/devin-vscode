@@ -951,6 +951,27 @@ import { renderMarkdown } from "./markdown.js";
     }
   }
 
+  // VS Code shows a tool line as a normal-weight verb followed by a dimmed
+  // detail (e.g. "Read" + " src/auth/token.ts"). Devin gives one title string,
+  // so split on the first space.
+  function setToolLabel(labelEl, title) {
+    const t = String(title || "Tool");
+    const sp = t.indexOf(" ");
+    const verb = sp === -1 ? t : t.slice(0, sp);
+    const rest = sp === -1 ? "" : t.slice(sp);
+    labelEl.textContent = "";
+    const v = document.createElement("span");
+    v.className = "tool-verb";
+    v.textContent = verb;
+    labelEl.appendChild(v);
+    if (rest) {
+      const r = document.createElement("span");
+      r.className = "tool-detail";
+      r.textContent = rest;
+      labelEl.appendChild(r);
+    }
+  }
+
   function upsertTool(m) {
     let entry = toolEls.get(m.id);
     if (!entry) {
@@ -992,7 +1013,7 @@ import { renderMarkdown } from "./markdown.js";
     entry.node.className = "tool " + (d.status || "pending");
     entry.kindIcon.className = "codicon tool-kind " + (TOOL_KIND_ICONS[d.kind] || TOOL_KIND_ICONS.other);
     entry.statEl.className = "codicon tool-status " + statusIcon(d.status);
-    entry.label.textContent = d.title || "Tool";
+    setToolLabel(entry.label, d.title);
     renderToolBody(entry);
     // Inline progress: reflect the running tool in the header status.
     if (d.status === "in_progress" && d.title) {
@@ -1137,11 +1158,15 @@ import { renderMarkdown } from "./markdown.js";
     const box = document.createElement("div");
     box.className = "tray-card";
     const msg = document.createElement("div");
+    msg.className = "tray-title";
     msg.textContent = data.message || "Devin has a question";
     box.appendChild(msg);
-    const respond = (action, content) => {
+    // Post the response, drop the widget, and leave a Q/A recap in the
+    // transcript (like VS Code), so the exchange stays visible.
+    const finish = (action, content, recap) => {
       vscode.postMessage({ type: "elicitationResponse", requestId: data.requestId, action, content });
       box.remove();
+      if (recap && recap.length) renderQaRecap(recap);
     };
     if (data.mode === "url" && data.url) {
       const url = document.createElement("div");
@@ -1150,8 +1175,8 @@ import { renderMarkdown } from "./markdown.js";
       box.appendChild(url);
       const row = document.createElement("div");
       row.className = "options";
-      row.appendChild(btn("Open", "primary", () => respond("accept")));
-      row.appendChild(btn("Decline", "secondary", () => respond("decline")));
+      row.appendChild(btn("Open", "primary", () => finish("accept")));
+      row.appendChild(btn("Decline", "secondary", () => finish("decline")));
       box.appendChild(row);
       el.elicitationTray.appendChild(box);
       return;
@@ -1159,7 +1184,6 @@ import { renderMarkdown } from "./markdown.js";
     const props = (data.schema && data.schema.properties) || {};
     const names = Object.keys(props);
     const required = (data.schema && data.schema.required) || [];
-    // Each control returns { value(), valid() } for its question.
     const controls = names.map((key) => buildElicitQuestion(key, props[key], {
       allowOther: data.allowOther,
       required: required.includes(key),
@@ -1169,31 +1193,37 @@ import { renderMarkdown } from "./markdown.js";
 
     const row = document.createElement("div");
     row.className = "options elicit-actions";
-    const submit = btn("Submit", "primary", () => {
+    row.appendChild(btn("Submit", "primary", () => {
       if (!controls.every((c) => c.valid())) {
         box.classList.add("elicit-invalid");
         return;
       }
       const content = {};
-      controls.forEach((c) => { content[c.key] = c.value(); });
-      respond("accept", content);
-    });
-    row.appendChild(submit);
-    row.appendChild(btn("Cancel", "secondary", () => respond("cancel")));
+      const recap = controls.map((c) => {
+        content[c.key] = c.value();
+        return { title: c.title, answer: c.answerText() };
+      });
+      finish("accept", content, recap);
+    }));
+    row.appendChild(btn("Cancel", "secondary", () =>
+      finish("cancel", undefined, controls.map((c) => ({ title: c.title, answer: "" })))
+    ));
     box.appendChild(row);
     el.elicitationTray.appendChild(box);
   }
 
-  // Builds one question block for an elicitation form. Handles single-select
-  // (oneOf), multi-select (type array, items.anyOf), an "Other" free-text
-  // choice, and a plain text/number/boolean fallback.
+  // Builds one question block for an elicitation form. Returns the element plus
+  // value()/valid() for submission and title/answerText() for the recap.
+  // Handles single-select (oneOf), multi-select (array, items.anyOf), an
+  // "Other" free-text choice, and a plain text/number/boolean fallback.
   function buildElicitQuestion(key, spec, opts) {
+    const title = spec.title || spec.description || key;
     const field = document.createElement("div");
     field.className = "elicit-field";
     if (!opts.hideTitle && (spec.title || spec.description)) {
       const lab = document.createElement("div");
       lab.className = "elicit-q";
-      lab.textContent = spec.title || spec.description;
+      lab.textContent = title;
       field.appendChild(lab);
     }
 
@@ -1209,15 +1239,17 @@ import { renderMarkdown } from "./markdown.js";
       input.className = "elicit-input";
       if (spec.default !== undefined && input.type !== "checkbox") input.value = String(spec.default);
       field.appendChild(input);
+      const val = () => (input.type === "checkbox" ? input.checked : input.type === "number" ? Number(input.value) : input.value);
       return {
-        key, el: field,
-        value: () => (input.type === "checkbox" ? input.checked : input.type === "number" ? Number(input.value) : input.value),
-        valid: () => (!opts.required || input.type === "checkbox" || String(input.value).trim() !== "")
+        key, el: field, title,
+        value: val,
+        valid: () => (!opts.required || input.type === "checkbox" || String(input.value).trim() !== ""),
+        answerText: () => (input.type === "checkbox" ? (input.checked ? "Yes" : "No") : String(input.value))
       };
     }
 
     const name = "elicit-" + key + "-" + Math.random().toString(36).slice(2, 7);
-    const inputs = [];
+    const choices = []; // { input, label, val } for the fixed options
     let otherRadio = null;
     let otherText = null;
 
@@ -1241,7 +1273,7 @@ import { renderMarkdown } from "./markdown.js";
         otherText.addEventListener("input", () => { if (otherText.value && !input.checked) input.checked = true; });
         opt.appendChild(otherText);
       } else {
-        inputs.push(input);
+        choices.push({ input, label, val });
       }
       field.appendChild(opt);
     };
@@ -1249,17 +1281,52 @@ import { renderMarkdown } from "./markdown.js";
     optionDefs.forEach((o) => addOption(o.title || String(o.const), o.const, false));
     if (opts.allowOther) addOption("Other", null, true);
 
+    const otherValue = () => (otherRadio && otherRadio.checked && otherText.value.trim() ? otherText.value.trim() : null);
     const selectedValues = () => {
-      const vals = inputs.filter((i) => i.checked).map((i) => i.value);
-      if (otherRadio && otherRadio.checked && otherText.value.trim()) vals.push(otherText.value.trim());
+      const vals = choices.filter((c) => c.input.checked).map((c) => c.val);
+      const o = otherValue();
+      if (o) vals.push(o);
       return vals;
+    };
+    const selectedLabels = () => {
+      const labels = choices.filter((c) => c.input.checked).map((c) => c.label);
+      const o = otherValue();
+      if (o) labels.push(o);
+      return labels;
     };
     const minItems = spec.minItems || (opts.required ? 1 : 0);
     return {
-      key, el: field,
+      key, el: field, title,
       value: () => (isMulti ? selectedValues() : selectedValues()[0]),
-      valid: () => (isMulti ? selectedValues().length >= minItems : (!opts.required || selectedValues().length >= 1))
+      valid: () => (isMulti ? selectedValues().length >= minItems : (!opts.required || selectedValues().length >= 1)),
+      answerText: () => selectedLabels().join(", ")
     };
+  }
+
+  // Persistent Q/A block left in the transcript after a question is answered,
+  // one card per question (VS Code style): dimmed "Q:" and bold "A:", or an
+  // italic "Skipped" when nothing was chosen.
+  function renderQaRecap(items) {
+    ensureTurn();
+    items.forEach((it) => {
+      const box = document.createElement("div");
+      box.className = "qa-recap";
+      const q = document.createElement("div");
+      q.className = "qa-q";
+      q.textContent = "Q: " + it.title;
+      box.appendChild(q);
+      const a = document.createElement("div");
+      if (it.answer && String(it.answer).trim()) {
+        a.className = "qa-a";
+        a.textContent = "A: " + it.answer;
+      } else {
+        a.className = "qa-skipped";
+        a.textContent = "Skipped";
+      }
+      box.appendChild(a);
+      respTarget().appendChild(box);
+    });
+    scrollToBottom();
   }
 
   // --- Working set ---------------------------------------------------------
