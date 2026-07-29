@@ -1132,7 +1132,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
       editRequests: this.cfg().get<string>("editRequests", "inline"),
       checkpoints: this.cfg().get<boolean>("checkpoints.enabled", true),
       showFileChanges: this.cfg().get<boolean>("checkpoints.showFileChanges", true),
-      confirmRemoval: this.cfg().get<boolean>("editing.confirmEditRequestRemoval", true)
+      confirmRemoval: this.cfg().get<boolean>("editing.confirmEditRequestRemoval", true),
+      verbose: this.cfg().get<boolean>("verbose", true),
+      progressBorder: this.cfg().get<boolean>("progressBorder.enabled", true),
+      contextUsage: this.cfg().get<boolean>("contextUsage.enabled", true)
     });
   }
 

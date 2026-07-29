@@ -268,10 +268,34 @@ Playwright preview screenshot before moving on.
   Deferred: the full set of incremental-render variants (fade/rise/blur/slide)
   and `collapseCompletedResponses` (collapsing intermediate work in a finished
   response), which are larger and lower value. (§2.3)
-- **Phase 8, behaviour gaps + settings.** Conversational undo/redo via ACP
-  revert, the "Checkpoint Restored" row, and the `devin.*` settings that map to
-  VS Code keys. (§2.6, §2.7)
+- **Phase 8, behaviour gaps + settings. ✅ Done (v0.6.22).** Added the `devin.*`
+  settings that map to VS Code keys and wired them end to end (host
+  `postCapabilities` + webview gates): `devin.verbose` (hover timestamps),
+  `devin.progressBorder.enabled` (input working border), and
+  `devin.contextUsage.enabled` (usage ring). Added a **"Checkpoint restored"**
+  divider row (`renderRestoredRow`) at the rewind point after a restore.
+  Conversational **undo** already exists as restore/edit (both revert to a
+  turn's head over ACP). **Redo is not implementable**: re-running from a
+  rewind is non-deterministic and ACP exposes no fork or forward step
+  (`-32601`), the same limitation that blocks Fork. Documented rather than
+  faked. (§2.6, §2.7)
 
-Out of scope / not applicable: thumbs feedback (no backend), follow-up chips
-(ACP sends none), fork (ACP blocked, `-32601`), Copilot-specific parts (public
-code citations, PR/extensions widgets), the avatar/username header (decision 1).
+---
+
+## 5. Status summary
+
+All eight phases are shipped (`v0.6.22`). Remaining divergences are the ones
+that need agent/ACP support Devin does not expose today, each noted inline
+above: the tool **risk badge** (no risk level over ACP), standalone
+**warning/notification** rows (no warning part), the diff-fill sweep and the
+full incremental-render variant set (cosmetic), `collapseCompletedResponses`,
+and **redo / fork** (non-deterministic, `-32601`). Everything else tracks the
+VS Code core chat look and behaviour.
+
+---
+
+## 6. Out of scope / not applicable
+
+Thumbs feedback (no backend), follow-up chips (ACP sends none), fork (ACP
+blocked, `-32601`), Copilot-specific parts (public code citations,
+PR/extensions widgets), and the avatar/username header (decision 1).

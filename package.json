@@ -2,7 +2,7 @@
   "name": "devin-vscode",
   "displayName": "Devin for VS Code",
   "description": "A native chat panel for the Devin CLI, powered by the Agent Client Protocol. Streaming replies, per workspace sessions, and trackable diffs.",
-  "version": "0.6.21",
+  "version": "0.6.22",
   "publisher": "shayanline",
   "author": "Shayan Khaksar",
   "license": "MIT",
@@ -238,6 +238,21 @@
           "type": "boolean",
           "default": true,
           "description": "Ask for confirmation before an edit or restore discards later turns that made file edits."
+        },
+        "devin.verbose": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show request and response timestamps on hover in the transcript."
+        },
+        "devin.progressBorder.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Animate a highlight around the input while Devin is working."
+        },
+        "devin.contextUsage.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the context-window usage indicator in the input toolbar."
         },
         "devin.extraArgs": {
           "type": "array",
