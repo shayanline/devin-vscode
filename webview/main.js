@@ -18,7 +18,6 @@ import { renderMarkdown } from "./markdown.js";
     send: $("send"),
     stop: $("stop"),
     attach: $("attach"),
-    mention: $("mention"),
     modeDD: $("mode-dd"),
     modelDD: $("model-dd"),
     permissionTray: $("permission-tray"),
@@ -43,7 +42,7 @@ import { renderMarkdown } from "./markdown.js";
   let lastUserText = "";
 
   const modeDropdown = createDropdown(el.modeDD, (v) => vscode.postMessage({ type: "setMode", mode: v }));
-  const modelDropdown = createDropdown(el.modelDD, (v) => vscode.postMessage({ type: "setModel", model: v }));
+  const modelDropdown = createDropdown(el.modelDD, (v) => vscode.postMessage({ type: "setModel", model: v }), { staticIcon: "codicon-sparkle" });
 
   // --- View state ----------------------------------------------------------
 
@@ -91,14 +90,6 @@ import { renderMarkdown } from "./markdown.js";
   el.send.addEventListener("click", send);
   el.stop.addEventListener("click", () => vscode.postMessage({ type: "cancel" }));
   el.attach.addEventListener("click", () => vscode.postMessage({ type: "addContext" }));
-  el.mention.addEventListener("click", () => {
-    const v = el.input.value;
-    const needsSpace = v.length && !/\s$/.test(v);
-    el.input.value = v + (needsSpace ? " @" : "@");
-    el.input.focus();
-    autosize();
-    updateAutocomplete();
-  });
 
   el.input.addEventListener("keydown", (e) => {
     if (ac) {
@@ -156,15 +147,30 @@ import { renderMarkdown } from "./markdown.js";
 
   // --- Dropdown component (VS Code style) ----------------------------------
 
-  function createDropdown(container, onSelect) {
+  function createDropdown(container, onSelect, opts) {
+    opts = opts || {};
     const btn = document.createElement("button");
     btn.className = "dd-btn";
+    const btnIcon = document.createElement("i");
+    btnIcon.className = "codicon dd-icon";
     const label = document.createElement("span");
     label.className = "dd-label";
     const chev = document.createElement("i");
     chev.className = "codicon codicon-chevron-down";
+    btn.appendChild(btnIcon);
     btn.appendChild(label);
     btn.appendChild(chev);
+
+    function iconFor(v) {
+      if (opts.staticIcon) return opts.staticIcon;
+      const it = items.find((x) => x.value === v);
+      return it && it.icon ? it.icon : "";
+    }
+    function updateBtnIcon() {
+      const ic = iconFor(current);
+      btnIcon.className = "codicon dd-icon " + ic;
+      btnIcon.classList.toggle("hidden", !ic);
+    }
     const menu = document.createElement("div");
     menu.className = "dd-menu hidden";
     container.appendChild(btn);
@@ -185,14 +191,20 @@ import { renderMarkdown } from "./markdown.js";
       const check = document.createElement("span");
       check.className = "dd-check";
       if (it.value === current) check.innerHTML = '<i class="codicon codicon-check"></i>';
+      row.appendChild(check);
+      if (it.icon) {
+        const ic = document.createElement("i");
+        ic.className = "codicon dd-item-icon " + it.icon;
+        row.appendChild(ic);
+      }
       const txt = document.createElement("span");
       txt.textContent = it.name;
-      row.appendChild(check);
       row.appendChild(txt);
       row.addEventListener("click", (ev) => {
         ev.stopPropagation();
         current = it.value;
         label.textContent = labelFor(current);
+        updateBtnIcon();
         close();
         onSelect(it.value);
       });
@@ -255,9 +267,10 @@ import { renderMarkdown } from "./markdown.js";
         items = newItems || [];
         current = newCurrent || (items[0] && items[0].value) || "";
         label.textContent = labelFor(current);
+        updateBtnIcon();
         container.classList.toggle("hidden", items.length === 0);
       },
-      setCurrent(v) { current = v; label.textContent = labelFor(v); }
+      setCurrent(v) { current = v; label.textContent = labelFor(v); updateBtnIcon(); }
     };
   }
 
