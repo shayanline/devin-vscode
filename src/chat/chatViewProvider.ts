@@ -119,6 +119,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
         case "cancel":
           this.cancel();
           return;
+        case "webviewError":
+          this.log(`[webview-error] in "${msg.where}": ${msg.message}`);
+          return;
         case "revertPreview":
           await this.handleRevertPreview(Number(msg.head), msg.token);
           return;
@@ -523,24 +526,35 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
       return;
     }
     const folders = this.folders();
-    let sessions: DevinSession[];
+    let sessions: DevinSession[] = [];
     if (!force && this.sessionsCache && Date.now() - this.sessionsCache.at < 4000) {
       sessions = this.sessionsCache.sessions;
     } else {
       this.post({ type: "sessionsLoading" });
-      const { sessions: live, prunedIds } = await listSessions({
-        cliPath: this.resolvedCli || "devin",
-        env: this.env,
-        folders,
-        trackedIds: this.store.ids(),
-        cwdById: this.store.cwds()
-      });
-      // Drop tracked ids Devin no longer knows about so stale rows self-heal.
-      for (const id of prunedIds) {
-        this.store.remove(id);
+      // Never let a slow/failed `devin list` leave the list stuck on its
+      // spinner: cap the wait and fall back to the cache (or empty).
+      try {
+        const listing = listSessions({
+          cliPath: this.resolvedCli || "devin",
+          env: this.env,
+          folders,
+          trackedIds: this.store.ids(),
+          cwdById: this.store.cwds()
+        });
+        const timeout = new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("devin list timed out")), 20000)
+        );
+        const { sessions: live, prunedIds } = await Promise.race([listing, timeout]);
+        // Drop tracked ids Devin no longer knows about so stale rows self-heal.
+        for (const id of prunedIds) {
+          this.store.remove(id);
+        }
+        sessions = live;
+        this.sessionsCache = { at: Date.now(), sessions };
+      } catch (err) {
+        this.log(`[list-failed] ${err instanceof Error ? err.message : String(err)}`);
+        sessions = this.sessionsCache?.sessions ?? [];
       }
-      sessions = live;
-      this.sessionsCache = { at: Date.now(), sessions };
     }
     // Persist titles, and fill any tracked session whose title we only know
     // from the cache (e.g. its directory is not currently listed).
