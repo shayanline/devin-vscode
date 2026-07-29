@@ -560,11 +560,11 @@ import { renderMarkdown } from "./markdown.js";
     }
     turn.req.appendChild(reqActions);
 
-    // Inline (click-to-edit) affordance.
-    turn.reqText.onclick = null;
+    // Inline (click-to-edit) affordance on the whole bubble.
+    turn.reqBody.onclick = null;
     if (caps.editRequests === "inline" && canEditTurn(turn)) {
       turn.req.classList.add("editable-inline");
-      turn.reqText.onclick = () => startEditing(turn);
+      turn.reqBody.onclick = () => startEditing(turn);
     } else {
       turn.req.classList.remove("editable-inline");
     }
@@ -883,7 +883,13 @@ import { renderMarkdown } from "./markdown.js";
     }
     block.buffer += text;
     lastUserText = block.buffer;
-    scheduleRender();
+    // Render the request text synchronously so a finalize between replayed
+    // chunks can never leave the bubble as an empty placeholder.
+    if (block.turn) {
+      block.turn.text = block.buffer;
+      block.turn.reqText.innerHTML = renderMarkdown(block.buffer);
+    }
+    scrollToBottom();
   }
 
   // A user turn we already have in full (live echo from the host).
@@ -1714,6 +1720,21 @@ import { renderMarkdown } from "./markdown.js";
 
   window.addEventListener("message", (event) => {
     const m = event.data;
+    try {
+      handleMessage(m);
+    } catch (err) {
+      // A bug in one handler must never wedge the whole UI (e.g. leaving the
+      // sessions list stuck on its loading spinner). Surface it and recover.
+      try { console.error("[devin] message handler error", m && m.type, err); } catch {}
+      try { vscode.postMessage({ type: "webviewError", where: m && m.type, message: String(err && err.stack || err) }); } catch {}
+      // If the sessions list was mid-load, clear the spinner so it is usable.
+      if (m && (m.type === "sessions" || m.type === "sessionsLoading") && el.sessionsList) {
+        try { renderSessions(lastSessions, lastActiveId, lastFolders); } catch { el.sessionsList.innerHTML = '<div class="sessions-empty-sm">Could not load sessions.</div>'; }
+      }
+    }
+  });
+
+  function handleMessage(m) {
     switch (m.type) {
       case "setup": renderSetup(m.health || {}); break;
       case "ready": setView("chat"); setBody("list"); break;
@@ -1807,7 +1828,7 @@ import { renderMarkdown } from "./markdown.js";
       }
       default: break;
     }
-  });
+  }
 
   vscode.postMessage({ type: "ready" });
 })();

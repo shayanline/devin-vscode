@@ -763,19 +763,41 @@ body {
   gap: 6px;
 }
 
+/* Right-aligned, content-hugging request bubble (matches the VS Code /
+   Copilot chat panel: user on the right, assistant full-width). */
 .turn-request {
   position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
 }
 
 .turn-request .req-body {
-  background: var(--vscode-chat-requestBubbleBackground, var(--vscode-chat-requestBackground, rgba(127, 127, 127, 0.1)));
+  background: var(--vscode-chat-requestBubbleBackground, var(--vscode-chat-requestBackground, rgba(127, 127, 127, 0.12)));
   border: 1px solid var(--vscode-chat-requestBorder, transparent);
-  border-radius: 6px;
+  border-radius: var(--vscode-cornerRadius-xLarge, 16px);
   padding: 8px 12px;
+  width: fit-content;
+  max-width: 90%;
+  margin-left: auto;
 }
 
-.turn-request.editable-inline .req-text {
+.turn-request.editable-inline .req-body {
   cursor: text;
+}
+
+.turn-request.editable-inline .req-body:hover {
+  background: var(--vscode-chat-requestBubbleHoverBackground, var(--vscode-chat-requestBubbleBackground, rgba(127, 127, 127, 0.16)));
+}
+
+/* While editing in place, expand to full width for comfortable typing. */
+.turn-request.editing {
+  align-items: stretch;
+}
+
+.turn-request.editing .req-body {
+  width: 100%;
+  max-width: 100%;
 }
 
 .turn.headless .turn-request {
