@@ -1,5 +1,32 @@
 :root {
   color-scheme: light dark;
+
+  /* Design tokens for the chat transcript, our own scale aligned to the
+     VS Code chat conventions (radii, spacing, and em-based body sizes on a
+     13px base). Components reference these rather than hard-coded values. */
+  --dv-radius-sm: 4px;
+  --dv-radius-md: 6px;
+  --dv-radius-lg: 8px;
+  --dv-radius-xl: 16px;
+
+  --dv-space-1: 2px;
+  --dv-space-2: 4px;
+  --dv-space-3: 6px;
+  --dv-space-4: 8px;
+  --dv-space-5: 10px;
+  --dv-space-6: 12px;
+  --dv-space-8: 16px;
+
+  --dv-fs-xs: 0.846em;
+  --dv-fs-s: 0.923em;
+  --dv-fs-m: 1em;
+  --dv-fs-l: 1.077em;
+  --dv-fs-xl: 1.231em;
+  --dv-fs-xxl: 1.538em;
+
+  /* Structural border used across cards/tables/connectors. */
+  --dv-border: var(--vscode-chat-requestBorder, var(--vscode-panel-border));
+  --dv-dim: var(--vscode-descriptionForeground, #9d9d9d);
 }
 
 * {
@@ -1128,9 +1155,13 @@ body {
 }
 
 .bubble :not(pre) > code {
-  background: var(--vscode-textCodeBlock-background);
-  padding: 1px 4px;
-  border-radius: 3px;
+  font-size: var(--dv-fs-xs);
+  color: var(--vscode-textPreformat-foreground, var(--vscode-foreground));
+  background: var(--vscode-textPreformat-background, var(--vscode-textCodeBlock-background));
+  border: 1px solid var(--vscode-textPreformat-border, transparent);
+  padding: 1px 3px;
+  border-radius: var(--dv-radius-sm);
+  white-space: pre-wrap;
 }
 
 .bubble h1,
