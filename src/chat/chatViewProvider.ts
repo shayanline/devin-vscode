@@ -122,6 +122,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
         case "openDiff":
           await this.changes.openDiff(String(msg.path || ""));
           return;
+        case "openFile":
+          await this.openFile(String(msg.path || ""), typeof msg.line === "number" ? msg.line : undefined);
+          return;
         case "acceptFile":
           this.changes.accept(String(msg.path || ""));
           return;
@@ -614,6 +617,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     await this.addFile(chosen.id);
   }
 
+  private async openFile(fsPath: string, line?: number): Promise<void> {
+    if (!fsPath) {
+      return;
+    }
+    try {
+      const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(fsPath));
+      const options: vscode.TextDocumentShowOptions = {};
+      if (typeof line === "number" && line > 0) {
+        const pos = new vscode.Position(line - 1, 0);
+        options.selection = new vscode.Range(pos, pos);
+      }
+      await vscode.window.showTextDocument(doc, options);
+    } catch (err) {
+      this.log(`[open-file-failed] ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   private async addFile(fsPath: string): Promise<void> {
     try {
       const raw = await fs.promises.readFile(fsPath, "utf8");
@@ -773,11 +793,29 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
         this.post({ type: "plan", entries: u.entries });
         return;
       case "tool_call":
-        this.post({ type: "toolCall", id: u.toolCallId, title: u.title, kind: u.kind, status: u.status || "pending" });
+        this.post({
+          type: "toolCall",
+          id: u.toolCallId,
+          title: u.title,
+          kind: u.kind,
+          status: u.status || "pending",
+          rawInput: u.rawInput,
+          content: normalizeToolContent(u.content),
+          locations: normalizeLocations(u.locations)
+        });
         this.recordDiffs(u);
         return;
       case "tool_call_update":
-        this.post({ type: "toolCallUpdate", id: u.toolCallId, title: u.title, status: u.status });
+        this.post({
+          type: "toolCallUpdate",
+          id: u.toolCallId,
+          title: u.title,
+          kind: u.kind,
+          status: u.status,
+          rawInput: u.rawInput,
+          content: normalizeToolContent(u.content),
+          locations: normalizeLocations(u.locations)
+        });
         this.recordDiffs(u);
         return;
       case "usage_update":
@@ -966,6 +1004,39 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
 </body>
 </html>`;
   }
+}
+
+// Flatten ACP tool-call content into renderable items for the webview.
+function normalizeToolContent(content: any): { type: string; text?: string; path?: string }[] {
+  if (!Array.isArray(content)) {
+    return [];
+  }
+  const out: { type: string; text?: string; path?: string }[] = [];
+  for (const c of content) {
+    if (!c) {
+      continue;
+    }
+    if (c.type === "diff" && typeof c.path === "string") {
+      out.push({ type: "diff", path: c.path });
+    } else if (c.type === "content") {
+      const text = textOf(c.content);
+      if (text) {
+        out.push({ type: "text", text });
+      }
+    } else if (typeof c.text === "string") {
+      out.push({ type: "text", text: c.text });
+    }
+  }
+  return out;
+}
+
+function normalizeLocations(locations: any): { path: string; line?: number }[] {
+  if (!Array.isArray(locations)) {
+    return [];
+  }
+  return locations
+    .filter((l) => l && typeof l.path === "string")
+    .map((l) => ({ path: l.path, line: typeof l.line === "number" ? l.line : undefined }));
 }
 
 function textOf(content: any): string {
