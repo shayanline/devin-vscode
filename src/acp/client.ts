@@ -214,9 +214,12 @@ export class AcpClient extends EventEmitter {
   // ("...from head H..."). Returns the head node id, or null when the session
   // has no revertible history yet.
   async currentHead(sessionId: string): Promise<number | null> {
+    // Node 0 is always off the expanded chain (the chain starts at the session
+    // prefix), so preview rejects with "...from head H...", which we parse.
+    // A session with no revertible history yet reports no head -> null.
     try {
-      await this.revertPreview(sessionId, Number.MAX_SAFE_INTEGER);
-      return null; // unexpected success (no error to parse)
+      await this.revertPreview(sessionId, 0);
+      return null;
     } catch (err) {
       const data = (err as { data?: unknown }).data;
       const text = typeof data === "string" ? data : (err instanceof Error ? err.message : String(err));
