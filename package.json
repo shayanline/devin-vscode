@@ -2,7 +2,7 @@
   "name": "devin-vscode",
   "displayName": "Devin for VS Code",
   "description": "A native chat panel for the Devin CLI, powered by the Agent Client Protocol. Streaming replies, per workspace sessions, and trackable diffs.",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "publisher": "shayanline",
   "author": "Shayan Khaksar",
   "license": "AGPL-3.0-or-later",
@@ -112,9 +112,18 @@
     ],
     "menus": {
       "commandPalette": [
-        { "command": "devin.acceptChange", "when": "false" },
-        { "command": "devin.rejectChange", "when": "false" },
-        { "command": "devin.openChangeDiff", "when": "false" }
+        {
+          "command": "devin.acceptChange",
+          "when": "false"
+        },
+        {
+          "command": "devin.rejectChange",
+          "when": "false"
+        },
+        {
+          "command": "devin.openChangeDiff",
+          "when": "false"
+        }
       ],
       "view/title": [
         {
@@ -243,6 +252,7 @@
   "devDependencies": {
     "@types/node": "^20.14.0",
     "@types/vscode": "^1.92.0",
+    "@vscode/codicons": "^0.0.36",
     "esbuild": "^0.23.1",
     "typescript": "^5.5.4"
   }
