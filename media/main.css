@@ -246,15 +246,15 @@ body {
   font-size: 14px;
 }
 
-/* Send / stop buttons (Copilot-style filled circle) */
+/* Send / stop buttons: square, filled (match the other toolbar buttons) */
 .send-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
+  width: 22px;
+  height: 22px;
   border: none;
-  border-radius: 50%;
+  border-radius: 4px;
   background: var(--vscode-button-background);
   color: var(--vscode-button-foreground);
   cursor: pointer;
@@ -265,7 +265,10 @@ body {
   background: var(--vscode-button-hoverBackground);
 }
 
+/* Disabled Send is just the icon: no background/border/container. */
 .send-btn:disabled {
+  background: transparent;
+  color: var(--vscode-icon-foreground, var(--vscode-foreground));
   opacity: 0.4;
   cursor: default;
 }
@@ -308,16 +311,21 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  height: 24px;
-  max-width: 160px;
-  padding: 3px 6px;
+  height: 22px;
+  max-width: 150px;
+  padding: 2px 5px;
   border: none;
   border-radius: 4px;
   background: transparent;
   color: var(--vscode-foreground);
   font-family: inherit;
   font-size: 0.9em;
+  line-height: 1;
   cursor: pointer;
+}
+
+.dd-label {
+  line-height: 1;
 }
 
 .dd { min-width: 0; }
@@ -348,9 +356,16 @@ body {
 }
 
 .dd-brand {
+  display: block;
   width: 14px;
   height: 14px;
-  display: block;
+  background-color: currentColor;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: contain;
+  mask-size: contain;
 }
 
 .dd-item-icon {
@@ -474,8 +489,15 @@ body {
   border-color: var(--vscode-focusBorder);
 }
 
-/* While generating, run a moving blue highlight around the input border
-   (blue-ish, matching the focus colour). Uses a masked gradient ring. */
+/* While generating, sweep a blue highlight all the way around the input
+   border (matching the focus colour). A conic gradient rotates and is masked
+   to just the 1px border ring. */
+@property --devin-angle {
+  syntax: "<angle>";
+  initial-value: 0deg;
+  inherits: false;
+}
+
 #input-box.busy {
   border-color: transparent;
 }
@@ -486,25 +508,23 @@ body {
   inset: -1px;
   border-radius: 8px;
   padding: 1px;
-  background: linear-gradient(
-    90deg,
-    transparent 0%,
-    var(--vscode-focusBorder, #3794ff) 25%,
-    var(--vscode-focusBorder, #3794ff) 50%,
-    transparent 75%
+  background: conic-gradient(
+    from var(--devin-angle),
+    transparent 0deg,
+    transparent 270deg,
+    var(--vscode-focusBorder, #3794ff) 330deg,
+    var(--vscode-focusBorder, #3794ff) 360deg
   );
-  background-size: 300% 100%;
   -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
   -webkit-mask-composite: xor;
   mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
   mask-composite: exclude;
   pointer-events: none;
-  animation: devin-border 1.6s linear infinite;
+  animation: devin-border 1.5s linear infinite;
 }
 
 @keyframes devin-border {
-  0% { background-position: 150% 0; }
-  100% { background-position: -150% 0; }
+  to { --devin-angle: 360deg; }
 }
 
 #input {
@@ -548,13 +568,13 @@ body {
   flex: 0 0 auto;
 }
 
-/* Add-context "+" button, sized to match the dropdown buttons */
+/* Add-context "+" button, same square size as the other toolbar controls */
 .tool-ctl {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  height: 24px;
-  width: 24px;
+  height: 22px;
+  width: 22px;
   border: none;
   border-radius: 4px;
   background: transparent;
@@ -568,7 +588,7 @@ body {
 }
 
 .tool-ctl .codicon {
-  font-size: 15px;
+  font-size: 14px;
 }
 
 /* Responsive composer tiers (classes toggled by a ResizeObserver) */
@@ -588,10 +608,10 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  height: 24px;
+  height: 22px;
   padding: 0 4px;
   border: none;
-  border-radius: 12px;
+  border-radius: 4px;
   background: transparent;
   color: var(--vscode-descriptionForeground, var(--vscode-foreground));
   cursor: pointer;
