@@ -172,39 +172,80 @@ import { renderMarkdown } from "./markdown.js";
 
     let items = [];
     let current = "";
+    let filterText = "";
 
     function close() { menu.classList.add("hidden"); }
     function labelFor(v) {
       const it = items.find((x) => x.value === v);
       return it ? it.name : v || "";
     }
+    function makeRow(it) {
+      const row = document.createElement("div");
+      row.className = "dd-item" + (it.value === current ? " selected" : "");
+      const check = document.createElement("span");
+      check.className = "dd-check";
+      if (it.value === current) check.innerHTML = '<i class="codicon codicon-check"></i>';
+      const txt = document.createElement("span");
+      txt.textContent = it.name;
+      row.appendChild(check);
+      row.appendChild(txt);
+      row.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        current = it.value;
+        label.textContent = labelFor(current);
+        close();
+        onSelect(it.value);
+      });
+      return row;
+    }
     function renderMenu() {
       menu.innerHTML = "";
-      items.forEach((it) => {
-        const row = document.createElement("div");
-        row.className = "dd-item" + (it.value === current ? " selected" : "");
-        const check = document.createElement("span");
-        check.className = "dd-check";
-        if (it.value === current) {
-          check.innerHTML = '<i class="codicon codicon-check"></i>';
-        }
-        const txt = document.createElement("span");
-        txt.textContent = it.name;
-        row.appendChild(check);
-        row.appendChild(txt);
-        row.addEventListener("click", (ev) => {
-          ev.stopPropagation();
-          current = it.value;
-          label.textContent = labelFor(current);
-          close();
-          onSelect(it.value);
+      const showFilter = items.length > 10;
+      const rows = document.createElement("div");
+      rows.className = "dd-rows";
+      const renderRows = () => {
+        rows.innerHTML = "";
+        const q = filterText.trim().toLowerCase();
+        let lastGroup = null;
+        let shown = 0;
+        items.forEach((it) => {
+          if (q && !it.name.toLowerCase().includes(q) && !(it.group || "").toLowerCase().includes(q)) return;
+          if (it.group && it.group !== lastGroup) {
+            const h = document.createElement("div");
+            h.className = "dd-group";
+            h.textContent = it.group;
+            rows.appendChild(h);
+          }
+          lastGroup = it.group || null;
+          rows.appendChild(makeRow(it));
+          shown++;
         });
-        menu.appendChild(row);
-      });
+        if (!shown) {
+          const empty = document.createElement("div");
+          empty.className = "dd-empty";
+          empty.textContent = "No matches";
+          rows.appendChild(empty);
+        }
+      };
+      if (showFilter) {
+        const f = document.createElement("input");
+        f.className = "dd-filter";
+        f.type = "text";
+        f.placeholder = "Filter\u2026";
+        f.value = filterText;
+        f.addEventListener("click", (e) => e.stopPropagation());
+        f.addEventListener("keydown", (e) => e.stopPropagation());
+        f.addEventListener("input", () => { filterText = f.value; renderRows(); });
+        menu.appendChild(f);
+        setTimeout(() => f.focus(), 0);
+      }
+      menu.appendChild(rows);
+      renderRows();
     }
     btn.addEventListener("click", (ev) => {
       ev.stopPropagation();
       document.querySelectorAll(".dd-menu").forEach((m) => { if (m !== menu) m.classList.add("hidden"); });
+      filterText = "";
       renderMenu();
       menu.classList.toggle("hidden");
     });

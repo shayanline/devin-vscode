@@ -3,6 +3,7 @@ import { execFile } from "child_process";
 export interface ModelChoice {
   value: string;
   name: string;
+  group?: string;
 }
 
 interface ModelsJson {
@@ -13,6 +14,9 @@ interface ModelsJson {
 }
 
 let cache: { at: number; models: ModelChoice[] } | undefined;
+// value -> family label, so session-sourced model options (which arrive flat)
+// can be grouped the same way as the CLI list.
+const groupByValue = new Map<string, string>();
 
 // Lists the account's available models via `devin models list --format json`.
 // This needs no ACP session, so the model picker can be populated before any
@@ -25,8 +29,19 @@ export async function listModels(cliPath: string, env?: NodeJS.ProcessEnv): Prom
   const models = await run(cliPath, env);
   if (models.length) {
     cache = { at: Date.now(), models };
+    groupByValue.clear();
+    for (const m of models) {
+      if (m.group) {
+        groupByValue.set(m.value, m.group);
+      }
+    }
   }
   return models;
+}
+
+// Family label for a model uid, from the last `listModels` result (best-effort).
+export function modelGroupOf(value: string): string | undefined {
+  return groupByValue.get(value);
 }
 
 function run(cliPath: string, env?: NodeJS.ProcessEnv): Promise<ModelChoice[]> {
@@ -46,7 +61,7 @@ function run(cliPath: string, env?: NodeJS.ProcessEnv): Promise<ModelChoice[]> {
           for (const fam of parsed.families || []) {
             for (const v of fam.variants || []) {
               if (v.model_uid) {
-                out.push({ value: v.model_uid, name: v.label || v.model_uid });
+                out.push({ value: v.model_uid, name: v.label || v.model_uid, group: fam.family_label });
               }
             }
           }
