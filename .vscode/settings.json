@@ -1,3 +1,4 @@
 {
-    "devin.defaultMode": "bypass"
+    "devin.defaultMode": "bypass",
+    "devin.defaultModel": "claude-sonnet-5-low"
 }

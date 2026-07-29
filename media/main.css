@@ -1287,14 +1287,19 @@ body {
   cursor: pointer;
   list-style: none;
   user-select: none;
-  color: var(--vscode-descriptionForeground, #9d9d9d);
+  color: var(--vscode-foreground);
 }
 
 .tool > summary::-webkit-details-marker {
   display: none;
 }
 
-.tool > summary:hover {
+/* Verb normal, the rest dimmed, like VS Code's tool lines. */
+.tool .tool-detail {
+  color: var(--vscode-descriptionForeground, #9d9d9d);
+}
+
+.tool > summary:hover .tool-detail {
   color: var(--vscode-foreground);
 }
 
@@ -1506,6 +1511,33 @@ body {
 .elicit-invalid .elicit-field:has(input:required) .elicit-q,
 .elicit-invalid .elicit-q.elicit-missing {
   color: var(--vscode-errorForeground);
+}
+
+/* Tray heading (permission title / question message). */
+.tray-title {
+  font-weight: 600;
+}
+
+/* Persistent Q/A recap left in the transcript after answering a question. */
+.qa-recap {
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+
+.qa-recap .qa-q {
+  color: var(--vscode-descriptionForeground, #9d9d9d);
+}
+
+.qa-recap .qa-a {
+  font-weight: 600;
+  margin-top: 2px;
+}
+
+.qa-recap .qa-skipped {
+  font-style: italic;
+  color: var(--vscode-descriptionForeground, #9d9d9d);
+  margin-top: 2px;
 }
 
 /* Working set */
