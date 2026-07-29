@@ -39,6 +39,9 @@ import { renderMarkdown } from "./markdown.js";
   const collapsedGroups = new Set();
   let lastSessions = [];
   let lastActiveId = null;
+  let lastFolders = [];
+  let listCtrl = null; // full sessions-list controller
+  let menuCtrl = null; // title-dropdown controller
 
   let commands = [];
   let ac = null;
@@ -1007,83 +1010,19 @@ import { renderMarkdown } from "./markdown.js";
     });
   }
 
-  // --- Title session switcher (dropdown from the header title) -------------
+  // --- Reusable session list (shared by the full list and the title menu) --
 
-  function toggleTitleMenu() {
-    if (document.getElementById("title-menu")) { closeTitleMenu(); return; }
-    vscode.postMessage({ type: "refreshSessions" });
-    const menu = document.createElement("div");
-    menu.id = "title-menu";
-    menu.className = "title-menu";
-    menu.addEventListener("click", (e) => e.stopPropagation());
-    el.titleBtn.parentElement.appendChild(menu);
-    renderTitleMenu(menu);
+  function filterSessions(sessions, q) {
+    q = (q || "").trim().toLowerCase();
+    if (!q) return sessions;
+    return sessions.filter((s) =>
+      (s.title || "").toLowerCase().includes(q) || (s.short_id || s.id || "").toLowerCase().includes(q)
+    );
   }
 
-  function closeTitleMenu() {
-    const m = document.getElementById("title-menu");
-    if (m) m.remove();
-  }
-
-  function renderTitleMenu(menu) {
-    menu.innerHTML = "";
-    const nw = document.createElement("div");
-    nw.className = "tm-item tm-new";
-    nw.innerHTML = '<i class="codicon codicon-add"></i><span>New chat</span>';
-    nw.addEventListener("click", () => { closeTitleMenu(); vscode.postMessage({ type: "newSession" }); });
-    menu.appendChild(nw);
-    if (lastSessions.length) {
-      const sep = document.createElement("div");
-      sep.className = "dd-sep";
-      menu.appendChild(sep);
-    }
-    const rows = document.createElement("div");
-    rows.className = "tm-rows";
-    lastSessions.forEach((s) => {
-      const item = document.createElement("div");
-      item.className = "tm-item" + (s.id === lastActiveId ? " active" : "");
-      const main = document.createElement("div");
-      main.className = "tm-main";
-      const t = document.createElement("div");
-      t.className = "tm-title";
-      t.textContent = s.title || s.short_id || s.id;
-      const meta = document.createElement("div");
-      meta.className = "tm-meta";
-      meta.textContent = s.last_activity_ago || agoFrom(s.last_activity_at) || "";
-      main.appendChild(t);
-      main.appendChild(meta);
-      main.addEventListener("click", () => {
-        closeTitleMenu();
-        currentTitle = s.title || "Chat";
-        el.chatTitle.textContent = currentTitle;
-        vscode.postMessage({ type: "loadSession", id: s.id });
-        setBody("thread");
-      });
-      const del = iconBtn("codicon-trash", "Delete", (e) => {
-        e.stopPropagation();
-        vscode.postMessage({ type: "deleteSession", id: s.id, title: s.title || s.id });
-      });
-      item.appendChild(main);
-      item.appendChild(del);
-      rows.appendChild(item);
-    });
-    menu.appendChild(rows);
-  }
-
-  // --- Sessions list -------------------------------------------------------
-
-  function renderSessions(sessions, activeId, folders) {
-    lastSessions = sessions || [];
-    lastActiveId = activeId;
-    if (document.getElementById("title-menu")) renderTitleMenu(document.getElementById("title-menu"));
-    el.sessionsList.innerHTML = "";
-    if (!sessions || sessions.length === 0) {
-      const empty = document.createElement("div");
-      empty.className = "sessions-empty";
-      empty.innerHTML = '<i class="codicon codicon-comment-discussion"></i><div>No chats yet.</div><div class="muted">Type below to start a new chat.</div>';
-      el.sessionsList.appendChild(empty);
-      return;
-    }
+  // Groups sessions by workspace (workspace folders first) with collapsible
+  // headers, appending session rows into `container`.
+  function renderSessionGroups(container, sessions, activeId, folders) {
     const folderNames = new Map((folders || []).map((f) => [f.path, f.name]));
     const groups = new Map();
     const orderedKeys = [];
@@ -1099,8 +1038,6 @@ import { renderMarkdown } from "./markdown.js";
       if (!groups.has(key)) { groups.set(key, []); orderedKeys.push(key); }
       groups.get(key).push(s);
     });
-    // Workspace-folder groups first (in folder order), then everything else in
-    // first-seen order (V8 sort is stable, so equal ranks keep their order).
     const folderOrder = (folders || []).map((f) => f.path);
     const rank = (k) => { const i = folderOrder.indexOf(k); return i === -1 ? folderOrder.length + 1 : i; };
     orderedKeys.sort((a, b) => rank(a) - rank(b));
@@ -1123,21 +1060,93 @@ import { renderMarkdown } from "./markdown.js";
         header.appendChild(chev);
         header.appendChild(txt);
         header.appendChild(count);
-        const container = document.createElement("div");
-        container.className = "group-items" + (collapsed ? " hidden" : "");
-        rows.forEach((s) => container.appendChild(sessionRow(s, activeId)));
+        const box = document.createElement("div");
+        box.className = "group-items" + (collapsed ? " hidden" : "");
+        rows.forEach((s) => box.appendChild(sessionRow(s, activeId)));
         header.addEventListener("click", () => {
           const nowCollapsed = !collapsedGroups.has(key);
           if (nowCollapsed) collapsedGroups.add(key); else collapsedGroups.delete(key);
-          container.classList.toggle("hidden", nowCollapsed);
+          box.classList.toggle("hidden", nowCollapsed);
           header.classList.toggle("collapsed", nowCollapsed);
         });
-        el.sessionsList.appendChild(header);
-        el.sessionsList.appendChild(container);
+        container.appendChild(header);
+        container.appendChild(box);
       } else {
-        rows.forEach((s) => el.sessionsList.appendChild(sessionRow(s, activeId)));
+        rows.forEach((s) => container.appendChild(sessionRow(s, activeId)));
       }
     });
+  }
+
+  // Mounts a search box + grouped rows into `container`; returns { refresh }.
+  function mountSessionList(container, opts) {
+    opts = opts || {};
+    container.innerHTML = "";
+    const state = { q: "" };
+    if (opts.withNewChat) {
+      const nw = document.createElement("div");
+      nw.className = "session-newchat";
+      nw.innerHTML = '<i class="codicon codicon-add"></i><span>New chat</span>';
+      nw.addEventListener("click", () => { closeTitleMenu(); vscode.postMessage({ type: "newSession" }); });
+      container.appendChild(nw);
+    }
+    const search = document.createElement("input");
+    search.className = "session-search";
+    search.type = "text";
+    search.placeholder = "Search by title or code\u2026";
+    search.addEventListener("input", () => { state.q = search.value; renderBody(); });
+    search.addEventListener("click", (e) => e.stopPropagation());
+    search.addEventListener("keydown", (e) => e.stopPropagation());
+    const body = document.createElement("div");
+    body.className = "session-list-body";
+    container.appendChild(search);
+    container.appendChild(body);
+    function renderBody() {
+      body.innerHTML = "";
+      if (!lastSessions.length) {
+        body.innerHTML = '<div class="sessions-empty"><i class="codicon codicon-comment-discussion"></i><div>No chats yet.</div></div>';
+        return;
+      }
+      const filtered = filterSessions(lastSessions, state.q);
+      if (!filtered.length) { body.innerHTML = '<div class="sessions-empty-sm">No matching sessions</div>'; return; }
+      renderSessionGroups(body, filtered, lastActiveId, lastFolders);
+    }
+    renderBody();
+    return { refresh: renderBody };
+  }
+
+  // --- Title session switcher (dropdown from the header title) -------------
+
+  function toggleTitleMenu() {
+    if (document.getElementById("title-menu")) { closeTitleMenu(); return; }
+    vscode.postMessage({ type: "refreshSessions" });
+    const menu = document.createElement("div");
+    menu.id = "title-menu";
+    menu.className = "title-menu";
+    menu.addEventListener("click", (e) => e.stopPropagation());
+    el.titleBtn.parentElement.appendChild(menu);
+    menuCtrl = mountSessionList(menu, { withNewChat: true });
+  }
+
+  function closeTitleMenu() {
+    const m = document.getElementById("title-menu");
+    if (m) m.remove();
+    menuCtrl = null;
+  }
+
+  // --- Sessions list -------------------------------------------------------
+
+  function renderSessions(sessions, activeId, folders) {
+    lastSessions = sessions || [];
+    lastActiveId = activeId;
+    lastFolders = folders || [];
+    if (!listCtrl) {
+      listCtrl = mountSessionList(el.sessionsList, {});
+    } else {
+      listCtrl.refresh();
+    }
+    if (menuCtrl) {
+      menuCtrl.refresh();
+    }
   }
 
   function sessionRow(s, activeId) {
@@ -1161,7 +1170,9 @@ import { renderMarkdown } from "./markdown.js";
     main.appendChild(title);
     main.appendChild(meta);
     main.addEventListener("click", () => {
+      closeTitleMenu();
       currentTitle = s.title || "Chat";
+      el.chatTitle.textContent = currentTitle;
       vscode.postMessage({ type: "loadSession", id: s.id });
       setBody("thread");
     });
@@ -1496,6 +1507,7 @@ import { renderMarkdown } from "./markdown.js";
         break;
       case "sessionsLoading":
         el.sessionsList.innerHTML = '<div class="list-loading"><i class="codicon codicon-loading codicon-modifier-spin"></i></div>';
+        listCtrl = null;
         break;
       case "userMessage":
         if (currentTitle === "Chat") { currentTitle = m.text.slice(0, 40); el.chatTitle.textContent = currentTitle; }
