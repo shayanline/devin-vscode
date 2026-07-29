@@ -1,6 +1,8 @@
 .vscode/**
 .github/**
+docs/**
 src/**
+webview/**
 scripts/**
 node_modules/**
 .gitignore
