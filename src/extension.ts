@@ -1,13 +1,17 @@
 import * as vscode from "vscode";
 import { ChatViewProvider } from "./chat/chatViewProvider";
 import { ChangeTracker } from "./diff/changeTracker";
+import { SessionStore } from "./session/sessionStore";
+import { StatusBar } from "./ui/statusBar";
 
 export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel("Devin");
   const changes = new ChangeTracker();
-  context.subscriptions.push(output, changes.register());
+  const store = new SessionStore(context.workspaceState);
+  const statusBar = new StatusBar();
+  context.subscriptions.push(output, changes.register(), statusBar);
 
-  const provider = new ChatViewProvider(context, changes, output);
+  const provider = new ChatViewProvider(context, store, changes, statusBar, output);
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(ChatViewProvider.viewType, provider, {
       webviewOptions: { retainContextWhenHidden: true }
@@ -18,7 +22,8 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("devin.focusChat", () => provider.focus()),
     vscode.commands.registerCommand("devin.newSession", () => provider.newSession()),
     vscode.commands.registerCommand("devin.showSessions", () => provider.refreshSessions()),
-    vscode.commands.registerCommand("devin.cancel", () => provider.cancel())
+    vscode.commands.registerCommand("devin.cancel", () => provider.cancel()),
+    vscode.commands.registerCommand("devin.runSetup", () => provider.runSetup())
   );
 }
 

@@ -2,6 +2,8 @@
   const vscode = acquireVsCodeApi();
 
   const el = {
+    setup: document.getElementById("setup"),
+    chat: document.getElementById("chat"),
     sessionsBar: document.getElementById("sessions-bar"),
     thread: document.getElementById("thread"),
     input: document.getElementById("input"),
@@ -205,6 +207,116 @@
     el.permissionTray.appendChild(box);
   }
 
+  function showSetup(show) {
+    el.setup.classList.toggle("hidden", !show);
+    el.chat.classList.toggle("hidden", show);
+  }
+
+  function renderSetup(health) {
+    showSetup(true);
+    el.setup.innerHTML = "";
+
+    const h = document.createElement("h2");
+    h.textContent = "Set up Devin";
+    el.setup.appendChild(h);
+
+    // Step 1: CLI
+    const cliOk = !!health.found;
+    el.setup.appendChild(
+      stepBlock(
+        cliOk ? "\u2713 Devin CLI found" : "\u2717 Devin CLI not found",
+        cliOk
+          ? `${health.path || ""}${health.version ? " (" + health.version + ")" : ""}`
+          : "Set the path to the devin executable, or install the Devin CLI first.",
+        [
+          btn("Browse...", "secondary", () => vscode.postMessage({ type: "browseCli" })),
+          btn("Re-check", "secondary", () => vscode.postMessage({ type: "recheck" }))
+        ]
+      )
+    );
+
+    // Step 2: Auth (only meaningful once the CLI is found)
+    if (cliOk) {
+      const authed = health.loggedIn !== false;
+      el.setup.appendChild(
+        stepBlock(
+          authed ? "\u2713 Authenticated" : "\u2717 Not logged in",
+          authed ? "You are logged in to Devin." : "Log in to Devin, then re-check.",
+          authed
+            ? []
+            : [
+                btn("Log in", "", () => vscode.postMessage({ type: "authenticate" })),
+                btn("Re-check", "secondary", () => vscode.postMessage({ type: "recheck" }))
+              ]
+        )
+      );
+    }
+
+    // Step 3: default mode
+    if (cliOk && health.loggedIn !== false) {
+      const modes = [
+        { value: "accept-edits", name: "Code" },
+        { value: "ask", name: "Ask" },
+        { value: "plan", name: "Plan" },
+        { value: "bypass", name: "Bypass" }
+      ];
+      const sel = document.createElement("select");
+      modes.forEach((mo) => {
+        const o = document.createElement("option");
+        o.value = mo.value;
+        o.textContent = mo.name;
+        sel.appendChild(o);
+      });
+      sel.addEventListener("change", () =>
+        vscode.postMessage({ type: "saveDefaults", mode: sel.value })
+      );
+      el.setup.appendChild(stepBlock("Default mode", "", [sel]));
+      el.setup.appendChild(
+        btn("Start chatting", "", () => vscode.postMessage({ type: "finishSetup" }))
+      );
+    }
+
+    const err = health.error;
+    if (err && !cliOk) {
+      const p = document.createElement("p");
+      p.className = "setup-error";
+      p.textContent = err;
+      el.setup.appendChild(p);
+    }
+  }
+
+  function stepBlock(title, desc, controls) {
+    const box = document.createElement("div");
+    box.className = "setup-step";
+    const t = document.createElement("div");
+    t.className = "setup-title";
+    t.textContent = title;
+    box.appendChild(t);
+    if (desc) {
+      const d = document.createElement("div");
+      d.className = "setup-desc";
+      d.textContent = desc;
+      box.appendChild(d);
+    }
+    if (controls && controls.length) {
+      const row = document.createElement("div");
+      row.className = "setup-controls";
+      controls.forEach((c) => row.appendChild(c));
+      box.appendChild(row);
+    }
+    return box;
+  }
+
+  function btn(label, cls, onClick) {
+    const b = document.createElement("button");
+    if (cls) {
+      b.className = cls;
+    }
+    b.textContent = label;
+    b.addEventListener("click", onClick);
+    return b;
+  }
+
   function renderSessions(sessions, activeId) {
     el.sessionsBar.innerHTML = "";
     if (!sessions || sessions.length === 0) {
@@ -281,6 +393,17 @@
     const m = event.data;
     switch (m.type) {
       case "config":
+        break;
+      case "setup":
+        renderSetup(m.health || {});
+        break;
+      case "ready":
+        showSetup(false);
+        break;
+      case "workspace":
+        document.title = m.name || "Devin";
+        break;
+      case "authStarted":
         break;
       case "options":
         fillSelect(el.mode, m.modes, m.currentMode);

@@ -17,6 +17,7 @@ export interface AcpClientOptions {
   cliPath: string;
   cwd: string;
   env?: NodeJS.ProcessEnv;
+  extraArgs?: string[];
 }
 
 // Callbacks the host (extension) provides so the client can serve the
@@ -46,9 +47,10 @@ export class AcpClient extends EventEmitter {
   }
 
   start(): void {
-    const child = spawn(this.options.cliPath, ["acp"], {
+    const args = ["acp", ...(this.options.extraArgs || [])];
+    const child = spawn(this.options.cliPath, args, {
       cwd: this.options.cwd,
-      env: { ...process.env, ...this.options.env },
+      env: this.options.env ? { ...this.options.env } : { ...process.env },
       stdio: ["pipe", "pipe", "pipe"]
     }) as ChildProcessWithoutNullStreams;
 
@@ -110,18 +112,20 @@ export class AcpClient extends EventEmitter {
     return this.rpc("authenticate", { methodId });
   }
 
-  newSession(mcpServers: unknown[] = []): Promise<NewSessionResult> {
+  newSession(additionalDirectories: string[] = [], mcpServers: unknown[] = []): Promise<NewSessionResult> {
     return this.rpc<NewSessionResult>("session/new", {
       cwd: this.options.cwd,
-      mcpServers
+      mcpServers,
+      ...(additionalDirectories.length ? { additionalDirectories } : {})
     });
   }
 
-  loadSession(sessionId: string, mcpServers: unknown[] = []): Promise<unknown> {
+  loadSession(sessionId: string, additionalDirectories: string[] = [], mcpServers: unknown[] = []): Promise<unknown> {
     return this.rpc("session/load", {
       sessionId,
       cwd: this.options.cwd,
-      mcpServers
+      mcpServers,
+      ...(additionalDirectories.length ? { additionalDirectories } : {})
     });
   }
 
