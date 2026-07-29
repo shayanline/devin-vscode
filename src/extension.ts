@@ -3,9 +3,13 @@ import { ChatViewProvider } from "./chat/chatViewProvider";
 import { ChangeTracker } from "./diff/changeTracker";
 import { SessionStore } from "./session/sessionStore";
 import { StatusBar } from "./ui/statusBar";
+import { reapOrphanedAgents } from "./cli/reaper";
 
 export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel("Devin");
+  // Clean up any agents left stranded by a previous crash or force-quit before
+  // we start a fresh one. Only orphans (ppid == 1) are touched.
+  reapOrphanedAgents((line) => output.appendLine(line));
   const changes = new ChangeTracker();
   const store = new SessionStore(context.workspaceState);
   const statusBar = new StatusBar();
