@@ -630,6 +630,11 @@ body {
   opacity: 0.5;
 }
 
+.welcome-logo {
+  width: 48px;
+  height: 48px;
+}
+
 .welcome-title {
   font-size: 1.15em;
   font-weight: 600;

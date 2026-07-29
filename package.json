@@ -6,6 +6,7 @@
   "publisher": "shayanline",
   "author": "Shayan Khaksar",
   "license": "MIT",
+  "icon": "resources/icon.png",
   "repository": {
     "type": "git",
     "url": "https://github.com/shayanline/devin-vscode.git"
