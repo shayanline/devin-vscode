@@ -21,7 +21,7 @@ import { SessionStore } from "../session/sessionStore";
 import { ChangeTracker } from "../diff/changeTracker";
 import { StatusBar } from "../ui/statusBar";
 import { checkHealth, CliHealth, loginShellEnv } from "../cli/locate";
-import { cachedFamilies, listModelFamilies, ModelFamily } from "../cli/models";
+import { cachedFamilies, familyOf, listModelFamilies, ModelFamily } from "../cli/models";
 
 export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
   public static readonly viewType = "devin.chatView";
@@ -270,8 +270,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
   }
 
   private scope(): SessionScope {
-    const v = this.cfg().get<string>("sessionScope", "both");
-    return v === "workspace" || v === "directory" ? v : "both";
+    const v = this.cfg().get<string>("sessionScope", "workspace");
+    return v === "directory" || v === "both" ? v : "workspace";
   }
 
   // --- CLI health + setup --------------------------------------------------
@@ -645,7 +645,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
         await this.client.setConfigOption(this.sessionId, "mode", mode);
         this.currentMode = mode;
       }
-      if (model) {
+      // Only re-apply a remembered model if it's still an available model
+      // (when we know the list); otherwise keep the session's own default.
+      const modelKnown = cachedFamilies().length === 0 || !!familyOf(model);
+      if (model && modelKnown) {
         await this.client.setConfigOption(this.sessionId, "model", model);
         this.currentModel = model;
       }

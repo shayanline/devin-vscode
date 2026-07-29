@@ -188,17 +188,17 @@
         "devin.sessionScope": {
           "type": "string",
           "enum": [
-            "both",
             "workspace",
-            "directory"
+            "directory",
+            "both"
           ],
           "enumDescriptions": [
-            "Sessions started in this workspace plus any whose directory is inside it",
-            "Only sessions started from this extension in this workspace",
-            "Any session whose working directory is inside this workspace"
+            "Only sessions started or opened from this extension in this window (VS Code initiated). Recommended.",
+            "Any session whose working directory is inside this workspace, including ones you started in a terminal",
+            "The union of both: VS Code initiated sessions plus any whose directory is inside this workspace"
           ],
-          "default": "both",
-          "description": "How the session list is scoped to the current window."
+          "default": "workspace",
+          "description": "Which sessions the list shows. By default only sessions you started inside VS Code are listed; widen this to also include sessions started outside VS Code (e.g. the terminal)."
         },
         "devin.autoResumeLast": {
           "type": "boolean",
