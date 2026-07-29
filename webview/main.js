@@ -854,6 +854,23 @@ import { renderMarkdown } from "./markdown.js";
       pre.appendChild(bar);
     });
   }
+
+  // File/symbol references in assistant text (non http links) render as VS Code
+  // style inline anchor chips: a bordered pill with a file-type icon. External
+  // links stay plain. Clicks are handled by the delegated thread listener.
+  function enhanceAnchors(container) {
+    if (!container) return;
+    container.querySelectorAll("a[href]").forEach((a) => {
+      if (a.dataset.anchored) return;
+      const href = a.getAttribute("href") || "";
+      if (!href || href.startsWith("#") || /^(https?|mailto):/i.test(href)) return;
+      a.dataset.anchored = "1";
+      a.classList.add("anchor-chip");
+      const icon = document.createElement("i");
+      icon.className = "codicon codicon-file anchor-chip-icon";
+      a.insertBefore(icon, a.firstChild);
+    });
+  }
   function sameMid(a, b) { return (a || null) === (b || null); }
 
   // Rendering is throttled to animation frames so a fast stream doesn't
@@ -893,7 +910,7 @@ import { renderMarkdown } from "./markdown.js";
       if (block.turn) { block.turn.text = block.buffer; block.turn.reqText.innerHTML = renderMarkdown(block.buffer); }
     } else {
       block.bubble.innerHTML = renderMarkdown(block.buffer);
-      if (block.kind === "assistant") enhanceCodeBlocks(block.bubble);
+      if (block.kind === "assistant") { enhanceCodeBlocks(block.bubble); enhanceAnchors(block.bubble); }
     }
     if (atBottom) scrollToBottom();
   }
@@ -1200,28 +1217,51 @@ import { renderMarkdown } from "./markdown.js";
     const diffItems = (d.content || []).filter((c) => c.type === "diff" && c.path);
     const locs = (d.locations || []).slice();
     const fileRows = [
-      ...diffItems.map((c) => ({ path: c.path, diff: true })),
+      ...diffItems.map((c) => ({ path: c.path, diff: true, added: c.added, removed: c.removed })),
       ...locs.map((l) => ({ path: l.path, line: l.line, diff: false }))
     ];
     if (fileRows.length) {
       hasContent = true;
       const sec = document.createElement("div");
-      sec.className = "tool-section";
-      fileRows.forEach((f) => {
-        const link = document.createElement("a");
-        link.className = "file-change tool-file";
-        link.textContent = shorten(f.path) + (f.line ? ":" + f.line : "");
-        link.title = f.path;
-        link.addEventListener("click", () => {
-          if (f.diff) vscode.postMessage({ type: "openDiff", path: f.path });
-          else vscode.postMessage({ type: "openFile", path: f.path, line: f.line });
-        });
-        sec.appendChild(link);
-      });
+      sec.className = "tool-section tool-files";
+      fileRows.forEach((f) => sec.appendChild(filePill(f)));
       body.appendChild(sec);
     }
 
     entry.node.classList.toggle("tool-empty", !hasContent);
+  }
+
+  // A file reference rendered as a VS Code style pill: a file-type icon, the
+  // name, and (for edits) +added / -removed line counts. Clicking opens a diff
+  // for edited files or the file at a line otherwise.
+  function filePill(f) {
+    const link = document.createElement("a");
+    link.className = "file-change";
+    link.title = f.path;
+    const icon = document.createElement("i");
+    icon.className = "codicon codicon-file file-pill-icon";
+    const name = document.createElement("span");
+    name.className = "file-pill-name";
+    name.textContent = baseName(f.path) + (f.line ? ":" + f.line : "");
+    link.appendChild(icon);
+    link.appendChild(name);
+    if (f.added) {
+      const a = document.createElement("span");
+      a.className = "label-added";
+      a.textContent = "+" + f.added;
+      link.appendChild(a);
+    }
+    if (f.removed) {
+      const r = document.createElement("span");
+      r.className = "label-removed";
+      r.textContent = "-" + f.removed;
+      link.appendChild(r);
+    }
+    link.addEventListener("click", () => {
+      if (f.diff) vscode.postMessage({ type: "openDiff", path: f.path });
+      else vscode.postMessage({ type: "openFile", path: f.path, line: f.line });
+    });
+    return link;
   }
 
   function safeJson(v) {
@@ -1232,21 +1272,19 @@ import { renderMarkdown } from "./markdown.js";
       return String(v);
     }
   }
-  function addFileChange(path) {
+  function addFileChange(m) {
+    const path = typeof m === "string" ? m : m.path;
+    const added = typeof m === "object" ? m.added : undefined;
+    const removed = typeof m === "object" ? m.removed : undefined;
     finalizeBlock();
     hideWelcome();
     ensureTurn();
     const node = document.createElement("div");
-    node.className = "tool-line completed";
-    const icon = document.createElement("i");
-    icon.className = "codicon codicon-edit";
-    const link = document.createElement("a");
-    link.className = "file-change";
-    link.textContent = shorten(path);
-    link.title = path;
-    link.addEventListener("click", () => vscode.postMessage({ type: "openDiff", path }));
-    node.appendChild(icon);
-    node.appendChild(link);
+    node.className = "edit-pill";
+    const status = document.createElement("i");
+    status.className = "codicon codicon-check edit-pill-status";
+    node.appendChild(status);
+    node.appendChild(filePill({ path, diff: true, added, removed }));
     respTarget().appendChild(node);
     scrollToBottom();
   }
@@ -1297,17 +1335,21 @@ import { renderMarkdown } from "./markdown.js";
   }
 
   function showElicitation(data) {
-    const box = cwShell();
-    cwTitle(box, data.message || "Devin has a question");
-    const body = cwBody(box);
+    let widget;
     // Post the response, drop the widget, and leave a Q/A recap in the
     // transcript (like VS Code), so the exchange stays visible.
     const finish = (action, content, recap) => {
       vscode.postMessage({ type: "elicitationResponse", requestId: data.requestId, action, content });
-      box.remove();
+      if (widget) widget.remove();
       if (recap && recap.length) renderQaRecap(recap);
     };
+
+    // URL prompts are a simple confirmation, not a question carousel.
     if (data.mode === "url" && data.url) {
+      const box = cwShell();
+      widget = box;
+      cwTitle(box, data.message || "Devin has a question");
+      const body = cwBody(box);
       const url = document.createElement("div");
       url.className = "cw-message muted";
       url.textContent = data.url;
@@ -1318,6 +1360,7 @@ import { renderMarkdown } from "./markdown.js";
       el.elicitationTray.appendChild(box);
       return;
     }
+
     const props = (data.schema && data.schema.properties) || {};
     const names = Object.keys(props);
     const required = (data.schema && data.schema.required) || [];
@@ -1326,12 +1369,56 @@ import { renderMarkdown } from "./markdown.js";
       required: required.includes(key),
       hideTitle: names.length === 1 && props[key].title === data.message
     }));
-    controls.forEach((c) => body.appendChild(c.el));
 
-    const row = cwButtons(box);
-    row.appendChild(btn("Submit", "primary", () => {
-      if (!controls.every((c) => c.valid())) {
-        box.classList.add("elicit-invalid");
+    // A one-card-at-a-time carousel (VS Code's chat-question-carousel): the
+    // header keeps the prompt + step, the body shows the current question, and
+    // the footer navigates and submits all answers at once.
+    const qc = document.createElement("div");
+    qc.className = "qc";
+    if (controls.length <= 1) qc.classList.add("qc-single");
+    widget = qc;
+
+    const header = document.createElement("div");
+    header.className = "qc-header";
+    const title = document.createElement("div");
+    title.className = "qc-title";
+    title.textContent = data.message || "Devin has a question";
+    const close = actionBtn("codicon-close", "Cancel", () =>
+      finish("cancel", undefined, controls.map((c) => ({ title: c.title, answer: "" })))
+    );
+    header.appendChild(title);
+    header.appendChild(close);
+    qc.appendChild(header);
+
+    const body = document.createElement("div");
+    body.className = "qc-body";
+    controls.forEach((c) => body.appendChild(c.el));
+    qc.appendChild(body);
+
+    const validation = document.createElement("div");
+    validation.className = "qc-validation hidden";
+    validation.textContent = "Please answer this question.";
+    qc.appendChild(validation);
+
+    const footer = document.createElement("div");
+    footer.className = "qc-footer";
+    const prev = actionBtn("codicon-chevron-left", "Previous", () => show(idx - 1));
+    const next = actionBtn("codicon-chevron-right", "Next", () => show(idx + 1));
+    const nav = document.createElement("div");
+    nav.className = "qc-nav";
+    nav.appendChild(prev);
+    nav.appendChild(next);
+    const step = document.createElement("span");
+    step.className = "qc-step";
+    const spacer = document.createElement("span");
+    spacer.className = "qc-spacer";
+    const submit = btn("Submit", "primary", () => {
+      controls.forEach((c) => c.el.classList.remove("elicit-invalid"));
+      const bad = controls.findIndex((c) => !c.valid());
+      if (bad >= 0) {
+        show(bad);
+        controls[bad].el.classList.add("elicit-invalid");
+        validation.classList.remove("hidden");
         return;
       }
       const content = {};
@@ -1340,11 +1427,25 @@ import { renderMarkdown } from "./markdown.js";
         return { title: c.title, answer: c.answerText() };
       });
       finish("accept", content, recap);
-    }));
-    row.appendChild(btn("Cancel", "secondary", () =>
-      finish("cancel", undefined, controls.map((c) => ({ title: c.title, answer: "" })))
-    ));
-    el.elicitationTray.appendChild(box);
+    });
+    footer.appendChild(nav);
+    footer.appendChild(step);
+    footer.appendChild(spacer);
+    footer.appendChild(submit);
+    qc.appendChild(footer);
+
+    let idx = 0;
+    function show(i) {
+      idx = Math.max(0, Math.min(controls.length - 1, i));
+      controls.forEach((c, j) => c.el.classList.toggle("hidden", j !== idx));
+      const label = controls.length + " question" + (controls.length === 1 ? "" : "s");
+      step.textContent = controls.length > 1 ? (idx + 1) + " / " + controls.length : label;
+      prev.disabled = idx === 0;
+      next.disabled = idx === controls.length - 1;
+      validation.classList.add("hidden");
+    }
+    show(0);
+    el.elicitationTray.appendChild(qc);
   }
 
   // Builds one question block for an elicitation form. Returns the element plus
@@ -1849,7 +1950,7 @@ import { renderMarkdown } from "./markdown.js";
   }
 
   function threadHasContent() {
-    return !!el.thread.querySelector(".turn, .tool, .tool-line, .plan, .thinking");
+    return !!el.thread.querySelector(".turn, .tool, .edit-pill, .plan, .thinking");
   }
 
   // --- Error rendering -----------------------------------------------------
@@ -2070,7 +2171,7 @@ import { renderMarkdown } from "./markdown.js";
       case "plan": renderPlan(m.entries); break;
       case "toolCall":
       case "toolCallUpdate": upsertTool(m); break;
-      case "fileChange": addFileChange(m.path); break;
+      case "fileChange": addFileChange(m); break;
       case "workingSet": renderWorkingSet(m.files); break;
       case "attachments": renderAttachments(m.items); break;
       case "permission": showPermission(m); break;

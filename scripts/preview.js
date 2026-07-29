@@ -88,22 +88,26 @@ const SCENARIOS = {
       { content: "Run the test suite", status: "pending" }
     ] },
     { type: "toolCall", id: "t1", title: "Read src/auth/token.ts", kind: "read", status: "completed", locations: [{ path: "src/auth/token.ts", line: 42 }] },
-    { type: "toolCall", id: "t2", title: "Edit src/auth/token-service.ts", kind: "edit", status: "completed", rawInput: { path: "src/auth/token-service.ts" }, content: [{ type: "diff", path: "src/auth/token-service.ts" }] },
+    { type: "toolCall", id: "t2", title: "Edit src/auth/token-service.ts", kind: "edit", status: "completed", rawInput: { path: "src/auth/token-service.ts" }, content: [{ type: "diff", path: "src/auth/token-service.ts", added: 34, removed: 6 }] },
     { type: "toolCall", id: "t3", title: "Run npm test", kind: "execute", status: "completed", rawInput: { command: "npm test" }, content: [{ type: "text", text: "PASS  auth.test.ts\n  \u2713 issues a token (12 ms)\n  \u2713 rejects an expired token (4 ms)\n\nTests: 2 passed, 2 total" }] },
-    { type: "fileChange", path: "src/auth/token-service.ts" },
-    { type: "assistantChunk", text: "All tests pass. Token handling now lives in `TokenService`, and the callers were updated to use it. Anything else you'd like adjusted?" },
+    { type: "fileChange", path: "src/auth/token-service.ts", added: 34, removed: 6 },
+    { type: "assistantChunk", text: "All tests pass. Token handling now lives in [src/auth/token-service.ts](src/auth/token-service.ts), and the callers were updated to use it. Anything else you'd like adjusted?" },
     { type: "assistantEnd" },
     { type: "busy", value: false },
     { type: "permission", requestId: "p1", title: "Devin wants to run: `git push origin main`", options: [
       { optionId: "allow", name: "Allow", kind: "allow" },
       { optionId: "reject", name: "Reject", kind: "reject" }
     ] },
-    { type: "elicitation", requestId: "e1", mode: "form", message: "Which follow-up should I do next?", allowOther: true, schema: {
-      type: "object", required: ["q0"], properties: {
-        q0: { type: "string", title: "Next step", description: "Next step", oneOf: [
+    { type: "elicitation", requestId: "e1", mode: "form", message: "A couple of quick questions", allowOther: true, schema: {
+      type: "object", required: ["q0", "q1"], properties: {
+        q0: { type: "string", title: "Next step", description: "What should I do next?", oneOf: [
           { const: "docs", title: "Update the docs" },
           { const: "pr", title: "Open a pull request" },
           { const: "nothing", title: "Nothing for now" }
+        ] },
+        q1: { type: "string", title: "Target branch", description: "Where should the change land?", oneOf: [
+          { const: "main", title: "main" },
+          { const: "develop", title: "develop" }
         ] }
       }
     } }

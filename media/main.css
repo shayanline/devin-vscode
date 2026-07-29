@@ -876,8 +876,8 @@ body {
   gap: 8px;
 }
 
-/* Runs of file-change rows read as one list, so keep them tight. */
-.turn-response .tool-line + .tool-line {
+/* Runs of edited-file rows read as one list, so keep them tight. */
+.turn-response .edit-pill + .edit-pill {
   margin-top: -4px;
 }
 
@@ -1183,7 +1183,7 @@ body {
   position: relative;
   background: var(--vscode-textCodeBlock-background);
   padding: 8px 10px;
-  border-radius: 6px;
+  border-radius: var(--dv-radius-md);
   overflow-x: auto;
 }
 
@@ -1601,7 +1601,7 @@ body {
 .tool-pre {
   margin: 0;
   padding: 6px 8px;
-  border-radius: 4px;
+  border-radius: var(--dv-radius-sm);
   background: var(--vscode-textCodeBlock-background);
   font-family: var(--vscode-editor-font-family, monospace);
   font-size: 0.92em;
@@ -1611,8 +1611,9 @@ body {
   overflow-y: auto;
 }
 
-.tool-file {
-  display: block;
+/* File-pill rows inside a tool body hug their content and stack left. */
+.tool-files {
+  align-items: flex-start;
 }
 
 .terminal-pre {
@@ -1633,42 +1634,87 @@ body {
   display: inline-flex;
 }
 
-/* Single-line tool row (file changes): plain understated line, no box. */
-.tool-line {
+/* An edited-file row: a completion status icon followed by the file pill,
+   mirroring VS Code's code-block edit pill. */
+.edit-pill {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 1px 0;
-  font-size: 0.92em;
-  color: var(--vscode-descriptionForeground, #9d9d9d);
+  gap: var(--dv-space-2);
+  font-size: var(--dv-fs-s);
 }
 
-.tool-line .codicon {
-  font-size: 14px;
-  opacity: 0.8;
+.edit-pill-status {
+  font-size: 12px;
+  color: var(--vscode-testing-iconPassed, var(--vscode-charts-green, #3fb950));
+  flex: 0 0 auto;
 }
 
-.tool-line.completed .codicon {
-  color: var(--vscode-testing-iconPassed, #3fb950);
-}
-
-/* File / directory references as inline pills (VS Code style). */
+/* File / symbol references as bordered pills (VS Code chat-codeblock-pill /
+   inline-anchor style): a file-type icon, the name, and +/- line counts. */
 .file-change {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 0 5px;
-  border-radius: 4px;
-  background: var(--vscode-badge-background, rgba(127, 127, 127, 0.16));
-  color: var(--vscode-foreground);
+  gap: var(--dv-space-2);
+  padding: 1px var(--dv-space-3);
+  border: 1px solid var(--dv-border);
+  border-radius: var(--dv-radius-sm);
+  color: var(--dv-dim);
   cursor: pointer;
   text-decoration: none;
   vertical-align: baseline;
+  max-width: 100%;
+  min-width: 0;
 }
 
 .file-change:hover {
   background: var(--vscode-list-hoverBackground);
+  color: var(--vscode-textLink-foreground, var(--vscode-foreground));
   text-decoration: none;
+}
+
+.file-pill-icon {
+  font-size: 12px;
+  flex: 0 0 auto;
+}
+
+.file-pill-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.label-added {
+  color: var(--vscode-chat-linesAddedForeground, var(--vscode-charts-green, #3fb950));
+  flex: 0 0 auto;
+}
+
+.label-removed {
+  color: var(--vscode-chat-linesRemovedForeground, var(--vscode-charts-red, #f85149));
+  flex: 0 0 auto;
+}
+
+/* Inline anchor chip: a file/symbol reference inside assistant prose. */
+.anchor-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+  padding: 0 3px;
+  border: 1px solid var(--dv-border);
+  border-radius: var(--dv-radius-sm);
+  color: var(--vscode-textLink-foreground, var(--vscode-foreground));
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.anchor-chip:hover {
+  background: var(--vscode-list-hoverBackground);
+  text-decoration: none;
+}
+
+.anchor-chip-icon {
+  font-size: 11px;
+  align-self: center;
 }
 
 /* Confirmation widget (permissions, questions, edit-discard), mirroring VS
@@ -1718,6 +1764,79 @@ body {
   color: var(--dv-dim);
   cursor: pointer;
   user-select: none;
+}
+
+/* Question carousel (elicitation forms), mirroring VS Code's
+   chat-question-carousel: a prompt header, a body that shows one question at a
+   time, and a footer with prev/next nav, a step indicator, and Submit. */
+.qc {
+  border: 1px solid var(--vscode-input-border, var(--dv-border));
+  border-radius: var(--dv-radius-lg);
+  margin-bottom: var(--dv-space-4);
+  overflow: hidden;
+  background: var(--vscode-panel-background, transparent);
+}
+
+.qc-header {
+  display: flex;
+  align-items: center;
+  gap: var(--dv-space-2);
+  padding: var(--dv-space-3) var(--dv-space-3) var(--dv-space-3) var(--dv-space-6);
+  border-bottom: 1px solid var(--dv-border);
+}
+
+.qc-title {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+}
+
+.qc-body {
+  padding: var(--dv-space-4) var(--dv-space-6);
+}
+
+/* The single visible question fills the card, so drop its own bottom margin. */
+.qc-body .elicit-field {
+  margin-bottom: 0;
+}
+
+.qc-validation {
+  padding: 0 var(--dv-space-6) var(--dv-space-3);
+  font-size: var(--dv-fs-s);
+  color: var(--vscode-editorWarning-foreground, var(--vscode-errorForeground));
+}
+
+.qc-footer {
+  display: flex;
+  align-items: center;
+  gap: var(--dv-space-2);
+  padding: var(--dv-space-2) var(--dv-space-4);
+  border-top: 1px solid var(--dv-border);
+}
+
+.qc-nav {
+  display: flex;
+  gap: var(--dv-space-1);
+}
+
+.qc-step {
+  font-size: var(--dv-fs-s);
+  color: var(--dv-dim);
+}
+
+.qc-spacer {
+  flex: 1;
+}
+
+/* A single-question prompt needs no nav arrows or step counter. */
+.qc-single .qc-nav,
+.qc-single .qc-step {
+  display: none;
+}
+
+.qc-nav .msg-action:disabled {
+  opacity: 0.35;
+  cursor: default;
 }
 
 .elicit-field {
@@ -1773,9 +1892,8 @@ body {
   min-width: 120px;
 }
 
-/* Highlight unanswered required questions after a failed submit. */
-.elicit-invalid .elicit-field:has(input:required) .elicit-q,
-.elicit-invalid .elicit-q.elicit-missing {
+/* Highlight the question card flagged after a failed submit. */
+.elicit-field.elicit-invalid .elicit-q {
   color: var(--vscode-errorForeground);
 }
 
