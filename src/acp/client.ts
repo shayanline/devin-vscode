@@ -141,6 +141,14 @@ export class AcpClient extends EventEmitter {
     return this.rpc("session/set_mode", { sessionId, modeId });
   }
 
+  renameSession(sessionId: string, title: string): Promise<unknown> {
+    return this.rpc("_cognition.ai/session/rename", { sessionId, title });
+  }
+
+  deleteSession(sessionId: string): Promise<unknown> {
+    return this.rpc("session/delete", { sessionId });
+  }
+
   // Devin exposes both `mode` and `model` as config options set through this
   // custom method: { sessionId, configId, value }.
   setConfigOption(sessionId: string, configId: string, value: string): Promise<unknown> {

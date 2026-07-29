@@ -12,7 +12,10 @@
     mode: document.getElementById("mode"),
     model: document.getElementById("model"),
     status: document.getElementById("status"),
-    permissionTray: document.getElementById("permission-tray")
+    permissionTray: document.getElementById("permission-tray"),
+    workingSet: document.getElementById("working-set"),
+    attach: document.getElementById("attach"),
+    attachments: document.getElementById("attachments")
   };
 
   let assistantEl = null; // current assistant bubble
@@ -38,9 +41,57 @@
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       send();
+    } else if (e.key === "@" && el.input.value.trim() === "") {
+      e.preventDefault();
+      vscode.postMessage({ type: "addContext" });
     }
   });
   el.input.addEventListener("input", autosize);
+  el.attach.addEventListener("click", () => vscode.postMessage({ type: "addContext" }));
+
+  // Paste an image from the clipboard as context.
+  el.input.addEventListener("paste", (e) => {
+    const items = (e.clipboardData && e.clipboardData.items) || [];
+    for (const it of items) {
+      if (it.type && it.type.indexOf("image/") === 0) {
+        const file = it.getAsFile();
+        if (!file) {
+          continue;
+        }
+        e.preventDefault();
+        const reader = new FileReader();
+        reader.onload = () => {
+          const result = String(reader.result || "");
+          const base64 = result.slice(result.indexOf(",") + 1);
+          vscode.postMessage({ type: "attachImage", name: file.name || "pasted-image", mime: it.type, data: base64 });
+        };
+        reader.readAsDataURL(file);
+      }
+    }
+  });
+
+  function renderAttachments(items) {
+    el.attachments.innerHTML = "";
+    if (!items || items.length === 0) {
+      el.attachments.classList.add("hidden");
+      return;
+    }
+    el.attachments.classList.remove("hidden");
+    items.forEach((a) => {
+      const chip = document.createElement("span");
+      chip.className = "chip";
+      const icon = a.type === "image" ? "\u{1F5BC}" : a.type === "selection" ? "\u2702" : "\u{1F4C4}";
+      const label = document.createElement("span");
+      label.textContent = `${icon} ${a.label}`;
+      const x = document.createElement("button");
+      x.className = "chip-x";
+      x.textContent = "\u2715";
+      x.addEventListener("click", () => vscode.postMessage({ type: "removeAttachment", id: a.id }));
+      chip.appendChild(label);
+      chip.appendChild(x);
+      el.attachments.appendChild(chip);
+    });
+  }
   el.mode.addEventListener("change", () =>
     vscode.postMessage({ type: "setMode", mode: el.mode.value })
   );
@@ -207,6 +258,46 @@
     el.permissionTray.appendChild(box);
   }
 
+  function renderWorkingSet(files) {
+    el.workingSet.innerHTML = "";
+    if (!files || files.length === 0) {
+      el.workingSet.classList.add("hidden");
+      return;
+    }
+    el.workingSet.classList.remove("hidden");
+
+    const header = document.createElement("div");
+    header.className = "ws-header";
+    const label = document.createElement("span");
+    label.textContent = `${files.length} changed file${files.length > 1 ? "s" : ""}`;
+    const actions = document.createElement("div");
+    actions.className = "ws-actions";
+    actions.appendChild(btn("Keep all", "", () => vscode.postMessage({ type: "acceptAll" })));
+    actions.appendChild(btn("Undo all", "secondary", () => vscode.postMessage({ type: "rejectAll" })));
+    header.appendChild(label);
+    header.appendChild(actions);
+    el.workingSet.appendChild(header);
+
+    files.forEach((f) => {
+      const row = document.createElement("div");
+      row.className = "ws-file";
+      const link = document.createElement("a");
+      link.className = "file-change";
+      link.textContent = f.name;
+      link.title = f.path;
+      link.addEventListener("click", () => vscode.postMessage({ type: "openDiff", path: f.path }));
+      const keep = btn("Keep", "tiny", () => vscode.postMessage({ type: "acceptFile", path: f.path }));
+      const undo = btn("Undo", "tiny secondary", () => vscode.postMessage({ type: "rejectFile", path: f.path }));
+      row.appendChild(link);
+      const grp = document.createElement("div");
+      grp.className = "ws-file-actions";
+      grp.appendChild(keep);
+      grp.appendChild(undo);
+      row.appendChild(grp);
+      el.workingSet.appendChild(row);
+    });
+  }
+
   function showSetup(show) {
     el.setup.classList.toggle("hidden", !show);
     el.chat.classList.toggle("hidden", show);
@@ -327,15 +418,36 @@
     sessions.forEach((s) => {
       const item = document.createElement("div");
       item.className = "session-item" + (s.id === activeId ? " active" : "");
+
+      const main = document.createElement("div");
+      main.className = "session-main";
       const title = document.createElement("div");
       title.className = "session-title";
       title.textContent = s.title || s.short_id || s.id;
       const meta = document.createElement("div");
       meta.className = "session-meta";
       meta.textContent = s.last_activity_ago || "";
-      item.appendChild(title);
-      item.appendChild(meta);
-      item.addEventListener("click", () => vscode.postMessage({ type: "loadSession", id: s.id }));
+      main.appendChild(title);
+      main.appendChild(meta);
+      main.addEventListener("click", () => vscode.postMessage({ type: "loadSession", id: s.id }));
+
+      const actions = document.createElement("div");
+      actions.className = "session-actions";
+      const rename = btn("\u270e", "tiny secondary", (e) => {
+        e.stopPropagation();
+        vscode.postMessage({ type: "renameSession", id: s.id, title: s.title || "" });
+      });
+      rename.title = "Rename";
+      const del = btn("\u2715", "tiny secondary", (e) => {
+        e.stopPropagation();
+        vscode.postMessage({ type: "deleteSession", id: s.id, title: s.title || s.id });
+      });
+      del.title = "Delete";
+      actions.appendChild(rename);
+      actions.appendChild(del);
+
+      item.appendChild(main);
+      item.appendChild(actions);
       el.sessionsBar.appendChild(item);
     });
   }
@@ -418,6 +530,8 @@
       case "clear":
         el.thread.innerHTML = "";
         el.permissionTray.innerHTML = "";
+        renderWorkingSet([]);
+        renderAttachments([]);
         toolEls.clear();
         endAssistant();
         break;
@@ -447,6 +561,12 @@
         break;
       case "fileChange":
         addFileChange(m.path);
+        break;
+      case "workingSet":
+        renderWorkingSet(m.files);
+        break;
+      case "attachments":
+        renderAttachments(m.items);
         break;
       case "permission":
         showPermission(m);

@@ -26,6 +26,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
   private sessionId?: string;
   private starting?: Promise<void>;
   private busy = false;
+  private initialized = false;
 
   private health?: CliHealth;
   private resolvedCli = "devin";
@@ -36,13 +37,25 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
   private readonly permissionResolvers = new Map<string, (res: RequestPermissionResult) => void>();
   private permissionSeq = 0;
 
+  private attachments: { id: string; label: string; type: string; block: ContentBlock }[] = [];
+  private attachSeq = 0;
+
   constructor(
     private readonly context: vscode.ExtensionContext,
     private readonly store: SessionStore,
     private readonly changes: ChangeTracker,
     private readonly statusBar: StatusBar,
     private readonly output: vscode.OutputChannel
-  ) {}
+  ) {
+    this.changes.onDidChangeList((paths) => this.postWorkingSet(paths));
+  }
+
+  private postWorkingSet(paths: string[]): void {
+    this.post({
+      type: "workingSet",
+      files: paths.map((p) => ({ path: p, name: path.basename(p) }))
+    });
+  }
 
   // --- Webview lifecycle ---------------------------------------------------
 
@@ -88,6 +101,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
         case "loadSession":
           await this.loadSession(String(msg.id || ""));
           return;
+        case "renameSession":
+          await this.renameSession(String(msg.id || ""), msg.title);
+          return;
+        case "deleteSession":
+          await this.deleteSession(String(msg.id || ""), msg.title);
+          return;
         case "refreshSessions":
           await this.refreshSessions();
           return;
@@ -102,6 +121,33 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
           return;
         case "openDiff":
           await this.changes.openDiff(String(msg.path || ""));
+          return;
+        case "acceptFile":
+          this.changes.accept(String(msg.path || ""));
+          return;
+        case "rejectFile":
+          await this.changes.reject(String(msg.path || ""));
+          return;
+        case "acceptAll":
+          this.changes.acceptAll();
+          return;
+        case "rejectAll":
+          await this.changes.rejectAll();
+          return;
+        case "reviewChanges":
+          await vscode.commands.executeCommand("workbench.view.scm");
+          return;
+        case "addContext":
+          await this.addContext();
+          return;
+        case "addSelection":
+          await this.addSelection();
+          return;
+        case "attachImage":
+          this.attachImage(msg.name, msg.mime, msg.data);
+          return;
+        case "removeAttachment":
+          this.removeAttachment(String(msg.id || ""));
           return;
         case "browseCli":
           await this.browseCli();
@@ -275,11 +321,21 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
       this.client = undefined;
       this.sessionId = undefined;
       this.starting = undefined;
+      this.initialized = false;
       this.setBusy(false);
       this.statusBar.set({ connected: false });
     });
     client.start();
     this.client = client;
+    return client;
+  }
+
+  private async ensureInitialized(): Promise<AcpClient> {
+    const client = this.ensureClient();
+    if (!this.initialized) {
+      await client.initialize();
+      this.initialized = true;
+    }
     return client;
   }
 
@@ -302,8 +358,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
       return this.starting;
     }
     this.starting = (async () => {
-      const client = this.ensureClient();
-      await client.initialize();
+      const client = await this.ensureInitialized();
       const res = await client.newSession(this.additionalDirs());
       this.sessionId = res.sessionId;
       this.store.add(res.sessionId);
@@ -324,27 +379,28 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     if (!(await this.ensureReady())) {
       return;
     }
+    this.resetClient();
+    this.changes.clear();
+    this.post({ type: "clear" });
+    await this.ensureSession();
+  }
+
+  private resetClient(): void {
     this.client?.dispose();
     this.client = undefined;
     this.sessionId = undefined;
     this.starting = undefined;
-    this.changes.clear();
-    this.post({ type: "clear" });
-    await this.ensureSession();
+    this.initialized = false;
   }
 
   private async loadSession(id: string): Promise<void> {
     if (!id || !(await this.ensureReady())) {
       return;
     }
-    this.client?.dispose();
-    this.client = undefined;
-    this.sessionId = undefined;
-    this.starting = undefined;
+    this.resetClient();
     this.changes.clear();
     this.post({ type: "clear" });
-    const client = this.ensureClient();
-    await client.initialize();
+    const client = await this.ensureInitialized();
     this.post({ type: "assistantStart" });
     await client.loadSession(id, this.additionalDirs());
     this.sessionId = id;
@@ -367,6 +423,53 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
       scope: this.scope()
     });
     this.post({ type: "sessions", sessions, activeId: this.sessionId });
+  }
+
+  private async renameSession(id: string, currentTitle?: string): Promise<void> {
+    if (!id || !(await this.ensureReady())) {
+      return;
+    }
+    const title = await vscode.window.showInputBox({
+      title: "Rename session",
+      value: currentTitle || "",
+      prompt: "New session title"
+    });
+    if (title === undefined || title.trim() === "") {
+      return;
+    }
+    try {
+      const client = await this.ensureInitialized();
+      await client.renameSession(id, title.trim());
+    } catch (err) {
+      this.log(`[rename-failed] ${err instanceof Error ? err.message : String(err)}`);
+    }
+    await this.refreshSessions();
+  }
+
+  private async deleteSession(id: string, title?: string): Promise<void> {
+    if (!id || !(await this.ensureReady())) {
+      return;
+    }
+    const choice = await vscode.window.showWarningMessage(
+      `Delete the session "${title || id}"? This permanently removes it and cannot be undone.`,
+      { modal: true },
+      "Delete"
+    );
+    if (choice !== "Delete") {
+      return;
+    }
+    try {
+      const client = await this.ensureInitialized();
+      await client.deleteSession(id);
+    } catch (err) {
+      this.log(`[delete-failed] ${err instanceof Error ? err.message : String(err)}`);
+    }
+    this.store.remove(id);
+    if (this.sessionId === id) {
+      this.resetClient();
+      this.post({ type: "clear" });
+    }
+    await this.refreshSessions();
   }
 
   // --- Mode + model --------------------------------------------------------
@@ -437,6 +540,110 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     this.post({ type: "model", model });
   }
 
+  // --- Context attachments -------------------------------------------------
+
+  private postAttachments(): void {
+    this.post({
+      type: "attachments",
+      items: this.attachments.map((a) => ({ id: a.id, label: a.label, type: a.type }))
+    });
+  }
+
+  private removeAttachment(id: string): void {
+    this.attachments = this.attachments.filter((a) => a.id !== id);
+    this.postAttachments();
+  }
+
+  private async addContext(): Promise<void> {
+    const uris = await vscode.workspace.findFiles(
+      "**/*",
+      "**/{node_modules,.git,dist,out,build,.venv,__pycache__,target}/**",
+      1000
+    );
+    const picks: (vscode.QuickPickItem & { id: string })[] = [
+      { label: "$(list-selection) Current selection or file", id: "__sel__" },
+      { label: "$(folder-opened) Browse...", id: "__browse__" },
+      ...uris.map((u) => ({ label: "$(file) " + vscode.workspace.asRelativePath(u), id: u.fsPath }))
+    ];
+    const chosen = await vscode.window.showQuickPick(picks, {
+      placeHolder: "Add context for Devin",
+      matchOnDescription: true
+    });
+    if (!chosen) {
+      return;
+    }
+    if (chosen.id === "__sel__") {
+      await this.addSelection();
+      return;
+    }
+    if (chosen.id === "__browse__") {
+      const picked = await vscode.window.showOpenDialog({ canSelectMany: true, openLabel: "Add" });
+      for (const p of picked || []) {
+        await this.addFile(p.fsPath);
+      }
+      return;
+    }
+    await this.addFile(chosen.id);
+  }
+
+  private async addFile(fsPath: string): Promise<void> {
+    try {
+      const raw = await fs.promises.readFile(fsPath, "utf8");
+      const text = raw.length > 200000 ? raw.slice(0, 200000) : raw;
+      this.attachments.push({
+        id: `att-${++this.attachSeq}`,
+        label: path.basename(fsPath),
+        type: "file",
+        block: {
+          type: "resource",
+          resource: { uri: vscode.Uri.file(fsPath).toString(), text }
+        }
+      });
+      this.postAttachments();
+    } catch (err) {
+      this.log(`[attach-file-failed] ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  private async addSelection(): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+      return;
+    }
+    const doc = editor.document;
+    const sel = editor.selection;
+    const hasSel = sel && !sel.isEmpty;
+    const body = hasSel ? doc.getText(sel) : doc.getText();
+    if (!body.trim()) {
+      return;
+    }
+    const rel = vscode.workspace.asRelativePath(doc.uri);
+    const label = hasSel
+      ? `${path.basename(doc.uri.fsPath)}:${sel.start.line + 1}-${sel.end.line + 1}`
+      : path.basename(doc.uri.fsPath);
+    const text = `From ${rel}${hasSel ? ` lines ${sel.start.line + 1}-${sel.end.line + 1}` : ""}:\n\n\`\`\`${doc.languageId}\n${body.slice(0, 200000)}\n\`\`\``;
+    this.attachments.push({
+      id: `att-${++this.attachSeq}`,
+      label,
+      type: "selection",
+      block: { type: "text", text }
+    });
+    this.postAttachments();
+  }
+
+  private attachImage(name: unknown, mime: unknown, data: unknown): void {
+    if (typeof data !== "string" || typeof mime !== "string") {
+      return;
+    }
+    this.attachments.push({
+      id: `att-${++this.attachSeq}`,
+      label: typeof name === "string" && name ? name : "image",
+      type: "image",
+      block: { type: "image", mimeType: mime, data }
+    });
+    this.postAttachments();
+  }
+
   // --- Prompting -----------------------------------------------------------
 
   private async handleSend(text: string): Promise<void> {
@@ -454,7 +661,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     this.setBusy(true);
     this.post({ type: "assistantStart" });
 
-    const blocks: ContentBlock[] = [{ type: "text", text }];
+    const blocks: ContentBlock[] = [...this.attachments.map((a) => a.block), { type: "text", text }];
+    this.attachments = [];
+    this.postAttachments();
     try {
       const result = await this.client.prompt(this.sessionId, blocks);
       this.post({ type: "assistantEnd", stopReason: result.stopReason });
@@ -618,9 +827,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
       <div id="sessions-bar" class="hidden"></div>
       <div id="thread"></div>
       <div id="composer">
+        <div id="working-set" class="hidden"></div>
         <div id="permission-tray"></div>
+        <div id="attachments" class="hidden"></div>
         <div id="input-row">
-          <textarea id="input" rows="1" placeholder="Ask Devin, Shift+Enter for newline..."></textarea>
+          <button id="attach" title="Add context (@)">@</button>
+          <textarea id="input" rows="1" placeholder="Ask Devin, @ to add context, Shift+Enter for newline..."></textarea>
           <button id="send" title="Send">Send</button>
           <button id="stop" class="hidden" title="Stop">Stop</button>
         </div>
