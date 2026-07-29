@@ -261,9 +261,14 @@ import { renderMarkdown } from "./markdown.js";
       const ic = iconFor(current);
       btnIcon.classList.toggle("hidden", !ic);
       if (!ic) { btnIcon.innerHTML = ""; return; }
-      btnIcon.innerHTML = ic.indexOf("img:") === 0
-        ? `<img class="dd-brand" src="${ic.slice(4)}" alt="" />`
-        : `<i class="codicon ${ic}"></i>`;
+      if (ic.indexOf("img:") === 0) {
+        // Render brand SVGs as a currentColor mask so they are monochrome and
+        // adapt to light/dark automatically (no separate variants needed).
+        const url = ic.slice(4).replace(/"/g, "%22");
+        btnIcon.innerHTML = `<span class="dd-brand" style="-webkit-mask-image:url('${url}');mask-image:url('${url}')"></span>`;
+      } else {
+        btnIcon.innerHTML = `<i class="codicon ${ic}"></i>`;
+      }
     }
     const menu = document.createElement("div");
     menu.className = "dd-menu hidden";
