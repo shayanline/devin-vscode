@@ -803,6 +803,11 @@ body {
   display: block;
 }
 
+.terminal-pre {
+  background: var(--vscode-terminal-background, var(--vscode-editor-background, #1e1e1e));
+  color: var(--vscode-terminal-foreground, var(--vscode-editor-foreground));
+}
+
 .tool.in_progress .tool-status {
   color: var(--vscode-progressBar-background);
   opacity: 1;

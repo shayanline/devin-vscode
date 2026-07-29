@@ -37,6 +37,7 @@ import { renderMarkdown } from "./markdown.js";
   let thinkingStart = 0;
   let thinkingDone = false;
   const toolEls = new Map();
+  const terminalCache = new Map();
 
   let commands = [];
   let ac = null;
@@ -574,6 +575,24 @@ import { renderMarkdown } from "./markdown.js";
       body.appendChild(sec);
     }
 
+    const termItems = (d.content || []).filter((c) => c.type === "terminal" && c.terminalId);
+    if (termItems.length) {
+      hasContent = true;
+      termItems.forEach((c) => {
+        const sec = document.createElement("div");
+        sec.className = "tool-section";
+        const pre = document.createElement("pre");
+        pre.className = "tool-pre terminal-pre";
+        pre.setAttribute("data-terminal", c.terminalId);
+        const cached = terminalCache.get(c.terminalId);
+        pre.textContent = (cached && cached.output) || "\u2026";
+        sec.appendChild(pre);
+        body.appendChild(sec);
+      });
+      // Terminal cards are worth showing open by default.
+      if (!entry.node.dataset.autoOpened) { entry.node.open = true; entry.node.dataset.autoOpened = "1"; }
+    }
+
     const diffItems = (d.content || []).filter((c) => c.type === "diff" && c.path);
     const locs = (d.locations || []).slice();
     const fileRows = [
@@ -1018,6 +1037,23 @@ import { renderMarkdown } from "./markdown.js";
     el.usage.textContent = label;
     el.usage.title = title;
   }
+
+  // Live terminal output streamed from the extension host.
+  function updateTerminal(m) {
+    if (!m.terminalId) return;
+    let text = m.output || "";
+    if (m.exitStatus) {
+      const code = m.exitStatus.exitCode;
+      const sig = m.exitStatus.signal;
+      text += `\n[exited ${sig ? "signal " + sig : "code " + (code == null ? "?" : code)}]`;
+    }
+    terminalCache.set(m.terminalId, { output: text, exitStatus: m.exitStatus });
+    el.thread.querySelectorAll(`pre[data-terminal="${m.terminalId}"]`).forEach((pre) => {
+      const atBottom = el.thread.scrollHeight - el.thread.scrollTop - el.thread.clientHeight < 40;
+      pre.textContent = text || "\u2026";
+      if (atBottom) scrollToBottom();
+    });
+  }
   function shorten(p) { return p.split(/[\\/]/).slice(-2).join("/"); }
   function baseName(p) { return p.split(/[\\/]/).filter(Boolean).pop() || p; }
 
@@ -1075,6 +1111,7 @@ import { renderMarkdown } from "./markdown.js";
       case "busy": setBusy(m.value); break;
       case "mode": if (m.mode) modeDropdown.setCurrent(m.mode); break;
       case "model": if (m.model) modelDropdown.setCurrent(m.model); break;
+      case "terminalOutput": updateTerminal(m); break;
       case "usage": renderUsage(m); break;
       case "error": endAssistant(); renderError(m.text); break;
       default: break;

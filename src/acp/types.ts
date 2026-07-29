@@ -121,6 +121,26 @@ export type RequestPermissionResult =
   | { outcome: { outcome: "selected"; optionId: string } }
   | { outcome: { outcome: "cancelled" } };
 
+// terminal/* client methods
+export interface CreateTerminalParams {
+  sessionId: string;
+  command: string;
+  args?: string[];
+  env?: { name: string; value: string }[];
+  cwd?: string;
+  outputByteLimit?: number;
+}
+
+export interface TerminalRef {
+  sessionId: string;
+  terminalId: string;
+}
+
+export interface TerminalExitStatus {
+  exitCode: number | null;
+  signal: string | null;
+}
+
 // fs/* client methods
 export interface ReadTextFileParams {
   sessionId: string;
