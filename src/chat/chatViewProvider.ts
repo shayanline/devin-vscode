@@ -16,7 +16,7 @@ import {
   WriteTextFileParams
 } from "../acp/types";
 import { TerminalManager } from "../acp/terminal";
-import { listSessions, SessionScope } from "../session/sessionList";
+import { DevinSession, listSessions, SessionScope } from "../session/sessionList";
 import { SessionStore } from "../session/sessionStore";
 import { ChangeTracker } from "../diff/changeTracker";
 import { StatusBar } from "../ui/statusBar";
@@ -114,7 +114,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
           await this.deleteSession(String(msg.id || ""), msg.title);
           return;
         case "refreshSessions":
-          await this.refreshSessions();
+          await this.refreshSessions(true);
           return;
         case "setMode":
           await this.setMode(String(msg.mode || "accept-edits"));
@@ -229,6 +229,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
   private async pushReadiness(): Promise<void> {
     if (this.isReady()) {
       this.post({ type: "ready" });
+      this.publishCachedOptions();
       await this.refreshSessions();
       if (this.cfg().get<boolean>("autoResumeLast", false)) {
         const last = this.store.activeId();
@@ -420,52 +421,73 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     if (!(await this.ensureReady())) {
       return;
     }
-    this.resetClient();
+    if (this.busy) {
+      this.cancel();
+    }
+    // Start a fresh session on the existing connection (no process respawn).
+    this.sessionId = undefined;
+    this.starting = undefined;
     this.changes.clear();
     this.post({ type: "clear" });
     await this.ensureSession();
-  }
-
-  private resetClient(): void {
-    this.client?.dispose();
-    this.client = undefined;
-    this.sessionId = undefined;
-    this.starting = undefined;
-    this.initialized = false;
-    this.terminals?.disposeAll();
-    this.terminals = undefined;
   }
 
   private async loadSession(id: string): Promise<void> {
     if (!id || !(await this.ensureReady())) {
       return;
     }
-    this.resetClient();
+    if (this.busy) {
+      this.cancel();
+    }
+    // Reuse the existing ACP connection (it supports multiple sessions); only
+    // respawn if there is no live process. This makes switching sessions fast.
     this.changes.clear();
     this.post({ type: "clear" });
-    const client = await this.ensureInitialized();
-    this.post({ type: "assistantStart" });
-    await client.loadSession(id, this.additionalDirs());
-    this.sessionId = id;
-    this.store.add(id);
-    this.store.setActive(id);
-    this.post({ type: "assistantEnd" });
-    this.post({ type: "sessionReady", sessionId: id });
-    void this.refreshSessions();
+    this.post({ type: "status", text: "Loading history\u2026" });
+    try {
+      const client = await this.ensureInitialized();
+      const res = (await client.loadSession(id, this.additionalDirs())) as NewSessionResult | undefined;
+      this.sessionId = id;
+      this.store.add(id);
+      this.store.setActive(id);
+      if (res && (res.configOptions || res.modes)) {
+        this.publishOptions(res.configOptions, res.modes?.currentModeId);
+      } else {
+        this.publishCachedOptions();
+      }
+      this.post({ type: "assistantEnd" });
+      this.post({ type: "sessionReady", sessionId: id });
+    } catch (err) {
+      this.post({ type: "error", text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      this.post({ type: "status", text: "" });
+      void this.refreshSessions();
+    }
   }
 
-  async refreshSessions(): Promise<void> {
+  private sessionsCache?: { at: number; sessions: DevinSession[] };
+
+  // `force` bypasses the short TTL cache (used for explicit refresh/rename/delete);
+  // implicit refreshes after a load/prompt reuse the cache to avoid respawning
+  // `devin list` repeatedly.
+  async refreshSessions(force = false): Promise<void> {
     if (!this.isReady()) {
       return;
     }
     const folders = this.folders();
-    const sessions = await listSessions({
-      cliPath: this.resolvedCli || "devin",
-      env: this.env,
-      folders,
-      trackedIds: this.store.ids(),
-      scope: this.scope()
-    });
+    let sessions: DevinSession[];
+    if (!force && this.sessionsCache && Date.now() - this.sessionsCache.at < 4000) {
+      sessions = this.sessionsCache.sessions;
+    } else {
+      sessions = await listSessions({
+        cliPath: this.resolvedCli || "devin",
+        env: this.env,
+        folders,
+        trackedIds: this.store.ids(),
+        scope: this.scope()
+      });
+      this.sessionsCache = { at: Date.now(), sessions };
+    }
     // Persist titles, and fill any tracked session whose title we only know
     // from the cache (e.g. its directory is not currently listed).
     const cached = this.store.titles();
@@ -504,7 +526,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     } catch (err) {
       this.log(`[rename-failed] ${err instanceof Error ? err.message : String(err)}`);
     }
-    await this.refreshSessions();
+    await this.refreshSessions(true);
   }
 
   private async deleteSession(id: string, title?: string): Promise<void> {
@@ -527,10 +549,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     }
     this.store.remove(id);
     if (this.sessionId === id) {
-      this.resetClient();
+      this.sessionId = undefined;
       this.post({ type: "clear" });
     }
-    await this.refreshSessions();
+    await this.refreshSessions(true);
   }
 
   // --- Mode + model --------------------------------------------------------
@@ -542,13 +564,22 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     this.currentMode = modeOpt?.currentValue || currentModeId || this.currentMode;
     this.currentModel = modelOpt?.currentValue || this.currentModel;
     this.statusBar.set({ connected: this.isReady(), mode: this.currentMode, model: this.currentModel });
-    this.post({
-      type: "options",
-      modes: (modeOpt?.options || []).map((c) => ({ value: c.value, name: c.name || c.value })),
-      currentMode: this.currentMode,
-      models: (modelOpt?.options || []).map((c) => ({ value: c.value, name: c.name || c.value })),
-      currentModel: this.currentModel
-    });
+    const modes = (modeOpt?.options || []).map((c) => ({ value: c.value, name: c.name || c.value }));
+    const models = (modelOpt?.options || []).map((c) => ({ value: c.value, name: c.name || c.value }));
+    const payload = { type: "options", modes, currentMode: this.currentMode, models, currentModel: this.currentModel };
+    if (modes.length || models.length) {
+      this.store.cacheOptions(payload);
+    }
+    this.post(payload);
+  }
+
+  // Populate the dropdowns from the cached options (used before any session
+  // exists, so they are never empty on open).
+  private publishCachedOptions(): void {
+    const cached = this.store.options();
+    if (cached) {
+      this.post(cached);
+    }
   }
 
   private async applyDefaults(res: NewSessionResult): Promise<void> {
@@ -568,6 +599,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
         this.currentModel = model;
       }
       this.statusBar.set({ connected: true, mode: this.currentMode, model: this.currentModel });
+      this.post({ type: "mode", mode: this.currentMode });
+      if (this.currentModel) {
+        this.post({ type: "model", model: this.currentModel });
+      }
     } catch (err) {
       this.log(`[apply-defaults-failed] ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -794,9 +829,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     if (!(await this.ensureReady())) {
       return;
     }
-    // Sending from the sessions list starts a fresh session.
+    // Sending from the sessions list starts a fresh session (reusing the
+    // existing ACP connection).
     if (startNew) {
-      this.resetClient();
+      this.sessionId = undefined;
+      this.starting = undefined;
       this.changes.clear();
       this.post({ type: "clear" });
     }
@@ -840,7 +877,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
   async showSessionsView(): Promise<void> {
     this.focus();
     this.post({ type: "body", body: "list" });
-    await this.refreshSessions();
+    await this.refreshSessions(true);
   }
 
   private setBusy(value: boolean): void {
@@ -854,11 +891,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     const u = n.update as any;
     switch (u.sessionUpdate) {
       case "agent_message_chunk":
-        this.post({ type: "assistantChunk", text: textOf(u.content) });
+        this.post({ type: "assistantChunk", text: textOf(u.content), messageId: u.messageId });
+        return;
+      case "user_message_chunk":
+        this.post({ type: "userChunk", text: textOf(u.content), messageId: u.messageId });
         return;
       case "agent_thought_chunk":
         if (this.cfg().get<boolean>("showThinking", true)) {
-          this.post({ type: "thoughtChunk", text: textOf(u.content) });
+          this.post({ type: "thoughtChunk", text: textOf(u.content), messageId: u.messageId });
         }
         return;
       case "plan":
@@ -1094,7 +1134,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
           <textarea id="input" rows="1" placeholder="Ask Devin"></textarea>
           <div id="toolbar">
             <div class="toolbar-left">
-              <button id="attach" class="icon-btn" title="Add context"><i class="codicon codicon-attach"></i></button>
+              <button id="attach" class="context-btn" title="Add files, selection, or images as context"><i class="codicon codicon-add"></i><span>Context</span></button>
+              <button id="mention" class="icon-btn" title="Reference a file (@)"><i class="codicon codicon-mention"></i></button>
               <div id="mode-dd" class="dd"></div>
             </div>
             <div class="toolbar-right">
