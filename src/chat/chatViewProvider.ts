@@ -102,6 +102,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
         case "cancel":
           this.cancel();
           return;
+        case "revertPreview":
+          await this.handleRevertPreview(Number(msg.head), msg.token);
+          return;
+        case "revertExecute":
+          await this.handleRevertExecute(Number(msg.head), msg.resendText, !!msg.newSession);
+          return;
         case "newSession":
           await this.newSession();
           return;
@@ -403,6 +409,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     }
     this.starting = (async () => {
       const client = await this.ensureInitialized();
+      this.postCapabilities();
       const res = await client.newSession(this.additionalDirs());
       this.sessionId = res.sessionId;
       this.store.add(res.sessionId);
@@ -449,6 +456,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     this.post({ type: "clear", loading: true });
     try {
       const client = await this.ensureInitialized();
+      this.postCapabilities();
       const res = (await client.loadSession(id, this.additionalDirs())) as NewSessionResult | undefined;
       this.sessionId = id;
       this.store.add(id);
@@ -464,6 +472,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
       this.post({ type: "error", text: err instanceof Error ? err.message : String(err) });
     } finally {
       this.post({ type: "loaded" });
+      // Establish the current head so live turns after a resume can be reverted.
+      await this.postTurnHead();
       void this.refreshSessions();
     }
   }
@@ -908,11 +918,74 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     try {
       const result = await this.client.prompt(this.sessionId, blocks);
       this.post({ type: "assistantEnd", stopReason: result.stopReason });
+      await this.postTurnHead();
     } catch (err) {
       this.post({ type: "error", text: err instanceof Error ? err.message : String(err) });
     } finally {
       this.setBusy(false);
       void this.refreshSessions();
+    }
+  }
+
+  // After a turn completes, read the current head node id and hand it to the
+  // webview so it can pin a revert target ("checkpoint") to the finished turn.
+  private async postTurnHead(): Promise<void> {
+    if (!this.sessionId || !this.client || !this.client.supportsRevert()) {
+      return;
+    }
+    try {
+      const head = await this.client.currentHead(this.sessionId);
+      if (head != null) {
+        this.post({ type: "turnHead", head });
+      }
+    } catch (err) {
+      this.log(`[turn-head-failed] ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  // Preview what reverting to a node would undo (files + irreversible actions),
+  // so the webview can render an inline confirmation before executing.
+  private async handleRevertPreview(head: number, token?: unknown): Promise<void> {
+    if (!this.sessionId || !this.client || !Number.isFinite(head)) {
+      return;
+    }
+    try {
+      const result = await this.client.revertPreview(this.sessionId, head);
+      this.post({ type: "revertPreview", head, token, result });
+    } catch (err) {
+      this.post({ type: "revertPreview", head, token, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
+  // Execute a revert (edit-in-place submit, restore checkpoint, or undo). When
+  // `resendText` is given, resend it as the next prompt after the rewind.
+  private async handleRevertExecute(head: number, resendText: unknown, startNew: boolean): Promise<void> {
+    if (!(await this.ensureReady())) {
+      return;
+    }
+    // Reverting the very first turn has no prior node: start fresh instead.
+    if (startNew || !Number.isFinite(head)) {
+      await this.newSession();
+      if (typeof resendText === "string" && resendText.trim()) {
+        await this.handleSend(resendText, false);
+      }
+      return;
+    }
+    if (!this.sessionId || !this.client) {
+      return;
+    }
+    try {
+      await this.client.revertExecute(this.sessionId, head);
+      // The rewind undoes file edits agent-side; drop our tracked working set
+      // so the SCM group and working-set card reflect the reverted state.
+      this.changes.clear();
+      this.post({ type: "reverted", head });
+    } catch (err) {
+      this.post({ type: "error", text: err instanceof Error ? err.message : String(err) });
+      return;
+    }
+    if (typeof resendText === "string" && resendText.trim()) {
+      await this.handleSend(resendText, false);
     }
   }
 
@@ -970,6 +1043,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
   private setBusy(value: boolean): void {
     this.busy = value;
     this.post({ type: "busy", value });
+  }
+
+  // Tell the webview which optional features are available/enabled so it can
+  // gate edit-in-place, checkpoints, and undo.
+  private postCapabilities(): void {
+    this.post({
+      type: "capabilities",
+      revert: !!this.client?.supportsRevert(),
+      editRequests: this.cfg().get<string>("editRequests", "inline"),
+      checkpoints: this.cfg().get<boolean>("checkpoints.enabled", true),
+      showFileChanges: this.cfg().get<boolean>("checkpoints.showFileChanges", true),
+      confirmRemoval: this.cfg().get<boolean>("editing.confirmEditRequestRemoval", true)
+    });
   }
 
   // --- Incoming session/update notifications -------------------------------

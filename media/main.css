@@ -754,44 +754,164 @@ body {
 }
 
 /* Messages */
-.msg {
+/* --- Turns (request + response), VS Code / Copilot transcript style ------- */
+/* No avatars, no role names. The user request sits in a subtle rounded box;
+   the assistant response is plain, full-width text. */
+.turn {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
 }
 
-.msg .role {
+.turn-request {
+  position: relative;
+}
+
+.turn-request .req-body {
+  background: var(--vscode-chat-requestBubbleBackground, var(--vscode-chat-requestBackground, rgba(127, 127, 127, 0.1)));
+  border: 1px solid var(--vscode-chat-requestBorder, transparent);
+  border-radius: 6px;
+  padding: 8px 12px;
+}
+
+.turn-request.editable-inline .req-text {
+  cursor: text;
+}
+
+.turn.headless .turn-request {
+  display: none;
+}
+
+.turn-response {
+  line-height: 1.5;
+}
+
+.resp-text {
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+/* A turn (and everything after it) dimmed while its request is being edited. */
+.turn.discardable {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+.bubble {
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+/* --- Inline request editor (edit-in-place) -------------------------------- */
+.turn-request.editing .req-text.hidden {
+  display: none;
+}
+
+.req-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.req-editor-input {
+  width: 100%;
+  box-sizing: border-box;
+  resize: none;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border: 1px solid var(--vscode-focusBorder);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: 1.4;
+}
+
+.req-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+/* --- Checkpoint row (Restore Checkpoint), revealed on hover --------------- */
+.checkpoint-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  opacity: 0;
+  transition: opacity 0.1s ease-in-out;
+  margin: 2px 0;
+}
+
+.turn:hover .checkpoint-row,
+.checkpoint-row:focus-within,
+.checkpoint-row.confirming {
+  opacity: 1;
+}
+
+.checkpoint-line-left,
+.checkpoint-line-right {
+  flex: 1;
+  height: 1px;
+  background: var(--vscode-panel-border);
+}
+
+.checkpoint-line-left {
+  -webkit-mask-image: linear-gradient(to right, transparent, black);
+  mask-image: linear-gradient(to right, transparent, black);
+}
+
+.checkpoint-line-right {
+  -webkit-mask-image: linear-gradient(to left, transparent, black);
+  mask-image: linear-gradient(to left, transparent, black);
+}
+
+.checkpoint-restore,
+.checkpoint-cancel {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--vscode-descriptionForeground);
+  font-family: inherit;
+  font-size: 0.85em;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.checkpoint-restore:hover,
+.checkpoint-cancel:hover {
+  border-color: var(--vscode-panel-border);
+  color: var(--vscode-foreground);
+}
+
+.checkpoint-row.confirming .checkpoint-restore {
+  color: var(--vscode-errorForeground);
+  border-color: var(--vscode-errorForeground);
+}
+
+.checkpoint-restore .codicon {
+  font-size: 12px;
+}
+
+.checkpoint-cancel.hidden {
+  display: none;
+}
+
+.plan-title {
   font-size: 0.75em;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   opacity: 0.55;
   font-weight: 600;
+  margin-bottom: 4px;
 }
 
-/* User request: a left-aligned bubble that hugs its content (Copilot-style). */
-.msg.user {
-  align-items: flex-start;
-}
-
-.msg.user .bubble {
-  align-self: flex-start;
-  max-width: 92%;
-  background: var(--vscode-chat-requestBackground, rgba(127, 127, 127, 0.12));
-  border: 1px solid var(--vscode-chat-requestBorder, transparent);
-  border-radius: 12px;
-  padding: 8px 12px;
-}
-
-.msg.user .role {
-  display: none;
-}
-
-.msg .bubble {
-  line-height: 1.5;
-  overflow-wrap: anywhere;
-}
-
-/* Per-message hover actions */
+/* Per-message hover actions (request toolbar) */
 .msg-actions {
   display: flex;
   gap: 2px;
@@ -800,7 +920,16 @@ body {
   transition: opacity 0.12s ease;
 }
 
-.msg:hover .msg-actions,
+.req-actions {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  margin-top: 0;
+  background: var(--vscode-chat-requestBubbleBackground, var(--vscode-editor-background));
+  border-radius: 4px;
+}
+
+.turn-request:hover .msg-actions,
 .msg-actions:focus-within {
   opacity: 0.9;
 }

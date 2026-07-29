@@ -10,6 +10,7 @@ import {
   ReadTextFileParams,
   RequestPermissionParams,
   RequestPermissionResult,
+  RevertPreviewResult,
   SessionUpdateNotification,
   TerminalExitStatus,
   TerminalRef,
@@ -123,11 +124,20 @@ export class AcpClient extends EventEmitter {
       clientCapabilities: {
         fs: { readTextFile: true, writeTextFile: true },
         terminal: true,
-        elicitation: { form: {}, url: {} }
+        elicitation: { form: {}, url: {} },
+        // Unlocks the _cognition.ai/revert/* methods (conversation rewind +
+        // file undo). Verified against devin acp.
+        _meta: { "cognition.ai/revert": true }
       }
     });
     this.initializeResult = result;
     return result;
+  }
+
+  // True when the agent acknowledged the revert capability.
+  supportsRevert(): boolean {
+    const meta = this.initializeResult?.agentCapabilities?._meta as Record<string, unknown> | undefined;
+    return meta?.["cognition.ai/revert"] === true;
   }
 
   authenticate(methodId: string): Promise<unknown> {
@@ -175,6 +185,44 @@ export class AcpClient extends EventEmitter {
   // custom method: { sessionId, configId, value }.
   setConfigOption(sessionId: string, configId: string, value: string): Promise<unknown> {
     return this.rpc("session/set_config_option", { sessionId, configId, value });
+  }
+
+  // --- Revert (conversation rewind + file undo) ---------------------------
+  // Preview what reverting to `targetNodeId` would do, without mutating.
+  revertPreview(sessionId: string, targetNodeId: number, opts?: { force?: boolean; skipFileUndo?: boolean }): Promise<RevertPreviewResult> {
+    return this.rpc<RevertPreviewResult>("_cognition.ai/revert/preview", {
+      sessionId,
+      targetNodeId,
+      force: opts?.force ?? false,
+      skipFileUndo: opts?.skipFileUndo ?? false
+    });
+  }
+
+  // Execute the rewind: truncate the conversation back to `targetNodeId` and
+  // undo the file edits made from that node onward (unless skipFileUndo).
+  revertExecute(sessionId: string, targetNodeId: number, opts?: { force?: boolean; skipFileUndo?: boolean }): Promise<unknown> {
+    return this.rpc("_cognition.ai/revert/execute", {
+      sessionId,
+      targetNodeId,
+      force: opts?.force ?? true,
+      skipFileUndo: opts?.skipFileUndo ?? false
+    });
+  }
+
+  // The agent does not surface node ids in the stream, so we read the current
+  // head by probing preview with an out-of-range target and parsing the error
+  // ("...from head H..."). Returns the head node id, or null when the session
+  // has no revertible history yet.
+  async currentHead(sessionId: string): Promise<number | null> {
+    try {
+      await this.revertPreview(sessionId, Number.MAX_SAFE_INTEGER);
+      return null; // unexpected success (no error to parse)
+    } catch (err) {
+      const data = (err as { data?: unknown }).data;
+      const text = typeof data === "string" ? data : (err instanceof Error ? err.message : String(err));
+      const m = /from head (\d+)/.exec(text);
+      return m ? Number(m[1]) : null;
+    }
   }
 
   private rpc<T>(method: string, params?: unknown): Promise<T> {

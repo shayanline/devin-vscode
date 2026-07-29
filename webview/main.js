@@ -464,26 +464,26 @@ import { renderMarkdown } from "./markdown.js";
     autosize();
   }
 
-  // --- Thread --------------------------------------------------------------
+  // --- Turns & thread ------------------------------------------------------
+  // The thread is a list of turns. Each turn pairs a user request with the
+  // assistant response that follows it (assistant text, thinking, tool cards,
+  // plan). This request/response model mirrors VS Code's chat and is what makes
+  // edit-in-place, checkpoints (restore), and undo possible.
 
-  function addMessage(role, text) {
-    const msg = document.createElement("div");
-    msg.className = "msg " + role;
-    const roleEl = document.createElement("div");
-    roleEl.className = "role";
-    roleEl.textContent = role === "user" ? "You" : "Devin";
-    const bubble = document.createElement("div");
-    bubble.className = "bubble";
-    if (text !== undefined) {
-      bubble.innerHTML = renderMarkdown(text);
-      enhanceCodeBlocks(bubble);
-    }
-    msg.appendChild(roleEl);
-    msg.appendChild(bubble);
-    msg.appendChild(messageActions(role, bubble, text));
-    el.thread.appendChild(msg);
-    scrollToBottom();
-    return bubble;
+  let turns = [];
+  let currentTurn = null;
+  let turnSeq = 0;
+  // The head node id after the most recently completed turn. A turn's revert
+  // target ("checkpoint") is the head captured before it ran (headBefore).
+  let lastHead = null;
+  // Feature gates from the host (revert capability + settings).
+  let caps = { revert: false, editRequests: "inline", checkpoints: true, showFileChanges: true, confirmRemoval: true };
+  // Pending revert-preview requests keyed by token.
+  const previewWaiters = new Map();
+  let previewSeq = 0;
+
+  function respTarget() {
+    return currentTurn ? currentTurn.respEl : el.thread;
   }
 
   function actionBtn(icon, title, onClick) {
@@ -491,7 +491,7 @@ import { renderMarkdown } from "./markdown.js";
     b.className = "msg-action";
     b.title = title;
     b.innerHTML = `<i class="codicon ${icon}"></i>`;
-    b.addEventListener("click", () => onClick(b));
+    b.addEventListener("click", (e) => { e.stopPropagation(); onClick(b); });
     return b;
   }
 
@@ -502,27 +502,244 @@ import { renderMarkdown } from "./markdown.js";
     setTimeout(() => { i.className = prev; }, 1200);
   }
 
-  function messageActions(role, bubble, rawText) {
-    const bar = document.createElement("div");
-    bar.className = "msg-actions";
-    bar.appendChild(actionBtn("codicon-copy", "Copy", (b) => {
-      vscode.postMessage({ type: "copyText", text: rawText || bubble.textContent || "" });
+  // Create a new turn shell (request container + checkpoint row + response
+  // container) and make it current. `text` is the user's message.
+  function newTurn(mid, text) {
+    finalizeBlock();
+    hideWelcome();
+    const container = document.createElement("div");
+    container.className = "turn";
+    const req = document.createElement("div");
+    req.className = "turn-request";
+    const reqBody = document.createElement("div");
+    reqBody.className = "req-body";
+    const reqText = document.createElement("div");
+    reqText.className = "req-text bubble";
+    reqBody.appendChild(reqText);
+    req.appendChild(reqBody);
+    const resp = document.createElement("div");
+    resp.className = "turn-response";
+    const checkpoint = document.createElement("div");
+    checkpoint.className = "checkpoint-row hidden";
+    container.appendChild(req);
+    container.appendChild(checkpoint);
+    container.appendChild(resp);
+    el.thread.appendChild(container);
+    const turn = {
+      id: "t" + (++turnSeq), mid, container, req, reqBody, reqText, resp, checkpoint,
+      text: text || "", headBefore: lastHead, headAfter: null, editing: false
+    };
+    turns.push(turn);
+    currentTurn = turn;
+    if (text !== undefined) setTurnText(turn, text);
+    buildTurnChrome(turn);
+    scrollToBottom();
+    return turn;
+  }
+
+  function setTurnText(turn, text) {
+    turn.text = text;
+    if (text) turn.reqText.innerHTML = renderMarkdown(text);
+    lastUserText = text;
+  }
+
+  // Request hover toolbar (Edit) + response footer (Copy, Retry) + the
+  // checkpoint row (Restore). Rebuilt whenever caps change.
+  function buildTurnChrome(turn) {
+    // Request toolbar (top-right, on hover): Edit.
+    let reqActions = turn.req.querySelector(".msg-actions");
+    if (reqActions) reqActions.remove();
+    reqActions = document.createElement("div");
+    reqActions.className = "msg-actions req-actions";
+    reqActions.appendChild(actionBtn("codicon-copy", "Copy", (b) => {
+      vscode.postMessage({ type: "copyText", text: turn.text });
       flashCheck(b);
     }));
-    if (role === "user") {
-      bar.appendChild(actionBtn("codicon-edit", "Edit & resend", () => {
-        el.input.value = rawText || bubble.textContent || "";
-        el.input.focus();
-        el.input.setSelectionRange(el.input.value.length, el.input.value.length);
-        autosize();
-        updateSendState();
-      }));
-    } else {
-      bar.appendChild(actionBtn("codicon-refresh", "Retry", () => {
-        if (lastUserText) vscode.postMessage({ type: "send", text: lastUserText, newSession: false });
-      }));
+    if (canEditTurn(turn)) {
+      reqActions.appendChild(actionBtn("codicon-edit", "Edit Request", () => startEditing(turn)));
     }
-    return bar;
+    turn.req.appendChild(reqActions);
+
+    // Inline (click-to-edit) affordance.
+    turn.reqText.onclick = null;
+    if (caps.editRequests === "inline" && canEditTurn(turn)) {
+      turn.req.classList.add("editable-inline");
+      turn.reqText.onclick = () => startEditing(turn);
+    } else {
+      turn.req.classList.remove("editable-inline");
+    }
+
+    // Checkpoint row (Restore Checkpoint) between request and response.
+    renderCheckpointRow(turn);
+  }
+
+  function refreshTurnChrome() {
+    turns.forEach((t) => { if (!t.editing) buildTurnChrome(t); });
+  }
+
+  // A turn is "mapped" (revertable) when we know a node to revert to: either a
+  // captured head-before, or it was created live in this session (a live first
+  // turn has headBefore null but can be reverted by starting fresh). Turns
+  // replayed from a loaded session without a known head cannot be mapped.
+  function turnMapped(turn) {
+    return turn.headBefore != null || !turn.replayed;
+  }
+  function canEditTurn(turn) {
+    return caps.revert && caps.editRequests !== "none" && !busy && turnMapped(turn);
+  }
+  function canRestoreTurn(turn) {
+    return caps.revert && caps.checkpoints && !busy && turnMapped(turn);
+  }
+
+  function renderCheckpointRow(turn) {
+    const row = turn.checkpoint;
+    row.innerHTML = "";
+    if (!canRestoreTurn(turn)) { row.classList.add("hidden"); return; }
+    row.classList.remove("hidden");
+    const left = document.createElement("span");
+    left.className = "checkpoint-line-left";
+    const btn = document.createElement("button");
+    btn.className = "checkpoint-restore";
+    btn.innerHTML = '<i class="codicon codicon-history"></i><span>Restore Checkpoint</span>';
+    btn.title = "Restores workspace and chat to this point";
+    const right = document.createElement("span");
+    right.className = "checkpoint-line-right";
+    // Inline two-state confirm ("Discard Edits"/Cancel), like VS Code.
+    let confirming = false;
+    const cancel = document.createElement("button");
+    cancel.className = "checkpoint-cancel hidden";
+    cancel.innerHTML = '<i class="codicon codicon-close"></i>';
+    cancel.title = "Cancel";
+    const setConfirming = (v) => {
+      confirming = v;
+      row.classList.toggle("confirming", v);
+      cancel.classList.toggle("hidden", !v);
+      btn.querySelector("span").textContent = v ? "Discard Edits" : "Restore Checkpoint";
+    };
+    cancel.addEventListener("click", (e) => { e.stopPropagation(); setConfirming(false); });
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      if (confirming) { setConfirming(false); doRestore(turn); return; }
+      const needs = await revertNeedsConfirm(turn);
+      if (needs) setConfirming(true);
+      else doRestore(turn);
+    });
+    row.appendChild(left);
+    row.appendChild(btn);
+    row.appendChild(cancel);
+    row.appendChild(right);
+  }
+
+  // Restore: rewind to before this turn and drop the prompt text back into the
+  // composer (do not auto-run), matching VS Code.
+  function doRestore(turn) {
+    if (turn.headBefore == null) {
+      vscode.postMessage({ type: "revertExecute", newSession: true });
+    } else {
+      vscode.postMessage({ type: "revertExecute", head: turn.headBefore });
+    }
+    trimTurnsFrom(turn);
+    el.input.value = turn.text;
+    el.input.focus();
+    autosize();
+    updateSendState();
+  }
+
+  // Ask the host to preview the revert; returns true if it would discard edits
+  // or has irreversible actions and confirmation is enabled.
+  function revertNeedsConfirm(turn) {
+    if (!caps.confirmRemoval || turn.headBefore == null) return Promise.resolve(false);
+    const token = "pv" + (++previewSeq);
+    return new Promise((resolve) => {
+      previewWaiters.set(token, (msg) => {
+        if (msg.error || !msg.result) { resolve(false); return; }
+        const r = msg.result;
+        const has = (r.fileActions && r.fileActions.length) || (r.irreversibleWarnings && r.irreversibleWarnings.length);
+        resolve(!!has);
+      });
+      vscode.postMessage({ type: "revertPreview", head: turn.headBefore, token });
+      setTimeout(() => { if (previewWaiters.has(token)) { previewWaiters.delete(token); resolve(false); } }, 4000);
+    });
+  }
+
+  // Remove this turn and every turn after it from the DOM/model.
+  function trimTurnsFrom(turn) {
+    const idx = turns.indexOf(turn);
+    if (idx < 0) return;
+    for (let i = turns.length - 1; i >= idx; i--) {
+      turns[i].container.remove();
+      turns.splice(i, 1);
+    }
+    currentTurn = turns[turns.length - 1] || null;
+    if (currentTurn) lastHead = currentTurn.headAfter;
+    else lastHead = null;
+  }
+
+  // --- Edit a request in place --------------------------------------------
+
+  function startEditing(turn) {
+    if (turn.editing || !canEditTurn(turn)) return;
+    turn.editing = true;
+    turn.req.classList.add("editing");
+    turn.reqText.classList.add("hidden");
+    const box = document.createElement("div");
+    box.className = "req-editor";
+    const ta = document.createElement("textarea");
+    ta.className = "req-editor-input";
+    ta.value = turn.text;
+    const row = document.createElement("div");
+    row.className = "req-editor-actions";
+    const cancelBtn = btn("Cancel", "secondary", () => finishEditing(turn));
+    const sendBtn = btn("Send", "primary", () => submitEdit(turn, ta.value));
+    row.appendChild(cancelBtn);
+    row.appendChild(sendBtn);
+    box.appendChild(ta);
+    box.appendChild(row);
+    turn.reqBody.appendChild(box);
+    turn.editorEl = box;
+    const grow = () => { ta.style.height = "auto"; ta.style.height = Math.min(Math.max(ta.scrollHeight, 32), 240) + "px"; };
+    ta.addEventListener("input", grow);
+    ta.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") { e.preventDefault(); finishEditing(turn); }
+      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submitEdit(turn, ta.value); }
+    });
+    grow();
+    ta.focus();
+    ta.setSelectionRange(ta.value.length, ta.value.length);
+    // Dim the turns that a submit would discard.
+    markDiscardable(turn, true);
+  }
+
+  function finishEditing(turn) {
+    turn.editing = false;
+    turn.req.classList.remove("editing");
+    turn.reqText.classList.remove("hidden");
+    if (turn.editorEl) { turn.editorEl.remove(); turn.editorEl = null; }
+    markDiscardable(turn, false);
+  }
+
+  async function submitEdit(turn, text) {
+    text = (text || "").trim();
+    if (!text) return;
+    const needs = await revertNeedsConfirm(turn);
+    if (needs && !window.confirm("This will remove this request and everything after it, and undo any edits those turns made. Continue?")) {
+      return;
+    }
+    finishEditing(turn);
+    trimTurnsFrom(turn);
+    if (turn.headBefore == null) {
+      vscode.postMessage({ type: "revertExecute", newSession: true, resendText: text });
+    } else {
+      vscode.postMessage({ type: "revertExecute", head: turn.headBefore, resendText: text });
+    }
+  }
+
+  function markDiscardable(fromTurn, on) {
+    const idx = turns.indexOf(fromTurn);
+    if (idx < 0) return;
+    for (let i = idx; i < turns.length; i++) {
+      turns[i].container.classList.toggle("discardable", on && i !== idx);
+    }
   }
 
   const SHELL_LANGS = new Set(["bash", "sh", "shell", "zsh", "console", "powershell", "ps", "ps1", "bat", "cmd"]);
@@ -575,11 +792,24 @@ import { renderMarkdown } from "./markdown.js";
     const atBottom = el.thread.scrollHeight - el.thread.scrollTop - el.thread.clientHeight < 60;
     if (block.kind === "thinking") {
       block.body.innerHTML = renderMarkdown(block.buffer);
+    } else if (block.kind === "user") {
+      if (block.turn) { block.turn.text = block.buffer; block.turn.reqText.innerHTML = renderMarkdown(block.buffer); }
     } else {
       block.bubble.innerHTML = renderMarkdown(block.buffer);
       if (block.kind === "assistant") enhanceCodeBlocks(block.bubble);
     }
     if (atBottom) scrollToBottom();
+  }
+
+  // Assistant content (text, thinking, tools, plan) always belongs to a turn.
+  // If none is open (e.g. an assistant-first history replay), start a headless
+  // one with no request row.
+  function ensureTurn() {
+    if (!currentTurn) {
+      newTurn(undefined, undefined);
+      currentTurn.container.classList.add("headless");
+    }
+    return currentTurn;
   }
 
   // Close the current block, running any finalisation it needs.
@@ -598,7 +828,11 @@ import { renderMarkdown } from "./markdown.js";
     if (!(block && block.kind === "assistant" && sameMid(block.mid, mid))) {
       finalizeBlock();
       hideWelcome();
-      block = { kind: "assistant", mid, bubble: addMessage("assistant"), buffer: "" };
+      ensureTurn();
+      const bubble = document.createElement("div");
+      bubble.className = "resp-text bubble";
+      respTarget().appendChild(bubble);
+      block = { kind: "assistant", mid, bubble, buffer: "" };
     }
     block.buffer += text;
     scheduleRender();
@@ -608,6 +842,7 @@ import { renderMarkdown } from "./markdown.js";
     if (!(block && block.kind === "thinking" && sameMid(block.mid, mid))) {
       finalizeBlock();
       hideWelcome();
+      ensureTurn();
       const details = document.createElement("details");
       details.className = "thinking";
       const summary = document.createElement("summary");
@@ -622,7 +857,7 @@ import { renderMarkdown } from "./markdown.js";
       bodyEl.className = "thinking-body";
       details.appendChild(summary);
       details.appendChild(bodyEl);
-      el.thread.appendChild(details);
+      respTarget().appendChild(details);
       block = { kind: "thinking", mid, body: bodyEl, label, buffer: "", start: Date.now(), timer: null };
       const tb = block;
       tb.timer = setInterval(() => {
@@ -635,12 +870,16 @@ import { renderMarkdown } from "./markdown.js";
     scheduleRender();
   }
 
-  // A user turn streamed during history replay (user_message_chunk).
+  // A user turn streamed during history replay (user_message_chunk): starts a
+  // new turn and streams the request text into it.
   function appendUserChunk(text, mid) {
     if (!(block && block.kind === "user" && sameMid(block.mid, mid))) {
       finalizeBlock();
       hideWelcome();
-      block = { kind: "user", mid, bubble: addMessage("user"), buffer: "" };
+      const turn = newTurn(mid, "");
+      turn.replayed = true; // from a loaded session; node id unknown
+      buildTurnChrome(turn); // hide edit/restore until (if) a head is known
+      block = { kind: "user", mid, turn, buffer: "" };
     }
     block.buffer += text;
     lastUserText = block.buffer;
@@ -651,16 +890,23 @@ import { renderMarkdown } from "./markdown.js";
   function addUserMessage(text) {
     finalizeBlock();
     hideWelcome();
-    lastUserText = text;
-    addMessage("user", text);
+    newTurn(undefined, text);
   }
   function renderPlan(entries) {
     finalizeBlock();
     hideWelcome();
-    const box = document.createElement("div");
-    box.className = "plan";
+    ensureTurn();
+    // Reuse a single plan box per turn so live updates replace it.
+    let box = currentTurn && currentTurn.planEl;
+    if (!box) {
+      box = document.createElement("div");
+      box.className = "plan";
+      respTarget().appendChild(box);
+      if (currentTurn) currentTurn.planEl = box;
+    }
+    box.innerHTML = "";
     const title = document.createElement("div");
-    title.className = "role";
+    title.className = "plan-title";
     title.textContent = "Plan";
     box.appendChild(title);
     (entries || []).forEach((entry) => {
@@ -674,7 +920,6 @@ import { renderMarkdown } from "./markdown.js";
       row.appendChild(txt);
       box.appendChild(row);
     });
-    el.thread.appendChild(box);
     scrollToBottom();
   }
   const TOOL_KIND_ICONS = {
@@ -704,6 +949,7 @@ import { renderMarkdown } from "./markdown.js";
     if (!entry) {
       finalizeBlock();
       hideWelcome();
+      ensureTurn();
       const node = document.createElement("details");
       node.className = "tool";
       const summary = document.createElement("summary");
@@ -723,7 +969,7 @@ import { renderMarkdown } from "./markdown.js";
       bodyEl.className = "tool-body";
       node.appendChild(summary);
       node.appendChild(bodyEl);
-      el.thread.appendChild(node);
+      respTarget().appendChild(node);
       entry = { node, kindIcon, label, statEl, bodyEl, data: {} };
       toolEls.set(m.id, entry);
     }
@@ -843,6 +1089,7 @@ import { renderMarkdown } from "./markdown.js";
   function addFileChange(path) {
     finalizeBlock();
     hideWelcome();
+    ensureTurn();
     const node = document.createElement("div");
     node.className = "tool-line completed";
     const icon = document.createElement("i");
@@ -854,7 +1101,7 @@ import { renderMarkdown } from "./markdown.js";
     link.addEventListener("click", () => vscode.postMessage({ type: "openDiff", path }));
     node.appendChild(icon);
     node.appendChild(link);
-    el.thread.appendChild(node);
+    respTarget().appendChild(node);
     scrollToBottom();
   }
 
@@ -1275,7 +1522,7 @@ import { renderMarkdown } from "./markdown.js";
 
   function renderWelcome() {
     if (el.thread.querySelector(".welcome")) return;
-    if (el.thread.querySelector(".msg")) return;
+    if (el.thread.querySelector(".turn")) return;
     const box = document.createElement("div");
     box.className = "welcome";
     const logoSrc = document.body.dataset.logo;
@@ -1327,7 +1574,7 @@ import { renderMarkdown } from "./markdown.js";
   }
 
   function threadHasContent() {
-    return !!el.thread.querySelector(".msg, .tool, .tool-line, .plan, .thinking");
+    return !!el.thread.querySelector(".turn, .tool, .tool-line, .plan, .thinking");
   }
 
   // --- Error rendering -----------------------------------------------------
@@ -1362,7 +1609,7 @@ import { renderMarkdown } from "./markdown.js";
       row.appendChild(btn("Retry", "primary", () => { if (lastUserText) vscode.postMessage({ type: "send", text: lastUserText, newSession: false }); }));
     }
     box.appendChild(row);
-    el.thread.appendChild(box);
+    respTarget().appendChild(box);
     scrollToBottom();
   }
 
@@ -1487,6 +1734,10 @@ import { renderMarkdown } from "./markdown.js";
       case "status": el.status.textContent = m.text || ""; break;
       case "clear":
         el.thread.innerHTML = "";
+        turns = [];
+        currentTurn = null;
+        lastHead = null;
+        previewWaiters.clear();
         el.permissionTray.innerHTML = "";
         el.elicitationTray.innerHTML = "";
         renderWorkingSet([]);
@@ -1526,12 +1777,34 @@ import { renderMarkdown } from "./markdown.js";
       case "attachments": renderAttachments(m.items); break;
       case "permission": showPermission(m); break;
       case "elicitation": showElicitation(m); break;
-      case "busy": setBusy(m.value); break;
+      case "busy": setBusy(m.value); refreshTurnChrome(); break;
       case "mode": if (m.mode) modeDropdown.setCurrent(m.mode); break;
       case "model": if (m.model) selectModelUid(m.model); break;
       case "terminalOutput": updateTerminal(m); break;
       case "usage": renderUsage(m); break;
       case "error": renderError(m.text); break;
+      case "capabilities":
+        caps = Object.assign(caps, {
+          revert: !!m.revert,
+          editRequests: m.editRequests || caps.editRequests,
+          checkpoints: m.checkpoints !== undefined ? !!m.checkpoints : caps.checkpoints,
+          showFileChanges: m.showFileChanges !== undefined ? !!m.showFileChanges : caps.showFileChanges,
+          confirmRemoval: m.confirmRemoval !== undefined ? !!m.confirmRemoval : caps.confirmRemoval
+        });
+        refreshTurnChrome();
+        break;
+      case "turnHead":
+        if (typeof m.head === "number") {
+          lastHead = m.head;
+          if (currentTurn) currentTurn.headAfter = m.head;
+        }
+        break;
+      case "reverted": break; // UI already trimmed the turns; host did the rewind.
+      case "revertPreview": {
+        const w = previewWaiters.get(m.token);
+        if (w) { previewWaiters.delete(m.token); w(m); }
+        break;
+      }
       default: break;
     }
   });

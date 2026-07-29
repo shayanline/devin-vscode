@@ -67,7 +67,10 @@ export class JsonRpcConnection {
       }
       this.pending.delete(msg.id);
       if (msg.error) {
-        pending.reject(new Error(msg.error.message || "RPC error"));
+        const err = new Error(msg.error.message || "RPC error") as Error & { code?: number; data?: unknown };
+        err.code = msg.error.code;
+        err.data = msg.error.data;
+        pending.reject(err);
       } else {
         pending.resolve(msg.result);
       }

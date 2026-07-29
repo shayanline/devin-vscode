@@ -2,7 +2,7 @@
   "name": "devin-vscode",
   "displayName": "Devin for VS Code",
   "description": "A native chat panel for the Devin CLI, powered by the Agent Client Protocol. Streaming replies, per workspace sessions, and trackable diffs.",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "publisher": "shayanline",
   "author": "Shayan Khaksar",
   "license": "AGPL-3.0-or-later",
@@ -223,6 +223,36 @@
           "type": "boolean",
           "default": true,
           "description": "Show the agent's reasoning/thinking stream in the chat."
+        },
+        "devin.editRequests": {
+          "type": "string",
+          "enum": [
+            "inline",
+            "hover",
+            "none"
+          ],
+          "enumDescriptions": [
+            "Click a sent message to edit it in place",
+            "Show an edit button on hover; editing happens in place",
+            "Disable editing sent messages"
+          ],
+          "default": "inline",
+          "description": "How to edit a previously sent request. Editing rewinds the conversation to that point and re-runs (requires the Devin CLI revert capability)."
+        },
+        "devin.checkpoints.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show a Restore Checkpoint action on each turn to rewind the workspace and conversation to that point (requires the Devin CLI revert capability)."
+        },
+        "devin.checkpoints.showFileChanges": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show a summary of files changed at the end of each turn."
+        },
+        "devin.editing.confirmEditRequestRemoval": {
+          "type": "boolean",
+          "default": true,
+          "description": "Ask for confirmation before an edit or restore discards later turns that made file edits."
         },
         "devin.extraArgs": {
           "type": "array",
