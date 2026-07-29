@@ -21,6 +21,7 @@ import { SessionStore } from "../session/sessionStore";
 import { ChangeTracker } from "../diff/changeTracker";
 import { StatusBar } from "../ui/statusBar";
 import { checkHealth, CliHealth, loginShellEnv } from "../cli/locate";
+import { listModels } from "../cli/models";
 
 export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
   public static readonly viewType = "devin.chatView";
@@ -229,7 +230,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
   private async pushReadiness(): Promise<void> {
     if (this.isReady()) {
       this.post({ type: "ready" });
-      this.publishCachedOptions();
+      void this.publishInitialOptions();
       await this.refreshSessions();
       if (this.cfg().get<boolean>("autoResumeLast", false)) {
         const last = this.store.activeId();
@@ -453,7 +454,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
       if (res && (res.configOptions || res.modes)) {
         this.publishOptions(res.configOptions, res.modes?.currentModeId);
       } else {
-        this.publishCachedOptions();
+        void this.publishInitialOptions();
       }
       this.post({ type: "assistantEnd" });
       this.post({ type: "sessionReady", sessionId: id });
@@ -573,13 +574,40 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     this.post(payload);
   }
 
-  // Populate the dropdowns from the cached options (used before any session
-  // exists, so they are never empty on open).
-  private publishCachedOptions(): void {
-    const cached = this.store.options();
-    if (cached) {
-      this.post(cached);
+  // Devin's session modes are fixed, so we can always show them even before a
+  // session exists. (The model list only comes from a session, so it can only
+  // be a cached list or a "default" placeholder until one is created.)
+  private static readonly STATIC_MODES = [
+    { value: "accept-edits", name: "Code" },
+    { value: "ask", name: "Ask" },
+    { value: "plan", name: "Plan" },
+    { value: "bypass", name: "Bypass" }
+  ];
+
+  // Populate the dropdowns before any session exists so they are never empty.
+  // Modes are fixed; models come from `devin models list` (no session needed,
+  // and the uids match what the ACP model option accepts). A live session's
+  // own options still override these once one is created.
+  private async publishInitialOptions(): Promise<void> {
+    const cfgMode = this.cfg().get<string>("defaultMode", "accept-edits");
+    const cfgModel = this.cfg().get<string>("defaultModel", "");
+    let models: { value: string; name: string }[] = [];
+    try {
+      models = await listModels(this.resolvedCli || "devin", this.env);
+    } catch (err) {
+      this.log(`[models-failed] ${err instanceof Error ? err.message : String(err)}`);
     }
+    if (!models.length) {
+      const cached = this.store.options() as { models?: { value: string; name: string }[] } | undefined;
+      models = cached?.models?.length ? cached.models : [{ value: "adaptive", name: "Adaptive" }];
+    }
+    this.post({
+      type: "options",
+      modes: ChatViewProvider.STATIC_MODES,
+      currentMode: cfgMode || "accept-edits",
+      models,
+      currentModel: cfgModel || "adaptive"
+    });
   }
 
   private async applyDefaults(res: NewSessionResult): Promise<void> {
