@@ -483,7 +483,7 @@ import { renderMarkdown } from "./markdown.js";
   let previewSeq = 0;
 
   function respTarget() {
-    return currentTurn ? currentTurn.respEl : el.thread;
+    return currentTurn ? currentTurn.resp : el.thread;
   }
 
   function actionBtn(icon, title, onClick) {

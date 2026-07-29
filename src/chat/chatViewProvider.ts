@@ -80,6 +80,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     void vscode.commands.executeCommand("devin.chatView.focus");
   }
 
+  // Kill the ACP process (and its terminals) so a window reload or extension
+  // deactivate does not leave a stranded `devin acp` (and its MCP servers).
+  dispose(): void {
+    try {
+      this.client?.dispose();
+    } catch {
+      // ignore
+    }
+    this.client = undefined;
+    this.sessionId = undefined;
+    this.terminals?.disposeAll();
+    this.terminals = undefined;
+  }
+
   private post(message: unknown): void {
     void this.view?.webview.postMessage(message);
   }
