@@ -91,6 +91,12 @@ body {
   gap: 12px;
 }
 
+/* Keep each item at its natural height; the thread scrolls instead of
+   flex-shrinking children down to nothing when it fills up. */
+#thread > * {
+  flex: 0 0 auto;
+}
+
 /* Buttons */
 .icon-btn {
   display: inline-flex;
@@ -690,11 +696,6 @@ body {
 .hljs-emphasis { font-style: italic; }
 .hljs-strong { font-weight: 600; }
 
-.thinking {
-  border-left: 2px solid var(--vscode-panel-border);
-  padding-left: 8px;
-}
-
 .thinking > summary {
   display: flex;
   align-items: center;
@@ -725,6 +726,9 @@ body {
 
 .thinking-body {
   margin-top: 4px;
+  margin-left: 6px;
+  padding-left: 8px;
+  border-left: 2px solid var(--vscode-panel-border);
   opacity: 0.75;
   font-size: 0.95em;
 }

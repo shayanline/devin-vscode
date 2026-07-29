@@ -125,18 +125,6 @@
           "when": "false"
         }
       ],
-      "view/title": [
-        {
-          "command": "devin.newSession",
-          "when": "view == devin.chatView",
-          "group": "navigation@1"
-        },
-        {
-          "command": "devin.showSessions",
-          "when": "view == devin.chatView",
-          "group": "navigation@2"
-        }
-      ],
       "scm/title": [
         {
           "command": "devin.acceptAllChanges",

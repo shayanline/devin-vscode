@@ -1145,7 +1145,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
 
     <div id="chat" class="hidden">
       <div id="chat-header">
-        <button id="history-btn" class="icon-btn" title="Show chats"><i class="codicon codicon-list-unordered"></i></button>
+        <button id="history-btn" class="icon-btn" title="Show chat history"><i class="codicon codicon-history"></i></button>
         <span id="chat-title">Chat</span>
         <span class="spacer"></span>
         <span id="status"></span>
