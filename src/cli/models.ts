@@ -59,18 +59,20 @@ function setCache(families: ModelFamily[]): void {
 }
 
 // "Claude Sonnet 5 Medium" + family "Claude Sonnet 5" -> "Medium".
+// When the variant label is exactly the family name (the base, no-thinking
+// variant), there is nothing left after stripping, so call it "Base".
 function effortLabel(familyLabel: string, variantLabel: string): string {
   let e = variantLabel;
   if (familyLabel && variantLabel.toLowerCase().startsWith(familyLabel.toLowerCase())) {
     e = variantLabel.slice(familyLabel.length).trim();
   }
-  return e || variantLabel;
+  return e || "Base";
 }
 
 // Best-effort ordering of thinking effort, lowest to highest.
 function effortRank(name: string): number {
   const s = name.toLowerCase();
-  if (/no\s*thinking|none/.test(s)) return 0;
+  if (/^base$|no\s*thinking|none/.test(s)) return 0;
   if (/x-?high|xhigh|extra/.test(s)) return 4;
   if (/\bmax\b/.test(s)) return 5;
   if (/high/.test(s)) return 3;
