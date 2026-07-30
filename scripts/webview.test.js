@@ -157,12 +157,15 @@ test("session list shows liveness dots and offers take-over", async () => {
 
   // Live sessions offer a terminate action; dead ones do not.
   const rows = [...h.document.querySelectorAll("#sessions-list .session-item")];
-  const terminate = rows[0].querySelector(".session-actions .codicon-circle-slash");
-  assert.ok(terminate, "a live session row has a terminate button");
-  assert.ok(!rows[2].querySelector(".codicon-circle-slash"), "a dead session row has no terminate button");
+  const terminate = rows[0].querySelector(".session-actions .kill-glyph");
+  assert.ok(terminate, "a live session row has a terminate (kill) button");
+  assert.ok(!rows[2].querySelector(".kill-glyph"), "a dead session row has no terminate button");
   terminate.parentElement.click();
   await h.settle(5);
-  assert.ok(h.posted.some((m) => m.type === "terminateSession" && m.id === "aaa"), "terminate posts terminateSession");
+  assert.ok(
+    h.posted.some((m) => m.type === "terminateSession" && m.id === "aaa" && m.title === "Running one" && !m.returnToList),
+    "row terminate posts terminateSession with the title and no returnToList"
+  );
 
   // A locked session offers take-over, which posts the decision back.
   h.post({ type: "lockConflict", requestId: "lock-1", id: "aaa", pid: 4242 });
@@ -271,6 +274,142 @@ test("renders response images and inline keep/undo on edits", async () => {
   assert.ok(h.posted.some((m) => m.type === "acceptFile" && m.path === "/w/app.ts"), "Keep posts acceptFile");
   assert.ok(pill.classList.contains("resolved"), "pill marks resolved after keep");
   assert.strictEqual(h.errors().length, 0, "image/edit rendering threw: " + JSON.stringify(h.errors()));
+});
+
+test("web search, fetch, and MCP tools render distinctly via _meta", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "capabilities", revert: true });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "userMessage", text: "research" });
+  h.post({ type: "assistantStart" });
+
+  // Web search reports the coarse kind "fetch" but is identified via _meta.
+  h.post({ type: "toolCall", id: "s1", title: "Searched web for node lts", kind: "fetch",
+    meta: { inferenceToolName: "web_search" }, status: "pending", rawInput: { query: "node lts" } });
+  h.post({ type: "toolCallUpdate", id: "s1", status: "completed", meta: { inferenceToolName: "web_search" },
+    content: [{ type: "text", text: 'Found 5 result(s) for "node lts"' }] });
+
+  // Web fetch: clickable URL.
+  h.post({ type: "toolCall", id: "f1", title: "Fetched https://example.com", kind: "fetch",
+    meta: { inferenceToolName: "webfetch" }, status: "pending", rawInput: { url: "https://example.com" } });
+  h.post({ type: "toolCallUpdate", id: "f1", status: "completed", meta: { inferenceToolName: "webfetch" },
+    content: [{ type: "text", text: "Fetched 176 characters from https://example.com" }] });
+
+  // MCP tool call with a JSON result.
+  h.post({ type: "toolCall", id: "m1", title: "Calling get_current_time from time",
+    meta: { eventType: "mcp_tool_call", toolName: "mcp__time__get_current_time", inferenceToolName: "mcp__time__get_current_time" },
+    status: "pending", rawInput: { timezone: "UTC" } });
+  h.post({ type: "toolCallUpdate", id: "m1", status: "completed",
+    meta: { eventType: "mcp_tool_call", toolName: "mcp__time__get_current_time" },
+    content: [{ type: "text", text: '{\n  "timezone": "UTC",\n  "datetime": "2026-01-01T00:00:00+00:00"\n}' }] });
+
+  await h.settle(20);
+
+  const tools = [...h.document.querySelectorAll("#thread .tool")];
+  const search = tools.find((t) => /Searched web/.test(t.textContent));
+  assert.ok(search, "search tool renders");
+  assert.ok(search.querySelector(".tool-kind.codicon-globe"), "search uses the globe icon");
+  assert.ok(search.querySelector(".tool-summary-label"), "search shows a summary line, not raw JSON");
+  assert.ok(search.querySelector(".tool-result-note"), "search shows a dim result caption");
+
+  const fetchT = tools.find((t) => /Fetched https/.test(t.textContent));
+  assert.ok(fetchT && fetchT.querySelector("a.tool-summary-value"), "fetch renders a clickable URL");
+
+  const mcp = tools.find((t) => /Calling get_current_time/.test(t.textContent));
+  assert.ok(mcp && mcp.querySelector(".tool-kind.codicon-plug"), "mcp uses the plug icon");
+  assert.ok(
+    [...mcp.querySelectorAll(".tool-section-title")].some((e) => e.textContent === "Arguments"),
+    "mcp shows an Arguments section"
+  );
+  assert.ok(mcp.querySelector(".tool-pre.hljs"), "mcp JSON result is highlighted");
+
+  assert.strictEqual(h.errors().length, 0, "tool rendering threw: " + JSON.stringify(h.errors()));
+});
+
+test("consecutive tool calls collapse into a grouped disclosure", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "capabilities", revert: true });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "userMessage", text: "explore" });
+  h.post({ type: "assistantStart" });
+
+  for (const id of ["t1", "t2", "t3"]) {
+    h.post({ type: "toolCall", id, title: "Read src/" + id + ".ts", kind: "read", status: "pending" });
+    h.post({ type: "toolCallUpdate", id, status: "completed" });
+  }
+  await h.settle(10);
+
+  let groups = [...h.document.querySelectorAll("#thread .tool-group")];
+  assert.strictEqual(groups.length, 1, "the three tools form a single group");
+  assert.strictEqual(
+    groups[0].querySelectorAll(".tool-group-body > .tool").length,
+    3,
+    "all three tools nest inside the group"
+  );
+  assert.ok(/Used 3 tools/.test(groups[0].textContent), "the group summarises the count");
+  assert.ok(!groups[0].classList.contains("running"), "a finished group is not marked running");
+
+  // Assistant text ends the run; a following tool starts fresh and ungrouped.
+  h.post({ type: "assistantChunk", text: "done reading" });
+  h.post({ type: "toolCall", id: "t4", title: "Read src/final.ts", kind: "read", status: "completed" });
+  await h.settle(10);
+
+  groups = [...h.document.querySelectorAll("#thread .tool-group")];
+  assert.strictEqual(groups.length, 1, "the lone post-text tool does not form a new group");
+  const t4 = [...h.document.querySelectorAll("#thread .tool")].find((t) => /final\.ts/.test(t.textContent));
+  assert.ok(t4 && !t4.closest(".tool-group"), "a lone tool after text stays ungrouped");
+  assert.strictEqual(h.errors().length, 0, "grouping threw: " + JSON.stringify(h.errors()));
+});
+
+test("terminating the open session uses the kill glyph and asks to return to the list", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "capabilities", revert: true });
+  h.post({ type: "sessionStatuses", statuses: { S1: "running" }, activeId: "S1" });
+  h.post({ type: "sessionReady", sessionId: "S1" });
+  h.post({ type: "userMessage", text: "hi" });
+  await h.settle(10);
+
+  const term = h.document.getElementById("terminate-btn");
+  assert.ok(!term.classList.contains("hidden"), "header terminate shows for a live open session");
+  assert.ok(term.querySelector(".kill-glyph"), "header terminate uses the power/kill glyph, not a codicon");
+  term.click();
+  await h.settle(5);
+  assert.ok(
+    h.posted.some((m) => m.type === "terminateSession" && m.id === "S1" && m.returnToList === true),
+    "header terminate posts returnToList so the host returns to the sessions list"
+  );
+  assert.strictEqual(h.errors().length, 0, "header terminate threw: " + JSON.stringify(h.errors()));
+});
+
+test("mermaid fences render as a source block (upgraded lazily)", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "capabilities", revert: true });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "userMessage", text: "draw" });
+  h.post({ type: "assistantStart" });
+  h.post({ type: "assistantChunk", text: "A diagram:\n\n```mermaid\ngraph TD; A-->B;\n```\n" });
+  h.post({ type: "assistantEnd" });
+  await h.settle(20);
+
+  const pre = h.document.querySelector("#thread .resp-text pre.mermaid-src");
+  assert.ok(pre, "mermaid fence renders as a mermaid-src block");
+  assert.ok(/graph TD/.test(pre.textContent), "the mermaid source is preserved");
+  assert.ok(!pre.querySelector(".code-toolbar"), "mermaid source is not given a code toolbar");
+  // No data-mermaid-src is set in the harness, so the lazy load no-ops; the
+  // source block must simply survive without throwing.
+  assert.strictEqual(h.errors().length, 0, "mermaid rendering threw: " + JSON.stringify(h.errors()));
 });
 
 test("per-turn edit/restore chrome builds while busy (no throw)", async () => {

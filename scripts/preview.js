@@ -119,6 +119,24 @@ const SCENARIOS = {
     { type: "capabilities", revert: true, editRequests: "inline", checkpoints: true },
     { type: "userMessage", text: "Refactor the auth module and run the tests." },
     { type: "assistantStart" }
+  ],
+  // Exercises the newer rendering: web search / fetch / MCP tools, a grouped
+  // tool run, and a mermaid diagram.
+  tools: [
+    { type: "ready" },
+    { type: "body", body: "thread" },
+    { type: "capabilities", revert: true },
+    { type: "userMessage", text: "Research the release process and draw the flow." },
+    { type: "assistantStart" },
+    { type: "toolCall", id: "s1", title: "Searched web for release checklist", kind: "fetch", meta: { inferenceToolName: "web_search" }, status: "completed", rawInput: { query: "software release checklist best practices" }, content: [{ type: "text", text: 'Found 5 result(s) for "software release checklist best practices"' }] },
+    { type: "toolCall", id: "f1", title: "Fetched https://semver.org", kind: "fetch", meta: { inferenceToolName: "webfetch" }, status: "completed", rawInput: { url: "https://semver.org" }, content: [{ type: "text", text: "Fetched 4210 characters from https://semver.org" }] },
+    { type: "toolCall", id: "m1", title: "Calling get_current_time from time", meta: { eventType: "mcp_tool_call", toolName: "mcp__time__get_current_time", inferenceToolName: "mcp__time__get_current_time" }, status: "completed", rawInput: { timezone: "UTC" }, content: [{ type: "text", text: '{\n  "timezone": "UTC",\n  "datetime": "2026-07-30T13:35:18+00:00",\n  "is_dst": false\n}' }] },
+    { type: "assistantChunk", text: "Now let me look at the code." },
+    { type: "toolCall", id: "r1", title: "Read src/release/plan.ts", kind: "read", status: "completed" },
+    { type: "toolCall", id: "r2", title: "Read src/release/tag.ts", kind: "read", status: "completed" },
+    { type: "toolCall", id: "r3", title: "Grep for version bump", kind: "search", status: "completed", rawInput: { query: "bumpVersion" } },
+    { type: "assistantChunk", text: "Here is the release flow:\n\n```mermaid\nflowchart TD\n  A[Merge to main] --> B{Tests pass?}\n  B -- yes --> C[Bump version]\n  B -- no --> D[Fix and retry]\n  C --> E[Tag release]\n  E --> F[Publish]\n```\n\nThat covers the full path from merge to publish." },
+    { type: "assistantEnd" }
   ]
 };
 
@@ -128,6 +146,7 @@ function build(scenarioName) {
   const cssMain = path.relative(OUT_DIR, path.join(MEDIA, "main.css"));
   const cssCodicon = path.relative(OUT_DIR, path.join(MEDIA, "codicon", "codicon.css"));
   const bundle = path.relative(OUT_DIR, path.join(ROOT, "dist", "webview.js"));
+  const mermaid = path.relative(OUT_DIR, path.join(ROOT, "dist", "mermaid.js"));
 
   const html = `<!DOCTYPE html>
 <html lang="en">
@@ -150,7 +169,7 @@ body {
 <link rel="stylesheet" href="${cssCodicon}" />
 <link rel="stylesheet" href="${cssMain}" />
 </head>
-<body data-logo="" data-model-icons="{}">
+<body data-logo="" data-model-icons="{}" data-mermaid-src="${mermaid}" class="vscode-dark">
 ${body}
 <script>
   // Mock the VS Code webview API before the bundle loads.
@@ -163,6 +182,10 @@ ${body}
   for (const msg of SCENARIO) {
     window.dispatchEvent(new MessageEvent("message", { data: msg }));
   }
+  // Scenarios do not send a "sessions" message, so dismiss the boot overlay
+  // directly rather than waiting out its 15s fallback timeout.
+  const boot = document.getElementById("boot");
+  if (boot) boot.classList.add("hidden");
 </script>
 </body>
 </html>`;

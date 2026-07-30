@@ -8,6 +8,11 @@ const md = new MarkdownIt({
   linkify: true,
   breaks: true,
   highlight(code, lang) {
+    // Mermaid fences render as a live diagram once the assistant turn settles;
+    // until then (and on parse failure) the source shows as a normal code block.
+    if ((lang || "").toLowerCase() === "mermaid") {
+      return `<pre class="code-block mermaid-src" data-lang="mermaid"><code>${md.utils.escapeHtml(code)}</code></pre>`;
+    }
     const language = lang && hljs.getLanguage(lang) ? lang : "";
     let body;
     if (language) {
@@ -40,4 +45,19 @@ export function renderShell(src) {
 
 export function renderMarkdownInline(src) {
   return md.renderInline(src || "");
+}
+
+// Syntax-highlighted code (inline HTML) in an explicit language, for tool result
+// bodies (e.g. pretty-printed JSON from an MCP tool).
+export function renderCode(src, lang) {
+  const code = String(src || "");
+  const language = lang && hljs.getLanguage(lang) ? lang : "";
+  if (!language) {
+    return md.utils.escapeHtml(code);
+  }
+  try {
+    return hljs.highlight(code, { language, ignoreIllegals: true }).value;
+  } catch {
+    return md.utils.escapeHtml(code);
+  }
 }

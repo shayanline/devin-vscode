@@ -36,7 +36,7 @@ export class StatusBar {
   }
 
   private render(): void {
-    this.item.text = this.state.connected ? "$(comment-discussion)" : "$(debug-disconnect)";
+    this.item.text = this.state.connected ? "$(chat-sparkle)" : "$(debug-disconnect)";
     this.item.tooltip = this.buildTooltip();
   }
 
@@ -46,7 +46,7 @@ export class StatusBar {
     const md = new vscode.MarkdownString(undefined, true);
     md.isTrusted = true;
     md.supportThemeIcons = true;
-    md.appendMarkdown("**$(comment-discussion) Devin**\n\n");
+    md.appendMarkdown("**$(chat-sparkle) Devin**\n\n");
 
     if (!this.state.connected) {
       md.appendMarkdown("$(debug-disconnect) Not connected\n\n");

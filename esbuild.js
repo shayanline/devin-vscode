@@ -29,11 +29,25 @@ async function main() {
     logLevel: "info"
   });
 
+  // Mermaid ships as its own bundle, injected on demand by the webview so its
+  // multi-MB weight never loads unless a diagram actually appears.
+  const mermaidCtx = await esbuild.context({
+    entryPoints: ["webview/mermaid-entry.js"],
+    bundle: true,
+    format: "iife",
+    minify: production,
+    sourcemap: !production,
+    platform: "browser",
+    target: "es2020",
+    outfile: "dist/mermaid.js",
+    logLevel: "info"
+  });
+
   if (watch) {
-    await Promise.all([extensionCtx.watch(), webviewCtx.watch()]);
+    await Promise.all([extensionCtx.watch(), webviewCtx.watch(), mermaidCtx.watch()]);
   } else {
-    await Promise.all([extensionCtx.rebuild(), webviewCtx.rebuild()]);
-    await Promise.all([extensionCtx.dispose(), webviewCtx.dispose()]);
+    await Promise.all([extensionCtx.rebuild(), webviewCtx.rebuild(), mermaidCtx.rebuild()]);
+    await Promise.all([extensionCtx.dispose(), webviewCtx.dispose(), mermaidCtx.dispose()]);
   }
 }
 
