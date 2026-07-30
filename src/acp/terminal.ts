@@ -49,10 +49,35 @@ export class TerminalManager {
     for (const e of params.env || []) {
       env[e.name] = e.value;
     }
-    const child = spawn(params.command, params.args || [], {
+
+    // The agent sends either a program + args (run it directly) or, more often,
+    // a full shell command line as `command` with no args (e.g. `cd x && ls`).
+    // Running that string directly fails with ENOENT — there is no program by
+    // that name — so a compound command surfaces as "Command failed". Run the
+    // no-args form through a shell, the way a real terminal does, so cd, &&,
+    // pipes, globs and quoting all work.
+    const win = process.platform === "win32";
+    const hasArgs = Array.isArray(params.args) && params.args.length > 0;
+    let file: string;
+    let args: string[];
+    if (hasArgs) {
+      file = params.command;
+      args = params.args as string[];
+    } else if (win) {
+      file = process.env.ComSpec || "cmd.exe";
+      args = ["/d", "/s", "/c", params.command];
+    } else {
+      file = this.baseEnv.SHELL || "/bin/bash";
+      args = ["-c", params.command];
+    }
+
+    const child = spawn(file, args, {
       cwd: params.cwd || this.defaultCwd,
       env,
-      stdio: ["ignore", "pipe", "pipe"]
+      stdio: ["ignore", "pipe", "pipe"],
+      // Own process group (POSIX) so we can signal the shell and everything it
+      // spawns on kill/release, rather than orphaning children.
+      detached: !win
     });
 
     const term: Term = {
@@ -114,11 +139,23 @@ export class TerminalManager {
 
   kill(terminalId: string): void {
     const term = this.terminals.get(terminalId);
-    if (term && !term.exitStatus) {
+    if (!term || term.exitStatus) {
+      return;
+    }
+    const pid = term.child.pid;
+    try {
+      // Signal the whole group (negative pid) so the shell and its children go
+      // down together; fall back to the direct child if that is not possible.
+      if (process.platform !== "win32" && pid) {
+        process.kill(-pid, "SIGTERM");
+      } else {
+        term.child.kill();
+      }
+    } catch {
       try {
         term.child.kill();
       } catch {
-        // ignore
+        // already gone
       }
     }
   }
