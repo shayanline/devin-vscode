@@ -34,32 +34,37 @@ You also need the Devin CLI, see [Requirements](#requirements) below.
 
 ### Session browser
 
-Every chat you start is a real Devin session, grouped by the workspace folder it
-belongs to. A liveness dot shows whether a session is running, waiting for you,
-waking up, or stopped, and each row can be resumed, renamed, or deleted.
+Your sessions live in a browser inside the panel, grouped by the workspace
+folder they belong to. A liveness dot marks each one as running, waiting on you,
+waking, or stopped, and any row can be resumed, renamed, or deleted, so picking
+work back up is one click away.
 
 <img src="https://raw.githubusercontent.com/shayanline/devin-vscode/main/docs/screenshots/01-session-list.png" alt="The session browser grouped by workspace folder, with liveness dots and a new-chat composer" width="440" />
 
 ### A full agent turn
 
-Plan tracking, a collapsible group of tool calls, inline file references in the
-reply, plus the two ways Devin asks for input: a permission prompt with approve
-or deny buttons, and an interactive question rendered as clickable options.
+A turn as the panel renders it: a tracked plan, a collapsible group of tool
+calls, and file references in the reply that open the file on click. Requests
+for input surface in place too, a permission prompt with approve or deny
+buttons, and a multiple choice question as clickable options, so you answer
+without leaving the editor.
 
 <img src="https://raw.githubusercontent.com/shayanline/devin-vscode/main/docs/screenshots/02-refactor-and-tests.png" alt="A full turn with a plan, grouped tools, a permission prompt, and an interactive question" width="440" />
 
 ### Fixing a bug and proving it
 
-A focused turn: the reasoning stream, grouped tool calls, an edit rendered with
-its line counts, a benchmark run, the end of turn file changes summary, and the
+The full shape of a fix, rendered inline: the reasoning stream, grouped tool
+calls, an edit shown with its added and removed line counts, a benchmark run to
+prove the result, an end of turn summary of the files that changed, and the
 context window ring in the composer.
 
 <img src="https://raw.githubusercontent.com/shayanline/devin-vscode/main/docs/screenshots/03-fix-with-diff.png" alt="A bug fix turn showing reasoning, tool calls, an edit, a benchmark result, and inline file references" width="440" />
 
 ### Research and diagrams
 
-Web search, fetch, and MCP tools each render distinctly, and Markdown replies
-support rich content, including Mermaid diagrams drawn inline.
+Different tool types are drawn as distinct cards, so web search, fetch, and MCP
+calls each read clearly at a glance. Markdown replies render rich content in the
+panel, including Mermaid diagrams drawn inline.
 
 <img src="https://raw.githubusercontent.com/shayanline/devin-vscode/main/docs/screenshots/04-research-and-diagram.png" alt="Web search, fetch, and MCP tool cards followed by a rendered Mermaid flowchart" width="440" />
 
