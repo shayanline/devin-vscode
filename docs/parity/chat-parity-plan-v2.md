@@ -831,6 +831,37 @@ Plan:
 This is tracked separately from the six styling phases because it needs real
 ACP tool payloads to get the field extraction exactly right.
 
+### Status (shipped)
+
+Kind-aware bodies (execute/read/edit/search/fetch) shipped earlier. The tool
+identity was then probed against a live `devin acp` (see the harness idea in
+`scripts/preview.js` and the `tools` scenario) and the real discriminators live
+in `_meta`, not the coarse ACP `kind`:
+
+- Web search: `kind:"fetch"`, `_meta["cognition.ai/inferenceToolName"]="web_search"`,
+  `rawInput.query`. The result is a text summary ("Found N result(s)…"), and there
+  are **no** structured per-result blocks in the stream, so we render the query as
+  a Search line plus a dim caption.
+- Web fetch: `kind:"fetch"`, `inferenceToolName="webfetch"`, `rawInput.url`. The
+  result reads "Fetched N characters…", and the URL renders as a clickable link
+  plus a caption.
+- MCP tool call: `_meta["cognition.ai/eventType"]="mcp_tool_call"`,
+  `toolName="mcp__<server>__<tool>"`, `rawInput` holds the tool args, and the
+  result is usually a JSON string. Rendered with a plug icon, an **Arguments**
+  section, and a pretty-printed, highlighted **Result** (it falls back to text
+  when the payload is not JSON). `mcp_list_tools` (`inferenceToolName`) is treated
+  the same way.
+
+The host now forwards these `_meta` fields (`toolMeta` in `chatViewProvider.ts`),
+and the webview classifies via `toolInfo` (`webview/main.js`).
+
+Also shipped alongside:
+- **Grouped tool disclosure**: a run of consecutive tool cards collapses under a
+  single "Used N tools" header (broken by any non-tool response content).
+- **Mermaid diagrams**: ```` ```mermaid ```` fences render as SVG once the turn
+  settles, via a lazily-injected `dist/mermaid.js` bundle (kept out of the main
+  bundle, and only fetched when a diagram first appears).
+
 ---
 
 ## Appendix A — `--vscode-chat-*` colour reference (from `chatColors.ts`)

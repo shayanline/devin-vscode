@@ -374,7 +374,8 @@ body {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 8px;
+  margin: 2px 2px 6px;
+  padding: 8px;
   border-radius: 4px;
   cursor: pointer;
   font-weight: 600;
@@ -496,14 +497,26 @@ body {
   font-size: 14px;
 }
 
-/* Send button: 22x22 filled, radius small, mirroring VS Code's
+/* Inline power/shutdown glyph used by the terminate (kill) buttons. */
+.kill-glyph {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+
+.icon-btn.small .kill-glyph {
+  width: 14px;
+  height: 14px;
+}
+
+/* Send button: 28x28 filled, radius small, mirroring VS Code's
    .chat-submit-button > .action-label (button colours + 120ms bg transition). */
 .send-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
+  width: 28px;
+  height: 28px;
   border: none;
   border-radius: var(--dv-radius-sm);
   background: var(--vscode-button-background);
@@ -520,13 +533,6 @@ body {
 .send-btn:focus-visible {
   outline: 1px solid var(--vscode-focusBorder);
   outline-offset: 1px;
-}
-
-/* Copilot-style enter/return glyph on the send button. */
-.send-btn .send-glyph {
-  width: 16px;
-  height: 16px;
-  display: block;
 }
 
 /* Disabled Send keeps the filled look, dimmed (VS Code keeps the button). */
@@ -547,7 +553,7 @@ body {
 }
 
 .send-btn .codicon {
-  font-size: 14px;
+  font-size: 19px;
 }
 
 .btn {
@@ -1423,13 +1429,11 @@ body {
   transition: opacity 0.1s ease-in-out;
 }
 
+/* The request actions sit in a hover-revealed row below the bubble (aligned to
+   the right under the right-aligned request), rather than overlaying the text. */
 .req-actions {
-  position: absolute;
-  top: 4px;
-  right: 4px;
-  margin-top: 0;
-  background: var(--vscode-chat-requestBubbleBackground, var(--vscode-editor-background));
-  border-radius: 4px;
+  align-self: flex-end;
+  margin-top: 3px;
 }
 
 /* Reveal the request toolbar on hover/focus of the whole turn (VS Code's
@@ -1799,11 +1803,14 @@ body {
   font-size: var(--dv-fs-s);
 }
 
-/* Label takes the row; the chevron sits at the far right and reveals on
-   hover/open, matching VS Code's collapsible headers. */
+/* Label hugs its text so the chevron reveals right at the text's edge (not the
+   panel's far right), matching VS Code's collapsible headers. */
 .thinking-label {
-  flex: 1;
+  flex: 0 1 auto;
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Swept highlight while thinking is active; a plain dimmed label once done. */
@@ -2088,7 +2095,7 @@ body {
 }
 
 .tool .label {
-  flex: 1;
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2126,6 +2133,86 @@ body {
 
 .tool.tool-empty .tool-chevron {
   display: none;
+}
+
+/* A rendered mermaid diagram (the source fence is swapped for this once the
+   turn settles). Centered, scaled to fit, on a subtle surface. */
+.mermaid-diagram {
+  margin: 8px 0;
+  padding: 10px;
+  border: 1px solid var(--dv-border);
+  border-radius: var(--dv-radius-md);
+  background: var(--vscode-textCodeBlock-background);
+  overflow-x: auto;
+  text-align: center;
+}
+
+.mermaid-diagram svg {
+  max-width: 100%;
+  height: auto;
+}
+
+/* A run of consecutive tool calls collapses under one disclosure header
+   ("Used N tools"), like VS Code's grouped tool card. */
+.tool-group {
+  font-size: 0.92em;
+}
+
+.tool-group > .dv-collapsible-header {
+  gap: 6px;
+  padding: 1px 0;
+  color: var(--vscode-descriptionForeground, #9d9d9d);
+}
+
+.tool-group > .dv-collapsible-header:hover {
+  color: var(--vscode-foreground);
+}
+
+.tool-group .codicon {
+  font-size: 14px;
+  opacity: 0.8;
+}
+
+.tool-group-label {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-group-chevron {
+  order: 2;
+  flex: 0 0 auto;
+  font-size: 13px;
+  opacity: 0.6;
+  transition: transform 180ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+.tool-group:not(.dv-collapsed) > .dv-collapsible-header .tool-group-chevron {
+  transform: rotate(90deg);
+}
+
+/* Two classes so this beats the codicon base rule (.codicon[class*=codicon-]),
+   which would otherwise keep the status icon displayed. */
+.tool-group .tool-group-status {
+  flex: 0 0 auto;
+  display: none;
+}
+
+.tool-group.running .tool-group-status {
+  display: inline-flex;
+  color: var(--vscode-progressBar-background);
+  opacity: 1;
+}
+
+/* Nested tool rows indent under the group behind a hairline rail. */
+.tool-group-body {
+  margin-left: 6px;
+  padding-left: 10px;
+  border-left: 1px solid var(--dv-border);
+  display: flex;
+  flex-direction: column;
 }
 
 .tool-body {
@@ -2233,6 +2320,14 @@ body {
 
 .tool-summary-value {
   font-family: var(--vscode-editor-font-family, monospace);
+  overflow-wrap: anywhere;
+}
+
+/* A dim one-line caption for a tool's terse result summary (web search /
+   fetch report a count, not structured results). */
+.tool-result-note {
+  font-size: var(--dv-fs-s);
+  opacity: 0.6;
   overflow-wrap: anywhere;
 }
 

@@ -2,7 +2,7 @@
   "name": "devin-vscode",
   "displayName": "Devin for VS Code",
   "description": "A native chat panel for the Devin CLI, powered by the Agent Client Protocol. Streaming replies, per workspace sessions, and trackable diffs.",
-  "version": "0.6.38",
+  "version": "0.6.41",
   "publisher": "shayanline",
   "author": "Shayan Khaksar",
   "license": "MIT",
@@ -334,6 +334,7 @@
     "pretest": "npm run compile",
     "test": "node --test scripts/*.test.js",
     "harness": "node scripts/webview-harness.js",
+    "probe": "node scripts/acp-probe.js",
     "preview": "npm run compile && node scripts/preview.js",
     "package": "npx @vscode/vsce package --no-dependencies"
   },
@@ -341,13 +342,14 @@
     "@types/markdown-it": "^14.1.2",
     "@types/node": "^20.14.0",
     "@types/vscode": "^1.92.0",
-    "@vscode/codicons": "^0.0.36",
+    "@vscode/codicons": "^0.0.46-23",
     "esbuild": "^0.23.1",
     "jsdom": "^25.0.1",
     "typescript": "^5.5.4"
   },
   "dependencies": {
     "highlight.js": "^11.10.0",
-    "markdown-it": "^14.1.0"
+    "markdown-it": "^14.1.0",
+    "mermaid": "^11.16.0"
   }
 }

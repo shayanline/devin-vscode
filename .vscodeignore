@@ -4,6 +4,7 @@ docs/**
 src/**
 webview/**
 scripts/**
+.playwright-cli/**
 node_modules/**
 .gitignore
 .vscodeignore

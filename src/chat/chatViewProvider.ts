@@ -377,7 +377,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
           this.leaveToList();
           return;
         case "terminateSession":
-          this.terminateSession(String(msg.id || ""));
+          await this.terminateSession(String(msg.id || ""), msg.title, !!msg.returnToList);
           return;
         case "takeoverDecision":
           this.resolveTakeover(String(msg.requestId || ""), String(msg.decision || "cancel"));
@@ -782,22 +782,41 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
   }
 
   // Terminate a session's live process (kill its acp + terminals), freeing its
-  // lock and turning its dot gray. The conversation is preserved and can be
-  // woken again later. If the visible session is terminated it stays on screen
-  // as history and re-wakes on the next send.
-  private terminateSession(id: string): void {
+  // lock and turning its dot gray, after a confirmation prompt. The conversation
+  // is preserved and can be woken again later. Terminating the open session (or
+  // any terminate that asks) returns to the sessions list.
+  private async terminateSession(id: string, title?: string, returnToList?: boolean): Promise<void> {
     const rt = this.runtimes.get(id);
     if (!rt) {
       return;
     }
-    this.destroyRuntime(rt);
+    const choice = await vscode.window.showWarningMessage(
+      `Terminate the session "${title || id}"? This stops its running process. The conversation is kept and can be resumed later.`,
+      { modal: true },
+      "Terminate"
+    );
+    if (choice !== "Terminate") {
+      return;
+    }
+    // The runtime may have changed while the modal was open; re-read it.
+    const live = this.runtimes.get(id);
+    if (!live) {
+      return;
+    }
+    this.destroyRuntime(live);
     this.runtimes.delete(id);
     this.starting.delete(id);
-    if (this.activeId === id) {
+    const wasActive = this.activeId === id;
+    if (wasActive) {
       this.setBusy(false);
     }
     this.broadcastStatuses();
-    void this.refreshSessions();
+    // Terminating the open session returns to the list; otherwise just refresh.
+    if (returnToList || wasActive) {
+      await this.showSessionsView();
+    } else {
+      void this.refreshSessions();
+    }
   }
 
   private clearAttachments(): void {
@@ -1645,6 +1664,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
             id: u.toolCallId,
             title: u.title,
             kind: u.kind,
+            meta: toolMeta(u),
             status: u.status || "pending",
             rawInput: u.rawInput,
             content: normalizeToolContent(u.content),
@@ -1660,6 +1680,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
             id: u.toolCallId,
             title: u.title,
             kind: u.kind,
+            meta: toolMeta(u),
             status: u.status,
             rawInput: u.rawInput,
             content: normalizeToolContent(u.content),
@@ -1868,6 +1889,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
   private getHtml(webview: vscode.Webview): string {
     const nonce = getNonce();
     const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "dist", "webview.js"));
+    const mermaidUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "dist", "mermaid.js"));
     const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "media", "main.css"));
     const codiconUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this.context.extensionUri, "media", "codicon", "codicon.css")
@@ -1904,7 +1926,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
   <link href="${styleUri}" rel="stylesheet" />
   <title>Devin</title>
 </head>
-<body data-logo="${logoUri}" data-model-icons="${modelIcons}">
+<body data-logo="${logoUri}" data-model-icons="${modelIcons}" data-mermaid-src="${mermaidUri}" data-nonce="${nonce}">
   ${appBody}
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
@@ -1986,6 +2008,21 @@ function imageOf(content: any): { mimeType?: string; data: string } | null {
     return { mimeType: content.mimeType, data: content.data };
   }
   return null;
+}
+
+// Devin tags each tool with its real identity in `_meta` (the ACP `kind` is a
+// coarse bucket, e.g. both web search and fetch report kind "fetch"). We surface
+// these so the webview can render web search / fetch / MCP tools distinctly.
+function toolMeta(u: any): { inferenceToolName?: string; toolName?: string; eventType?: string } | undefined {
+  const m = u && u._meta;
+  if (!m || typeof m !== "object") {
+    return undefined;
+  }
+  const out: { inferenceToolName?: string; toolName?: string; eventType?: string } = {};
+  if (typeof m["cognition.ai/inferenceToolName"] === "string") out.inferenceToolName = m["cognition.ai/inferenceToolName"];
+  if (typeof m["cognition.ai/toolName"] === "string") out.toolName = m["cognition.ai/toolName"];
+  if (typeof m["cognition.ai/eventType"] === "string") out.eventType = m["cognition.ai/eventType"];
+  return Object.keys(out).length ? out : undefined;
 }
 
 function normalizeLocations(locations: any): { path: string; line?: number }[] {

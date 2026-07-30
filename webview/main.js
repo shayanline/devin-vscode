@@ -1,8 +1,16 @@
-import { renderMarkdown, renderShell } from "./markdown.js";
+import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
 
 (function () {
   const vscode = acquireVsCodeApi();
   const $ = (id) => document.getElementById(id);
+
+  // Power/shutdown glyph for the "terminate session" (kill) controls. Codicons
+  // (@vscode/codicons) has no power symbol, so this ships as an inline SVG like
+  // the send button, keeping the classic shutdown look independent of the font.
+  const KILL_GLYPH =
+    '<svg class="kill-glyph" viewBox="0 0 16 16" fill="none" stroke="currentColor" ' +
+    'stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M8 2.2v5"/><path d="M5.1 4.5a4.3 4.3 0 1 0 5.8 0"/></svg>';
 
   const el = {
     boot: $("boot"),
@@ -76,21 +84,22 @@ import { renderMarkdown, renderShell } from "./markdown.js";
   const modelDropdown = createDropdown(el.modelDD, onModelSelect, { buttonIcon: modelButtonIcon });
   const thinkingDropdown = createDropdown(el.thinkingDD, onThinkingSelect);
 
-  // Icon shown on the model button only (not in the dropdown rows): sparkle for
-  // Adaptive, generic chip otherwise. Brand icons can slot in here once
-  // provided as SVGs (keyed by family).
+  // Icon shown on the model button: sparkle for Adaptive, the brand codicon for
+  // Claude / OpenAI, and a generic chip otherwise. Grok has no codicon, so it
+  // still uses the bundled SVG mask (via brandIconOf).
   function brandIconOf(fam) {
     let icons = {};
     try { icons = JSON.parse(document.body.dataset.modelIcons || "{}"); } catch { icons = {}; }
     const s = ((fam.name || "") + " " + (fam.id || "")).toLowerCase();
-    if (/claude/.test(s) && icons.claude) return { key: "claude", url: icons.claude };
-    if (/gpt|openai/.test(s) && icons.openai) return { key: "openai", url: icons.openai };
     if (/grok/.test(s) && icons.grok) return { key: "grok", url: icons.grok };
     return null;
   }
   function modelButtonIcon(familyId) {
     const fam = familyById(familyId);
     if (!fam || isAdaptive(fam)) return "codicon-sparkle";
+    const s = ((fam.name || "") + " " + (fam.id || "")).toLowerCase();
+    if (/claude/.test(s)) return "codicon-claude";
+    if (/gpt|openai/.test(s)) return "codicon-openai";
     const b = brandIconOf(fam);
     return b ? `img:${b.key} ${b.url}` : "codicon-chip";
   }
@@ -202,8 +211,10 @@ import { renderMarkdown, renderShell } from "./markdown.js";
     const show = body === "thread" && !!curSessionId && isAliveStatus(sessionStatuses[curSessionId]);
     el.terminateBtn.classList.toggle("hidden", !show);
   }
+  el.terminateBtn.innerHTML = KILL_GLYPH;
   el.terminateBtn.addEventListener("click", () => {
-    if (curSessionId) vscode.postMessage({ type: "terminateSession", id: curSessionId });
+    // Terminating from inside a session returns to the list once confirmed.
+    if (curSessionId) vscode.postMessage({ type: "terminateSession", id: curSessionId, title: currentTitle, returnToList: true });
   });
 
   el.historyBtn.addEventListener("click", () => {
@@ -289,9 +300,62 @@ import { renderMarkdown, renderShell } from "./markdown.js";
     el.input.style.height = Math.min(Math.max(el.input.scrollHeight, 52), 240) + "px";
   }
 
-  function scrollToBottom() {
-    el.thread.scrollTop = el.thread.scrollHeight;
+  // --- Scroll management ---------------------------------------------------
+  // The transcript follows new content only while the user is pinned to the
+  // bottom. Height changes from streaming text, expanding tool cards, loading
+  // images, mermaid swap-in and collapse animations are followed via a
+  // ResizeObserver, so the view never lags behind and does not yank the user
+  // back when they have scrolled up to read.
+  let stickToBottom = true;
+  let pinning = false;
+  let pinScheduled = false;
+
+  function distanceFromBottom() {
+    return el.thread.scrollHeight - el.thread.scrollTop - el.thread.clientHeight;
   }
+  function pinNow() {
+    pinning = true;
+    el.thread.scrollTop = el.thread.scrollHeight;
+    // Release the guard next frame; by then we are at the bottom so a genuine
+    // user scroll re-evaluates stick correctly.
+    requestAnimationFrame(() => { pinning = false; });
+  }
+  // Pin after layout so scrollHeight reflects the just-added content.
+  function schedulePin() {
+    if (pinScheduled) return;
+    pinScheduled = true;
+    requestAnimationFrame(() => {
+      pinScheduled = false;
+      if (stickToBottom) pinNow();
+    });
+  }
+  // Content changed: follow the bottom only if the user is pinned there.
+  function scrollToBottom() { schedulePin(); }
+  // A user action (send, open/restore a session): snap back to the bottom.
+  function forceScrollToBottom() { stickToBottom = true; schedulePin(); }
+
+  el.thread.addEventListener("scroll", () => {
+    if (pinning) return; // ignore our own programmatic scrolls
+    stickToBottom = distanceFromBottom() <= 40;
+  }, { passive: true });
+
+  // Follow height changes that fire no DOM mutation at scroll time (images
+  // loading, mermaid swap-in, collapsible animations, font reflow). jsdom (the
+  // test harness) has no ResizeObserver, so fall back to a no-op there.
+  const contentRO = typeof ResizeObserver !== "undefined"
+    ? new ResizeObserver(() => { if (stickToBottom) pinNow(); })
+    : { observe() {}, unobserve() {} };
+  // Auto-observe transcript children (turns, welcome, dividers) as they mount,
+  // so their inner growth keeps us pinned.
+  const contentMO = new MutationObserver((muts) => {
+    for (const m of muts) {
+      m.addedNodes.forEach((n) => { if (n.nodeType === 1) contentRO.observe(n); });
+      m.removedNodes.forEach((n) => { if (n.nodeType === 1) { try { contentRO.unobserve(n); } catch { /* gone */ } } });
+    }
+    if (stickToBottom) schedulePin();
+  });
+  contentMO.observe(el.thread, { childList: true });
+  Array.prototype.forEach.call(el.thread.children, (n) => contentRO.observe(n));
 
   // Match VS Code's dynamic working-border speed: the "comet" duration scales
   // with input width (clamped 1.4s-2.5s) so it travels at a consistent visual
@@ -1115,7 +1179,7 @@ import { renderMarkdown, renderShell } from "./markdown.js";
 
   function enhanceCodeBlocks(container) {
     if (!container) return;
-    container.querySelectorAll("pre.code-block").forEach((pre) => {
+    container.querySelectorAll("pre.code-block:not(.mermaid-src)").forEach((pre) => {
       if (pre.dataset.enhanced) return;
       pre.dataset.enhanced = "1";
       const code = pre.querySelector("code");
@@ -1131,6 +1195,59 @@ import { renderMarkdown, renderShell } from "./markdown.js";
       }
       pre.appendChild(bar);
     });
+  }
+
+  // Mermaid is heavy (~MBs), so it ships as its own bundle and is fetched only
+  // the first time a diagram actually appears. The promise is cached (even on
+  // failure) so we never inject the script twice.
+  let mermaidPromise = null;
+  function loadMermaid() {
+    if (mermaidPromise) return mermaidPromise;
+    const src = document.body.dataset.mermaidSrc;
+    if (!src) return (mermaidPromise = Promise.reject(new Error("mermaid unavailable")));
+    mermaidPromise = new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = src;
+      const nonce = document.body.dataset.nonce;
+      if (nonce) s.setAttribute("nonce", nonce);
+      s.onload = () => {
+        const m = window.__mermaid;
+        if (!m) { reject(new Error("mermaid failed to load")); return; }
+        const dark = document.body.classList.contains("vscode-dark") ||
+          document.body.classList.contains("vscode-high-contrast");
+        try { m.initialize({ startOnLoad: false, securityLevel: "strict", theme: dark ? "dark" : "default" }); } catch (e) { /* keep going */ }
+        resolve(m);
+      };
+      s.onerror = () => reject(new Error("mermaid script error"));
+      document.head.appendChild(s);
+    });
+    return mermaidPromise;
+  }
+  // Upgrade any completed mermaid source blocks in `container` to rendered SVG.
+  // Called on turn finalisation, so the fence is closed and the source stable.
+  let mermaidSeq = 0;
+  function renderMermaid(container) {
+    if (!container) return;
+    const blocks = [...container.querySelectorAll("pre.mermaid-src:not([data-mermaid-done])")];
+    if (!blocks.length) return;
+    loadMermaid().then((m) => {
+      blocks.forEach((pre) => {
+        if (pre.dataset.mermaidDone) return;
+        pre.dataset.mermaidDone = "1";
+        const codeEl = pre.querySelector("code");
+        const src = (codeEl ? codeEl.textContent : pre.textContent) || "";
+        const id = "mmd-" + (++mermaidSeq);
+        Promise.resolve()
+          .then(() => m.render(id, src))
+          .then(({ svg }) => {
+            const wrap = document.createElement("div");
+            wrap.className = "mermaid-diagram";
+            wrap.innerHTML = svg;
+            pre.replaceWith(wrap);
+          })
+          .catch(() => { pre.classList.add("mermaid-error"); });
+      });
+    }).catch(() => { /* mermaid unavailable: leave the source blocks in place */ });
   }
 
   // File/symbol references in assistant text (non http links) render as VS Code
@@ -1183,7 +1300,6 @@ import { renderMarkdown, renderShell } from "./markdown.js";
   }
   function renderOpenBlock() {
     if (!block) return;
-    const atBottom = el.thread.scrollHeight - el.thread.scrollTop - el.thread.clientHeight < 60;
     if (block.kind === "thinking") {
       renderThinkingItems(block);
       // Keep the fixed-height peek pinned to the latest reasoning.
@@ -1194,7 +1310,9 @@ import { renderMarkdown, renderShell } from "./markdown.js";
       block.bubble.innerHTML = renderMarkdown(block.buffer);
       if (block.kind === "assistant") { enhanceCodeBlocks(block.bubble); enhanceAnchors(block.bubble); }
     }
-    if (atBottom) scrollToBottom();
+    // Follow the stream if the user is pinned to the bottom (scrollToBottom is a
+    // no-op otherwise); the ResizeObserver also keeps us pinned as height grows.
+    scrollToBottom();
   }
 
   // Assistant content (text, thinking, tools, plan) always belongs to a turn.
@@ -1212,6 +1330,9 @@ import { renderMarkdown, renderShell } from "./markdown.js";
   function finalizeBlock() {
     if (!block) return;
     renderOpenBlock();
+    // The fence is now closed, so any mermaid source in a settled assistant
+    // message can be upgraded to a rendered diagram.
+    if (block.kind === "assistant" && block.bubble) renderMermaid(block.bubble);
     if (block.kind === "thinking") {
       if (block.timer) clearInterval(block.timer);
       if (block.details) {
@@ -1250,6 +1371,7 @@ import { renderMarkdown, renderShell } from "./markdown.js";
       finalizeBlock();
       hideWelcome();
       ensureTurn();
+      breakToolGroup();
       const bubble = document.createElement("div");
       bubble.className = "resp-text bubble";
       respTarget().appendChild(bubble);
@@ -1267,6 +1389,7 @@ import { renderMarkdown, renderShell } from "./markdown.js";
     finalizeBlock();
     hideWelcome();
     ensureTurn();
+    breakToolGroup();
     const img = document.createElement("img");
     img.className = "resp-image";
     img.src = "data:" + (mime || "image/png") + ";base64," + data;
@@ -1283,6 +1406,7 @@ import { renderMarkdown, renderShell } from "./markdown.js";
       ensureTurn();
       // fixedScrolling shows a live, fixed-height peek while streaming (VS
       // Code's chat.agent.thinkingStyle); collapsed starts folded.
+      breakToolGroup();
       const peek = caps.thinkingStyle === "fixedScrolling";
       const c = makeCollapsible("thinking thinking-active" + (peek ? " thinking-peek" : ""), { startCollapsed: !peek });
       const chev = document.createElement("i");
@@ -1336,6 +1460,9 @@ import { renderMarkdown, renderShell } from "./markdown.js";
     finalizeBlock();
     hideWelcome();
     newTurn(undefined, text);
+    // A send is an explicit action: snap back to the bottom even if the user
+    // had scrolled up while reading.
+    forceScrollToBottom();
   }
   // The plan/todo list shows live in a docked widget above the composer (VS
   // Code's chat-todo-list-widget), then snapshots into the transcript when the
@@ -1450,6 +1577,33 @@ import { renderMarkdown, renderShell } from "./markdown.js";
     other: "codicon-tools"
   };
 
+  // Icons keyed by the resolved tool type (see toolInfo), which is derived from
+  // Devin's `_meta` and is more specific than the coarse ACP `kind`.
+  const TOOL_TYPE_ICONS = {
+    web_search: "codicon-globe",
+    webfetch: "codicon-globe",
+    mcp: "codicon-plug",
+    mcp_list: "codicon-plug"
+  };
+
+  // Resolve a tool's real identity from the `_meta` Devin attaches. Returns a
+  // descriptor { type, server?, tool? } for web search / fetch / MCP tools, or
+  // null when the coarse `kind` is all we have.
+  function toolInfo(d) {
+    const meta = d.meta || {};
+    const name = meta.toolName || meta.inferenceToolName || "";
+    if (meta.eventType === "mcp_tool_call" || /^mcp__/.test(name)) {
+      const parts = name.split("__");
+      const server = parts.length > 1 ? parts[1] : "";
+      const tool = parts.length > 2 ? parts.slice(2).join("__") : "";
+      return { type: "mcp", server, tool };
+    }
+    if (meta.inferenceToolName === "mcp_list_tools") return { type: "mcp_list" };
+    if (meta.inferenceToolName === "web_search") return { type: "web_search" };
+    if (meta.inferenceToolName === "webfetch") return { type: "webfetch" };
+    return null;
+  }
+
   function statusIcon(status) {
     switch (status) {
       case "in_progress": return "codicon-loading codicon-modifier-spin";
@@ -1481,6 +1635,66 @@ import { renderMarkdown, renderShell } from "./markdown.js";
     }
   }
 
+  // A run of consecutive tool calls collapses under one disclosure header
+  // ("Used N tools"), mirroring VS Code's grouped tool card. The run is broken
+  // by any non-tool response content (see breakToolGroup).
+  function breakToolGroup() {
+    if (currentTurn) currentTurn.toolRun = null;
+  }
+  function createToolGroup() {
+    const c = makeCollapsible("tool-group", { startCollapsed: false });
+    const chev = document.createElement("i");
+    chev.className = "codicon codicon-chevron-right tool-group-chevron";
+    const gicon = document.createElement("i");
+    gicon.className = "codicon codicon-tools tool-group-icon";
+    const label = document.createElement("span");
+    label.className = "tool-group-label";
+    const statEl = document.createElement("i");
+    statEl.className = "codicon tool-group-status";
+    c.header.appendChild(chev);
+    c.header.appendChild(gicon);
+    c.header.appendChild(label);
+    c.header.appendChild(statEl);
+    const body = document.createElement("div");
+    body.className = "tool-group-body";
+    c.body.appendChild(body);
+    return { root: c.root, body, label, statEl, collapse: c, ids: new Set() };
+  }
+  function updateToolGroup(g) {
+    const n = g.ids.size;
+    g.label.textContent = "Used " + n + (n === 1 ? " tool" : " tools");
+    const running = !!g.body.querySelector(".tool.in_progress, .tool.pending");
+    g.statEl.className = "codicon tool-group-status " + (running ? "codicon-loading codicon-modifier-spin" : "codicon-check");
+    g.root.classList.toggle("running", running);
+  }
+  // Place a freshly created tool node: the first tool of a run mounts inline,
+  // the second wraps both into a group, and the rest join the group.
+  function placeToolNode(node, id) {
+    const turn = currentTurn;
+    const run = turn.toolRun || (turn.toolRun = { first: null, group: null });
+    if (run.group) {
+      run.group.body.appendChild(node);
+      run.group.ids.add(id);
+      updateToolGroup(run.group);
+      return run.group;
+    }
+    if (!run.first) {
+      respTarget().appendChild(node);
+      run.first = { id, node };
+      return null;
+    }
+    const g = createToolGroup();
+    respTarget().insertBefore(g.root, run.first.node);
+    g.body.appendChild(run.first.node);
+    g.body.appendChild(node);
+    g.ids.add(run.first.id).add(id);
+    const firstEntry = toolEls.get(run.first.id);
+    if (firstEntry) firstEntry.group = g;
+    run.group = g;
+    updateToolGroup(g);
+    return g;
+  }
+
   function upsertTool(m) {
     hideWorking();
     let entry = toolEls.get(m.id);
@@ -1505,14 +1719,15 @@ import { renderMarkdown, renderShell } from "./markdown.js";
       const bodyEl = document.createElement("div");
       bodyEl.className = "tool-body";
       c.body.appendChild(bodyEl);
-      respTarget().appendChild(node);
-      entry = { node, kindIcon, label, statEl, bodyEl, data: {}, collapse: c };
+      const group = placeToolNode(node, m.id);
+      entry = { node, kindIcon, label, statEl, bodyEl, data: {}, collapse: c, group };
       toolEls.set(m.id, entry);
     }
     // Merge incrementally: updates may carry only some fields.
     const d = entry.data;
     if (m.title) d.title = m.title;
     if (m.kind) d.kind = m.kind;
+    if (m.meta) d.meta = Object.assign(d.meta || {}, m.meta);
     if (m.status) d.status = m.status;
     if (m.rawInput !== undefined) d.rawInput = m.rawInput;
     if (Array.isArray(m.content) && m.content.length) d.content = m.content;
@@ -1522,7 +1737,10 @@ import { renderMarkdown, renderShell } from "./markdown.js";
     // dv-collapsed / tool-empty state the collapsible controller manages).
     ["pending", "in_progress", "completed", "failed", "cancelled"].forEach((s) => entry.node.classList.remove(s));
     entry.node.classList.add(d.status || "pending");
-    entry.kindIcon.className = "codicon tool-kind " + (TOOL_KIND_ICONS[d.kind] || TOOL_KIND_ICONS.other);
+    if (entry.group) updateToolGroup(entry.group);
+    const info = toolInfo(d);
+    const typeIcon = info && TOOL_TYPE_ICONS[info.type];
+    entry.kindIcon.className = "codicon tool-kind " + (typeIcon || TOOL_KIND_ICONS[d.kind] || TOOL_KIND_ICONS.other);
     entry.statEl.className = "codicon tool-status " + statusIcon(d.status);
     setToolLabel(entry.label, d.title);
     renderToolBody(entry);
@@ -1638,6 +1856,28 @@ import { renderMarkdown, renderShell } from "./markdown.js";
     sec.appendChild(row);
     return sec;
   }
+  // Pretty-print JSON text (objects/arrays only); returns null when the text is
+  // not JSON, so callers can fall back to showing it verbatim.
+  function tryPrettyJson(text) {
+    const t = String(text || "").trim();
+    if (!(t.startsWith("{") || t.startsWith("["))) return null;
+    try { return JSON.stringify(JSON.parse(t), null, 2); } catch { return null; }
+  }
+  // MCP / custom tool arguments, shown as a labelled, highlighted JSON block.
+  function toolArgsSection(raw) {
+    const sec = document.createElement("div");
+    sec.className = "tool-section";
+    const h = document.createElement("div");
+    h.className = "tool-section-title";
+    h.textContent = "Arguments";
+    const pre = document.createElement("pre");
+    pre.className = "tool-pre hljs";
+    if (typeof raw === "string") pre.textContent = raw;
+    else pre.innerHTML = renderCode(safeJson(raw), "json");
+    sec.appendChild(h);
+    sec.appendChild(pre);
+    return sec;
+  }
   // Raw argument JSON, kept only as a last-resort fallback for tools we cannot
   // represent more nicely (mostly MCP / custom tools).
   function toolRawInputSection(raw) {
@@ -1667,11 +1907,21 @@ import { renderMarkdown, renderShell } from "./markdown.js";
     const raw = d.rawInput;
     const isObj = raw && typeof raw === "object" && !Array.isArray(raw);
 
-    // Kind-aware input: a command block for runs, a concise line for search /
-    // fetch, and nothing for file tools (the title + pills say it all). The raw
-    // argument JSON is only shown as a fallback further below.
+    // Prefer the resolved tool identity (from _meta) over the coarse ACP kind:
+    // web search and web fetch both report kind "fetch", and MCP tools report no
+    // kind at all. Fall back to kind-aware rendering for the built-in tools.
+    const info = toolInfo(d);
     let inputShown = false;
-    if (d.kind === "execute") {
+    if (info && info.type === "web_search") {
+      const q = toolField(isObj ? raw : null, ["query", "q", "search", "text"]);
+      if (q != null) { body.appendChild(toolSummaryLine("Search", String(q))); inputShown = true; hasContent = true; }
+    } else if (info && info.type === "webfetch") {
+      const u = toolField(isObj ? raw : null, ["url", "uri", "href"]);
+      if (u != null) { body.appendChild(toolSummaryLine("Fetch", String(u), String(u))); inputShown = true; hasContent = true; }
+    } else if (info && (info.type === "mcp" || info.type === "mcp_list")) {
+      if (isObj && Object.keys(raw).length) { body.appendChild(toolArgsSection(raw)); inputShown = true; hasContent = true; }
+      else if (typeof raw === "string" && raw.trim()) { body.appendChild(toolArgsSection(raw)); inputShown = true; hasContent = true; }
+    } else if (d.kind === "execute") {
       const cmd = toolCommandStr(raw);
       if (cmd) { body.appendChild(toolCommandBlock(cmd)); inputShown = true; hasContent = true; }
     } else if (d.kind === "search") {
@@ -1685,17 +1935,30 @@ import { renderMarkdown, renderShell } from "./markdown.js";
     const textItems = (d.content || []).filter((c) => c.type === "text" && c.text);
     if (textItems.length) {
       hasContent = true;
-      const sec = document.createElement("div");
-      sec.className = "tool-section";
-      const h = document.createElement("div");
-      h.className = "tool-section-title";
-      h.textContent = "Result";
-      const pre = document.createElement("pre");
-      pre.className = "tool-pre";
-      pre.textContent = textItems.map((c) => c.text).join("\n");
-      sec.appendChild(h);
-      sec.appendChild(pre);
-      body.appendChild(sec);
+      const text = textItems.map((c) => c.text).join("\n");
+      if (info && (info.type === "web_search" || info.type === "webfetch")) {
+        // The result is a short summary ("Found 5 results", "Fetched N chars"),
+        // so a dim caption reads better than a heavyweight Result block.
+        const note = document.createElement("div");
+        note.className = "tool-result-note";
+        note.textContent = text;
+        body.appendChild(note);
+      } else {
+        const sec = document.createElement("div");
+        sec.className = "tool-section";
+        const h = document.createElement("div");
+        h.className = "tool-section-title";
+        h.textContent = "Result";
+        const pre = document.createElement("pre");
+        pre.className = "tool-pre";
+        // MCP tools usually return a JSON payload; pretty-print + highlight it.
+        const json = info && (info.type === "mcp" || info.type === "mcp_list") ? tryPrettyJson(text) : null;
+        if (json != null) { pre.classList.add("hljs"); pre.innerHTML = renderCode(json, "json"); }
+        else pre.textContent = text;
+        sec.appendChild(h);
+        sec.appendChild(pre);
+        body.appendChild(sec);
+      }
     }
 
     const termItems = (d.content || []).filter((c) => c.type === "terminal" && c.terminalId);
@@ -1871,7 +2134,7 @@ import { renderMarkdown, renderShell } from "./markdown.js";
       }));
       node.appendChild(actions);
     }
-    if (isNew) respTarget().appendChild(node);
+    if (isNew) { breakToolGroup(); respTarget().appendChild(node); }
     scrollToBottom();
   }
 
@@ -2441,7 +2704,7 @@ import { renderMarkdown, renderShell } from "./markdown.js";
     if (opts.withNewChat) {
       const nw = document.createElement("div");
       nw.className = "session-newchat";
-      nw.innerHTML = '<i class="codicon codicon-add"></i><span>New chat</span>';
+      nw.innerHTML = '<i class="codicon codicon-add"></i><span>New Session</span>';
       nw.addEventListener("click", () => { closeTitleMenu(); snapshotCurrent(); curSessionId = null; vscode.postMessage({ type: "newSession" }); });
       container.appendChild(nw);
     }
@@ -2552,7 +2815,7 @@ import { renderMarkdown, renderShell } from "./markdown.js";
     el.chatTitle.textContent = currentTitle;
     views.delete(id);
     dirtyViews.delete(id);
-    scrollToBottom();
+    forceScrollToBottom();
   }
 
   // Open a session from the list: restore its transcript instantly when it is
@@ -2641,9 +2904,9 @@ import { renderMarkdown, renderShell } from "./markdown.js";
     // Terminate is only offered for a live session (kills its process, keeps
     // the conversation). Delete removes the conversation entirely.
     if (isAliveStatus(sessionStatuses[s.id])) {
-      const term = iconBtn("codicon-circle-slash", "Terminate (stop this session's process)", (e) => {
+      const term = iconBtn(KILL_GLYPH, "Terminate (stop this session's process)", (e) => {
         e.stopPropagation();
-        vscode.postMessage({ type: "terminateSession", id: s.id });
+        vscode.postMessage({ type: "terminateSession", id: s.id, title: s.title || s.id });
       });
       actions.appendChild(term);
     }
@@ -2717,11 +2980,13 @@ import { renderMarkdown, renderShell } from "./markdown.js";
     b.addEventListener("click", onClick);
     return b;
   }
-  function iconBtn(codicon, title, onClick) {
+  // `icon` is a codicon class (e.g. "codicon-edit") or, when it starts with "<",
+  // raw inline SVG/HTML (e.g. KILL_GLYPH).
+  function iconBtn(icon, title, onClick) {
     const b = document.createElement("button");
     b.className = "icon-btn small";
     b.title = title;
-    b.innerHTML = `<i class="codicon ${codicon}"></i>`;
+    b.innerHTML = icon.charAt(0) === "<" ? icon : `<i class="codicon ${icon}"></i>`;
     b.addEventListener("click", onClick);
     return b;
   }
@@ -2978,9 +3243,8 @@ import { renderMarkdown, renderShell } from "./markdown.js";
     }
     terminalCache.set(m.terminalId, { output: text, exitStatus: m.exitStatus });
     el.thread.querySelectorAll(`pre[data-terminal="${m.terminalId}"]`).forEach((pre) => {
-      const atBottom = el.thread.scrollHeight - el.thread.scrollTop - el.thread.clientHeight < 40;
       pre.textContent = text || "\u2026";
-      if (atBottom) scrollToBottom();
+      scrollToBottom();
     });
   }
   function shorten(p) { return p.split(/[\\/]/).slice(-2).join("/"); }
@@ -3046,6 +3310,8 @@ import { renderMarkdown, renderShell } from "./markdown.js";
       case "status": el.status.textContent = m.text || ""; break;
       case "clear":
         workingEl = null;
+        // A freshly cleared thread starts pinned at the bottom.
+        stickToBottom = true;
         // Drop any in-progress request edit so its banner/target don't dangle
         // over the freshly cleared thread.
         cancelInputEditing();
@@ -3073,8 +3339,13 @@ import { renderMarkdown, renderShell } from "./markdown.js";
         else if (body === "thread") renderWelcome();
         break;
       case "loaded":
+        // Settle the last replayed block so its mermaid diagrams render and no
+        // block stays open to catch a later stray chunk.
+        finalizeBlock();
         { const l = el.thread.querySelector(".thread-loading"); if (l) l.remove(); }
         if (body === "thread" && !threadHasContent()) renderWelcome();
+        // A freshly loaded transcript starts pinned at the bottom.
+        forceScrollToBottom();
         break;
       case "sessionsLoading":
         el.sessionsList.innerHTML = '<div class="list-loading"><i class="codicon codicon-loading codicon-modifier-spin"></i></div>';
