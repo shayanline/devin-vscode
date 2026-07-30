@@ -1,6 +1,7 @@
 # Devin for VS Code
 
-[![VS Code Marketplace](https://img.shields.io/visual-studio-marketplace/v/shayanline.devin-vscode?label=Marketplace&color=1f9cf0)](https://marketplace.visualstudio.com/items?itemName=shayanline.devin-vscode)
+[![VS Code Marketplace](https://vsmarketplacebadges.dev/version-short/shayanline.devin-vscode.svg?label=Marketplace)](https://marketplace.visualstudio.com/items?itemName=shayanline.devin-vscode)
+[![Marketplace installs](https://vsmarketplacebadges.dev/installs-short/shayanline.devin-vscode.svg?label=Installs)](https://marketplace.visualstudio.com/items?itemName=shayanline.devin-vscode)
 [![Latest release](https://img.shields.io/github/v/release/shayanline/devin-vscode?label=Release)](https://github.com/shayanline/devin-vscode/releases/latest)
 
 A native chat panel for the [Devin CLI](https://docs.devin.ai), built on the
