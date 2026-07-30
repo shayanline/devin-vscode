@@ -1,4 +1,5 @@
 import { spawn, ChildProcess } from "child_process";
+import { StringDecoder } from "string_decoder";
 
 export interface EnvVariable {
   name: string;
@@ -90,8 +91,8 @@ export class TerminalManager {
     };
     this.terminals.set(terminalId, term);
 
-    const append = (chunk: Buffer) => {
-      term.output += chunk.toString("utf8");
+    const append = (text: string) => {
+      term.output += text;
       while (Buffer.byteLength(term.output, "utf8") > term.limit) {
         term.truncated = true;
         term.output = term.output.slice(Math.ceil(term.output.length * 0.1) || 1);
@@ -99,8 +100,12 @@ export class TerminalManager {
       this.onOutput?.(terminalId, term.output, term.exitStatus);
     };
 
-    child.stdout?.on("data", append);
-    child.stderr?.on("data", append);
+    // Decode each stream through its own StringDecoder so a multi-byte UTF-8
+    // sequence split across chunk boundaries is not corrupted.
+    const outDecoder = new StringDecoder("utf8");
+    const errDecoder = new StringDecoder("utf8");
+    child.stdout?.on("data", (chunk: Buffer) => append(outDecoder.write(chunk)));
+    child.stderr?.on("data", (chunk: Buffer) => append(errDecoder.write(chunk)));
     child.on("error", (err) => {
       term.output += `\n[spawn error] ${err.message}\n`;
       this.onOutput?.(terminalId, term.output, term.exitStatus);

@@ -2552,6 +2552,15 @@ body {
   border-top-right-radius: 0;
 }
 
+/* In the sessions list the composer is a clean "new chat" box: session-scoped
+   docked widgets and the context ring are hidden. Their data is kept, so they
+   reappear when a thread is reopened; only the presentation is suppressed. */
+#composer.list-mode #working-set,
+#composer.list-mode #todo-widget,
+#composer.list-mode #usage {
+  display: none !important;
+}
+
 .ws-header {
   display: flex;
   align-items: center;

@@ -22,6 +22,7 @@ import { renderMarkdown } from "./markdown.js";
     modelDD: $("model-dd"),
     thinkingDD: $("thinking-dd"),
     inputBox: $("input-box"),
+    composer: $("composer"),
     permissionTray: $("permission-tray"),
     elicitationTray: $("elicitation-tray"),
     workingSet: $("working-set"),
@@ -139,15 +140,40 @@ import { renderMarkdown } from "./markdown.js";
     const list = b === "list";
     el.sessionsList.classList.toggle("hidden", !list);
     el.thread.classList.toggle("hidden", list);
+    // The composer lives outside the body panels, so mark the list view so its
+    // session-scoped widgets (working set, context ring) hide while browsing.
+    el.composer.classList.toggle("list-mode", list);
     el.chatTitle.textContent = list ? "Sessions" : currentTitle;
     el.input.placeholder = list ? "Start a new chat\u2026" : "Ask Devin, or type @ to add a file";
     // Back arrow + title switcher only make sense inside a session (thread view).
     el.historyBtn.classList.toggle("hidden", list);
     el.titleBtn.classList.toggle("as-heading", list);
-    if (list) closeTitleMenu();
+    if (list) { closeTitleMenu(); detachComposerFromSession(); }
+    updateComposerDock();
+  }
+
+  // Entering the sessions list turns the composer into a clean "new chat" box:
+  // the draft, attachments, request-edit binding, docked plan and busy state
+  // all belonged to the session we just left. The in-flight turn is cancelled
+  // host-side (leaveToList / showSessions). The working set and context ring
+  // are only hidden by list-mode CSS, not cleared, so pending edits stay
+  // reviewable and reappear when a thread is reopened.
+  function detachComposerFromSession() {
+    cancelInputEditing();
+    el.input.value = "";
+    closeAutocomplete();
+    autosize();
+    updateSendState();
+    renderAttachments([]);
+    planUserToggled = false;
+    hideDockedPlan();
+    closeUsagePopup();
+    if (busy) setBusy(false);
   }
 
   el.historyBtn.addEventListener("click", () => {
+    // Detach from (and cancel) the session we're leaving, then show the list.
+    vscode.postMessage({ type: "leaveToList" });
     vscode.postMessage({ type: "refreshSessions" });
     setBody("list");
   });
@@ -164,7 +190,8 @@ import { renderMarkdown } from "./markdown.js";
     if (!text) return;
     // In editRequests:input mode, the composer is editing a past request:
     // submitting rewinds to it and resends instead of appending a new turn.
-    if (editingTurn) {
+    // Never in the list view, where the composer is a fresh new-chat box.
+    if (editingTurn && body !== "list") {
       submitInputEdit(editingTurn, text);
       return;
     }
@@ -531,6 +558,10 @@ import { renderMarkdown } from "./markdown.js";
   // Pending revert-preview requests keyed by token.
   const previewWaiters = new Map();
   let previewSeq = 0;
+  // A revert we asked the host to perform but has not yet confirmed. We only
+  // trim the transcript once the host replies "reverted", so a failed revert
+  // (which leaves the conversation unchanged) does not desync the UI.
+  let pendingRevert = null; // { head, showRestored } | null
 
   function respTarget() {
     return currentTurn ? currentTurn.resp : el.thread;
@@ -788,12 +819,14 @@ import { renderMarkdown } from "./markdown.js";
   // composer (do not auto-run), matching VS Code.
   function doRestore(turn) {
     if (turn.headBefore == null) {
+      // No prior node: the host starts a fresh session and posts "clear",
+      // which resets the transcript for us (no trim needed here).
       vscode.postMessage({ type: "revertExecute", newSession: true });
     } else {
+      // Defer trimming + the "restored" divider until the host confirms.
+      pendingRevert = { head: turn.headBefore, showRestored: true };
       vscode.postMessage({ type: "revertExecute", head: turn.headBefore });
     }
-    trimTurnsFrom(turn);
-    renderRestoredRow();
     el.input.value = turn.text;
     el.input.focus();
     autosize();
@@ -901,11 +934,14 @@ import { renderMarkdown } from "./markdown.js";
   }
 
   // Rewind to before `turn` and resend `text` (shared by inline + input edits).
+  // Trimming is deferred to the host's "reverted" confirmation so a failed
+  // revert does not remove turns that are, in fact, still there.
   function revertAndResend(turn, text) {
-    trimTurnsFrom(turn);
     if (turn.headBefore == null) {
+      // Host starts a fresh session (posts "clear") then resends the text.
       vscode.postMessage({ type: "revertExecute", newSession: true, resendText: text });
     } else {
+      pendingRevert = { head: turn.headBefore, showRestored: false };
       vscode.postMessage({ type: "revertExecute", head: turn.headBefore, resendText: text });
     }
   }
@@ -1335,7 +1371,9 @@ import { renderMarkdown } from "./markdown.js";
   // Square the input's top corners when a widget (plan / working set) is docked
   // flush on top of it, mirroring VS Code.
   function updateComposerDock() {
-    const docked = !el.todoWidget.classList.contains("hidden") || !el.workingSet.classList.contains("hidden");
+    // In the list view the docked widgets are hidden, so never square the input.
+    const docked = body !== "list" &&
+      (!el.todoWidget.classList.contains("hidden") || !el.workingSet.classList.contains("hidden"));
     el.inputBox.classList.toggle("docked-above", docked);
   }
   const TOOL_KIND_ICONS = {
@@ -1696,18 +1734,33 @@ import { renderMarkdown } from "./markdown.js";
     finalizeBlock();
     hideWelcome();
     ensureTurn();
-    const node = document.createElement("div");
-    node.className = "edit-pill";
+    // The same file can report changes several times in a turn (the initial
+    // tool_call plus repeated tool_call_update events all resend the diff), so
+    // reuse one pill per path per turn and refresh it in place rather than
+    // stacking duplicate rows.
+    const turn = currentTurn;
+    turn.editPills = turn.editPills || new Map();
+    let node = path ? turn.editPills.get(path) : null;
+    const isNew = !node;
+    if (isNew) {
+      node = document.createElement("div");
+      node.className = "edit-pill";
+      if (path) turn.editPills.set(path, node);
+    } else {
+      node.innerHTML = "";
+    }
     const status = document.createElement("i");
     status.className = "codicon codicon-check edit-pill-status";
     // Text status next to the icon, like VS Code's edit-pill .status-label.
     const label = document.createElement("span");
     label.className = "edit-pill-label";
-    label.textContent = created ? "Created" : "Edited";
+    // Once a file is shown as Created, keep that label even as later edits land.
+    if (created) node.dataset.created = "1";
+    label.textContent = node.dataset.created ? "Created" : "Edited";
     node.appendChild(status);
     node.appendChild(label);
     node.appendChild(filePill({ path, diff: true, added, removed }));
-    respTarget().appendChild(node);
+    if (isNew) respTarget().appendChild(node);
     scrollToBottom();
   }
 
@@ -2744,10 +2797,14 @@ import { renderMarkdown } from "./markdown.js";
       case "status": el.status.textContent = m.text || ""; break;
       case "clear":
         workingEl = null;
+        // Drop any in-progress request edit so its banner/target don't dangle
+        // over the freshly cleared thread.
+        cancelInputEditing();
         el.thread.innerHTML = "";
         turns = [];
         currentTurn = null;
         lastHead = null;
+        pendingRevert = null;
         previewWaiters.clear();
         el.permissionTray.innerHTML = "";
         el.elicitationTray.innerHTML = "";
@@ -2824,7 +2881,17 @@ import { renderMarkdown } from "./markdown.js";
           if (currentTurn) currentTurn.headAfter = m.head;
         }
         break;
-      case "reverted": break; // UI already trimmed the turns; host did the rewind.
+      case "reverted": {
+        // The host has performed the rewind; now it is safe to trim the turns
+        // from the reverted point onward (and drop the "restored" divider for a
+        // checkpoint restore). A resend, if any, streams in as new turns after.
+        const head = typeof m.head === "number" ? m.head : (pendingRevert && pendingRevert.head);
+        const turn = turns.find((t) => t.headBefore === head);
+        if (turn) trimTurnsFrom(turn);
+        if (pendingRevert && pendingRevert.showRestored) renderRestoredRow();
+        pendingRevert = null;
+        break;
+      }
       case "revertPreview": {
         const w = previewWaiters.get(m.token);
         if (w) { previewWaiters.delete(m.token); w(m); }

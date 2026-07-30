@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import * as fs from "fs";
 import * as path from "path";
+import * as crypto from "crypto";
 import { AcpClient, AcpHost } from "../acp/client";
 import {
   ConfigOption,
@@ -206,6 +207,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
           return;
         case "refreshSessions":
           await this.refreshSessions(true);
+          return;
+        case "leaveToList":
+          this.leaveToList();
           return;
         case "setMode":
           await this.setMode(String(msg.mode || "accept-edits"));
@@ -554,6 +558,24 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     }
   }
 
+  // Leaving the active session for the sessions list. Background-running a
+  // session isn't supported yet (a single ACP client / sessionId / busy flag),
+  // so cancel the in-flight turn and detach the composer's pending attachments
+  // rather than let them bleed into the next chat.
+  private leaveToList(): void {
+    if (this.busy) {
+      this.cancel();
+    }
+    this.clearAttachments();
+  }
+
+  private clearAttachments(): void {
+    if (this.attachments.length) {
+      this.attachments = [];
+    }
+    this.postAttachments();
+  }
+
   async newSession(): Promise<void> {
     if (!(await this.ensureReady())) {
       return;
@@ -565,6 +587,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     this.sessionId = undefined;
     this.starting = undefined;
     this.changes.clear();
+    this.attachments = [];
     this.focus();
     this.post({ type: "body", body: "thread" });
     this.post({ type: "clear" });
@@ -581,6 +604,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     // Reuse the existing ACP connection (it supports multiple sessions); only
     // respawn if there is no live process. This makes switching sessions fast.
     this.changes.clear();
+    this.attachments = [];
     this.post({ type: "clear", loading: true });
     try {
       const client = await this.ensureInitialized();
@@ -1045,19 +1069,27 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
   // --- Prompting -----------------------------------------------------------
 
   private async handleSend(text: string, startNew = false): Promise<void> {
-    if (!text.trim() || this.busy) {
+    if (!text.trim()) {
       return;
     }
     if (!(await this.ensureReady())) {
       return;
     }
     // Sending from the sessions list starts a fresh session (reusing the
-    // existing ACP connection).
+    // existing ACP connection). If a turn is still running on the old session,
+    // cancel it first rather than silently dropping the message.
     if (startNew) {
+      if (this.busy) {
+        this.cancel();
+      }
       this.sessionId = undefined;
       this.starting = undefined;
       this.changes.clear();
+      this.attachments = [];
       this.post({ type: "clear" });
+    } else if (this.busy) {
+      // One turn at a time within a session.
+      return;
     }
     await this.ensureSession();
     if (!this.sessionId || !this.client) {
@@ -1191,6 +1223,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
 
   async showSessionsView(): Promise<void> {
     this.focus();
+    this.leaveToList();
     this.post({ type: "body", body: "list" });
     await this.refreshSessions(true);
   }
@@ -1545,10 +1578,6 @@ function quote(p: string): string {
 }
 
 function getNonce(): string {
-  let text = "";
-  const possible = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-  for (let i = 0; i < 32; i++) {
-    text += possible.charAt(Math.floor(Math.random() * possible.length));
-  }
-  return text;
+  // A CSP nonce must be unguessable, so use a CSPRNG rather than Math.random.
+  return crypto.randomBytes(16).toString("hex");
 }

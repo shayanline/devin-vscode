@@ -167,7 +167,11 @@ export class ChangeTracker
   }
 
   private originalUri(fsPath: string): vscode.Uri {
-    return vscode.Uri.from({ scheme: ChangeTracker.scheme, path: fsPath, query: fsPath });
+    // The exact fsPath is carried in the query (and used for content lookup).
+    // The path component is normalised to a valid POSIX-style URI path so a
+    // Windows drive path (C:\...) does not produce a malformed URI.
+    const uriPath = "/" + fsPath.replace(/\\/g, "/").replace(/^\/+/, "");
+    return vscode.Uri.from({ scheme: ChangeTracker.scheme, path: uriPath, query: fsPath });
   }
 }
 

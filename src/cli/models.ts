@@ -35,8 +35,12 @@ export async function listModelFamilies(cliPath: string, env?: NodeJS.ProcessEnv
   const families = await run(cliPath, env);
   if (families.length) {
     setCache(families);
+    return families;
   }
-  return families;
+  // The CLI call failed or returned nothing: keep serving the last successful
+  // families (even if now stale) so the dropdowns don't empty out on a
+  // transient error.
+  return cache?.families ?? families;
 }
 
 // Families from the last successful fetch, synchronously (may be empty).
