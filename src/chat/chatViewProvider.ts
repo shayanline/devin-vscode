@@ -1212,7 +1212,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
       confirmRemoval: this.cfg().get<boolean>("editing.confirmEditRequestRemoval", true),
       verbose: this.cfg().get<boolean>("verbose", true),
       progressBorder: this.cfg().get<boolean>("progressBorder.enabled", true),
-      contextUsage: this.cfg().get<boolean>("contextUsage.enabled", true)
+      contextUsage: this.cfg().get<boolean>("contextUsage.enabled", true),
+      inlineReferencesStyle: this.cfg().get<string>("inlineReferences.style", "box")
     });
   }
 
@@ -1283,7 +1284,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
       if (c && c.type === "diff" && typeof c.path === "string") {
         this.changes.recordDiff(c.path, c.oldText ?? null, c.newText ?? "");
         const s = diffStat(c.oldText, c.newText);
-        this.post({ type: "fileChange", path: c.path, added: s.added, removed: s.removed });
+        this.post({ type: "fileChange", path: c.path, added: s.added, removed: s.removed, created: c.oldText == null || c.oldText === "" });
       }
     }
   }
@@ -1408,7 +1409,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     await fs.promises.writeFile(full, params.content, "utf8");
     this.changes.recordDiff(full, original, params.content);
     const s = diffStat(original, params.content);
-    this.post({ type: "fileChange", path: full, added: s.added, removed: s.removed });
+    this.post({ type: "fileChange", path: full, added: s.added, removed: s.removed, created: original == null });
     return null;
   }
 

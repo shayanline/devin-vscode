@@ -519,7 +519,7 @@ import { renderMarkdown } from "./markdown.js";
   // target ("checkpoint") is the head captured before it ran (headBefore).
   let lastHead = null;
   // Feature gates from the host (revert capability + settings).
-  let caps = { revert: false, editRequests: "inline", checkpoints: true, showFileChanges: true, confirmRemoval: true, verbose: true, progressBorder: true, contextUsage: true };
+  let caps = { revert: false, editRequests: "inline", checkpoints: true, showFileChanges: true, confirmRemoval: true, verbose: true, progressBorder: true, contextUsage: true, inlineReferencesStyle: "box" };
   // Pending revert-preview requests keyed by token.
   const previewWaiters = new Map();
   let previewSeq = 0;
@@ -962,9 +962,11 @@ import { renderMarkdown } from "./markdown.js";
 
   // File/symbol references in assistant text (non http links) render as VS Code
   // style inline anchor chips: a bordered pill with a file-type icon. External
-  // links stay plain. Clicks are handled by the delegated thread listener.
+  // links stay plain. With inlineReferences.style === "link" they stay as plain
+  // links (VS Code's chat.inlineReferences.style). Clicks are handled by the
+  // delegated thread listener.
   function enhanceAnchors(container) {
-    if (!container) return;
+    if (!container || caps.inlineReferencesStyle === "link") return;
     container.querySelectorAll("a[href]").forEach((a) => {
       if (a.dataset.anchored) return;
       const href = a.getAttribute("href") || "";
@@ -972,7 +974,7 @@ import { renderMarkdown } from "./markdown.js";
       a.dataset.anchored = "1";
       a.classList.add("anchor-chip");
       const icon = document.createElement("i");
-      icon.className = "codicon codicon-file anchor-chip-icon";
+      icon.className = "codicon " + fileIconFor(a.textContent || href) + " anchor-chip-icon";
       a.insertBefore(icon, a.firstChild);
     });
   }
@@ -1374,6 +1376,13 @@ import { renderMarkdown } from "./markdown.js";
     // An empty tool has nothing to reveal, so it must not collapse/expand.
     entry.node.classList.toggle("tool-empty", !hasContent);
     entry.node.classList.toggle("dv-nocollapse", !hasContent);
+
+    // Auto-expand a failed tool so the error is visible without a click
+    // (VS Code's chat.tools.autoExpandFailures).
+    if (d.status === "failed" && hasContent && entry.collapse && !entry.node.dataset.autoOpened) {
+      entry.collapse.setCollapsed(false);
+      entry.node.dataset.autoOpened = "1";
+    }
   }
 
   // A file reference rendered as a VS Code style pill: a file-type icon, the
@@ -1384,7 +1393,7 @@ import { renderMarkdown } from "./markdown.js";
     link.className = "file-change";
     link.title = f.path;
     const icon = document.createElement("i");
-    icon.className = "codicon codicon-file file-pill-icon";
+    icon.className = "codicon " + fileIconFor(f.path) + " file-pill-icon";
     const name = document.createElement("span");
     name.className = "file-pill-name";
     name.textContent = baseName(f.path) + (f.line ? ":" + f.line : "");
@@ -1421,6 +1430,7 @@ import { renderMarkdown } from "./markdown.js";
     const path = typeof m === "string" ? m : m.path;
     const added = typeof m === "object" ? m.added : undefined;
     const removed = typeof m === "object" ? m.removed : undefined;
+    const created = typeof m === "object" && m.created;
     finalizeBlock();
     hideWelcome();
     ensureTurn();
@@ -1428,7 +1438,12 @@ import { renderMarkdown } from "./markdown.js";
     node.className = "edit-pill";
     const status = document.createElement("i");
     status.className = "codicon codicon-check edit-pill-status";
+    // Text status next to the icon, like VS Code's edit-pill .status-label.
+    const label = document.createElement("span");
+    label.className = "edit-pill-label";
+    label.textContent = created ? "Created" : "Edited";
     node.appendChild(status);
+    node.appendChild(label);
     node.appendChild(filePill({ path, diff: true, added, removed }));
     respTarget().appendChild(node);
     scrollToBottom();
@@ -1611,21 +1626,30 @@ import { renderMarkdown } from "./markdown.js";
     const isMulti = spec.type === "array";
     const optionDefs = isMulti ? (spec.items && spec.items.anyOf) || [] : spec.oneOf || [];
 
-    // Free text / number / boolean when there are no discrete options.
+    // Free text / number / boolean when there are no discrete options. Free
+    // text uses an auto-growing textarea (VS Code's chat-question-freeform).
     if (!optionDefs.length && !isMulti) {
       let input;
       if (spec.type === "boolean") { input = document.createElement("input"); input.type = "checkbox"; }
       else if (spec.type === "number" || spec.type === "integer") { input = document.createElement("input"); input.type = "number"; }
-      else { input = document.createElement("input"); input.type = "text"; }
-      input.className = "elicit-input";
-      if (spec.default !== undefined && input.type !== "checkbox") input.value = String(spec.default);
+      else { input = document.createElement("textarea"); input.rows = 1; }
+      const isCheckbox = input.type === "checkbox";
+      const isNumber = input.type === "number";
+      const isFreeform = input.tagName === "TEXTAREA";
+      input.className = "elicit-input" + (isFreeform ? " elicit-freeform" : "");
+      if (spec.default !== undefined && !isCheckbox) input.value = String(spec.default);
+      if (isFreeform) {
+        const grow = () => { input.style.height = "auto"; input.style.height = Math.min(Math.max(input.scrollHeight, 28), 160) + "px"; };
+        input.addEventListener("input", grow);
+        setTimeout(grow, 0);
+      }
       field.appendChild(input);
-      const val = () => (input.type === "checkbox" ? input.checked : input.type === "number" ? Number(input.value) : input.value);
+      const val = () => (isCheckbox ? input.checked : isNumber ? Number(input.value) : input.value);
       return {
         key, el: field, title,
         value: val,
-        valid: () => (!opts.required || input.type === "checkbox" || String(input.value).trim() !== ""),
-        answerText: () => (input.type === "checkbox" ? (input.checked ? "Yes" : "No") : String(input.value))
+        valid: () => (!opts.required || isCheckbox || String(input.value).trim() !== ""),
+        answerText: () => (isCheckbox ? (input.checked ? "Yes" : "No") : String(input.value))
       };
     }
 
@@ -1640,10 +1664,17 @@ import { renderMarkdown } from "./markdown.js";
       const input = document.createElement("input");
       input.type = isMulti ? "checkbox" : "radio";
       input.name = name;
+      input.className = "elicit-native";
       if (!isOther) input.value = val;
+      // VS Code's question-list rows show a check indicator (not a native
+      // control); the native input is kept (visually hidden) for state + a11y.
+      const indicator = document.createElement("i");
+      indicator.className = "codicon codicon-check elicit-indicator";
       const span = document.createElement("span");
+      span.className = "elicit-option-label";
       span.textContent = label;
       opt.appendChild(input);
+      opt.appendChild(indicator);
       opt.appendChild(span);
       if (isOther) {
         otherRadio = input;
@@ -2449,7 +2480,8 @@ import { renderMarkdown } from "./markdown.js";
           confirmRemoval: m.confirmRemoval !== undefined ? !!m.confirmRemoval : caps.confirmRemoval,
           verbose: m.verbose !== undefined ? !!m.verbose : caps.verbose,
           progressBorder: m.progressBorder !== undefined ? !!m.progressBorder : caps.progressBorder,
-          contextUsage: m.contextUsage !== undefined ? !!m.contextUsage : caps.contextUsage
+          contextUsage: m.contextUsage !== undefined ? !!m.contextUsage : caps.contextUsage,
+          inlineReferencesStyle: m.inlineReferencesStyle || caps.inlineReferencesStyle
         });
         applyCapPrefs();
         refreshTurnChrome();
