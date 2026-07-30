@@ -4,12 +4,22 @@ import { ChangeTracker } from "./diff/changeTracker";
 import { SessionStore } from "./session/sessionStore";
 import { StatusBar } from "./ui/statusBar";
 import { reapOrphanedAgents } from "./cli/reaper";
+import { sweepStaleLocks } from "./cli/sessionLocks";
 
 export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel("Devin");
-  // Clean up any agents left stranded by a previous crash or force-quit before
-  // we start a fresh one. Only orphans (ppid == 1) are touched.
+  // Clean up anything left stranded by a previous crash or force-quit before we
+  // start fresh: orphaned `devin acp` agents (ppid == 1), and session lock
+  // files whose owning PID is dead. Deferred so activation never blocks on the
+  // lock-dir scan. Live owners are left untouched.
   reapOrphanedAgents((line) => output.appendLine(line));
+  setTimeout(() => {
+    try {
+      sweepStaleLocks((line) => output.appendLine(line));
+    } catch {
+      // best effort
+    }
+  }, 0).unref?.();
   const changes = new ChangeTracker();
   const store = new SessionStore(context.workspaceState);
   const statusBar = new StatusBar();

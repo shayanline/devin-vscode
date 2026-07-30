@@ -134,6 +134,39 @@ test("leaving a running session to the list detaches the composer", async () => 
   assert.strictEqual(h.errors().length, 0, "leaving to list threw: " + JSON.stringify(h.errors()));
 });
 
+test("session list shows liveness dots and offers take-over", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({
+    type: "sessions",
+    sessions: [
+      { id: "aaa", short_id: "aaa", title: "Running one", working_directory: "/w" },
+      { id: "bbb", short_id: "bbb", title: "Idle one", working_directory: "/w" },
+      { id: "ccc", short_id: "ccc", title: "Dead one", working_directory: "/w" }
+    ],
+    activeId: "aaa",
+    statuses: { aaa: "running", bbb: "idle" },
+    folders: [{ path: "/w", name: "w" }]
+  });
+  await h.settle(20);
+
+  const cls = [...h.document.querySelectorAll("#sessions-list .session-dot")].map((d) => d.className);
+  assert.ok(cls.some((c) => c.includes("dot-running")), "a running (green) dot");
+  assert.ok(cls.some((c) => c.includes("dot-idle")), "an idle (amber) dot");
+  assert.ok(cls.some((c) => c.includes("dot-dead")), "a dead (gray) dot for the session with no status");
+
+  // A locked session offers take-over, which posts the decision back.
+  h.post({ type: "lockConflict", requestId: "lock-1", id: "aaa", pid: 4242 });
+  await h.settle(10);
+  const takeover = [...h.document.querySelectorAll("#permission-tray button")].find((b) => b.textContent === "Take over");
+  assert.ok(takeover, "a Take over button renders");
+  takeover.click();
+  await h.settle(10);
+  const decision = h.posted.find((m) => m.type === "takeoverDecision");
+  assert.ok(decision && decision.decision === "takeover" && decision.requestId === "lock-1", "take-over decision posted");
+  assert.strictEqual(h.errors().length, 0, "status/lock handling threw: " + JSON.stringify(h.errors()));
+});
+
 test("per-turn edit/restore chrome builds while busy (no throw)", async () => {
   const h = createHarness();
   h.replay([{ role: "user", text: "q" }, { role: "assistant", text: "a" }]);
