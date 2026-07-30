@@ -816,6 +816,34 @@ body {
   }
 }
 
+/* Editing a past request from the composer (editRequests:input): tint the box
+   with the request bubble colour and show a banner, mirroring VS Code. */
+#input-box.editing-request {
+  background: var(--vscode-chat-requestBubbleBackground, var(--vscode-input-background));
+}
+
+.input-editing-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-bottom: 6px;
+  padding: 2px 2px 2px 4px;
+  font-size: var(--dv-fs-s);
+  color: var(--dv-dim);
+  border-bottom: 1px solid var(--dv-border);
+}
+
+.input-editing-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.input-editing-label .codicon {
+  font-size: 13px;
+}
+
 #input {
   width: 100%;
   border: none;
@@ -1434,32 +1462,36 @@ body {
 }
 
 .welcome-title {
-  font-size: 1.15em;
+  font-size: 13px;
   font-weight: 600;
+  color: var(--vscode-foreground);
 }
 
 .welcome-sub {
-  max-width: 320px;
+  max-width: 280px;
+  font-size: 12px;
 }
 
+/* Suggested prompts as a wrapping bar of small chips, mirroring VS Code's
+   chat-welcome-view-suggested-prompts. */
 .welcome-prompts {
   display: flex;
-  flex-direction: column;
+  flex-wrap: wrap;
+  justify-content: center;
   gap: 6px;
-  width: 100%;
   max-width: 340px;
-  margin-top: 6px;
+  margin-top: 8px;
 }
 
 .welcome-chip {
   text-align: left;
-  padding: 8px 12px;
-  border: 1px solid var(--vscode-panel-border);
-  border-radius: 6px;
-  background: transparent;
-  color: var(--vscode-foreground);
+  padding: 3px 8px;
+  border: 1px solid var(--dv-border);
+  border-radius: var(--dv-radius-sm);
+  background: var(--vscode-editorWidget-background, transparent);
+  color: var(--vscode-editorWidget-foreground, var(--vscode-foreground));
   font-family: inherit;
-  font-size: 0.92em;
+  font-size: 12px;
   cursor: pointer;
 }
 
