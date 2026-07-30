@@ -54,6 +54,11 @@ import { renderMarkdown } from "./markdown.js";
   // Model picker lists families; a separate thinking picker holds the effort
   // variants of the selected family (Copilot-style).
   let modelFamilies = [];
+  // The active model family's display name, stamped onto each turn when it is
+  // sent so the response footer can show "{model} · {time}" (VS Code's footer
+  // detail). ACP does not report a per-turn model, so this is the model
+  // selected at send time.
+  let currentModelLabel = "";
   const modelDropdown = createDropdown(el.modelDD, onModelSelect, { buttonIcon: modelButtonIcon });
   const thinkingDropdown = createDropdown(el.thinkingDD, onThinkingSelect);
 
@@ -82,6 +87,7 @@ import { renderMarkdown } from "./markdown.js";
   function onModelSelect(familyId) {
     const fam = familyById(familyId);
     if (!fam) return;
+    currentModelLabel = fam.name || "";
     vscode.postMessage({ type: "setModel", model: fam.default });
     updateThinking(fam, fam.default);
   }
@@ -108,12 +114,14 @@ import { renderMarkdown } from "./markdown.js";
     // Separator after Adaptive, before the alphabetical list.
     if (adaptive.length && rest.length) items.splice(adaptive.length, 0, { sep: true });
     const fam = familyOfUid(currentModel) || modelFamilies[0];
+    currentModelLabel = fam ? fam.name || "" : currentModelLabel;
     modelDropdown.set(items, fam ? fam.id : "");
     updateThinking(fam, currentModel);
   }
   function selectModelUid(uid) {
     const fam = familyOfUid(uid);
     if (!fam) return;
+    currentModelLabel = fam.name || "";
     modelDropdown.setCurrent(fam.id);
     updateThinking(fam, uid);
   }
@@ -596,7 +604,7 @@ import { renderMarkdown } from "./markdown.js";
     const turn = {
       id: "t" + (++turnSeq), mid, container, req, reqBody, reqText, resp, checkpoint,
       text: text || "", headBefore: lastHead, headAfter: null, editing: false,
-      createdAt: Date.now(), completedAt: null
+      createdAt: Date.now(), completedAt: null, model: currentModelLabel
     };
     turns.push(turn);
     currentTurn = turn;
@@ -663,14 +671,19 @@ import { renderMarkdown } from "./markdown.js";
     if (footer) footer.remove();
     footer = document.createElement("div");
     footer.className = "chat-footer";
-    footer.appendChild(copyButton("Copy", "msg-action", () => turn.resp.innerText.trim()));
-    footer.appendChild(actionBtn("codicon-refresh", "Retry", () => {
+    // VS Code's ChatMessageFooter order: Retry first, then Copy (thumbs/report
+    // are telemetry we drop). Retry carries a class so it can be hidden on
+    // headless (request-less) turns.
+    const retry = actionBtn("codicon-refresh", "Retry", () => {
       if (turn.text) vscode.postMessage({ type: "send", text: turn.text, newSession: false });
-    }));
+    });
+    retry.classList.add("footer-retry");
+    footer.appendChild(retry);
+    footer.appendChild(copyButton("Copy", "msg-action", () => turn.resp.innerText.trim()));
     if (caps.verbose && !turn.replayed && turn.completedAt) {
       const det = document.createElement("span");
       det.className = "chat-footer-details";
-      det.textContent = fmtTime(turn.completedAt);
+      det.textContent = [turn.model, fmtTime(turn.completedAt)].filter(Boolean).join("  \u00b7  ");
       footer.appendChild(det);
     }
     turn.footer = footer;
