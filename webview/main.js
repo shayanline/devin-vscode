@@ -1,4 +1,4 @@
-import { renderMarkdown } from "./markdown.js";
+import { renderMarkdown, renderShell } from "./markdown.js";
 
 (function () {
   const vscode = acquireVsCodeApi();
@@ -11,6 +11,7 @@ import { renderMarkdown } from "./markdown.js";
     chatTitle: $("chat-title"),
     historyBtn: $("history-btn"),
     titleBtn: $("title-btn"),
+    terminateBtn: $("terminate-btn"),
     status: $("status"),
     usage: $("usage"),
     sessionsList: $("sessions-list"),
@@ -172,6 +173,7 @@ import { renderMarkdown } from "./markdown.js";
     el.titleBtn.classList.toggle("as-heading", list);
     if (list) { closeTitleMenu(); detachComposerFromSession(); }
     updateComposerDock();
+    updateTerminateBtn();
   }
 
   // Entering the sessions list turns the composer into a clean "new chat" box:
@@ -192,6 +194,17 @@ import { renderMarkdown } from "./markdown.js";
     closeUsagePopup();
     if (busy) setBusy(false);
   }
+
+  function isAliveStatus(st) { return st === "running" || st === "idle" || st === "starting"; }
+
+  // The header terminate control is shown only inside a live session's thread.
+  function updateTerminateBtn() {
+    const show = body === "thread" && !!curSessionId && isAliveStatus(sessionStatuses[curSessionId]);
+    el.terminateBtn.classList.toggle("hidden", !show);
+  }
+  el.terminateBtn.addEventListener("click", () => {
+    if (curSessionId) vscode.postMessage({ type: "terminateSession", id: curSessionId });
+  });
 
   el.historyBtn.addEventListener("click", () => {
     // Keep the session alive in the background and retain its transcript so
@@ -1562,8 +1575,9 @@ import { renderMarkdown } from "./markdown.js";
     return p != null ? String(p) : null;
   }
 
-  // A shell command block (VS Code's terminal command style): a dim $ prompt
-  // followed by the command, instead of dumping the argument JSON.
+  // A shell command block (VS Code's terminal command style): a dim $ prompt,
+  // the syntax-highlighted command, and a "Run in terminal" affordance, instead
+  // of dumping the argument JSON.
   function toolCommandBlock(cmd) {
     const sec = document.createElement("div");
     sec.className = "tool-section";
@@ -1573,9 +1587,13 @@ import { renderMarkdown } from "./markdown.js";
     prompt.className = "tool-command-prompt";
     prompt.textContent = "$";
     const code = document.createElement("code");
-    code.textContent = cmd;
+    code.className = "hljs tool-command-code";
+    code.innerHTML = renderShell(cmd);
+    const run = codeBtn("codicon-terminal", "Run in terminal", () => vscode.postMessage({ type: "runInTerminal", text: cmd }));
+    run.classList.add("tool-command-run");
     box.appendChild(prompt);
     box.appendChild(code);
+    box.appendChild(run);
     sec.appendChild(box);
     return sec;
   }
@@ -2492,6 +2510,7 @@ import { renderMarkdown } from "./markdown.js";
     if (activeId !== undefined) lastActiveId = activeId;
     if (listCtrl) listCtrl.refresh();
     if (menuCtrl) menuCtrl.refresh();
+    updateTerminateBtn();
   }
 
   // A session is held by another live Devin process (item 5): offer take-over.
@@ -2548,6 +2567,15 @@ import { renderMarkdown } from "./markdown.js";
     });
     const actions = document.createElement("div");
     actions.className = "session-actions";
+    // Terminate is only offered for a live session (kills its process, keeps
+    // the conversation). Delete removes the conversation entirely.
+    if (isAliveStatus(sessionStatuses[s.id])) {
+      const term = iconBtn("codicon-circle-slash", "Terminate (stop this session's process)", (e) => {
+        e.stopPropagation();
+        vscode.postMessage({ type: "terminateSession", id: s.id });
+      });
+      actions.appendChild(term);
+    }
     const rename = iconBtn("codicon-edit", "Rename", (e) => { e.stopPropagation(); vscode.postMessage({ type: "renameSession", id: s.id, title: s.title || "" }); });
     const del = iconBtn("codicon-trash", "Delete", (e) => { e.stopPropagation(); vscode.postMessage({ type: "deleteSession", id: s.id, title: s.title || s.id }); });
     actions.appendChild(rename);
@@ -2933,6 +2961,7 @@ import { renderMarkdown } from "./markdown.js";
         hideBoot();
         if (m.statuses) sessionStatuses = m.statuses;
         renderSessions(m.sessions, m.activeId, m.folders);
+        updateTerminateBtn();
         break;
       case "sessionStatuses": applyStatuses(m.statuses, m.activeId); break;
       case "sessionActivity": if (m.id) dirtyViews.add(m.id); break;
@@ -2941,6 +2970,7 @@ import { renderMarkdown } from "./markdown.js";
         el.status.textContent = "";
         // The thread now shows this session; retire any retained snapshot for it.
         if (m.sessionId) { curSessionId = m.sessionId; views.delete(m.sessionId); dirtyViews.delete(m.sessionId); }
+        updateTerminateBtn();
         break;
       case "status": el.status.textContent = m.text || ""; break;
       case "clear":

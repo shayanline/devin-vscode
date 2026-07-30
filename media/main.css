@@ -522,9 +522,11 @@ body {
   outline-offset: 1px;
 }
 
-/* Optical centring: VS Code nudges the up-arrow glyph down half a pixel. */
-.send-btn .codicon-arrow-up::before {
-  transform: translateY(0.5px);
+/* Copilot-style enter/return glyph on the send button. */
+.send-btn .send-glyph {
+  width: 16px;
+  height: 16px;
+  display: block;
 }
 
 /* Disabled Send keeps the filled look, dimmed (VS Code keeps the button). */
@@ -2169,25 +2171,47 @@ body {
    terminal command style, instead of the raw argument JSON. */
 .tool-command {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 6px;
   padding: 6px 8px;
   border-radius: var(--dv-radius-sm);
   background: var(--vscode-textCodeBlock-background);
+  border: 1px solid var(--dv-border);
   font-family: var(--vscode-editor-font-family, monospace);
   font-size: 0.92em;
-  overflow-x: auto;
 }
 
 .tool-command-prompt {
-  color: var(--dv-dim);
+  color: var(--vscode-terminal-ansiGreen, #3fb950);
   user-select: none;
   flex: 0 0 auto;
+  font-weight: 600;
 }
 
-.tool-command code {
+.tool-command code,
+.tool-command-code {
+  flex: 1 1 auto;
+  min-width: 0;
   white-space: pre-wrap;
   word-break: break-all;
+  background: transparent;
+  padding: 0;
+}
+
+/* "Run in terminal" affordance on the command line (top-right, like VS Code). */
+.tool-command-run {
+  flex: 0 0 auto;
+  margin-left: 4px;
+  opacity: 0.6;
+}
+.tool-command-run:hover {
+  opacity: 1;
+}
+
+/* When terminal output follows the command block, join them into one unit. */
+.tool-command + .terminal-pre,
+.tool-section:has(> .tool-command) + .tool-section .terminal-pre {
+  margin-top: 4px;
 }
 
 /* One-line "Label value" summary (search query, fetch URL). */

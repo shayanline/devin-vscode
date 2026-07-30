@@ -28,6 +28,16 @@ export function renderMarkdown(src) {
   return md.render(src || "");
 }
 
+// Syntax-highlighted shell command (inline HTML), for the terminal tool card.
+export function renderShell(src) {
+  const code = String(src || "");
+  try {
+    return hljs.highlight(code, { language: "bash", ignoreIllegals: true }).value;
+  } catch {
+    return md.utils.escapeHtml(code);
+  }
+}
+
 export function renderMarkdownInline(src) {
   return md.renderInline(src || "");
 }
