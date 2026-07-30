@@ -2122,6 +2122,53 @@ body {
   align-items: flex-start;
 }
 
+/* Command block for a run tool: a dim $ prompt + the command, VS Code's
+   terminal command style, instead of the raw argument JSON. */
+.tool-command {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: var(--dv-radius-sm);
+  background: var(--vscode-textCodeBlock-background);
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.92em;
+  overflow-x: auto;
+}
+
+.tool-command-prompt {
+  color: var(--dv-dim);
+  user-select: none;
+  flex: 0 0 auto;
+}
+
+.tool-command code {
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* One-line "Label value" summary (search query, fetch URL). */
+.tool-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: var(--dv-fs-s);
+}
+
+.tool-summary-label {
+  flex: 0 0 auto;
+  font-size: 0.85em;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.55;
+}
+
+.tool-summary-value {
+  font-family: var(--vscode-editor-font-family, monospace);
+  overflow-wrap: anywhere;
+}
+
 /* Terminal output framed like VS Code's terminal content part: a bordered,
    rounded box (the tool summary above it carries the command + status). */
 .terminal-pre {

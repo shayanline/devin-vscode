@@ -1471,25 +1471,102 @@ import { renderMarkdown } from "./markdown.js";
     turn.refs.forEach((f) => turn.usedRefsBody.appendChild(filePill({ path: f.path, line: f.line, diff: false })));
   }
 
+  // First non-empty value among candidate keys of a rawInput object.
+  function toolField(raw, keys) {
+    if (!raw || typeof raw !== "object") return null;
+    for (const k of keys) { if (raw[k] != null && raw[k] !== "") return raw[k]; }
+    return null;
+  }
+  // Extract a runnable command string from a tool's rawInput (handles the
+  // common argument shapes; ACP does not standardise the key).
+  function toolCommandStr(raw) {
+    if (typeof raw === "string") return raw.trim() || null;
+    let c = toolField(raw, ["command", "cmd", "script", "commandLine", "shellCommand"]);
+    if (c == null && raw && Array.isArray(raw.args)) c = raw.args.join(" ");
+    else if (c == null && raw && typeof raw.args === "string") c = raw.args;
+    return c != null ? String(c) : null;
+  }
+  function toolFilePath(raw) {
+    const p = toolField(raw, ["path", "file", "filename", "filePath", "file_path", "target"]);
+    return p != null ? String(p) : null;
+  }
+
+  // A shell command block (VS Code's terminal command style): a dim $ prompt
+  // followed by the command, instead of dumping the argument JSON.
+  function toolCommandBlock(cmd) {
+    const sec = document.createElement("div");
+    sec.className = "tool-section";
+    const box = document.createElement("div");
+    box.className = "tool-command";
+    const prompt = document.createElement("span");
+    prompt.className = "tool-command-prompt";
+    prompt.textContent = "$";
+    const code = document.createElement("code");
+    code.textContent = cmd;
+    box.appendChild(prompt);
+    box.appendChild(code);
+    sec.appendChild(box);
+    return sec;
+  }
+  // A one-line "Label value" summary (e.g. Search / Fetch).
+  function toolSummaryLine(label, value) {
+    const sec = document.createElement("div");
+    sec.className = "tool-section";
+    const row = document.createElement("div");
+    row.className = "tool-summary";
+    const l = document.createElement("span");
+    l.className = "tool-summary-label";
+    l.textContent = label;
+    const v = document.createElement("span");
+    v.className = "tool-summary-value";
+    v.textContent = value;
+    row.appendChild(l);
+    row.appendChild(v);
+    sec.appendChild(row);
+    return sec;
+  }
+  // Raw argument JSON, kept only as a last-resort fallback for tools we cannot
+  // represent more nicely (mostly MCP / custom tools).
+  function toolRawInputSection(raw) {
+    const sec = document.createElement("div");
+    sec.className = "tool-section";
+    const h = document.createElement("div");
+    h.className = "tool-section-title";
+    h.textContent = "Input";
+    const pre = document.createElement("pre");
+    pre.className = "tool-pre";
+    pre.textContent = typeof raw === "string" ? raw : safeJson(raw);
+    sec.appendChild(h);
+    sec.appendChild(pre);
+    return sec;
+  }
+
+  // Kinds whose input is fully conveyed by the title + file pills / diff, so we
+  // never dump their argument JSON.
+  const FILE_TOOL_KINDS = ["read", "edit", "delete", "move"];
+  const NO_RAW_KINDS = ["read", "edit", "delete", "move", "think"];
+
   function renderToolBody(entry) {
     const d = entry.data;
     const body = entry.bodyEl;
     body.innerHTML = "";
     let hasContent = false;
+    const raw = d.rawInput;
+    const isObj = raw && typeof raw === "object" && !Array.isArray(raw);
 
-    if (d.rawInput && Object.keys(d.rawInput).length) {
-      hasContent = true;
-      const sec = document.createElement("div");
-      sec.className = "tool-section";
-      const h = document.createElement("div");
-      h.className = "tool-section-title";
-      h.textContent = "Input";
-      const pre = document.createElement("pre");
-      pre.className = "tool-pre";
-      pre.textContent = safeJson(d.rawInput);
-      sec.appendChild(h);
-      sec.appendChild(pre);
-      body.appendChild(sec);
+    // Kind-aware input: a command block for runs, a concise line for search /
+    // fetch, and nothing for file tools (the title + pills say it all). The raw
+    // argument JSON is only shown as a fallback further below.
+    let inputShown = false;
+    if (d.kind === "execute") {
+      const cmd = toolCommandStr(raw);
+      if (cmd) { body.appendChild(toolCommandBlock(cmd)); inputShown = true; hasContent = true; }
+    } else if (d.kind === "search") {
+      const q = toolField(isObj ? raw : null, ["query", "pattern", "search", "regex", "q", "text"]);
+      if (q != null) { body.appendChild(toolSummaryLine("Search", String(q))); inputShown = true; hasContent = true; }
+    } else if (d.kind === "fetch") {
+      const u = toolField(isObj ? raw : null, ["url", "uri", "href"]);
+      if (u != null) { body.appendChild(toolSummaryLine("Fetch", String(u))); inputShown = true; hasContent = true; }
     }
 
     const textItems = (d.content || []).filter((c) => c.type === "text" && c.text);
@@ -1535,12 +1612,26 @@ import { renderMarkdown } from "./markdown.js";
       ...diffItems.map((c) => ({ path: c.path, diff: true, added: c.added, removed: c.removed })),
       ...locs.map((l) => ({ path: l.path, line: l.line, diff: false }))
     ];
+    // For a file tool with no location/diff, surface the path from rawInput as a
+    // pill rather than dumping the argument JSON.
+    if (!fileRows.length && FILE_TOOL_KINDS.includes(d.kind) && isObj) {
+      const p = toolFilePath(raw);
+      if (p) fileRows.push({ path: p, diff: d.kind === "edit" });
+    }
     if (fileRows.length) {
       hasContent = true;
       const sec = document.createElement("div");
       sec.className = "tool-section tool-files";
       fileRows.forEach((f) => sec.appendChild(filePill(f)));
       body.appendChild(sec);
+    }
+
+    // Raw argument JSON, only as a fallback: we did not show a friendly input
+    // view, and it is not a file/think tool (whose input the title + pills
+    // already convey). Covers MCP / custom tools where the args are the point.
+    if (!inputShown && !NO_RAW_KINDS.includes(d.kind)) {
+      if (isObj && Object.keys(raw).length) { body.insertBefore(toolRawInputSection(raw), body.firstChild); hasContent = true; }
+      else if (typeof raw === "string" && raw.trim()) { body.insertBefore(toolRawInputSection(raw), body.firstChild); hasContent = true; }
     }
 
     // An empty tool has nothing to reveal, so it must not collapse/expand.
