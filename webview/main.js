@@ -47,6 +47,13 @@ import { renderMarkdown } from "./markdown.js";
   // Per-session liveness for the status dots: id -> "running" | "idle" |
   // "starting". Absent means dead (gray). Sent by the host.
   let sessionStatuses = {};
+  // Retained transcripts so switching back to an idle session is instant (no
+  // reload): id -> { frag, turns, ... }. A dirty id changed in the background
+  // and must be reloaded instead of restored. curSessionId is the session whose
+  // transcript is currently mounted in the thread.
+  const views = new Map();
+  const dirtyViews = new Set();
+  let curSessionId = null;
   let listCtrl = null; // full sessions-list controller
   let menuCtrl = null; // title-dropdown controller
 
@@ -187,7 +194,10 @@ import { renderMarkdown } from "./markdown.js";
   }
 
   el.historyBtn.addEventListener("click", () => {
-    // Detach from (and cancel) the session we're leaving, then show the list.
+    // Keep the session alive in the background and retain its transcript so
+    // returning to it is instant, then show the list.
+    snapshotCurrent();
+    curSessionId = null;
     vscode.postMessage({ type: "leaveToList" });
     vscode.postMessage({ type: "refreshSessions" });
     setBody("list");
@@ -2343,7 +2353,7 @@ import { renderMarkdown } from "./markdown.js";
       const nw = document.createElement("div");
       nw.className = "session-newchat";
       nw.innerHTML = '<i class="codicon codicon-add"></i><span>New chat</span>';
-      nw.addEventListener("click", () => { closeTitleMenu(); vscode.postMessage({ type: "newSession" }); });
+      nw.addEventListener("click", () => { closeTitleMenu(); snapshotCurrent(); curSessionId = null; vscode.postMessage({ type: "newSession" }); });
       container.appendChild(nw);
     }
     const search = document.createElement("input");
@@ -2406,6 +2416,76 @@ import { renderMarkdown } from "./markdown.js";
     }
   }
 
+  // Detach the currently mounted transcript into `views` so we can restore it
+  // instantly later, and reset the live singletons for whatever renders next.
+  function snapshotCurrent() {
+    if (!curSessionId) return;
+    const frag = document.createDocumentFragment();
+    while (el.thread.firstChild) frag.appendChild(el.thread.firstChild);
+    views.set(curSessionId, {
+      frag, turns, currentTurn, turnSeq, lastHead,
+      toolEls: new Map(toolEls), terminalCache: new Map(terminalCache),
+      commands: commands.slice(), title: currentTitle
+    });
+    // A session that was mid-run when we left it will keep changing, so its
+    // snapshot is stale: force a reload when we come back.
+    if (sessionStatuses[curSessionId] === "running") dirtyViews.add(curSessionId);
+    // Cap retained transcripts to bound DOM retention.
+    if (views.size > 8) {
+      const oldest = views.keys().next().value;
+      if (oldest !== curSessionId) { views.delete(oldest); dirtyViews.delete(oldest); }
+    }
+    if (block && block.timer) clearInterval(block.timer);
+    block = null;
+    turns = [];
+    currentTurn = null;
+    toolEls.clear();
+    terminalCache.clear();
+  }
+
+  // Re-mount a retained transcript (real nodes, listeners intact) without a
+  // reload.
+  function restoreView(id) {
+    const v = views.get(id);
+    if (!v) return;
+    el.thread.innerHTML = "";
+    el.thread.appendChild(v.frag);
+    turns = v.turns;
+    currentTurn = v.currentTurn;
+    turnSeq = v.turnSeq;
+    lastHead = v.lastHead;
+    toolEls.clear();
+    v.toolEls.forEach((val, k) => toolEls.set(k, val));
+    terminalCache.clear();
+    v.terminalCache.forEach((val, k) => terminalCache.set(k, val));
+    commands = v.commands || [];
+    currentTitle = v.title || currentTitle;
+    el.chatTitle.textContent = currentTitle;
+    views.delete(id);
+    dirtyViews.delete(id);
+    scrollToBottom();
+  }
+
+  // Open a session from the list: restore its transcript instantly when it is
+  // idle and unchanged, otherwise ask the host to wake/reload it.
+  function switchToSession(id, title) {
+    if (id === curSessionId) { setBody("thread"); return; }
+    currentTitle = title || "Chat";
+    el.chatTitle.textContent = currentTitle;
+    setBody("thread");
+    const clean = views.has(id) && !dirtyViews.has(id) && sessionStatuses[id] === "idle";
+    snapshotCurrent();
+    curSessionId = id;
+    if (clean) {
+      restoreView(id);
+      vscode.postMessage({ type: "activateSession", id });
+    } else {
+      views.delete(id);
+      dirtyViews.delete(id);
+      vscode.postMessage({ type: "loadSession", id });
+    }
+  }
+
   // A status-only update (no list change): refresh the dots in place.
   function applyStatuses(statuses, activeId) {
     sessionStatuses = statuses || {};
@@ -2464,10 +2544,7 @@ import { renderMarkdown } from "./markdown.js";
     main.appendChild(meta);
     main.addEventListener("click", () => {
       closeTitleMenu();
-      currentTitle = s.title || "Chat";
-      el.chatTitle.textContent = currentTitle;
-      vscode.postMessage({ type: "loadSession", id: s.id });
-      setBody("thread");
+      switchToSession(s.id, s.title);
     });
     const actions = document.createElement("div");
     actions.className = "session-actions";
@@ -2858,8 +2935,13 @@ import { renderMarkdown } from "./markdown.js";
         renderSessions(m.sessions, m.activeId, m.folders);
         break;
       case "sessionStatuses": applyStatuses(m.statuses, m.activeId); break;
+      case "sessionActivity": if (m.id) dirtyViews.add(m.id); break;
       case "lockConflict": showLockConflict(m); break;
-      case "sessionReady": el.status.textContent = ""; break;
+      case "sessionReady":
+        el.status.textContent = "";
+        // The thread now shows this session; retire any retained snapshot for it.
+        if (m.sessionId) { curSessionId = m.sessionId; views.delete(m.sessionId); dirtyViews.delete(m.sessionId); }
+        break;
       case "status": el.status.textContent = m.text || ""; break;
       case "clear":
         workingEl = null;
