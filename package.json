@@ -2,7 +2,7 @@
   "name": "devin-vscode",
   "displayName": "Devin for VS Code",
   "description": "A native chat panel for the Devin CLI, powered by the Agent Client Protocol. Streaming replies, per workspace sessions, and trackable diffs.",
-  "version": "0.6.25",
+  "version": "0.6.26",
   "publisher": "shayanline",
   "author": "Shayan Khaksar",
   "license": "AGPL-3.0-or-later",
@@ -258,6 +258,19 @@
           "type": "boolean",
           "default": true,
           "description": "Include the active editor file (or its selection) as implicit context, shown as a pill in the composer. Toggle it per message from the pill."
+        },
+        "devin.inlineReferences.style": {
+          "type": "string",
+          "enum": [
+            "box",
+            "link"
+          ],
+          "enumDescriptions": [
+            "Render file and symbol references in replies as bordered chips",
+            "Render them as plain text links"
+          ],
+          "default": "box",
+          "description": "How file and symbol references inside replies are rendered."
         },
         "devin.extraArgs": {
           "type": "array",
