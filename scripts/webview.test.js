@@ -80,11 +80,23 @@ test("elicitation renders oneOf/anyOf options and submits the chosen consts", as
   const tray = h.window.document.getElementById("elicitation-tray");
   assert.ok(tray.querySelectorAll(".elicit-option").length >= 4, "options should render");
 
+  // VS Code layout: a leading 1-based number and a trailing check per row.
+  const firstOpt = tray.querySelector(".elicit-option");
+  assert.strictEqual(firstOpt.querySelector(".elicit-number").textContent, "1", "leading option number");
+  assert.ok(firstOpt.lastElementChild.classList.contains("elicit-indicator"), "check indicator is trailing");
+
+  const submitBtn = [...tray.querySelectorAll("button")].find((b) => b.textContent === "Submit");
+  // Submit is disabled until every question is answered (no default selection).
+  assert.ok(submitBtn.disabled, "Submit is disabled before any option is chosen");
+
   const radios = [...tray.querySelectorAll('input[type="radio"]')];
   const checks = [...tray.querySelectorAll('input[type="checkbox"]')];
-  radios.find((r) => r.value === "A").checked = true;
-  checks.find((c) => c.value === "X").checked = true;
-  [...tray.querySelectorAll("button")].find((b) => b.textContent === "Submit").click();
+  const pick = (input) => { input.checked = true; input.dispatchEvent(new h.window.Event("change", { bubbles: true })); };
+  pick(radios.find((r) => r.value === "A"));
+  assert.ok(submitBtn.disabled, "still disabled with one of two questions answered");
+  pick(checks.find((c) => c.value === "X"));
+  assert.ok(!submitBtn.disabled, "enabled once all questions are answered");
+  submitBtn.click();
   await h.settle(10);
 
   const resp = h.posted.find((m) => m.type === "elicitationResponse");
@@ -247,6 +259,47 @@ test("a session that changed in the background is reloaded, not restored", async
   assert.strictEqual(h.errors().length, 0);
 });
 
+test("reselecting a terminated session restores its transcript and wakes silently", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "capabilities", revert: true, editRequests: "inline", checkpoints: true });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "userMessage", text: "hello from A" });
+  h.post({ type: "assistantStart" });
+  h.post({ type: "assistantChunk", text: "hi A" });
+  h.post({ type: "assistantEnd" });
+  await h.settle(20);
+  assert.deepStrictEqual(h.reqTexts(), ["hello from A"]);
+
+  // Terminate returns us to the list (host-driven body:list) and the session is
+  // now dead (no live status).
+  h.post({ type: "body", body: "list" });
+  h.post({
+    type: "sessions",
+    sessions: [{ id: "A", short_id: "A", title: "A", working_directory: "/w" }],
+    activeId: null,
+    statuses: {},
+    folders: [{ path: "/w", name: "w" }]
+  });
+  await h.settle(10);
+
+  const loadsBefore = h.posted.filter((m) => m.type === "loadSession").length;
+  h.document.querySelector("#sessions-list .session-main").click();
+  await h.settle(10);
+
+  assert.ok(h.posted.some((m) => m.type === "wakeSession" && m.id === "A"), "a dead session wakes in the background");
+  assert.strictEqual(
+    h.posted.filter((m) => m.type === "loadSession").length,
+    loadsBefore,
+    "no full reload (so no 'Waking…' spinner replaces the thread)"
+  );
+  assert.strictEqual(h.document.querySelectorAll(".thread-loading").length, 0, "no loading spinner is shown");
+  assert.deepStrictEqual(h.reqTexts(), ["hello from A"], "the transcript stays on screen");
+  assert.strictEqual(h.errors().length, 0);
+});
+
 test("renders response images and inline keep/undo on edits", async () => {
   const h = createHarness();
   h.post({ type: "ready" });
@@ -319,7 +372,7 @@ test("web search, fetch, and MCP tools render distinctly via _meta", async () =>
   assert.ok(fetchT && fetchT.querySelector("a.tool-summary-value"), "fetch renders a clickable URL");
 
   const mcp = tools.find((t) => /Calling get_current_time/.test(t.textContent));
-  assert.ok(mcp && mcp.querySelector(".tool-kind.codicon-plug"), "mcp uses the plug icon");
+  assert.ok(mcp && mcp.querySelector(".tool-kind.codicon-mcp"), "mcp uses the VS Code MCP icon");
   assert.ok(
     [...mcp.querySelectorAll(".tool-section-title")].some((e) => e.textContent === "Arguments"),
     "mcp shows an Arguments section"
@@ -410,6 +463,206 @@ test("mermaid fences render as a source block (upgraded lazily)", async () => {
   // No data-mermaid-src is set in the harness, so the lazy load no-ops; the
   // source block must simply survive without throwing.
   assert.strictEqual(h.errors().length, 0, "mermaid rendering threw: " + JSON.stringify(h.errors()));
+});
+
+// Helper: two completed live turns with known heads.
+function twoLiveTurns(h) {
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "capabilities", revert: true, editRequests: "inline", checkpoints: true });
+  h.post({ type: "sessionReady", sessionId: "S" });
+  h.post({ type: "userMessage", text: "first" });
+  h.post({ type: "assistantStart" }); h.post({ type: "assistantChunk", text: "a1" }); h.post({ type: "assistantEnd" });
+  h.post({ type: "turnHead", head: 10, reliable: true });
+  h.post({ type: "busy", value: false });
+  h.post({ type: "userMessage", text: "second" });
+  h.post({ type: "assistantStart" }); h.post({ type: "assistantChunk", text: "a2" }); h.post({ type: "assistantEnd" });
+  h.post({ type: "turnHead", head: 20, reliable: true });
+  h.post({ type: "busy", value: false });
+}
+
+test("only one inline request edits at a time and Cancel closes it", async () => {
+  const h = createHarness();
+  twoLiveTurns(h);
+  await h.settle(20);
+
+  const reqBodies = [...h.document.querySelectorAll("#thread .turn-request .req-body")];
+  assert.strictEqual(reqBodies.length, 2, "two request rows");
+
+  reqBodies[0].click();
+  await h.settle(5);
+  assert.strictEqual(h.document.querySelectorAll(".req-editor").length, 1, "one editor opens");
+
+  // Opening a second edit closes the first (single editable request).
+  reqBodies[1].click();
+  await h.settle(5);
+  assert.strictEqual(h.document.querySelectorAll(".req-editor").length, 1, "still exactly one editor open");
+
+  const cancel = [...h.document.querySelectorAll(".req-editor button")].find((b) => b.textContent === "Cancel");
+  assert.ok(cancel, "Cancel button present");
+  cancel.click();
+  await h.settle(5);
+  assert.strictEqual(h.document.querySelectorAll(".req-editor").length, 0, "Cancel closes the editor and it does not reopen");
+  assert.strictEqual(h.errors().length, 0, "edit flow threw: " + JSON.stringify(h.errors()));
+});
+
+test("Retry shows only on the last response", async () => {
+  const h = createHarness();
+  twoLiveTurns(h);
+  await h.settle(20);
+
+  const footers = [...h.document.querySelectorAll("#thread .chat-footer")];
+  assert.strictEqual(footers.length, 2, "two response footers");
+  const lastFooters = footers.filter((f) => f.classList.contains("is-last"));
+  assert.strictEqual(lastFooters.length, 1, "exactly one footer is marked last");
+  assert.ok(footers[footers.length - 1].classList.contains("is-last"), "the last turn's footer carries Retry");
+  assert.ok(!footers[0].classList.contains("is-last"), "the earlier turn's footer does not");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("reloaded turns are only revertable once a reliable (on-expansion) head is known", async () => {
+  // The agent re-expands the conversation on load, orphaning any pre-load node
+  // id. So historical turns and the FIRST new turn after a reload must NOT be
+  // revertable (reverting would hit an orphaned node -> "Invalid params"); a
+  // later turn, whose head-before was captured live, is revertable.
+  const editableTexts = () =>
+    [...h.document.querySelectorAll("#thread .turn-request.editable-inline .req-text")].map((e) => e.textContent.trim());
+
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "capabilities", revert: true, editRequests: "inline", checkpoints: true });
+  // Replay history, then the host reports the load head as NOT reliable.
+  h.post({ type: "userChunk", text: "old q" });
+  h.post({ type: "assistantChunk", text: "old a" });
+  h.post({ type: "loaded" });
+  h.post({ type: "turnHead", head: 27, reliable: false });
+  await h.settle(20);
+  assert.deepStrictEqual(editableTexts(), [], "historical turn is not editable");
+  assert.strictEqual(h.document.querySelectorAll("#thread .footer-retry").length, 0, "no Retry on history");
+
+  // First new turn: head-before is the unreliable load head -> not revertable.
+  h.post({ type: "userMessage", text: "new q1" });
+  h.post({ type: "assistantStart" }); h.post({ type: "assistantChunk", text: "a1" }); h.post({ type: "assistantEnd" });
+  h.post({ type: "turnHead", head: 64, reliable: true });
+  h.post({ type: "busy", value: false });
+  await h.settle(20);
+  assert.deepStrictEqual(editableTexts(), [], "the first turn after a reload is not revertable");
+
+  // Second new turn: head-before (64) was captured live -> revertable.
+  h.post({ type: "userMessage", text: "new q2" });
+  h.post({ type: "assistantStart" }); h.post({ type: "assistantChunk", text: "a2" }); h.post({ type: "assistantEnd" });
+  h.post({ type: "turnHead", head: 67, reliable: true });
+  h.post({ type: "busy", value: false });
+  await h.settle(20);
+  assert.deepStrictEqual(editableTexts(), ["new q2"], "only the second new turn (reliable head) is editable");
+  assert.strictEqual(h.document.querySelectorAll("#thread .footer-retry").length, 1, "Retry only on the revertable last turn");
+  assert.strictEqual(h.errors().length, 0, "reliability handling threw: " + JSON.stringify(h.errors()));
+});
+
+test("starting a new chat from the list does not flash the welcome screen", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "capabilities", revert: true });
+
+  // The host clears with pendingSend and then renders the message: no welcome
+  // should appear in the gap while the ACP session spins up.
+  h.post({ type: "clear", pendingSend: true });
+  await h.settle(10);
+  assert.strictEqual(
+    h.document.querySelectorAll("#thread .welcome").length,
+    0,
+    "no welcome during a pending new-chat send"
+  );
+  h.post({ type: "userMessage", text: "hello new chat" });
+  await h.settle(10);
+  assert.strictEqual(h.document.querySelectorAll("#thread .welcome").length, 0, "still no welcome after the message renders");
+  assert.deepStrictEqual(h.reqTexts(), ["hello new chat"]);
+
+  // A normal clear (no pending send) still shows the welcome.
+  h.post({ type: "clear" });
+  await h.settle(10);
+  assert.ok(h.document.querySelector("#thread .welcome"), "a plain clear still shows the welcome");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a freshly sent message does not flash the Copy/Retry footer", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "capabilities", revert: true, editRequests: "inline", checkpoints: true });
+  h.post({ type: "sessionReady", sessionId: "S" });
+  h.post({ type: "userMessage", text: "hello" });
+  await h.settle(10);
+
+  // Before the response completes the turn must not be "complete" (its footer
+  // is hidden by CSS while not complete), so no Copy/Retry flashes.
+  const turn = h.document.querySelector("#thread .turn");
+  assert.ok(turn, "turn exists");
+  assert.ok(!turn.classList.contains("complete"), "the in-flight turn is not marked complete");
+
+  // After the response finishes it becomes complete and the footer appears.
+  h.post({ type: "assistantStart" });
+  h.post({ type: "assistantChunk", text: "hi" });
+  h.post({ type: "assistantEnd" });
+  h.post({ type: "busy", value: false });
+  await h.settle(10);
+  assert.ok(turn.classList.contains("complete"), "the turn is complete after the response");
+  assert.strictEqual(h.errors().length, 0, "send flow threw: " + JSON.stringify(h.errors()));
+});
+
+test("Copy is hidden when the response is empty", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "capabilities", revert: true });
+  h.post({ type: "sessionReady", sessionId: "S" });
+
+  // A turn that produced no assistant output.
+  h.post({ type: "userMessage", text: "hi" });
+  h.post({ type: "assistantStart" });
+  h.post({ type: "assistantEnd" });
+  h.post({ type: "busy", value: false });
+  await h.settle(10);
+  const emptyFooter = h.document.querySelector("#thread .chat-footer");
+  assert.ok(emptyFooter, "footer exists");
+  assert.strictEqual(emptyFooter.querySelectorAll(".dv-copy").length, 0, "no Copy button on an empty response");
+
+  // A turn with output shows Copy.
+  h.post({ type: "userMessage", text: "again" });
+  h.post({ type: "assistantStart" });
+  h.post({ type: "assistantChunk", text: "here is an answer" });
+  h.post({ type: "assistantEnd" });
+  h.post({ type: "busy", value: false });
+  await h.settle(10);
+  const footers = [...h.document.querySelectorAll("#thread .chat-footer")];
+  assert.strictEqual(footers[footers.length - 1].querySelectorAll(".dv-copy").length, 1, "Copy shows when there is a response");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("stopping the turn closes an open question widget", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "capabilities", revert: true });
+  h.post({
+    type: "elicitation", requestId: "e1", mode: "form", message: "Pick",
+    schema: { type: "object", required: ["q0"], properties: { q0: { type: "string", title: "Q0", oneOf: [{ const: "A", title: "A" }, { const: "B", title: "B" }] } } }
+  });
+  await h.settle(10);
+  assert.ok(h.document.querySelector("#elicitation-tray .qc"), "the question widget is shown");
+
+  // The host reports the request was cancelled (Stop, or leaving the turn).
+  h.post({ type: "cancelPrompts" });
+  await h.settle(10);
+  assert.strictEqual(h.document.querySelectorAll("#elicitation-tray .qc").length, 0, "the question widget is closed on cancel");
+  assert.strictEqual(h.errors().length, 0);
 });
 
 test("per-turn edit/restore chrome builds while busy (no throw)", async () => {

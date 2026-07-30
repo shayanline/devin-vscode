@@ -883,6 +883,40 @@ Also shipped alongside:
 | `chat.inputWorkingBorderColor2/3` | derived | derived | registered but unused by the border |
 | `chat.dictationActiveMicGlow` | #58A6FF | #2E8BE6 | dictation glow (➖ no voice) |
 
+## Appendix C — Revert node ids and conversation flow (edit / retry / restore)
+
+Devin's revert is node-id based (`_cognition.ai/revert/{preview,execute}`, target =
+an "expanded chain" node id). VS Code instead removes by request id and lets the
+agent host revert files via checkpoints. Two hard constraints were established by
+probing a live `devin acp` (see `scripts/acp-probe.js` and the throwaway probes):
+
+- **Node ids survive across processes.** A head captured in one `devin acp`
+  process is still valid after a fresh process does `session/load` (verified:
+  h1=27 valid in a second process, currentHead matched).
+- **BUT a session/load re-expands the conversation on the next prompt, orphaning
+  every pre-load node id.** After load (head 27), sending one turn jumped the head
+  to 64 and `revert(27)` then failed with `Invalid params: target node 27 is not
+  on the expanded chain from head 64`. Turns sent *after* the re-expansion are
+  revertable among themselves (64 stays valid after 67). There is no API to
+  enumerate the conversation nodes, and no way to force re-expansion without
+  adding a turn.
+
+Consequences (implemented):
+
+- A revert target is trusted only when it is a **reliable** head, i.e. captured
+  live on the current expansion: a live turn completion, or an instant restore
+  (no reload). The head read right after a `session/load` is marked unreliable.
+  `postTurnHead(reliable)` on the host; `lastHeadReliable` / `headBeforeReliable`
+  in the webview; `turnRevertable()` gates edit / retry / restore.
+- Therefore **historical (replayed) turns and the first turn sent after a reload
+  are not revertable** (their "before" node is orphaned by re-expansion). Editing
+  old messages after a window reload is not possible with the current ACP. The
+  earlier "persist per-turn heads and rehydrate on reload" approach was removed:
+  those persisted ids are orphaned the moment the reloaded session is prompted.
+- **Retry** only regenerates in place (rewind + rerun) and is shown only on the
+  last response, and only when that turn is revertable. It never falls back to
+  re-sending the message as a new prompt (that produced a surprising duplicate).
+
 ## Appendix B — Source anchors
 
 - Devin: `webview/main.js`, `media/main.css`, `media/webview-body.html`,

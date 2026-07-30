@@ -11,6 +11,7 @@ import {
   ReadTextFileParams,
   RequestPermissionParams,
   RequestPermissionResult,
+  RevertPreviewResult,
   SessionUpdateNotification,
   TerminalExitStatus,
   TerminalRef,
@@ -38,6 +39,12 @@ interface Runtime {
   busy: boolean; // a turn is in flight
   awaiting: number; // pending permission/elicitation requests (needs the user)
   replaying: boolean; // a session/load replay is in progress
+  // A silent background wake is in flight (the webview already shows the cached
+  // transcript, so the replay is not streamed to it). Resolves when interactive.
+  waking?: Promise<void>;
+  // While true, session/update notifications are consumed but NOT streamed to the
+  // webview (used during a silent wake so the cached transcript is not disturbed).
+  silentReplay?: boolean;
   lastActivityAt: number; // for idle auto-exit
   mode?: string;
   model?: string;
@@ -332,6 +339,24 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     this.output.appendLine(line);
   }
 
+  // A session/load the agent aborted (most often because a configured MCP server
+  // failed to start, which it treats as fatal). Point the user at the output for
+  // the underlying reason rather than showing the opaque agent message.
+  private reportLoadFailure(message: string): void {
+    this.log(`[load-failed] ${message}`);
+    const show = "Show Output";
+    void vscode.window
+      .showErrorMessage(
+        "Couldn't open this session. A configured MCP server may have failed to start, or the session is unavailable. See the Devin output for details.",
+        show
+      )
+      .then((choice) => {
+        if (choice === show) {
+          this.output.show(true);
+        }
+      });
+  }
+
   // --- Message handling from the webview ----------------------------------
 
   private async onMessage(msg: any): Promise<void> {
@@ -363,6 +388,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
           return;
         case "activateSession":
           await this.activateSession(String(msg.id || ""));
+          return;
+        case "wakeSession":
+          await this.wakeSession(String(msg.id || ""));
           return;
         case "renameSession":
           await this.renameSession(String(msg.id || ""), msg.title);
@@ -869,6 +897,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
       this.runtimes.set(id, rt);
     }
     rt.replaying = true;
+    let loadFailed = "";
     try {
       if (!already) {
         await this.ensureInitialized(rt);
@@ -893,20 +922,31 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
         this.destroyRuntime(rt);
         this.runtimes.delete(id);
       }
-      this.post({ type: "error", text: err instanceof Error ? err.message : String(err) });
+      loadFailed = err instanceof Error ? err.message : String(err);
     } finally {
       rt.replaying = false;
       this.starting.delete(id);
-      this.post({ type: "loaded" });
-      await this.postTurnHead();
-      this.broadcastStatuses();
-      // Re-surface a permission/question this session raised while it was in the
-      // background, now that it is visible again.
-      const opened = this.runtimes.get(id);
-      if (opened?.pending && this.activeId === id) {
-        this.post(opened.pending.payload);
+      if (loadFailed) {
+        // The agent aborted the load (commonly because a configured MCP server
+        // failed to initialise, which it treats as fatal). Don't strand the user
+        // on a broken empty thread: return to the list with a clear message.
+        this.broadcastStatuses();
+        await this.showSessionsView();
+        this.reportLoadFailure(loadFailed);
+      } else {
+        this.post({ type: "loaded" });
+        // The head read right after a reload is NOT a reliable revert target: the
+        // next prompt re-expands the conversation and orphans it.
+        await this.postTurnHead(false);
+        this.broadcastStatuses();
+        // Re-surface a permission/question this session raised while it was in the
+        // background, now that it is visible again.
+        const opened = this.runtimes.get(id);
+        if (opened?.pending && this.activeId === id) {
+          this.post(opened.pending.payload);
+        }
+        void this.refreshSessions();
       }
-      void this.refreshSessions();
     }
   }
 
@@ -935,12 +975,81 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     }
     this.post({ type: "busy", value: rt.busy });
     this.broadcastStatuses();
-    await this.postTurnHead();
+    // An instant restore does not reload, so the current head stays valid.
+    await this.postTurnHead(true);
     // Re-surface a prompt this session raised while backgrounded.
     if (rt.pending) {
       this.post(rt.pending.payload);
     }
     void this.refreshSessions();
+  }
+
+  // Seamlessly bring a dead (terminated / idle-exited) session back to life when
+  // the webview already shows its cached transcript: spawn a fresh acp and load
+  // its history WITHOUT clearing the thread or streaming a replay ("Waking…"
+  // spinner). The row shows a "starting" dot until it is interactive. A send
+  // that races the wake waits on `rt.waking`.
+  private async wakeSession(id: string): Promise<void> {
+    if (!id || !(await this.ensureReady())) {
+      return;
+    }
+    if (this.runtimes.has(id)) {
+      await this.activateSession(id);
+      return;
+    }
+    this.activeId = id;
+    this.changes.clear();
+    this.attachments = [];
+    const cwd = this.store.cwds()[id] || this.resolveNewSessionCwd();
+    const rt = this.spawnRuntime(cwd);
+    rt.id = id;
+    this.runtimes.set(id, rt);
+    rt.replaying = true;
+    rt.silentReplay = true;
+    this.starting.add(id);
+    this.broadcastStatuses();
+    let done: () => void = () => {};
+    let wakeFailed = "";
+    rt.waking = new Promise<void>((resolve) => { done = resolve; });
+    try {
+      await this.ensureInitialized(rt);
+      const res = await this.loadWithTakeover(rt, id, cwd);
+      rt.lastActivityAt = Date.now();
+      this.store.add(id, cwd);
+      this.store.setActive(id);
+      if (res && (res.configOptions || res.modes)) {
+        rt.mode = res.modes?.currentModeId || rt.mode;
+        this.publishOptions(res.configOptions, res.modes?.currentModeId);
+      } else {
+        void this.publishInitialOptions();
+      }
+      this.postCapabilities();
+      if (this.activeId === id) {
+        this.post({ type: "sessionReady", sessionId: id });
+      }
+      this.ensureIdleTimer();
+    } catch (err) {
+      if (this.runtimes.get(id) === rt) {
+        this.destroyRuntime(rt);
+        this.runtimes.delete(id);
+      }
+      wakeFailed = err instanceof Error ? err.message : String(err);
+    } finally {
+      rt.replaying = false;
+      rt.silentReplay = false;
+      rt.waking = undefined;
+      this.starting.delete(id);
+      this.broadcastStatuses();
+      if (wakeFailed) {
+        // The agent could not reload this session: return to the list rather
+        // than leaving a stale, non-interactive transcript on screen.
+        await this.showSessionsView();
+        this.reportLoadFailure(wakeFailed);
+      } else if (this.activeId === id) {
+        await this.postTurnHead(false);
+      }
+      done();
+    }
   }
 
   private sessionsCache?: { at: number; sessions: DevinSession[] };
@@ -972,9 +1081,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
           setTimeout(() => reject(new Error("devin list timed out")), 20000)
         );
         const { sessions: live, prunedIds } = await Promise.race([listing, timeout]);
-        // Drop tracked ids Devin no longer knows about so stale rows self-heal.
+        // Drop tracked ids Devin no longer knows about so stale rows self-heal,
+        // but NEVER prune a session we still hold a live runtime for (or are
+        // starting): a freshly created session is not in `devin list` until its
+        // first turn persists, and pruning it here would make it vanish.
         for (const id of prunedIds) {
-          this.store.remove(id);
+          if (!this.runtimes.has(id) && !this.starting.has(id)) {
+            this.store.remove(id);
+          }
         }
         sessions = live;
         this.sessionsCache = { at: Date.now(), sessions };
@@ -982,6 +1096,31 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
         this.log(`[list-failed] ${err instanceof Error ? err.message : String(err)}`);
         sessions = this.sessionsCache?.sessions ?? [];
       }
+    }
+    // Surface sessions we own a live runtime for even when `devin list` has not
+    // caught up yet (a brand-new session appears there only after its first turn
+    // persists), so a chat started from the list shows up immediately.
+    const known = new Set(sessions.map((s) => s.id));
+    const cwds = this.store.cwds();
+    const titles = this.store.titles();
+    const liveIds = new Set<string>([...this.starting, ...this.runtimes.keys()]);
+    const synthesized: DevinSession[] = [];
+    for (const id of liveIds) {
+      if (known.has(id)) {
+        continue;
+      }
+      const cwd = cwds[id] || this.runtimes.get(id)?.cwd || this.cwd();
+      synthesized.push({
+        id,
+        short_id: id,
+        working_directory: cwd,
+        title: titles[id],
+        last_activity_at: Math.floor(Date.now() / 1000),
+        tracked: true
+      });
+    }
+    if (synthesized.length) {
+      sessions = [...synthesized, ...sessions];
     }
     // Persist titles, and fill any tracked session whose title we only know
     // from the cache (e.g. its directory is not currently listed).
@@ -1405,12 +1544,25 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     if (!(await this.ensureReady())) {
       return;
     }
+    // If the visible session is still coming back to life (a silent background
+    // wake), wait for it so the prompt lands on a ready runtime.
+    if (!startNew && this.activeId) {
+      const waking = this.runtimes.get(this.activeId)?.waking;
+      if (waking) {
+        await waking;
+      }
+    }
     // Starting a fresh chat leaves the previous session alive in the background.
     if (startNew) {
       this.activeId = undefined;
       this.changes.clear();
       this.attachments = [];
-      this.post({ type: "clear" });
+      // `pendingSend` tells the webview not to show the welcome screen on this
+      // clear, and we render the user's message right away, so a new chat
+      // started from the list never flashes the welcome while the ACP session
+      // spins up.
+      this.post({ type: "clear", pendingSend: true });
+      this.post({ type: "userMessage", text });
     }
 
     let rt = startNew ? undefined : this.active();
@@ -1436,7 +1588,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     }
 
     const sent = rt;
-    this.post({ type: "userMessage", text });
+    // For a fresh chat the message was already rendered above; only echo it here
+    // for a send within an existing (visible) session.
+    if (!startNew) {
+      this.post({ type: "userMessage", text });
+    }
     this.setRuntimeBusy(sent, true);
     this.post({ type: "assistantStart" });
 
@@ -1448,7 +1604,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
       // Only render the completion if this session is still the visible one.
       if (this.activeId === sent.id) {
         this.post({ type: "assistantEnd", stopReason: result.stopReason });
-        await this.postTurnHead();
+        // A live completion's head is on the current expansion: a reliable
+        // revert target for the next turn.
+        await this.postTurnHead(true);
       }
     } catch (err) {
       if (this.activeId === sent.id) {
@@ -1462,7 +1620,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
 
   // After a turn completes, read the current head node id and hand it to the
   // webview so it can pin a revert target ("checkpoint") to the finished turn.
-  private async postTurnHead(): Promise<void> {
+  // `reliable` marks the head as a valid revert target on the CURRENT expansion.
+  // The agent re-expands the conversation on a session/load and assigns fresh
+  // node ids, so the head read right after a reload is NOT reliable (the next
+  // prompt orphans it). Live turn completions and instant restores are reliable.
+  private async postTurnHead(reliable = false): Promise<void> {
     const rt = this.active();
     if (!rt || !rt.client.supportsRevert()) {
       return;
@@ -1470,7 +1632,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     try {
       const head = await rt.client.currentHead(rt.id);
       if (head != null && this.activeId === rt.id) {
-        this.post({ type: "turnHead", head });
+        this.post({ type: "turnHead", head, reliable });
       }
     } catch (err) {
       this.log(`[turn-head-failed] ${err instanceof Error ? err.message : String(err)}`);
@@ -1511,9 +1673,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
       return;
     }
     try {
+      // The agent truncates the conversation but does NOT touch the client's
+      // disk: revert/preview returns the file undo it expects us to apply. So
+      // read the plan first, then rewind, then restore/delete each file so a
+      // "Discard edits" actually removes the changes (e.g. a newly created file).
+      const preview = await rt.client.revertPreview(rt.id, head).catch(() => undefined);
       await rt.client.revertExecute(rt.id, head);
-      // The rewind undoes file edits agent-side; drop our tracked working set
-      // so the SCM group and working-set card reflect the reverted state.
+      await this.applyRevertFileUndo(preview);
+      // The working set now matches the reverted state; drop it.
       this.changes.clear();
       this.post({ type: "reverted", head });
     } catch (err) {
@@ -1522,6 +1689,34 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     }
     if (typeof resendText === "string" && resendText.trim()) {
       await this.handleSend(resendText, false);
+    }
+  }
+
+  // Apply the file undo the agent planned in revert/preview. For a file we know
+  // we created this session, delete it (VS Code removes created files rather
+  // than leaving them empty); otherwise write back its original content.
+  private async applyRevertFileUndo(preview?: RevertPreviewResult): Promise<void> {
+    const actions = preview?.fileActions;
+    if (!Array.isArray(actions)) {
+      return;
+    }
+    for (const a of actions) {
+      const p = typeof a.path === "string" ? a.path : undefined;
+      if (!p) {
+        continue;
+      }
+      if (this.changes.hasChange(p)) {
+        await this.changes.reject(p); // restores original, or deletes if created
+        continue;
+      }
+      const original = (a.kind as { originalContent?: string } | undefined)?.originalContent;
+      try {
+        if (typeof original === "string") {
+          await fs.promises.writeFile(p, original, "utf8");
+        }
+      } catch {
+        // best-effort: a failed restore should not abort the rewind
+      }
     }
   }
 
@@ -1543,7 +1738,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
         }
       }
       rt.awaiting = 0;
+      // The question/permission is no longer outstanding, so drop the stored
+      // payload: it must not re-surface when the session is reopened.
+      rt.pending = undefined;
     }
+    // Close any open permission/question widgets in the webview.
+    this.post({ type: "cancelPrompts" });
     this.setBusy(false);
   }
 
@@ -1636,8 +1836,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     const rt = this.runtimeBySessionId(n.sessionId);
     // Only the visible session streams into the transcript. Background sessions
     // keep running; their progress is reflected by the status dot, and their
-    // history is replayed when they are next opened.
-    const active = !!rt && this.activeId === rt.id;
+    // history is replayed when they are next opened. During a silent wake the
+    // webview already shows the cached transcript, so suppress the replay.
+    const active = !!rt && this.activeId === rt.id && !rt.silentReplay;
     switch (u.sessionUpdate) {
       case "agent_message_chunk":
         if (active) {
@@ -1853,17 +2054,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     return rt ? rt.terminals.waitForExit(params.terminalId) : Promise.resolve({ exitCode: null, signal: null });
   }
 
-  killTerminal(params: TerminalRef): null {
+  // Empty-object results, not null: the agent deserializes these responses into
+  // structs and rejects a bare null with a "Parse error" (as fs/write_text_file
+  // did). An empty object is the safe "void" response.
+  killTerminal(params: TerminalRef): Record<string, never> {
     this.runtimeBySessionId(params.sessionId)?.terminals.kill(params.terminalId);
-    return null;
+    return {};
   }
 
-  releaseTerminal(params: TerminalRef): null {
+  releaseTerminal(params: TerminalRef): Record<string, never> {
     this.runtimeBySessionId(params.sessionId)?.terminals.release(params.terminalId);
-    return null;
+    return {};
   }
 
-  async writeTextFile(params: WriteTextFileParams): Promise<null> {
+  async writeTextFile(params: WriteTextFileParams): Promise<Record<string, never>> {
     const full = params.path;
     let original: string | null = null;
     try {
@@ -1881,7 +2085,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
       this.post({ type: "fileChange", path: full, added: s.added, removed: s.removed, created: original == null });
       this.changes.recordDiff(full, original, params.content);
     }
-    return null;
+    // The agent's fs/write_text_file expects an (empty) object result; returning
+    // null makes it report a spurious "Parse error" even though the write landed.
+    return {};
   }
 
   // --- HTML ---------------------------------------------------------------

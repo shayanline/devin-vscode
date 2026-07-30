@@ -38,7 +38,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     workingSet: $("working-set"),
     todoWidget: $("todo-widget"),
     attachments: $("attachments"),
-    autocomplete: $("autocomplete")
+    autocomplete: $("autocomplete"),
+    scrollDown: $("scroll-down")
   };
 
   let body = "list"; // "list" | "thread"
@@ -183,6 +184,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     if (list) { closeTitleMenu(); detachComposerFromSession(); }
     updateComposerDock();
     updateTerminateBtn();
+    updateScrollDownButton();
   }
 
   // Entering the sessions list turns the composer into a clean "new chat" box:
@@ -198,6 +200,11 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     autosize();
     updateSendState();
     renderAttachments([]);
+    // Drop any open question/permission widget: a still-pending one is re-posted
+    // by the host when the session is reopened, so keeping it here would leave a
+    // stale copy and double up on return.
+    el.elicitationTray.innerHTML = "";
+    el.permissionTray.innerHTML = "";
     planUserToggled = false;
     hideDockedPlan();
     closeUsagePopup();
@@ -257,7 +264,15 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   }
 
   el.send.addEventListener("click", send);
-  el.stop.addEventListener("click", () => vscode.postMessage({ type: "cancel" }));
+  el.stop.addEventListener("click", () => { vscode.postMessage({ type: "cancel" }); cancelPrompts(); });
+
+  // Close any open question/permission widgets (on Stop, or when the host says
+  // the request was cancelled). They must not linger or be submittable after
+  // the turn is stopped.
+  function cancelPrompts() {
+    el.elicitationTray.innerHTML = "";
+    el.permissionTray.innerHTML = "";
+  }
   el.attach.addEventListener("click", () => vscode.postMessage({ type: "addContext" }));
 
   el.input.addEventListener("keydown", (e) => {
@@ -272,6 +287,20 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   });
 
   el.input.addEventListener("input", () => { autosize(); updateAutocomplete(); updateSendState(); });
+
+  // VS Code cancels an in-progress request edit when you click another row or
+  // outside the editor (finishedEditing on onDidFocusOutside). Mirror that:
+  // a pointer down anywhere outside the open inline editor closes it. Capture
+  // phase so it runs before the row's own click-to-edit handler.
+  document.addEventListener("mousedown", (e) => {
+    if (!inlineEditTurn) return;
+    const ed = inlineEditTurn.editorEl;
+    if (ed && !ed.contains(e.target)) finishEditing(inlineEditTurn);
+  }, true);
+  // Escape cancels the inline edit even when focus has left the textarea.
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && inlineEditTurn) finishEditing(inlineEditTurn);
+  });
 
   function updateSendState() {
     el.send.disabled = !el.input.value.trim();
@@ -316,10 +345,19 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   function pinNow() {
     pinning = true;
     el.thread.scrollTop = el.thread.scrollHeight;
+    updateScrollDownButton();
     // Release the guard next frame; by then we are at the bottom so a genuine
     // user scroll re-evaluates stick correctly.
     requestAnimationFrame(() => { pinning = false; });
   }
+  // The jump-to-bottom button shows only when the user is scrolled up in a
+  // thread (VS Code's .chat-scroll-down / .show-scroll-down), and clicking it
+  // snaps to the bottom and re-sticks.
+  function updateScrollDownButton() {
+    const show = body === "thread" && distanceFromBottom() > 60;
+    el.scrollDown.classList.toggle("visible", show);
+  }
+  el.scrollDown.addEventListener("click", () => forceScrollToBottom());
   // Pin after layout so scrollHeight reflects the just-added content.
   function schedulePin() {
     if (pinScheduled) return;
@@ -331,19 +369,49 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   }
   // Content changed: follow the bottom only if the user is pinned there.
   function scrollToBottom() { schedulePin(); }
-  // A user action (send, open/restore a session): snap back to the bottom.
-  function forceScrollToBottom() { stickToBottom = true; schedulePin(); }
 
+  // A user action (send, open/restore a session) must land at the bottom even
+  // though the content keeps reflowing for a moment afterwards (the busy chrome
+  // refresh, the "Working…" indicator, then the first tokens). Pinning once is
+  // racy: a transient scroll during that reflow can flip stickToBottom off and
+  // leave the new message just above the fold. So pin every frame for a short
+  // window and refuse to un-stick during it.
+  const now = () => (typeof performance !== "undefined" && performance.now ? performance.now() : Date.now());
+  let forcePinUntil = 0;
+  function forcePinLoop() {
+    pinNow();
+    if (now() < forcePinUntil) requestAnimationFrame(forcePinLoop);
+  }
+  function forceScrollToBottom() {
+    stickToBottom = true;
+    // The test harness (jsdom) has no layout, so a timed loop adds nothing and
+    // would just leave rAFs pending: a single pin is enough there.
+    if (typeof ResizeObserver === "undefined") { schedulePin(); return; }
+    const wasForcing = now() < forcePinUntil;
+    forcePinUntil = now() + 450;
+    if (!wasForcing) forcePinLoop();
+  }
+
+  // Detach only when the USER scrolls up (scrollTop decreases). Appended content
+  // never moves scrollTop, so streaming can never accidentally detach us; a pin
+  // only increases scrollTop. Re-attach whenever we are back at the bottom. This
+  // fixes the response sometimes not following to the very end mid-stream.
+  let lastScrollTop = 0;
   el.thread.addEventListener("scroll", () => {
-    if (pinning) return; // ignore our own programmatic scrolls
-    stickToBottom = distanceFromBottom() <= 40;
+    const st = el.thread.scrollTop;
+    const movedUp = st < lastScrollTop - 2;
+    lastScrollTop = st;
+    updateScrollDownButton();
+    if (pinning || now() < forcePinUntil) return; // ignore our own pins + the forced window
+    if (movedUp && distanceFromBottom() > 40) stickToBottom = false;
+    else if (distanceFromBottom() <= 40) stickToBottom = true;
   }, { passive: true });
 
   // Follow height changes that fire no DOM mutation at scroll time (images
   // loading, mermaid swap-in, collapsible animations, font reflow). jsdom (the
   // test harness) has no ResizeObserver, so fall back to a no-op there.
   const contentRO = typeof ResizeObserver !== "undefined"
-    ? new ResizeObserver(() => { if (stickToBottom) pinNow(); })
+    ? new ResizeObserver(() => { if (stickToBottom) pinNow(); else updateScrollDownButton(); })
     : { observe() {}, unobserve() {} };
   // Auto-observe transcript children (turns, welcome, dividers) as they mount,
   // so their inner growth keeps us pinned.
@@ -353,6 +421,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       m.removedNodes.forEach((n) => { if (n.nodeType === 1) { try { contentRO.unobserve(n); } catch { /* gone */ } } });
     }
     if (stickToBottom) schedulePin();
+    else updateScrollDownButton();
   });
   contentMO.observe(el.thread, { childList: true });
   Array.prototype.forEach.call(el.thread.children, (n) => contentRO.observe(n));
@@ -655,6 +724,10 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // The head node id after the most recently completed turn. A turn's revert
   // target ("checkpoint") is the head captured before it ran (headBefore).
   let lastHead = null;
+  // Whether `lastHead` is a valid revert target on the current conversation
+  // expansion. False right after a reload (the next prompt re-expands and
+  // orphans it); true after a live turn completion or an instant restore.
+  let lastHeadReliable = false;
   // Feature gates from the host (revert capability + settings).
   let caps = { revert: false, editRequests: "inline", checkpoints: true, showFileChanges: true, confirmRemoval: true, verbose: true, progressBorder: true, contextUsage: true, inlineReferencesStyle: "box", thinkingStyle: "fixedScrolling", streamAnim: "rise" };
   // Pending revert-preview requests keyed by token.
@@ -757,13 +830,16 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     el.thread.appendChild(container);
     const turn = {
       id: "t" + (++turnSeq), mid, container, req, reqBody, reqText, resp, checkpoint,
-      text: text || "", headBefore: lastHead, headAfter: null, editing: false,
+      text: text || "", headBefore: lastHead, headBeforeReliable: lastHeadReliable,
+      headAfter: null, editing: false,
       createdAt: Date.now(), completedAt: null, model: currentModelLabel
     };
     turns.push(turn);
     currentTurn = turn;
     if (text !== undefined) setTurnText(turn, text);
     buildTurnChrome(turn);
+    // The previous last turn is no longer last: move Retry to this one.
+    refreshRetryButtons();
     scrollToBottom();
     return turn;
   }
@@ -787,7 +863,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     reqActions = document.createElement("div");
     reqActions.className = "msg-actions req-actions";
     reqActions.appendChild(copyButton("Copy", "msg-action", () => turn.text));
-    if (canEditTurn(turn)) {
+    // VS Code shows an explicit Edit pencil only in hover/input modes; in inline
+    // mode you click the request text to edit (no pencil).
+    if (canEditTurn(turn) && caps.editRequests !== "inline") {
       reqActions.appendChild(actionBtn("codicon-edit", "Edit Request", () => startEditing(turn)));
     }
     turn.req.appendChild(reqActions);
@@ -806,9 +884,12 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     // Click-to-edit on the whole bubble (inline and input modes both start on a
     // click; input mode routes the text into the composer).
     turn.reqBody.onclick = null;
+    turn.reqBody.removeAttribute("title");
     if ((caps.editRequests === "inline" || caps.editRequests === "input") && canEditTurn(turn)) {
       turn.req.classList.add("editable-inline");
       turn.reqBody.onclick = () => startEditing(turn);
+      // VS Code's inline mode shows a "Click to Edit" hover hint on the request.
+      if (caps.editRequests === "inline") turn.reqBody.title = "Click to Edit";
     } else {
       turn.req.classList.remove("editable-inline");
     }
@@ -835,55 +916,89 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     buildTurnFooter(turn);
   }
 
+  // True when the turn's response actually rendered something (text, tool card,
+  // image, plan, ...), so we don't show a Copy button on an empty answer.
+  function turnHasResponse(turn) {
+    return !!turn.resp && (turn.resp.childElementCount > 0 || turn.resp.textContent.trim().length > 0);
+  }
+
   function buildTurnFooter(turn) {
     let footer = turn.footer;
     if (footer) footer.remove();
     footer = document.createElement("div");
     footer.className = "chat-footer";
-    // VS Code's ChatMessageFooter order: Retry first, then Copy (thumbs/report
-    // are telemetry we drop). Retry carries a class so it can be hidden on
-    // headless (request-less) turns. Retry regenerates the response: rewind to
-    // before this turn and re-run the same request (replacing the answer),
-    // rather than appending a duplicate turn. When revert is unavailable it
-    // falls back to resending as a new turn.
-    const retry = actionBtn("codicon-refresh", "Retry", () => {
-      if (!turn.text) return;
-      if (caps.revert && !busy && turnMapped(turn)) {
+    // VS Code's ChatMessageFooter order: Copy first (order 1), then the rest.
+    // Copy only when there is actually a response to copy (hidden on an empty
+    // answer). The footer is rebuilt on completion, so the content is present.
+    if (turnHasResponse(turn)) {
+      footer.appendChild(copyButton("Copy", "msg-action", () => turn.resp.innerText.trim()));
+    }
+    // Retry regenerates the response IN PLACE (rewind + re-run the same request);
+    // it never appends a duplicate. Only offer it when we have a revert target on
+    // the current expansion (turnRevertable) and only on the LAST response (the
+    // is-last class gates visibility, kept accurate by refreshRetryButtons).
+    if (caps.revert && turnRevertable(turn)) {
+      const retry = actionBtn("codicon-refresh", "Retry", () => {
+        if (!turn.text || busy) return;
         revertAndResend(turn, turn.text);
-      } else {
-        vscode.postMessage({ type: "send", text: turn.text, newSession: false });
-      }
-    });
-    retry.classList.add("footer-retry");
-    footer.appendChild(retry);
-    footer.appendChild(copyButton("Copy", "msg-action", () => turn.resp.innerText.trim()));
+      });
+      retry.classList.add("footer-retry");
+      footer.appendChild(retry);
+    }
+    footer.classList.toggle("is-last", turns[turns.length - 1] === turn);
+    // Right-aligned "time • model" detail, matching VS Code's chat-footer-details.
     if (caps.verbose && !turn.replayed && turn.completedAt) {
       const det = document.createElement("span");
       det.className = "chat-footer-details";
-      if (turn.model) det.appendChild(document.createTextNode(turn.model + "  \u00b7  "));
       det.appendChild(timeFlip("", turn.completedAt));
+      if (turn.model) det.appendChild(document.createTextNode("  \u2022  " + turn.model));
       footer.appendChild(det);
     }
     turn.footer = footer;
     turn.container.appendChild(footer);
   }
 
+  // Keep Retry only on the last turn's footer as turns are added or trimmed.
+  function refreshRetryButtons() {
+    const last = turns[turns.length - 1];
+    for (const t of turns) {
+      if (t.footer) t.footer.classList.toggle("is-last", t === last);
+    }
+  }
+
   function refreshTurnChrome() {
     turns.forEach((t) => { if (!t.editing) buildTurnChrome(t); });
   }
 
-  // A turn is "mapped" (revertable) when we know a node to revert to: either a
-  // captured head-before, or it was created live in this session (a live first
-  // turn has headBefore null but can be reverted by starting fresh). Turns
-  // replayed from a loaded session without a known head cannot be mapped.
-  function turnMapped(turn) {
-    return turn.headBefore != null || !turn.replayed;
+  // A turn is revertable only when we hold a node id that is valid on the CURRENT
+  // conversation expansion. The agent re-expands the conversation on session
+  // load and assigns fresh node ids, orphaning any id captured before the load
+  // (verified: reverting to a pre-load head fails with "Invalid params"). So:
+  //  - the first live turn of a fresh session (headBefore null) reverts by
+  //    starting a new session;
+  //  - any later turn is revertable only if its head-before was captured live
+  //    from a completed turn on this expansion (headBeforeReliable);
+  //  - replayed/historical turns and the first turn after a reload are NOT
+  //    revertable, because their "before" node is orphaned by re-expansion.
+  function turnRevertable(turn) {
+    if (turn.headBefore == null) {
+      return !turn.replayed;
+    }
+    return !!turn.headBeforeReliable;
+  }
+  // After a wake/reload the agent re-expands the conversation with fresh node
+  // ids, so every revert target captured for the (restored) turns is orphaned.
+  // Downgrade them to non-revertable, exactly like a freshly replayed reload.
+  function invalidateRevertHeads() {
+    lastHeadReliable = false;
+    turns.forEach((t) => { t.headBeforeReliable = false; t.headAfterReliable = false; });
+    refreshTurnChrome();
   }
   function canEditTurn(turn) {
-    return caps.revert && caps.editRequests !== "none" && !busy && turnMapped(turn);
+    return caps.revert && caps.editRequests !== "none" && !busy && turnRevertable(turn);
   }
   function canRestoreTurn(turn) {
-    return caps.revert && caps.checkpoints && !busy && turnMapped(turn);
+    return caps.revert && caps.checkpoints && !busy && turnRevertable(turn);
   }
 
   function renderCheckpointRow(turn) {
@@ -895,21 +1010,26 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     left.className = "checkpoint-line-left";
     const btn = document.createElement("button");
     btn.className = "checkpoint-restore";
-    btn.innerHTML = '<i class="codicon codicon-history"></i><span>Restore Checkpoint</span>';
+    // VS Code renders this as a plain text label (no leading icon).
+    btn.innerHTML = '<span>Restore Checkpoint</span>';
     btn.title = "Restores workspace and chat to this point";
     const right = document.createElement("span");
     right.className = "checkpoint-line-right";
-    // Inline two-state confirm ("Discard Edits"/Cancel), like VS Code.
+    // Inline two-state confirm: the label morphs to a shimmering "Discard Edits"
+    // and an X cancel appears, exactly like VS Code's ChatRestoreCheckpoint item.
     let confirming = false;
     const cancel = document.createElement("button");
     cancel.className = "checkpoint-cancel hidden";
     cancel.innerHTML = '<i class="codicon codicon-close"></i>';
-    cancel.title = "Cancel";
+    cancel.title = "Cancel restoring this checkpoint";
     const setConfirming = (v) => {
       confirming = v;
       row.classList.toggle("confirming", v);
       cancel.classList.toggle("hidden", !v);
-      btn.querySelector("span").textContent = v ? "Discard Edits" : "Restore Checkpoint";
+      const span = btn.querySelector("span");
+      span.textContent = v ? "Discard Edits" : "Restore Checkpoint";
+      span.classList.toggle("dv-shimmer", v);
+      btn.title = v ? "Confirm restoring this checkpoint and discarding later edits" : "Restores workspace and chat to this point";
     };
     cancel.addEventListener("click", (e) => { e.stopPropagation(); setConfirming(false); });
     btn.addEventListener("click", async (e) => {
@@ -991,8 +1111,14 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       turns.splice(i, 1);
     }
     currentTurn = turns[turns.length - 1] || null;
-    if (currentTurn) lastHead = currentTurn.headAfter;
-    else lastHead = null;
+    if (currentTurn) {
+      lastHead = currentTurn.headAfter;
+      lastHeadReliable = !!currentTurn.headAfterReliable;
+    } else {
+      lastHead = null;
+      lastHeadReliable = false;
+    }
+    refreshRetryButtons();
   }
 
   // --- Edit a request in place --------------------------------------------
@@ -1000,15 +1126,27 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // The turn currently being edited in the bottom composer (editRequests:input).
   let editingTurn = null;
 
+  // The turn whose request is being edited inline (VS Code allows only one at a
+  // time). Kept module-level so a new edit, a click elsewhere or Escape can
+  // close it.
+  let inlineEditTurn = null;
+
   function startEditing(turn) {
     if (!canEditTurn(turn)) return;
     if (caps.editRequests === "input") { startInputEditing(turn); return; }
     if (turn.editing) return;
+    // Only one request editable at a time: close any other open editor first.
+    if (inlineEditTurn && inlineEditTurn !== turn) finishEditing(inlineEditTurn);
+    inlineEditTurn = turn;
+    document.body.classList.add("editing-request");
     turn.editing = true;
     turn.req.classList.add("editing");
     turn.reqText.classList.add("hidden");
     const box = document.createElement("div");
     box.className = "req-editor";
+    // Clicks inside the editor must not bubble to reqBody.onclick (which would
+    // immediately restart editing and make Cancel/Send look like no-ops).
+    box.addEventListener("click", (e) => e.stopPropagation());
     const ta = document.createElement("textarea");
     ta.className = "req-editor-input";
     ta.value = turn.text;
@@ -1025,7 +1163,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     const grow = () => { ta.style.height = "auto"; ta.style.height = Math.min(Math.max(ta.scrollHeight, 32), 240) + "px"; };
     ta.addEventListener("input", grow);
     ta.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") { e.preventDefault(); finishEditing(turn); }
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); finishEditing(turn); }
       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submitEdit(turn, ta.value); }
     });
     grow();
@@ -1041,6 +1179,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     turn.reqText.classList.remove("hidden");
     if (turn.editorEl) { turn.editorEl.remove(); turn.editorEl = null; }
     markDiscardable(turn, false);
+    if (inlineEditTurn === turn) inlineEditTurn = null;
+    if (!inlineEditTurn) document.body.classList.remove("editing-request");
   }
 
   // Rewind to before `turn` and resend `text` (shared by inline + input edits).
@@ -1459,6 +1599,11 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   function addUserMessage(text) {
     finalizeBlock();
     hideWelcome();
+    // A response is imminent, so enter the busy state BEFORE building the turn:
+    // otherwise the new turn is briefly treated as "complete" and flashes its
+    // Copy/Retry footer until the host's busy=true arrives. The host confirms
+    // busy shortly, and clears it on completion/error.
+    setBusy(true);
     newTurn(undefined, text);
     // A send is an explicit action: snap back to the bottom even if the user
     // had scrolled up while reading.
@@ -1565,25 +1710,29 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       (!el.todoWidget.classList.contains("hidden") || !el.workingSet.classList.contains("hidden"));
     el.inputBox.classList.toggle("docked-above", docked);
   }
+  // Mirrors VS Code's getToolInvocationIcon() keyword map (chatThinkingContentPart):
+  // read->book, edit->pencil, search->search, terminal->terminal, comment->comment,
+  // everything else->tools. (VS Code uses `book` for reads, not a file icon.)
   const TOOL_KIND_ICONS = {
-    read: "codicon-file",
+    read: "codicon-book",
     edit: "codicon-edit",
     delete: "codicon-trash",
     move: "codicon-arrow-right",
     search: "codicon-search",
     execute: "codicon-terminal",
     think: "codicon-lightbulb",
-    fetch: "codicon-cloud-download",
+    fetch: "codicon-globe",
     other: "codicon-tools"
   };
 
   // Icons keyed by the resolved tool type (see toolInfo), which is derived from
-  // Devin's `_meta` and is more specific than the coarse ACP `kind`.
+  // Devin's `_meta` and is more specific than the coarse ACP `kind`. MCP tools use
+  // VS Code's MCP glyph (codicon-mcp), the same icon VS Code brands MCP with.
   const TOOL_TYPE_ICONS = {
     web_search: "codicon-globe",
     webfetch: "codicon-globe",
-    mcp: "codicon-plug",
-    mcp_list: "codicon-plug"
+    mcp: "codicon-mcp",
+    mcp_list: "codicon-mcp"
   };
 
   // Resolve a tool's real identity from the `_meta` Devin attaches. Returns a
@@ -2294,6 +2443,26 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     footer.appendChild(submit);
     qc.appendChild(footer);
 
+    // Submit stays disabled until EVERY question has an answer (no option is
+    // selected by default, so the user must visit each question and pick one).
+    function updateSubmitState() {
+      submit.disabled = !controls.every((c) => c.answered());
+    }
+    qc.addEventListener("change", updateSubmitState);
+    qc.addEventListener("input", updateSubmitState);
+
+    // Left/Right arrows step between questions (captured so a radio group does
+    // not consume them), except while typing in a text field.
+    qc.addEventListener("keydown", (e) => {
+      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+      const t = e.target;
+      const typing = t && (t.tagName === "TEXTAREA" || (t.tagName === "INPUT" && (t.type === "text" || t.type === "number")));
+      if (typing) return;
+      e.preventDefault();
+      e.stopPropagation();
+      show(e.key === "ArrowLeft" ? idx - 1 : idx + 1);
+    }, true);
+
     let idx = 0;
     function show(i) {
       idx = Math.max(0, Math.min(controls.length - 1, i));
@@ -2303,8 +2472,10 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       prev.disabled = idx === 0;
       next.disabled = idx === controls.length - 1;
       validation.classList.add("hidden");
+      updateSubmitState();
     }
     show(0);
+    updateSubmitState();
     el.elicitationTray.appendChild(qc);
   }
 
@@ -2349,6 +2520,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         key, el: field, title,
         value: val,
         valid: () => (!opts.required || isCheckbox || String(input.value).trim() !== ""),
+        // "Answered" gates the Submit button: a boolean always has a state; text
+        // and number need a value.
+        answered: () => (isCheckbox ? true : String(input.value).trim() !== ""),
         answerText: () => (isCheckbox ? (input.checked ? "Yes" : "No") : String(input.value))
       };
     }
@@ -2358,6 +2532,10 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     let otherRadio = null;
     let otherText = null;
 
+    // VS Code's question-list row: a leading 1-based number, the label, and a
+    // trailing check that appears only when the row is selected. The native
+    // radio/checkbox is kept (visually hidden) for state + a11y.
+    let optNum = 0;
     const addOption = (label, val, isOther) => {
       const opt = document.createElement("label");
       opt.className = "elicit-option";
@@ -2366,27 +2544,34 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       input.name = name;
       input.className = "elicit-native";
       if (!isOther) input.value = val;
-      // VS Code's question-list rows show a check indicator (not a native
-      // control); the native input is kept (visually hidden) for state + a11y.
-      const indicator = document.createElement("i");
-      indicator.className = "codicon codicon-check elicit-indicator";
+      const num = document.createElement("span");
+      num.className = "elicit-number";
+      num.textContent = String(++optNum);
       const span = document.createElement("span");
       span.className = "elicit-option-label";
       span.textContent = label;
+      const indicator = document.createElement("i");
+      indicator.className = "codicon codicon-check elicit-indicator";
       opt.appendChild(input);
-      opt.appendChild(indicator);
+      opt.appendChild(num);
       opt.appendChild(span);
       if (isOther) {
         otherRadio = input;
-        otherText = document.createElement("input");
-        otherText.type = "text";
+        // A textarea (not a single-line input) so a long answer wraps onto new
+        // lines and grows in height, while sitting between the label and check.
+        otherText = document.createElement("textarea");
+        otherText.rows = 1;
         otherText.className = "elicit-input elicit-other";
         otherText.placeholder = "Type your answer";
-        otherText.addEventListener("input", () => { if (otherText.value && !input.checked) input.checked = true; });
+        const grow = () => { otherText.style.height = "auto"; otherText.style.height = Math.min(Math.max(otherText.scrollHeight, 26), 160) + "px"; };
+        otherText.addEventListener("input", () => { if (otherText.value && !input.checked) input.checked = true; grow(); });
+        setTimeout(grow, 0);
         opt.appendChild(otherText);
       } else {
         choices.push({ input, label, val });
       }
+      // Trailing check (VS Code's .chat-question-list-indicator, margin-left auto).
+      opt.appendChild(indicator);
       field.appendChild(opt);
     };
 
@@ -2411,6 +2596,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       key, el: field, title,
       value: () => (isMulti ? selectedValues() : selectedValues()[0]),
       valid: () => (isMulti ? selectedValues().length >= minItems : (!opts.required || selectedValues().length >= 1)),
+      // Submit is gated on every question having at least one option selected.
+      answered: () => selectedValues().length >= 1,
       answerText: () => selectedLabels().join(", ")
     };
   }
@@ -2701,13 +2888,6 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     opts = opts || {};
     container.innerHTML = "";
     const state = { q: "" };
-    if (opts.withNewChat) {
-      const nw = document.createElement("div");
-      nw.className = "session-newchat";
-      nw.innerHTML = '<i class="codicon codicon-add"></i><span>New Session</span>';
-      nw.addEventListener("click", () => { closeTitleMenu(); snapshotCurrent(); curSessionId = null; vscode.postMessage({ type: "newSession" }); });
-      container.appendChild(nw);
-    }
     const search = document.createElement("input");
     search.className = "session-search";
     search.type = "text";
@@ -2743,7 +2923,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     menu.className = "title-menu";
     menu.addEventListener("click", (e) => e.stopPropagation());
     el.titleBtn.parentElement.appendChild(menu);
-    menuCtrl = mountSessionList(menu, { withNewChat: true });
+    menuCtrl = mountSessionList(menu, {});
   }
 
   function closeTitleMenu() {
@@ -2775,7 +2955,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     const frag = document.createDocumentFragment();
     while (el.thread.firstChild) frag.appendChild(el.thread.firstChild);
     views.set(curSessionId, {
-      frag, turns, currentTurn, turnSeq, lastHead,
+      frag, turns, currentTurn, turnSeq, lastHead, lastHeadReliable,
       toolEls: new Map(toolEls), terminalCache: new Map(terminalCache),
       commands: commands.slice(), title: currentTitle
     });
@@ -2806,6 +2986,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     currentTurn = v.currentTurn;
     turnSeq = v.turnSeq;
     lastHead = v.lastHead;
+    lastHeadReliable = !!v.lastHeadReliable;
     toolEls.clear();
     v.toolEls.forEach((val, k) => toolEls.set(k, val));
     terminalCache.clear();
@@ -2825,12 +3006,26 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     currentTitle = title || "Chat";
     el.chatTitle.textContent = currentTitle;
     setBody("thread");
-    const clean = views.has(id) && !dirtyViews.has(id) && sessionStatuses[id] === "idle";
+    // Restore the cached transcript instantly whenever we have a clean copy,
+    // even for a dead (terminated / idle-exited) session. A live session just
+    // needs re-pointing (activate); a dead one is spawned in the background
+    // (wake) while its transcript stays on screen, so there is no "Waking…"
+    // spinner. Only a session we have never displayed here needs a full load.
+    const haveView = views.has(id) && !dirtyViews.has(id);
+    const alive = !!sessionStatuses[id];
     snapshotCurrent();
     curSessionId = id;
-    if (clean) {
+    if (haveView) {
       restoreView(id);
-      vscode.postMessage({ type: "activateSession", id });
+      if (alive) {
+        vscode.postMessage({ type: "activateSession", id });
+      } else {
+        // A wake spawns a fresh acp, which re-expands the conversation and
+        // orphans the cached revert node ids, so the restored turns are no
+        // longer safe revert targets (same as a reload).
+        invalidateRevertHeads();
+        vscode.postMessage({ type: "wakeSession", id });
+      }
     } else {
       views.delete(id);
       dirtyViews.delete(id);
@@ -3090,6 +3285,10 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // --- Error rendering -----------------------------------------------------
 
   function renderError(text) {
+    // An error ends the in-flight turn. Clear busy defensively so a failed
+    // send/new-session (where the host may not post busy=false) never leaves the
+    // composer stuck on Stop.
+    setBusy(false);
     hideWorking();
     finalizeBlock();
     hideWelcome();
@@ -3280,7 +3479,19 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     switch (m.type) {
       case "setup": hideBoot(); renderSetup(m.health || {}); break;
       case "ready": setView("chat"); setBody("list"); break;
-      case "body": setView("chat"); setBody(m.body === "list" ? "list" : "thread"); break;
+      case "body":
+        setView("chat");
+        if (m.body === "list") {
+          // Host-driven return to the list (e.g. after terminate). Cache the
+          // current transcript and drop curSessionId so reselecting the same
+          // session is not short-circuited and can restore + wake seamlessly.
+          snapshotCurrent();
+          curSessionId = null;
+          setBody("list");
+        } else {
+          setBody("thread");
+        }
+        break;
       case "workspace": break;
       case "options":
         modeDropdown.set(m.modes, m.currentMode);
@@ -3319,6 +3530,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         turns = [];
         currentTurn = null;
         lastHead = null;
+        lastHeadReliable = false;
         pendingRevert = null;
         previewWaiters.clear();
         el.permissionTray.innerHTML = "";
@@ -3335,8 +3547,10 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         el.usage.innerHTML = "";
         lastUsage = null;
         closeUsagePopup();
+        // `pendingSend` means a user message is about to render (new chat from
+        // the list), so do not flash the welcome screen in the gap.
         if (m.loading) showThreadLoading(m.waking);
-        else if (body === "thread") renderWelcome();
+        else if (body === "thread" && !m.pendingSend) renderWelcome();
         break;
       case "loaded":
         // Settle the last replayed block so its mermaid diagrams render and no
@@ -3374,6 +3588,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       case "permission": showPermission(m); break;
       case "elicitation": showElicitation(m); break;
       case "busy": setBusy(m.value); refreshTurnChrome(); break;
+      case "cancelPrompts": cancelPrompts(); break;
       case "mode": if (m.mode) modeDropdown.setCurrent(m.mode); break;
       case "model": if (m.model) selectModelUid(m.model); break;
       case "terminalOutput": updateTerminal(m); break;
@@ -3399,9 +3614,18 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       case "turnHead":
         if (typeof m.head === "number") {
           lastHead = m.head;
-          if (currentTurn) currentTurn.headAfter = m.head;
+          // `reliable` heads are captured on the current expansion (a live turn
+          // completion or an instant restore) and are safe revert targets. The
+          // head read right after a reload is NOT reliable: the next prompt
+          // re-expands the conversation and orphans it.
+          lastHeadReliable = !!m.reliable;
+          if (currentTurn) {
+            currentTurn.headAfter = m.head;
+            currentTurn.headAfterReliable = lastHeadReliable;
+          }
         }
         break;
+
       case "reverted": {
         // The host has performed the rewind; now it is safe to trim the turns
         // from the reverted point onward (and drop the "restored" divider for a

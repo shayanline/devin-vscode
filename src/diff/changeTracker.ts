@@ -75,6 +75,10 @@ export class ChangeTracker
     return [...this.snapshots.keys()];
   }
 
+  hasChange(fsPath: string): boolean {
+    return this.snapshots.has(fsPath);
+  }
+
   clear(): void {
     this.snapshots.clear();
     this.refreshGroup();
