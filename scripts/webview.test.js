@@ -167,6 +167,74 @@ test("session list shows liveness dots and offers take-over", async () => {
   assert.strictEqual(h.errors().length, 0, "status/lock handling threw: " + JSON.stringify(h.errors()));
 });
 
+test("returning to an idle session restores its transcript without reloading", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "capabilities", revert: true, editRequests: "inline", checkpoints: true });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "userMessage", text: "hello from A" });
+  h.post({ type: "assistantStart" });
+  h.post({ type: "assistantChunk", text: "hi A" });
+  h.post({ type: "assistantEnd" });
+  await h.settle(20);
+  assert.deepStrictEqual(h.reqTexts(), ["hello from A"]);
+
+  // Go back to the list (session A is snapshotted, kept alive in the background).
+  h.document.getElementById("history-btn").click();
+  await h.settle(10);
+  h.post({
+    type: "sessions",
+    sessions: [{ id: "A", short_id: "A", title: "A", working_directory: "/w" }],
+    activeId: null,
+    statuses: { A: "idle" },
+    folders: [{ path: "/w", name: "w" }]
+  });
+  await h.settle(10);
+
+  const before = h.posted.filter((m) => m.type === "loadSession").length;
+  h.document.querySelector("#sessions-list .session-main").click();
+  await h.settle(10);
+
+  assert.ok(h.posted.some((m) => m.type === "activateSession" && m.id === "A"), "activate without reload");
+  assert.strictEqual(
+    h.posted.filter((m) => m.type === "loadSession").length,
+    before,
+    "an idle, unchanged session must not be reloaded"
+  );
+  assert.deepStrictEqual(h.reqTexts(), ["hello from A"], "the transcript is restored, not rebuilt");
+  assert.strictEqual(h.errors().length, 0, "restore threw: " + JSON.stringify(h.errors()));
+});
+
+test("a session that changed in the background is reloaded, not restored", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "capabilities", revert: true });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "userMessage", text: "hello from A" });
+  h.post({ type: "assistantEnd" });
+  await h.settle(20);
+  h.document.getElementById("history-btn").click();
+  await h.settle(10);
+  // A started working again while backgrounded.
+  h.post({ type: "sessionActivity", id: "A" });
+  h.post({
+    type: "sessions",
+    sessions: [{ id: "A", short_id: "A", title: "A", working_directory: "/w" }],
+    activeId: null,
+    statuses: { A: "running" },
+    folders: [{ path: "/w", name: "w" }]
+  });
+  await h.settle(10);
+  h.document.querySelector("#sessions-list .session-main").click();
+  await h.settle(10);
+  assert.ok(h.posted.some((m) => m.type === "loadSession" && m.id === "A"), "changed session reloads");
+  assert.strictEqual(h.errors().length, 0);
+});
+
 test("per-turn edit/restore chrome builds while busy (no throw)", async () => {
   const h = createHarness();
   h.replay([{ role: "user", text: "q" }, { role: "assistant", text: "a" }]);

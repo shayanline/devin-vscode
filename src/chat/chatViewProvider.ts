@@ -361,6 +361,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
         case "loadSession":
           await this.loadSession(String(msg.id || ""));
           return;
+        case "activateSession":
+          await this.activateSession(String(msg.id || ""));
+          return;
         case "renameSession":
           await this.renameSession(String(msg.id || ""), msg.title);
           return;
@@ -864,6 +867,39 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
       }
       void this.refreshSessions();
     }
+  }
+
+  // Re-show an already-alive session WITHOUT reloading its history: the webview
+  // has kept its rendered transcript and restores it locally, so we only need to
+  // re-point the active session and refresh the composer chrome. Falls back to a
+  // full wake/load if the runtime is not alive. Item: switch without reload.
+  private async activateSession(id: string): Promise<void> {
+    const rt = this.runtimes.get(id);
+    if (!rt) {
+      await this.loadSession(id);
+      return;
+    }
+    this.activeId = id;
+    this.store.setActive(id);
+    this.changes.clear();
+    this.currentMode = rt.mode;
+    this.currentModel = rt.model;
+    this.postCapabilities();
+    this.postModelOptions(rt.model || "adaptive");
+    if (rt.mode) {
+      this.post({ type: "mode", mode: rt.mode });
+    }
+    if (rt.model) {
+      this.post({ type: "model", model: rt.model });
+    }
+    this.post({ type: "busy", value: rt.busy });
+    this.broadcastStatuses();
+    await this.postTurnHead();
+    // Re-surface a prompt this session raised while backgrounded.
+    if (rt.pending) {
+      this.post(rt.pending.payload);
+    }
+    void this.refreshSessions();
   }
 
   private sessionsCache?: { at: number; sessions: DevinSession[] };
@@ -1516,6 +1552,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     }
     if (this.activeId === rt.id) {
       this.post({ type: "busy", value });
+    } else if (value) {
+      // A backgrounded session started working, so the webview's saved
+      // transcript for it is now stale and must be reloaded on return.
+      this.post({ type: "sessionActivity", id: rt.id });
     }
     this.broadcastStatuses();
   }
