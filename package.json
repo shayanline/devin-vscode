@@ -12,6 +12,14 @@
     "type": "git",
     "url": "https://github.com/shayanline/devin-vscode.git"
   },
+  "homepage": "https://github.com/shayanline/devin-vscode#readme",
+  "bugs": {
+    "url": "https://github.com/shayanline/devin-vscode/issues"
+  },
+  "galleryBanner": {
+    "color": "#1f1f1f",
+    "theme": "dark"
+  },
   "engines": {
     "vscode": "^1.92.0"
   },
