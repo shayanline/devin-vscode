@@ -2,7 +2,7 @@
   "name": "devin-vscode",
   "displayName": "Devin for VS Code",
   "description": "A native chat panel for the Devin CLI, powered by the Agent Client Protocol. Streaming replies, per workspace sessions, and trackable diffs.",
-  "version": "0.6.24",
+  "version": "0.6.25",
   "publisher": "shayanline",
   "author": "Shayan Khaksar",
   "license": "AGPL-3.0-or-later",
@@ -253,6 +253,11 @@
           "type": "boolean",
           "default": true,
           "description": "Show the context-window usage indicator in the input toolbar."
+        },
+        "devin.implicitContext.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include the active editor file (or its selection) as implicit context, shown as a pill in the composer. Toggle it per message from the pill."
         },
         "devin.extraArgs": {
           "type": "array",

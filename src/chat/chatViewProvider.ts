@@ -50,6 +50,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
 
   private terminals?: TerminalManager;
 
+  // Whether the active editor file is sent as implicit context (VS Code's
+  // current-file behaviour). Mirrored to the composer as a pill.
+  private implicitEnabled = true;
+  private implicitTimer?: NodeJS.Timeout;
+
   constructor(
     private readonly context: vscode.ExtensionContext,
     private readonly store: SessionStore,
@@ -58,6 +63,65 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     private readonly output: vscode.OutputChannel
   ) {
     this.changes.onDidChangeList((paths) => this.postWorkingSet(paths));
+    this.implicitEnabled = this.cfg().get<boolean>("implicitContext.enabled", true);
+    // Keep the implicit "current file" pill in sync with the active editor and
+    // its selection (the latter debounced, since selection changes fire often).
+    this.context.subscriptions.push(
+      vscode.window.onDidChangeActiveTextEditor(() => this.postImplicitContext()),
+      vscode.window.onDidChangeTextEditorSelection((e) => {
+        if (e.textEditor === vscode.window.activeTextEditor) this.scheduleImplicitPost();
+      })
+    );
+  }
+
+  private scheduleImplicitPost(): void {
+    if (this.implicitTimer) {
+      clearTimeout(this.implicitTimer);
+    }
+    this.implicitTimer = setTimeout(() => this.postImplicitContext(), 150);
+  }
+
+  // Tell the webview about the active editor file (and selection range) so it
+  // can render the implicit-context pill.
+  private postImplicitContext(): void {
+    const ed = vscode.window.activeTextEditor;
+    let file: { path: string; name: string; line1?: number; line2?: number } | null = null;
+    if (ed && ed.document.uri.scheme === "file") {
+      const doc = ed.document;
+      const sel = ed.selection;
+      const hasSel = !!sel && !sel.isEmpty;
+      file = {
+        path: doc.uri.fsPath,
+        name: path.basename(doc.uri.fsPath),
+        line1: hasSel ? sel.start.line + 1 : undefined,
+        line2: hasSel ? sel.end.line + 1 : undefined
+      };
+    }
+    this.post({ type: "implicitContext", file, enabled: this.implicitEnabled });
+  }
+
+  // The active editor as implicit context: the selection when there is one,
+  // otherwise a lightweight resource link the agent can open.
+  private buildImplicitBlocks(): ContentBlock[] {
+    if (!this.implicitEnabled) {
+      return [];
+    }
+    const ed = vscode.window.activeTextEditor;
+    if (!ed || ed.document.uri.scheme !== "file") {
+      return [];
+    }
+    const doc = ed.document;
+    const uri = doc.uri;
+    const sel = ed.selection;
+    const rel = vscode.workspace.asRelativePath(uri);
+    if (sel && !sel.isEmpty) {
+      const body = doc.getText(sel).slice(0, 20000);
+      return [{
+        type: "text",
+        text: `Current selection from ${rel} lines ${sel.start.line + 1}-${sel.end.line + 1}:\n\n\`\`\`${doc.languageId}\n${body}\n\`\`\``
+      }];
+    }
+    return [{ type: "resource_link", uri: uri.toString(), name: path.basename(uri.fsPath) }];
   }
 
   private postWorkingSet(paths: string[]): void {
@@ -199,6 +263,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
         case "addSelection":
           await this.addSelection();
           return;
+        case "setImplicit":
+          this.implicitEnabled = !!msg.enabled;
+          await this.cfg().update("implicitContext.enabled", this.implicitEnabled, vscode.ConfigurationTarget.Workspace);
+          this.postImplicitContext();
+          return;
         case "attachImage":
           this.attachImage(msg.name, msg.mime, msg.data);
           return;
@@ -245,6 +314,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
 
   private async onWebviewReady(): Promise<void> {
     this.post({ type: "workspace", name: this.workspaceName() });
+    this.postImplicitContext();
     // The CLI health check spawns a login shell and calls the CLI, which can
     // take several seconds. Paint the chat shell immediately using the last
     // known readiness so the sidebar is never blank while it runs; the check
@@ -786,7 +856,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
   private postAttachments(): void {
     this.post({
       type: "attachments",
-      items: this.attachments.map((a) => ({ id: a.id, label: a.label, type: a.type }))
+      items: this.attachments.map((a) => {
+        const item: { id: string; label: string; type: string; thumb?: string } = { id: a.id, label: a.label, type: a.type };
+        const b = a.block as { type?: string; mimeType?: string; data?: string };
+        if (a.type === "image" && b && b.type === "image" && b.data) {
+          item.thumb = `data:${b.mimeType || "image/png"};base64,${b.data}`;
+        }
+        return item;
+      })
     });
   }
 
@@ -990,7 +1067,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     this.setBusy(true);
     this.post({ type: "assistantStart" });
 
-    const blocks: ContentBlock[] = [...this.attachments.map((a) => a.block), { type: "text", text }];
+    const blocks: ContentBlock[] = [...this.buildImplicitBlocks(), ...this.attachments.map((a) => a.block), { type: "text", text }];
     this.attachments = [];
     this.postAttachments();
     try {
