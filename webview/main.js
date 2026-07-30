@@ -1259,6 +1259,22 @@ import { renderMarkdown, renderShell } from "./markdown.js";
     scheduleRender();
   }
 
+  // An image produced in an assistant response (e.g. a browser screenshot or a
+  // chart). Rendered as its own block between any surrounding text.
+  function appendAssistantImage(mime, data) {
+    if (!data) return;
+    hideWorking();
+    finalizeBlock();
+    hideWelcome();
+    ensureTurn();
+    const img = document.createElement("img");
+    img.className = "resp-image";
+    img.src = "data:" + (mime || "image/png") + ";base64," + data;
+    img.alt = "image";
+    respTarget().appendChild(img);
+    scrollToBottom();
+  }
+
   function appendThought(text, mid) {
     hideWorking();
     if (!(block && block.kind === "thinking" && sameMid(block.mid, mid))) {
@@ -1597,8 +1613,9 @@ import { renderMarkdown, renderShell } from "./markdown.js";
     sec.appendChild(box);
     return sec;
   }
-  // A one-line "Label value" summary (e.g. Search / Fetch).
-  function toolSummaryLine(label, value) {
+  // A one-line "Label value" summary (e.g. Search / Fetch). When `href` is a URL
+  // the value renders as a link that opens in the browser.
+  function toolSummaryLine(label, value, href) {
     const sec = document.createElement("div");
     sec.className = "tool-section";
     const row = document.createElement("div");
@@ -1606,7 +1623,14 @@ import { renderMarkdown, renderShell } from "./markdown.js";
     const l = document.createElement("span");
     l.className = "tool-summary-label";
     l.textContent = label;
-    const v = document.createElement("span");
+    let v;
+    if (href && /^https?:\/\//i.test(href)) {
+      v = document.createElement("a");
+      v.href = href;
+      v.addEventListener("click", (e) => { e.preventDefault(); vscode.postMessage({ type: "openExternal", url: href }); });
+    } else {
+      v = document.createElement("span");
+    }
     v.className = "tool-summary-value";
     v.textContent = value;
     row.appendChild(l);
@@ -1655,7 +1679,7 @@ import { renderMarkdown, renderShell } from "./markdown.js";
       if (q != null) { body.appendChild(toolSummaryLine("Search", String(q))); inputShown = true; hasContent = true; }
     } else if (d.kind === "fetch") {
       const u = toolField(isObj ? raw : null, ["url", "uri", "href"]);
-      if (u != null) { body.appendChild(toolSummaryLine("Fetch", String(u))); inputShown = true; hasContent = true; }
+      if (u != null) { body.appendChild(toolSummaryLine("Fetch", String(u), String(u))); inputShown = true; hasContent = true; }
     }
 
     const textItems = (d.content || []).filter((c) => c.type === "text" && c.text);
@@ -1689,6 +1713,25 @@ import { renderMarkdown, renderShell } from "./markdown.js";
         body.appendChild(sec);
       });
       // Terminal cards are worth showing open by default.
+      if (!entry.node.dataset.autoOpened) {
+        if (entry.collapse) entry.collapse.setCollapsed(false);
+        entry.node.dataset.autoOpened = "1";
+      }
+    }
+
+    const imgItems = (d.content || []).filter((c) => c.type === "image" && c.data);
+    if (imgItems.length) {
+      hasContent = true;
+      imgItems.forEach((c) => {
+        const sec = document.createElement("div");
+        sec.className = "tool-section";
+        const img = document.createElement("img");
+        img.className = "tool-image";
+        img.src = "data:" + (c.mime || "image/png") + ";base64," + c.data;
+        img.alt = "";
+        sec.appendChild(img);
+        body.appendChild(sec);
+      });
       if (!entry.node.dataset.autoOpened) {
         if (entry.collapse) entry.collapse.setCollapsed(false);
         entry.node.dataset.autoOpened = "1";
@@ -1811,8 +1854,36 @@ import { renderMarkdown, renderShell } from "./markdown.js";
     node.appendChild(status);
     node.appendChild(label);
     node.appendChild(filePill({ path, diff: true, added, removed }));
+    // Inline Keep / Undo for this edit (VS Code shows accept/reject per edit),
+    // in addition to the Keep all / Undo all in the docked working set.
+    if (path) {
+      const actions = document.createElement("div");
+      actions.className = "edit-pill-actions";
+      actions.appendChild(iconBtn("codicon-check", "Keep this change", (e) => {
+        e.stopPropagation();
+        vscode.postMessage({ type: "acceptFile", path });
+        markEditResolved(node, "Kept");
+      }));
+      actions.appendChild(iconBtn("codicon-discard", "Undo this change", (e) => {
+        e.stopPropagation();
+        vscode.postMessage({ type: "rejectFile", path });
+        markEditResolved(node, "Undone");
+      }));
+      node.appendChild(actions);
+    }
     if (isNew) respTarget().appendChild(node);
     scrollToBottom();
+  }
+
+  // After keeping/undoing a single edit, reflect the resolved state on its pill.
+  function markEditResolved(node, label) {
+    node.classList.add("resolved");
+    const actions = node.querySelector(".edit-pill-actions");
+    if (actions) actions.remove();
+    const l = node.querySelector(".edit-pill-label");
+    if (l) l.textContent = label;
+    const st = node.querySelector(".edit-pill-status");
+    if (st) st.className = "codicon " + (label === "Undone" ? "codicon-discard" : "codicon-check") + " edit-pill-status";
   }
 
   // --- Permissions & elicitation -------------------------------------------
@@ -3016,6 +3087,7 @@ import { renderMarkdown, renderShell } from "./markdown.js";
       case "userChunk": appendUserChunk(m.text, m.messageId); break;
       case "assistantStart": finalizeBlock(); showWorking(); break;
       case "assistantChunk": appendAssistant(m.text, m.messageId); break;
+      case "assistantImage": appendAssistantImage(m.mime, m.data); break;
       case "thoughtChunk": appendThought(m.text, m.messageId); break;
       case "assistantEnd": hideWorking(); finalizeBlock(); break;
       case "plan": renderPlan(m.entries); break;

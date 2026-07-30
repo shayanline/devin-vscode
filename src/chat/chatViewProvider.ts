@@ -1621,7 +1621,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     const active = !!rt && this.activeId === rt.id;
     switch (u.sessionUpdate) {
       case "agent_message_chunk":
-        if (active) this.post({ type: "assistantChunk", text: textOf(u.content), messageId: u.messageId });
+        if (active) {
+          const img = imageOf(u.content);
+          if (img) this.post({ type: "assistantImage", mime: img.mimeType, data: img.data, messageId: u.messageId });
+          else this.post({ type: "assistantChunk", text: textOf(u.content), messageId: u.messageId });
+        }
         return;
       case "user_message_chunk":
         if (active) this.post({ type: "userChunk", text: textOf(u.content), messageId: u.messageId });
@@ -1933,12 +1937,23 @@ function diffStat(oldText: string | null | undefined, newText: string | null | u
   return { added: n - lcs, removed: m - lcs };
 }
 
+interface ToolContentItem {
+  type: string;
+  text?: string;
+  path?: string;
+  terminalId?: string;
+  added?: number;
+  removed?: number;
+  mime?: string;
+  data?: string;
+}
+
 // Flatten ACP tool-call content into renderable items for the webview.
-function normalizeToolContent(content: any): { type: string; text?: string; path?: string; terminalId?: string; added?: number; removed?: number }[] {
+function normalizeToolContent(content: any): ToolContentItem[] {
   if (!Array.isArray(content)) {
     return [];
   }
-  const out: { type: string; text?: string; path?: string; terminalId?: string; added?: number; removed?: number }[] = [];
+  const out: ToolContentItem[] = [];
   for (const c of content) {
     if (!c) {
       continue;
@@ -1949,15 +1964,28 @@ function normalizeToolContent(content: any): { type: string; text?: string; path
     } else if (c.type === "terminal" && typeof c.terminalId === "string") {
       out.push({ type: "terminal", terminalId: c.terminalId });
     } else if (c.type === "content") {
-      const text = textOf(c.content);
-      if (text) {
-        out.push({ type: "text", text });
+      const img = imageOf(c.content);
+      if (img) {
+        out.push({ type: "image", mime: img.mimeType, data: img.data });
+      } else {
+        const text = textOf(c.content);
+        if (text) {
+          out.push({ type: "text", text });
+        }
       }
     } else if (typeof c.text === "string") {
       out.push({ type: "text", text: c.text });
     }
   }
   return out;
+}
+
+// An image content block ({ type: "image", mimeType, data }), or null.
+function imageOf(content: any): { mimeType?: string; data: string } | null {
+  if (content && content.type === "image" && typeof content.data === "string" && content.data) {
+    return { mimeType: content.mimeType, data: content.data };
+  }
+  return null;
 }
 
 function normalizeLocations(locations: any): { path: string; line?: number }[] {

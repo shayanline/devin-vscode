@@ -244,6 +244,35 @@ test("a session that changed in the background is reloaded, not restored", async
   assert.strictEqual(h.errors().length, 0);
 });
 
+test("renders response images and inline keep/undo on edits", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "capabilities", revert: true });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "userMessage", text: "take a screenshot and edit a file" });
+  h.post({ type: "assistantStart" });
+  const px = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+  h.post({ type: "assistantImage", mime: "image/png", data: px });
+  h.post({ type: "fileChange", path: "/w/app.ts", added: 3, removed: 1 });
+  h.post({ type: "assistantEnd" });
+  await h.settle(20);
+
+  const img = h.document.querySelector("#thread .resp-image");
+  assert.ok(img && img.src.startsWith("data:image/png;base64,"), "response image renders");
+
+  const pill = h.document.querySelector("#thread .edit-pill");
+  assert.ok(pill, "edit pill renders");
+  const keep = pill.querySelector(".edit-pill-actions .codicon-check");
+  assert.ok(keep, "inline Keep action renders");
+  keep.parentElement.click();
+  await h.settle(5);
+  assert.ok(h.posted.some((m) => m.type === "acceptFile" && m.path === "/w/app.ts"), "Keep posts acceptFile");
+  assert.ok(pill.classList.contains("resolved"), "pill marks resolved after keep");
+  assert.strictEqual(h.errors().length, 0, "image/edit rendering threw: " + JSON.stringify(h.errors()));
+});
+
 test("per-turn edit/restore chrome builds while busy (no throw)", async () => {
   const h = createHarness();
   h.replay([{ role: "user", text: "q" }, { role: "assistant", text: "a" }]);
