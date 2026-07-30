@@ -109,8 +109,17 @@ export async function resolveCliPath(setting: string): Promise<string | undefine
   const env = await loginShellEnv();
   const configured = expandHome((setting || "").trim());
   if (configured && configured !== "devin") {
-    if (path.isAbsolute(configured) && fs.existsSync(configured)) {
-      return configured;
+    if (path.isAbsolute(configured)) {
+      if (fs.existsSync(configured)) {
+        return configured;
+      }
+    } else {
+      // A bare/relative custom name (e.g. "devin-beta"): resolve it on PATH by
+      // its basename rather than silently falling back to "devin".
+      const viaCustom = await which(path.basename(configured), env);
+      if (viaCustom && fs.existsSync(viaCustom)) {
+        return viaCustom;
+      }
     }
   }
   const viaWhich = await which("devin", env);
@@ -148,7 +157,11 @@ export async function checkHealth(setting: string): Promise<CliHealth> {
   if (!version.ok) {
     return { path: resolved, found: false, error: version.out || "Failed to run devin --version" };
   }
-  const loggedIn = /logged in/i.test(auth.out);
+  // `devin auth status` prints "Logged in (via Devin)." when authed and
+  // "Not logged in." when not, so a bare /logged in/ match would treat a
+  // signed-out user as signed in. Require a positive match and reject the
+  // negative phrasings explicitly.
+  const loggedIn = /logged in/i.test(auth.out) && !/not logged in|not authenticated|logged out/i.test(auth.out);
   const account = loggedIn ? parseAccount(auth.out) : undefined;
   return { path: resolved, found: true, version: cleanVersion(version.out), loggedIn, account };
 }

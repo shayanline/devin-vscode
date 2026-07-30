@@ -71,9 +71,30 @@ export class SessionStore {
     }
     const ids = this.ids().filter((x) => x !== id);
     ids.unshift(id);
-    void this.state.update(SessionStore.IDS_KEY, ids.slice(0, 200));
+    const capped = ids.slice(0, 200);
+    void this.state.update(SessionStore.IDS_KEY, capped);
     if (cwd) {
       this.setCwd(id, cwd);
+    }
+    // Keep the cwd map bounded to the capped id list, so it doesn't grow
+    // without limit as old sessions fall off the end. (Titles are deliberately
+    // left untouched: they are also cached for external sessions that are not
+    // in the tracked id list, and are used to fill names in the list.)
+    this.pruneCwds(capped);
+  }
+
+  private pruneCwds(ids: string[]): void {
+    const keep = new Set(ids);
+    const cwds = this.cwds();
+    let changed = false;
+    for (const key of Object.keys(cwds)) {
+      if (!keep.has(key)) {
+        delete cwds[key];
+        changed = true;
+      }
+    }
+    if (changed) {
+      void this.state.update(SessionStore.CWDS_KEY, cwds);
     }
   }
 

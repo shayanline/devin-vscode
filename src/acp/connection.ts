@@ -30,6 +30,14 @@ export class JsonRpcConnection {
     this.child.stderr.setEncoding("utf8");
     this.child.stderr.on("data", (chunk: string) => this.onLog?.(chunk.toString()));
     this.child.on("close", () => this.handleClose());
+    // Without listeners, a stream `error` (e.g. EPIPE on stdin after the agent
+    // dies) is thrown as an unhandled error and can crash the extension host.
+    this.child.stdin.on("error", (err) => this.onLog?.(`[stdin-error] ${err.message}`));
+    this.child.stdout.on("error", (err) => {
+      this.onLog?.(`[stdout-error] ${err.message}`);
+      this.handleClose();
+    });
+    this.child.stderr.on("error", (err) => this.onLog?.(`[stderr-error] ${err.message}`));
   }
 
   private onData(chunk: string): void {
@@ -102,7 +110,12 @@ export class JsonRpcConnection {
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {
       this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
-      this.send({ jsonrpc: "2.0", id, method, params });
+      // If the write fails the response can never arrive, so settle the call
+      // now rather than leaving it pending forever.
+      if (!this.send({ jsonrpc: "2.0", id, method, params })) {
+        this.pending.delete(id);
+        reject(new Error("Failed to write to ACP process"));
+      }
     });
   }
 
@@ -113,11 +126,13 @@ export class JsonRpcConnection {
     this.send({ jsonrpc: "2.0", method, params });
   }
 
-  private send(message: unknown): void {
+  private send(message: unknown): boolean {
     try {
       this.child.stdin.write(JSON.stringify(message) + "\n");
+      return true;
     } catch (err) {
       this.onLog?.(`[send-failed] ${err instanceof Error ? err.message : String(err)}`);
+      return false;
     }
   }
 

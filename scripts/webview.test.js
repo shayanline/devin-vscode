@@ -94,6 +94,46 @@ test("elicitation renders oneOf/anyOf options and submits the chosen consts", as
   assert.strictEqual(h.errors().length, 0);
 });
 
+test("leaving a running session to the list detaches the composer", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "capabilities", revert: true, editRequests: "inline", checkpoints: true });
+  h.post({ type: "userMessage", text: "do a big task" });
+  h.post({ type: "assistantStart" });
+  h.post({ type: "busy", value: true });
+  h.post({ type: "attachments", items: [{ id: "a1", label: "file.ts", type: "file" }] });
+  const input = h.document.getElementById("input");
+  input.value = "draft I never sent";
+  await h.settle(20);
+
+  // Go back to history while the turn is still running.
+  h.document.getElementById("history-btn").click();
+  await h.settle(20);
+
+  assert.ok(h.posted.some((m) => m.type === "leaveToList"), "should ask the host to cancel/detach");
+  assert.strictEqual(input.value, "", "the draft should be cleared for a clean new-chat box");
+  assert.ok(
+    h.document.getElementById("composer").classList.contains("list-mode"),
+    "the composer should switch to list mode"
+  );
+  assert.strictEqual(
+    h.document.getElementById("attachments").children.length,
+    0,
+    "attachment pills from the old session should be cleared"
+  );
+  assert.ok(
+    h.document.getElementById("stop").classList.contains("hidden"),
+    "the Stop/working indicator should not persist in the list view"
+  );
+  assert.ok(
+    !h.document.getElementById("sessions-list").classList.contains("hidden"),
+    "the sessions list should be visible"
+  );
+  assert.strictEqual(h.errors().length, 0, "leaving to list threw: " + JSON.stringify(h.errors()));
+});
+
 test("per-turn edit/restore chrome builds while busy (no throw)", async () => {
   const h = createHarness();
   h.replay([{ role: "user", text: "q" }, { role: "assistant", text: "a" }]);
