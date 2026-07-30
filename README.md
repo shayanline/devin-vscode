@@ -7,14 +7,11 @@
 Bring the Devin coding agent into VS Code as a native chat panel, so you stop
 switching to a terminal and work with it the way you already work in the editor.
 
-The extension connects to the [Devin CLI](https://docs.devin.ai) you have
-installed and renders the whole session as first class VS Code UI: streaming
-replies, reasoning shown as it happens, tool calls drawn as cards, every file
-edit as a native diff you can keep or undo, permission and question prompts
-inline, and a session browser scoped to your workspace. It runs entirely through
-your own `devin` install over the [Agent Client Protocol](https://agentclientprotocol.com),
-and adds no separate service or account of its own. Think of it as the editor
-front end for the agent you already use.
+It shows the whole session inside VS Code: streaming replies, the agent's
+reasoning as it happens, tool calls as cards, every file edit as a diff you can
+keep or undo, permission and question prompts inline, and a session browser for
+your workspace. There is no extra account or service to set up, it uses the
+[Devin](https://docs.devin.ai) you already sign in to.
 
 > **Preview.** This is an early release and under active development. It works
 > day to day, but expect rough edges and frequent updates. Feedback and issues
@@ -78,33 +75,25 @@ run the extension shows a setup panel that detects the CLI and helps you log in.
 
 ## Features
 
-- Streaming chat backed by a persistent `devin acp` session, with the agent's
-  reasoning shown live as it thinks.
-- Model picker and session mode selector (Code, Ask, Plan, Bypass), populated
-  from the CLI itself, plus a thinking effort picker for models that support it.
-- A session browser: click the back arrow to see your sessions, click one to
-  open it. Sessions are grouped by repository in multi root workspaces and
-  persist across restarts, with resume, rename, and delete.
-- Per workspace session list, scoped to the current window (separate lists for
-  separate `.code-workspace` files), with live status dots and take over of a
-  session that is running elsewhere.
-- Multi root aware: every folder in a `.code-workspace` is passed to Devin, and
-  its sessions are grouped by folder.
-- Rich tool cards: reads, edits, terminal runs, web search, fetch, and MCP tools
-  each render distinctly, and consecutive calls collapse into a grouped card.
+- Streaming chat with the agent's reasoning shown live as it works.
+- Pick the model and the session mode (Code, Ask, Plan, Bypass), and the
+  thinking effort for models that support it.
+- A session browser to open past chats and resume, rename, or delete them.
+  Sessions are grouped by workspace folder and persist across restarts.
+- Rich tool cards for reads, edits, terminal runs, web search, fetch, and MCP
+  tools, with back to back calls collapsed into one group.
 - Plan tracking, a context window usage ring, and an end of turn summary of the
   files that changed.
-- Slash commands and skills: type `/` to autocomplete Devin's commands and your
-  skills. Type `@` to search and attach workspace files.
-- The agent's questions are shown as clickable options, and permission prompts
-  are surfaced as approve or deny buttons.
-- Agent file edits are tracked as a working set with native VS Code diffs and per
-  file keep or undo, plus inline per hunk revert in the editor gutter.
-- Checkpoints and editable requests: restore the workspace and conversation to
-  an earlier turn, or edit a sent message to rewind and re-run from that point
-  (requires the Devin CLI revert capability).
-- Context attachments: add files or the current selection, paste images, and
-  include the active editor file as implicit context per message.
+- Type `/` to autocomplete commands and skills, and `@` to search and attach
+  files from your workspace.
+- The agent's questions appear as clickable options, and permission prompts as
+  approve or deny buttons.
+- Every file edit is tracked with native VS Code diffs, keep or undo per file,
+  and inline revert in the editor gutter.
+- Restore the workspace and chat to an earlier point, or edit a sent message to
+  rerun from there.
+- Attach files or your current selection, paste images, and include the active
+  file as context.
 - Markdown replies with syntax highlighting and inline Mermaid diagrams.
 
 ## Settings
@@ -124,8 +113,8 @@ run the extension shows a setup panel that detects the CLI and helps you log in.
   `devin.inlineReferences.style`, `devin.progressBorder.enabled`,
   `devin.incrementalRendering.animationStyle`, `devin.verbose`: composer and
   transcript presentation.
-- `devin.extraArgs`, `devin.env`: extra arguments and environment variables for
-  the `devin acp` process.
+- `devin.extraArgs`, `devin.env`: extra arguments and environment variables
+  passed to Devin.
 
 ## Commands
 
@@ -133,36 +122,15 @@ Available from the Command Palette under the **Devin** category: New Session,
 Show Sessions, Open Chat, Cancel Current Turn, Run Setup, and About / Status.
 Accept and reject actions for tracked changes appear in the source control view.
 
-## Building from source
+## Contributing
 
-- `npm install` to install dependencies.
-- `npm run watch` (or `npm run compile`), then press F5 in VS Code to launch an Extension Development Host.
-- `npm run check-types` type checks and `npm test` runs the webview unit tests.
-- `npm run package` builds a `.vsix` you can install with `code --install-extension`.
-- `npm run preview -- --scenario full` opens a mock chat in a browser for fast UI iteration without the CLI. See [the screenshots guide](docs/screenshots.md) for the scenarios behind the images above and how to regenerate them.
-
-## Releasing
-
-Releases are automated. To cut one:
-
-1. Bump the version and create the tag: `npm version patch` (or `minor` / `major`).
-2. Push it: `git push --follow-tags`.
-
-The [release workflow](.github/workflows/release.yml) then type checks, tests, builds the extension, creates a GitHub Release with the `.vsix` attached, and publishes to the VS Code Marketplace (and Open VSX). The [CI workflow](.github/workflows/ci.yml) runs the same checks on every push and pull request.
-
-One time setup for Marketplace publishing:
-
-- Create the `shayanline` publisher on the [Marketplace publisher portal](https://marketplace.visualstudio.com/manage).
-- Generate an Azure DevOps personal access token scoped to Marketplace publish.
-- Add it as a repository Actions secret named `VSCE_PAT` (and optionally `OVSX_PAT` for Open VSX).
-
-While `"preview": true` is set in `package.json`, the Marketplace listing keeps the preview badge.
+Contributions and issues are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for
+how to build, run, and release the extension.
 
 ## Acknowledgements
 
 Inspired by the community `Devin-Cli_Chat` extension by Luiz Alberto Abarca
-Ferrarezi, and by the design of GitHub Copilot Chat. This is an independent
-rewrite around the ACP protocol.
+Ferrarezi, and by the design of GitHub Copilot Chat.
 
 ## License
 
