@@ -33,6 +33,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
   private starting?: Promise<void>;
   private busy = false;
   private initialized = false;
+  // True while a session/load is replaying persisted history. Diffs emitted
+  // during replay are historical, so they must not repopulate the actionable
+  // working set (otherwise a session you already kept/undid shows its changed
+  // files, with actions, every time you reopen it).
+  private replaying = false;
   // Working directory of the active session (used for the terminal and for
   // resolving relative file paths against the right folder).
   private activeCwd?: string;
@@ -606,6 +611,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     this.changes.clear();
     this.attachments = [];
     this.post({ type: "clear", loading: true });
+    this.replaying = true;
     try {
       const client = await this.ensureInitialized();
       this.postCapabilities();
@@ -627,6 +633,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     } catch (err) {
       this.post({ type: "error", text: err instanceof Error ? err.message : String(err) });
     } finally {
+      this.replaying = false;
       this.post({ type: "loaded" });
       // Establish the current head so live turns after a resume can be reverted.
       await this.postTurnHead();
@@ -1314,6 +1321,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
   }
 
   private recordDiffs(u: any): void {
+    // Historical diffs from a session/load replay are already resolved (kept or
+    // undone), so they must not repopulate the actionable working set.
+    if (this.replaying) {
+      return;
+    }
     const content = Array.isArray(u.content) ? u.content : [];
     for (const c of content) {
       if (c && c.type === "diff" && typeof c.path === "string") {

@@ -224,6 +224,41 @@ body {
   display: none !important;
 }
 
+/* Boot overlay: a single loading state that covers the panel from first paint
+   until setup or the session list is ready. A pure CSS spinner is used so it
+   works before the codicon font has loaded. */
+#boot {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+}
+.boot-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  color: var(--dv-dim);
+  font-size: var(--dv-fs-s);
+}
+.boot-spinner {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2.5px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
+  border-top-color: var(--vscode-progressBar-background, var(--vscode-focusBorder, #3794ff));
+  animation: boot-spin 0.8s linear infinite;
+}
+@keyframes boot-spin {
+  to { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .boot-spinner { animation-duration: 2s; }
+}
+
 .muted {
   opacity: 0.7;
   font-size: 0.9em;
@@ -776,17 +811,24 @@ body {
   mask-composite: exclude;
 }
 
-/* Sharp beam */
+/* Sharp beam. A bright leading lobe with a long soft tail, plus a faint
+   trailing lobe half a turn behind, so the ring never fully goes dark and the
+   motion reads as continuous rather than a single pulse sweeping past. */
 #input-box::before {
   z-index: 2;
   padding: 1px;
   background: conic-gradient(
     from var(--devin-angle),
     transparent 0deg,
-    color-mix(in srgb, var(--dv-input-working-color) 90%, transparent) 20deg,
-    var(--dv-input-working-color) 30deg,
-    color-mix(in srgb, var(--dv-input-working-color) 60%, transparent) 50deg,
-    transparent 90deg,
+    color-mix(in srgb, var(--dv-input-working-color) 70%, transparent) 16deg,
+    var(--dv-input-working-color) 32deg,
+    color-mix(in srgb, var(--dv-input-working-color) 45%, transparent) 62deg,
+    color-mix(in srgb, var(--dv-input-working-color) 12%, transparent) 100deg,
+    transparent 150deg,
+    transparent 190deg,
+    color-mix(in srgb, var(--dv-input-working-color) 28%, transparent) 215deg,
+    color-mix(in srgb, var(--dv-input-working-color) 8%, transparent) 255deg,
+    transparent 300deg,
     transparent 360deg
   );
 }
@@ -795,13 +837,14 @@ body {
 #input-box::after {
   z-index: 1;
   padding: 2px;
-  filter: blur(1.5px);
+  filter: blur(2px);
   background: conic-gradient(
     from var(--devin-angle),
     transparent 0deg,
-    color-mix(in srgb, var(--dv-input-working-color) 60%, transparent) 25deg,
-    color-mix(in srgb, var(--dv-input-working-color) 35%, transparent) 50deg,
-    transparent 90deg,
+    color-mix(in srgb, var(--dv-input-working-color) 45%, transparent) 24deg,
+    color-mix(in srgb, var(--dv-input-working-color) 24%, transparent) 60deg,
+    color-mix(in srgb, var(--dv-input-working-color) 8%, transparent) 110deg,
+    transparent 170deg,
     transparent 360deg
   );
 }
@@ -2548,6 +2591,14 @@ body {
 
 /* Square the input's top corners when a widget is docked flush above it. */
 #input-box.docked-above {
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+
+/* Keep the animated working ring flush with those squared corners, otherwise
+   the comet keeps tracing the old rounded top while the box is square. */
+#input-box.docked-above::before,
+#input-box.docked-above::after {
   border-top-left-radius: 0;
   border-top-right-radius: 0;
 }
