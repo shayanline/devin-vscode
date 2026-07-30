@@ -2280,6 +2280,34 @@ body {
   flex: 0 0 auto;
 }
 
+/* Inline Keep / Undo for a single edit, revealed on hover of the pill row. */
+.edit-pill-actions {
+  display: inline-flex;
+  gap: 2px;
+  margin-left: 4px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.edit-pill:hover .edit-pill-actions,
+.edit-pill:focus-within .edit-pill-actions {
+  opacity: 1;
+}
+.edit-pill.resolved .edit-pill-label {
+  font-style: italic;
+  opacity: 0.7;
+}
+
+/* Images produced in a response or a tool result. */
+.resp-image,
+.tool-image {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: var(--dv-space-3) 0;
+  border: 1px solid var(--dv-border);
+  border-radius: var(--dv-radius-md);
+}
+
 /* File / symbol references as bordered pills (VS Code chat-codeblock-pill /
    inline-anchor style): a file-type icon, the name, and +/- line counts. */
 .file-change {
