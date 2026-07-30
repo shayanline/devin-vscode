@@ -1282,9 +1282,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     const content = Array.isArray(u.content) ? u.content : [];
     for (const c of content) {
       if (c && c.type === "diff" && typeof c.path === "string") {
-        this.changes.recordDiff(c.path, c.oldText ?? null, c.newText ?? "");
         const s = diffStat(c.oldText, c.newText);
+        // Post the per-file counts before recordDiff fires the working-set list,
+        // so the list renders with the deltas already known.
         this.post({ type: "fileChange", path: c.path, added: s.added, removed: s.removed, created: c.oldText == null || c.oldText === "" });
+        this.changes.recordDiff(c.path, c.oldText ?? null, c.newText ?? "");
       }
     }
   }
@@ -1407,9 +1409,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     }
     await fs.promises.mkdir(path.dirname(full), { recursive: true });
     await fs.promises.writeFile(full, params.content, "utf8");
-    this.changes.recordDiff(full, original, params.content);
     const s = diffStat(original, params.content);
     this.post({ type: "fileChange", path: full, added: s.added, removed: s.removed, created: original == null });
+    this.changes.recordDiff(full, original, params.content);
     return null;
   }
 
