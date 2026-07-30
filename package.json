@@ -209,6 +209,32 @@
           "default": true,
           "description": "Show the agent's reasoning/thinking stream in the chat."
         },
+        "devin.thinking.style": {
+          "type": "string",
+          "enum": [
+            "collapsed",
+            "fixedScrolling"
+          ],
+          "enumDescriptions": [
+            "Show a collapsed 'Thinking…' header; expand to read the reasoning",
+            "Show a live, fixed-height peek of the latest reasoning while it streams, then collapse it"
+          ],
+          "default": "fixedScrolling",
+          "description": "How the reasoning stream is displayed while the agent is thinking."
+        },
+        "devin.incrementalRendering.animationStyle": {
+          "type": "string",
+          "enum": [
+            "off",
+            "fade",
+            "rise",
+            "blur",
+            "scale",
+            "slide"
+          ],
+          "default": "rise",
+          "description": "Entrance animation for each response part as it streams in."
+        },
         "devin.editRequests": {
           "type": "string",
           "enum": [

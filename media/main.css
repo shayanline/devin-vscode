@@ -71,19 +71,42 @@
   }
 }
 
-/* Gentle entrance for each response part as it streams in, echoing VS Code's
-   incremental "rise" (translateY(4px)->0, cubic-bezier(0,0,0.2,1)). Kept short
-   (VS Code staggers streamed blocks over ~600ms; we run it once per part, so a
-   subtle 180ms avoids a slow fade on bulk history replay). Runs once per
-   element when it enters the DOM. */
+/* Entrance for each response part as it streams in, echoing VS Code's
+   incremental-rendering variants. The style is chosen by
+   devin.incrementalRendering.animationStyle (default "rise" = dv-appear). Kept
+   short (VS Code staggers streamed blocks over ~600ms; we run it once per part,
+   so a subtle 180ms avoids a slow fade on bulk history replay). */
 @keyframes dv-appear {
   from { opacity: 0; transform: translateY(4px); }
   to { opacity: 1; transform: none; }
 }
+@keyframes dv-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes dv-blur {
+  from { opacity: 0; filter: blur(2px); }
+  to { opacity: 1; filter: blur(0); }
+}
+@keyframes dv-scale {
+  from { opacity: 0; transform: scale(0.96); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes dv-slide {
+  from { opacity: 0; transform: translateX(-4px); }
+  to { opacity: 1; transform: none; }
+}
 
 .turn-response > * {
-  animation: dv-appear 180ms cubic-bezier(0, 0, 0.2, 1);
+  animation: var(--dv-stream-name, dv-appear) 180ms cubic-bezier(0, 0, 0.2, 1);
 }
+
+#thread[data-anim="fade"] { --dv-stream-name: dv-fade; }
+#thread[data-anim="rise"] { --dv-stream-name: dv-appear; }
+#thread[data-anim="blur"] { --dv-stream-name: dv-blur; }
+#thread[data-anim="scale"] { --dv-stream-name: dv-scale; }
+#thread[data-anim="slide"] { --dv-stream-name: dv-slide; }
+#thread[data-anim="off"] .turn-response > * { animation: none; }
 
 @media (prefers-reduced-motion: reduce) {
   .turn-response > * {
@@ -1440,6 +1463,41 @@ body {
   opacity: 0.7;
 }
 
+/* Timestamp that flips relative <-> absolute on hover, mirroring VS Code's
+   chat-request/response-timing (two lines in one cell, sliding on hover). */
+.time-flip {
+  display: inline-grid;
+  overflow: hidden;
+  vertical-align: bottom;
+}
+
+.time-flip > span {
+  grid-area: 1 / 1;
+  white-space: nowrap;
+  transition: transform 160ms ease, opacity 160ms ease;
+}
+
+.time-flip > .time-alt {
+  transform: translateY(100%);
+  opacity: 0;
+}
+
+.time-flip:hover > .time-primary {
+  transform: translateY(-100%);
+  opacity: 0;
+}
+
+.time-flip:hover > .time-alt {
+  transform: translateY(0);
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .time-flip > span {
+    transition: none;
+  }
+}
+
 /* Welcome / empty state */
 .welcome {
   display: flex;
@@ -1816,6 +1874,15 @@ body {
 
 .thinking-item-content > :last-child {
   margin-bottom: 0;
+}
+
+/* fixedScrolling peek: while streaming, cap the reasoning to a fixed height,
+   auto-scrolled to the latest, with top/bottom fades (VS Code's fixed mode). */
+.thinking-peek .dv-collapsible-anim-inner {
+  max-height: 160px;
+  overflow-y: auto;
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 20px, #000 calc(100% - 16px), transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 20px, #000 calc(100% - 16px), transparent 100%);
 }
 
 /* "Used N references" summary: a collapsed, low-weight list of the files the
