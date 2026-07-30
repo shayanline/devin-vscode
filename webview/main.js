@@ -44,6 +44,9 @@ import { renderMarkdown } from "./markdown.js";
   let lastSessions = [];
   let lastActiveId = null;
   let lastFolders = [];
+  // Per-session liveness for the status dots: id -> "running" | "idle" |
+  // "starting". Absent means dead (gray). Sent by the host.
+  let sessionStatuses = {};
   let listCtrl = null; // full sessions-list controller
   let menuCtrl = null; // title-dropdown controller
 
@@ -2403,6 +2406,32 @@ import { renderMarkdown } from "./markdown.js";
     }
   }
 
+  // A status-only update (no list change): refresh the dots in place.
+  function applyStatuses(statuses, activeId) {
+    sessionStatuses = statuses || {};
+    if (activeId !== undefined) lastActiveId = activeId;
+    if (listCtrl) listCtrl.refresh();
+    if (menuCtrl) menuCtrl.refresh();
+  }
+
+  // A session is held by another live Devin process (item 5): offer take-over.
+  function showLockConflict(m) {
+    const box = cwShell();
+    cwTitle(box, "Session is open elsewhere");
+    const body = cwBody(box);
+    const msg = document.createElement("div");
+    msg.className = "cw-message";
+    msg.textContent = "This session is currently running in another Devin process" +
+      (m.pid ? " (PID " + m.pid + ")" : "") +
+      ". You can take it over here, which may disrupt the other process, or cancel and close it there first.";
+    body.appendChild(msg);
+    const row = cwButtons(box);
+    const done = (decision) => { box.remove(); vscode.postMessage({ type: "takeoverDecision", requestId: m.requestId, decision }); };
+    row.appendChild(btn("Take over", "primary", () => done("takeover")));
+    row.appendChild(btn("Cancel", "secondary", () => done("cancel")));
+    el.permissionTray.appendChild(box);
+  }
+
   function sessionRow(s, activeId) {
     const item = document.createElement("div");
     item.className = "session-item" + (s.id === activeId ? " active" : "");
@@ -2411,6 +2440,16 @@ import { renderMarkdown } from "./markdown.js";
     const title = document.createElement("div");
     title.className = "session-title";
     title.textContent = s.title || s.short_id || s.id;
+    // Liveness dot: green = running, amber = waiting for you, gray = not running.
+    const st = sessionStatuses[s.id];
+    const dot = document.createElement("span");
+    dot.className = "session-dot " +
+      (st === "running" ? "dot-running" : st === "starting" ? "dot-starting" : st === "idle" ? "dot-idle" : "dot-dead");
+    dot.title = st === "running" ? "Running"
+      : st === "starting" ? "Waking\u2026"
+      : st === "idle" ? "Alive, waiting for you"
+      : "Not running";
+    title.insertBefore(dot, title.firstChild);
     const meta = document.createElement("div");
     meta.className = "session-meta";
     const time = document.createElement("span");
@@ -2594,11 +2633,12 @@ import { renderMarkdown } from "./markdown.js";
     if (l) l.remove();
   }
 
-  function showThreadLoading() {
+  function showThreadLoading(waking) {
     el.thread.innerHTML = "";
     const d = document.createElement("div");
     d.className = "thread-loading";
-    d.innerHTML = '<i class="codicon codicon-loading codicon-modifier-spin"></i><span>Loading session\u2026</span>';
+    const label = waking ? "Waking session\u2026" : "Loading session\u2026";
+    d.innerHTML = '<i class="codicon codicon-loading codicon-modifier-spin"></i><span>' + label + "</span>";
     el.thread.appendChild(d);
   }
 
@@ -2812,7 +2852,13 @@ import { renderMarkdown } from "./markdown.js";
           openAutocomplete((m.items || []).map((f) => ({ kind: "file", path: f.path, label: f.label, detail: f.detail })));
         }
         break;
-      case "sessions": hideBoot(); renderSessions(m.sessions, m.activeId, m.folders); break;
+      case "sessions":
+        hideBoot();
+        if (m.statuses) sessionStatuses = m.statuses;
+        renderSessions(m.sessions, m.activeId, m.folders);
+        break;
+      case "sessionStatuses": applyStatuses(m.statuses, m.activeId); break;
+      case "lockConflict": showLockConflict(m); break;
       case "sessionReady": el.status.textContent = ""; break;
       case "status": el.status.textContent = m.text || ""; break;
       case "clear":
@@ -2840,7 +2886,7 @@ import { renderMarkdown } from "./markdown.js";
         el.usage.innerHTML = "";
         lastUsage = null;
         closeUsagePopup();
-        if (m.loading) showThreadLoading();
+        if (m.loading) showThreadLoading(m.waking);
         else if (body === "thread") renderWelcome();
         break;
       case "loaded":
