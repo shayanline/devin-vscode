@@ -1,7 +1,6 @@
 # Devin for VS Code
 
-[![VS Code Marketplace](https://vsmarketplacebadges.dev/version-short/shayanline.devin-vscode.svg?label=Marketplace)](https://marketplace.visualstudio.com/items?itemName=shayanline.devin-vscode)
-[![Marketplace installs](https://vsmarketplacebadges.dev/installs-short/shayanline.devin-vscode.svg?label=Installs)](https://marketplace.visualstudio.com/items?itemName=shayanline.devin-vscode)
+[![VS Code Marketplace](https://badgen.net/vs-marketplace/v/shayanline.devin-vscode?label=Marketplace)](https://marketplace.visualstudio.com/items?itemName=shayanline.devin-vscode)
 [![Latest release](https://img.shields.io/github/v/release/shayanline/devin-vscode?label=Release)](https://github.com/shayanline/devin-vscode/releases/latest)
 
 Bring the Devin coding agent into VS Code as a native chat panel, so you stop
