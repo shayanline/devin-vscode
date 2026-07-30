@@ -4,11 +4,17 @@
 [![Marketplace installs](https://vsmarketplacebadges.dev/installs-short/shayanline.devin-vscode.svg?label=Installs)](https://marketplace.visualstudio.com/items?itemName=shayanline.devin-vscode)
 [![Latest release](https://img.shields.io/github/v/release/shayanline/devin-vscode?label=Release)](https://github.com/shayanline/devin-vscode/releases/latest)
 
-A native chat panel for the [Devin CLI](https://docs.devin.ai), built on the
-[Agent Client Protocol (ACP)](https://agentclientprotocol.com). It runs
-`devin acp` as a subprocess and speaks JSON-RPC over stdio, so you get the full
-agent experience inside VS Code: streaming replies, live tool calls, inline
-permission prompts, per workspace sessions, and trackable diffs.
+Bring the Devin coding agent into VS Code as a native chat panel, so you stop
+switching to a terminal and work with it the way you already work in the editor.
+
+The extension connects to the [Devin CLI](https://docs.devin.ai) you have
+installed and renders the whole session as first class VS Code UI: streaming
+replies, reasoning shown as it happens, tool calls drawn as cards, every file
+edit as a native diff you can keep or undo, permission and question prompts
+inline, and a session browser scoped to your workspace. It runs entirely through
+your own `devin` install over the [Agent Client Protocol](https://agentclientprotocol.com),
+and adds no separate service or account of its own. Think of it as the editor
+front end for the agent you already use.
 
 > **Preview.** This is an early release and under active development. It works
 > day to day, but expect rough edges and frequent updates. Feedback and issues
