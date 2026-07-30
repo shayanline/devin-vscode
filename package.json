@@ -214,11 +214,13 @@
           "enum": [
             "inline",
             "hover",
+            "input",
             "none"
           ],
           "enumDescriptions": [
             "Click a sent message to edit it in place",
             "Show an edit button on hover; editing happens in place",
+            "Edit a sent message in the main composer at the bottom",
             "Disable editing sent messages"
           ],
           "default": "inline",

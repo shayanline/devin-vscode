@@ -123,7 +123,19 @@ export class AcpClient extends EventEmitter {
       return;
     }
     // Devin custom notifications (logs, mcp status) start with `_cognition.ai/`.
-    this.emit("log", `[notify] ${method}`);
+    // Log a small payload preview so their shape can be inspected in the Output
+    // channel (used to decide what to surface in the UI, e.g. MCP start /
+    // interaction lines).
+    let preview = "";
+    try {
+      const s = JSON.stringify(params);
+      if (s) {
+        preview = " " + (s.length > 300 ? s.slice(0, 300) + "\u2026" : s);
+      }
+    } catch {
+      // ignore non-serialisable payloads
+    }
+    this.emit("log", `[notify] ${method}${preview}`);
   }
 
   async initialize(): Promise<InitializeResult> {

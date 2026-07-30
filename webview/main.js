@@ -162,6 +162,12 @@ import { renderMarkdown } from "./markdown.js";
   function send() {
     const text = el.input.value.trim();
     if (!text) return;
+    // In editRequests:input mode, the composer is editing a past request:
+    // submitting rewinds to it and resends instead of appending a new turn.
+    if (editingTurn) {
+      submitInputEdit(editingTurn, text);
+      return;
+    }
     const startNew = body === "list";
     if (startNew) {
       currentTitle = "Chat";
@@ -185,6 +191,7 @@ import { renderMarkdown } from "./markdown.js";
       if ((e.key === "Enter" || e.key === "Tab") && ac.items.length) { e.preventDefault(); acceptAutocomplete(ac.items[ac.index]); return; }
       if (e.key === "Escape") { e.preventDefault(); closeAutocomplete(); return; }
     }
+    if (e.key === "Escape" && editingTurn) { e.preventDefault(); cancelInputEditing(); return; }
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
   });
 
@@ -663,14 +670,29 @@ import { renderMarkdown } from "./markdown.js";
       turn.req.appendChild(ts);
     }
 
-    // Inline (click-to-edit) affordance on the whole bubble.
+    // Click-to-edit on the whole bubble (inline and input modes both start on a
+    // click; input mode routes the text into the composer).
     turn.reqBody.onclick = null;
-    if (caps.editRequests === "inline" && canEditTurn(turn)) {
+    if ((caps.editRequests === "inline" || caps.editRequests === "input") && canEditTurn(turn)) {
       turn.req.classList.add("editable-inline");
       turn.reqBody.onclick = () => startEditing(turn);
     } else {
       turn.req.classList.remove("editable-inline");
     }
+
+    // Keyboard affordances on the request bubble (VS Code makes request rows
+    // focusable): Enter/Space edits, Delete/Backspace restores to this turn.
+    turn.reqBody.tabIndex = 0;
+    turn.reqBody.setAttribute("role", "button");
+    turn.reqBody.onkeydown = (e) => {
+      if ((e.key === "Delete" || e.key === "Backspace") && canRestoreTurn(turn)) {
+        e.preventDefault();
+        doRestore(turn);
+      } else if ((e.key === "Enter" || e.key === " ") && canEditTurn(turn)) {
+        e.preventDefault();
+        startEditing(turn);
+      }
+    };
 
     // Checkpoint row (Restore Checkpoint) between request and response.
     renderCheckpointRow(turn);
@@ -831,8 +853,13 @@ import { renderMarkdown } from "./markdown.js";
 
   // --- Edit a request in place --------------------------------------------
 
+  // The turn currently being edited in the bottom composer (editRequests:input).
+  let editingTurn = null;
+
   function startEditing(turn) {
-    if (turn.editing || !canEditTurn(turn)) return;
+    if (!canEditTurn(turn)) return;
+    if (caps.editRequests === "input") { startInputEditing(turn); return; }
+    if (turn.editing) return;
     turn.editing = true;
     turn.req.classList.add("editing");
     turn.reqText.classList.add("hidden");
@@ -872,18 +899,80 @@ import { renderMarkdown } from "./markdown.js";
     markDiscardable(turn, false);
   }
 
-  async function submitEdit(turn, text) {
-    text = (text || "").trim();
-    if (!text) return;
-    const needs = await revertNeedsConfirm(turn);
-    if (needs && !(await confirmDiscard())) return;
-    finishEditing(turn);
+  // Rewind to before `turn` and resend `text` (shared by inline + input edits).
+  function revertAndResend(turn, text) {
     trimTurnsFrom(turn);
     if (turn.headBefore == null) {
       vscode.postMessage({ type: "revertExecute", newSession: true, resendText: text });
     } else {
       vscode.postMessage({ type: "revertExecute", head: turn.headBefore, resendText: text });
     }
+  }
+
+  async function submitEdit(turn, text) {
+    text = (text || "").trim();
+    if (!text) return;
+    const needs = await revertNeedsConfirm(turn);
+    if (needs && !(await confirmDiscard())) return;
+    finishEditing(turn);
+    revertAndResend(turn, text);
+  }
+
+  // --- Edit a request from the bottom composer (editRequests:input) ---------
+
+  function startInputEditing(turn) {
+    // Only one input edit at a time; re-target if already editing another.
+    if (editingTurn && editingTurn !== turn) cancelInputEditing();
+    editingTurn = turn;
+    el.input.value = turn.text;
+    el.inputBox.classList.add("editing-request");
+    showEditingBanner();
+    markDiscardable(turn, true);
+    el.input.focus();
+    el.input.setSelectionRange(el.input.value.length, el.input.value.length);
+    autosize();
+    updateSendState();
+  }
+
+  function cancelInputEditing() {
+    if (!editingTurn) return;
+    markDiscardable(editingTurn, false);
+    editingTurn = null;
+    el.inputBox.classList.remove("editing-request");
+    removeEditingBanner();
+    el.input.value = "";
+    autosize();
+    updateSendState();
+  }
+
+  async function submitInputEdit(turn, text) {
+    const needs = await revertNeedsConfirm(turn);
+    if (needs && !(await confirmDiscard())) return;
+    cancelInputEditing();
+    revertAndResend(turn, text);
+  }
+
+  function showEditingBanner() {
+    removeEditingBanner();
+    const bar = document.createElement("div");
+    bar.className = "input-editing-banner";
+    bar.id = "input-editing-banner";
+    const label = document.createElement("span");
+    label.className = "input-editing-label";
+    label.innerHTML = '<i class="codicon codicon-edit"></i><span>Editing message</span>';
+    const cancel = document.createElement("button");
+    cancel.className = "chip-x";
+    cancel.title = "Cancel edit (Esc)";
+    cancel.innerHTML = '<i class="codicon codicon-close"></i>';
+    cancel.addEventListener("click", (e) => { e.stopPropagation(); cancelInputEditing(); });
+    bar.appendChild(label);
+    bar.appendChild(cancel);
+    el.inputBox.insertBefore(bar, el.inputBox.firstChild);
+  }
+
+  function removeEditingBanner() {
+    const b = document.getElementById("input-editing-banner");
+    if (b) b.remove();
   }
 
   function markDiscardable(fromTurn, on) {
