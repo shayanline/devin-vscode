@@ -527,7 +527,7 @@ import { renderMarkdown } from "./markdown.js";
   // target ("checkpoint") is the head captured before it ran (headBefore).
   let lastHead = null;
   // Feature gates from the host (revert capability + settings).
-  let caps = { revert: false, editRequests: "inline", checkpoints: true, showFileChanges: true, confirmRemoval: true, verbose: true, progressBorder: true, contextUsage: true, inlineReferencesStyle: "box" };
+  let caps = { revert: false, editRequests: "inline", checkpoints: true, showFileChanges: true, confirmRemoval: true, verbose: true, progressBorder: true, contextUsage: true, inlineReferencesStyle: "box", thinkingStyle: "fixedScrolling", streamAnim: "rise" };
   // Pending revert-preview requests keyed by token.
   const previewWaiters = new Map();
   let previewSeq = 0;
@@ -666,7 +666,7 @@ import { renderMarkdown } from "./markdown.js";
     if (caps.verbose && !turn.replayed && turn.createdAt) {
       ts = document.createElement("div");
       ts.className = "turn-ts";
-      ts.textContent = "Sent " + fmtTime(turn.createdAt);
+      ts.appendChild(timeFlip("Sent ", turn.createdAt));
       turn.req.appendChild(ts);
     }
 
@@ -719,7 +719,8 @@ import { renderMarkdown } from "./markdown.js";
     if (caps.verbose && !turn.replayed && turn.completedAt) {
       const det = document.createElement("span");
       det.className = "chat-footer-details";
-      det.textContent = [turn.model, fmtTime(turn.completedAt)].filter(Boolean).join("  \u00b7  ");
+      if (turn.model) det.appendChild(document.createTextNode(turn.model + "  \u00b7  "));
+      det.appendChild(timeFlip("", turn.completedAt));
       footer.appendChild(det);
     }
     turn.footer = footer;
@@ -1103,6 +1104,8 @@ import { renderMarkdown } from "./markdown.js";
     const atBottom = el.thread.scrollHeight - el.thread.scrollTop - el.thread.clientHeight < 60;
     if (block.kind === "thinking") {
       renderThinkingItems(block);
+      // Keep the fixed-height peek pinned to the latest reasoning.
+      if (block.peek && block.scrollEl) block.scrollEl.scrollTop = block.scrollEl.scrollHeight;
     } else if (block.kind === "user") {
       if (block.turn) { block.turn.text = block.buffer; block.turn.reqText.innerHTML = renderMarkdown(block.buffer); }
     } else {
@@ -1129,7 +1132,13 @@ import { renderMarkdown } from "./markdown.js";
     renderOpenBlock();
     if (block.kind === "thinking") {
       if (block.timer) clearInterval(block.timer);
-      if (block.details) block.details.classList.remove("thinking-active");
+      if (block.details) {
+        block.details.classList.remove("thinking-active");
+        block.details.classList.remove("thinking-peek");
+      }
+      // A streaming peek collapses to the header when done (unless the user
+      // expanded/collapsed it themselves).
+      if (block.peek && !block.userToggled && block.collapse) block.collapse.setCollapsed(true);
       const secs = Math.max(1, Math.round((Date.now() - block.start) / 1000));
       if (block.label) block.label.textContent = `Thought for ${secs}s`;
     }
@@ -1174,7 +1183,10 @@ import { renderMarkdown } from "./markdown.js";
       finalizeBlock();
       hideWelcome();
       ensureTurn();
-      const c = makeCollapsible("thinking thinking-active", { startCollapsed: true });
+      // fixedScrolling shows a live, fixed-height peek while streaming (VS
+      // Code's chat.agent.thinkingStyle); collapsed starts folded.
+      const peek = caps.thinkingStyle === "fixedScrolling";
+      const c = makeCollapsible("thinking thinking-active" + (peek ? " thinking-peek" : ""), { startCollapsed: !peek });
       const chev = document.createElement("i");
       chev.className = "codicon codicon-chevron-right thinking-chevron";
       const label = document.createElement("span");
@@ -1186,8 +1198,9 @@ import { renderMarkdown } from "./markdown.js";
       bodyEl.className = "thinking-body";
       c.body.appendChild(bodyEl);
       respTarget().appendChild(c.root);
-      block = { kind: "thinking", mid, details: c.root, body: bodyEl, label, buffer: "", start: Date.now(), timer: null };
+      block = { kind: "thinking", mid, details: c.root, body: bodyEl, label, buffer: "", start: Date.now(), timer: null, peek, collapse: c, scrollEl: c.body, userToggled: false };
       const tb = block;
+      c.header.addEventListener("click", () => { tb.userToggled = true; });
       tb.timer = setInterval(() => {
         if (!tb.label) return;
         const secs = Math.max(1, Math.round((Date.now() - tb.start) / 1000));
@@ -2359,6 +2372,8 @@ import { renderMarkdown } from "./markdown.js";
       el.usage.classList.add("hidden");
       closeUsagePopup();
     }
+    // Drive the streaming entrance animation from the setting.
+    el.thread.dataset.anim = caps.streamAnim || "rise";
   }
 
   // --- Welcome / empty state ----------------------------------------------
@@ -2468,6 +2483,31 @@ import { renderMarkdown } from "./markdown.js";
   function fmtTime(ts) {
     try { return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
     catch { return ""; }
+  }
+
+  // Relative age of a millisecond timestamp ("2m ago"), for the timestamp flip.
+  function agoMs(ms) {
+    const d = Math.max(0, (Date.now() - ms) / 1000);
+    if (d < 60) return "just now";
+    if (d < 3600) return Math.floor(d / 60) + "m ago";
+    if (d < 86400) return Math.floor(d / 3600) + "h ago";
+    return Math.floor(d / 86400) + "d ago";
+  }
+
+  // A timestamp that flips relative <-> absolute on hover, mirroring VS Code's
+  // chat-response/request-timing micro-interaction. `prefix` e.g. "Sent ".
+  function timeFlip(prefix, ts) {
+    const wrap = document.createElement("span");
+    wrap.className = "time-flip";
+    const primary = document.createElement("span");
+    primary.className = "time-primary";
+    primary.textContent = prefix + agoMs(ts);
+    const alt = document.createElement("span");
+    alt.className = "time-alt";
+    alt.textContent = prefix + fmtTime(ts);
+    wrap.appendChild(primary);
+    wrap.appendChild(alt);
+    return wrap;
   }
 
   // --- Usage / cost --------------------------------------------------------
@@ -2680,7 +2720,9 @@ import { renderMarkdown } from "./markdown.js";
           verbose: m.verbose !== undefined ? !!m.verbose : caps.verbose,
           progressBorder: m.progressBorder !== undefined ? !!m.progressBorder : caps.progressBorder,
           contextUsage: m.contextUsage !== undefined ? !!m.contextUsage : caps.contextUsage,
-          inlineReferencesStyle: m.inlineReferencesStyle || caps.inlineReferencesStyle
+          inlineReferencesStyle: m.inlineReferencesStyle || caps.inlineReferencesStyle,
+          thinkingStyle: m.thinkingStyle || caps.thinkingStyle,
+          streamAnim: m.streamAnim || caps.streamAnim
         });
         applyCapPrefs();
         refreshTurnChrome();

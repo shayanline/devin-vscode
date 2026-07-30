@@ -1213,7 +1213,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
       verbose: this.cfg().get<boolean>("verbose", true),
       progressBorder: this.cfg().get<boolean>("progressBorder.enabled", true),
       contextUsage: this.cfg().get<boolean>("contextUsage.enabled", true),
-      inlineReferencesStyle: this.cfg().get<string>("inlineReferences.style", "box")
+      inlineReferencesStyle: this.cfg().get<string>("inlineReferences.style", "box"),
+      thinkingStyle: this.cfg().get<string>("thinking.style", "fixedScrolling"),
+      streamAnim: this.cfg().get<string>("incrementalRendering.animationStyle", "rise")
     });
   }
 
