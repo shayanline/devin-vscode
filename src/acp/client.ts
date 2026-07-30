@@ -29,13 +29,13 @@ export interface AcpClientOptions {
 export interface AcpHost {
   requestPermission(params: RequestPermissionParams): Promise<RequestPermissionResult>;
   readTextFile(params: ReadTextFileParams): Promise<{ content: string }>;
-  writeTextFile(params: WriteTextFileParams): Promise<null>;
+  writeTextFile(params: WriteTextFileParams): Promise<Record<string, never>>;
   createElicitation(params: unknown): Promise<unknown>;
   createTerminal(params: CreateTerminalParams): { terminalId: string };
   terminalOutput(params: TerminalRef): { output: string; truncated: boolean; exitStatus: TerminalExitStatus | null };
   waitForTerminalExit(params: TerminalRef): Promise<TerminalExitStatus>;
-  killTerminal(params: TerminalRef): null;
-  releaseTerminal(params: TerminalRef): null;
+  killTerminal(params: TerminalRef): Record<string, never>;
+  releaseTerminal(params: TerminalRef): Record<string, never>;
 }
 
 // Emitted events:
@@ -111,9 +111,10 @@ export class AcpClient extends EventEmitter {
       case "terminal/release":
         return this.host.releaseTerminal(params as TerminalRef);
       default:
-        // Unknown/custom client method: reply with null to keep the agent moving.
+        // Unknown/custom client method: reply with an empty object to keep the
+        // agent moving (a bare null can trip its response parser).
         this.emit("log", `[unhandled-request] ${method}`);
-        return null;
+        return {};
     }
   }
 

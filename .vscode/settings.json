@@ -1,4 +1,4 @@
 {
-    "devin.defaultMode": "bypass",
-    "devin.defaultModel": "claude-opus-4-8-high"
+    "devin.defaultMode": "accept-edits",
+    "devin.defaultModel": "adaptive"
 }

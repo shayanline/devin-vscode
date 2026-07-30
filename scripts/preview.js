@@ -70,13 +70,29 @@ const rootVars = Object.entries(VARS)
   .map(([k, v]) => `  --vscode-${k}: ${v};`)
   .join("\n");
 
+// Shared composer options so the model / mode pickers and the context ring
+// look populated, the way they do against a real CLI.
+const MODES = [
+  { value: "accept-edits", name: "Code" },
+  { value: "ask", name: "Ask" },
+  { value: "plan", name: "Plan" },
+  { value: "bypass", name: "Bypass" }
+];
+const MODELS = [
+  { id: "adaptive", name: "Adaptive", default: "adaptive", variants: [{ value: "adaptive", name: "Adaptive" }] },
+  { id: "claude", name: "Claude Sonnet 4.5", default: "claude-sonnet-4-5", variants: [{ value: "claude-sonnet-4-5", name: "Sonnet" }, { value: "claude-opus-4-5", name: "Opus" }] },
+  { id: "gpt", name: "GPT-5", default: "gpt-5", variants: [{ value: "gpt-5", name: "GPT-5" }] }
+];
+const options = (currentModel, currentMode) => ({ type: "options", modes: MODES, currentMode: currentMode || "accept-edits", models: MODELS, currentModel: currentModel || "adaptive" });
+
 // A rich conversation exercising text, thinking, plan, tool cards, file rows,
 // a follow-up message, plus a permission prompt and an interactive question.
 const SCENARIOS = {
   full: [
     { type: "ready" },
     { type: "body", body: "thread" },
-    { type: "capabilities", revert: true, editRequests: "inline", checkpoints: true, showFileChanges: true },
+    { type: "capabilities", revert: true, editRequests: "inline", checkpoints: true, showFileChanges: true, contextUsage: true },
+    options("adaptive"),
     { type: "userMessage", text: "Refactor the auth module to centralise token handling, then run the tests." },
     { type: "busy", value: true },
     { type: "assistantStart" },
@@ -94,6 +110,7 @@ const SCENARIOS = {
     { type: "assistantChunk", text: "All tests pass. Token handling now lives in [src/auth/token-service.ts](src/auth/token-service.ts), and the callers were updated to use it. Anything else you'd like adjusted?" },
     { type: "assistantEnd" },
     { type: "busy", value: false },
+    { type: "usage", used: 41200, size: 200000, cost: 0.09 },
     { type: "permission", requestId: "p1", title: "Devin wants to run: `git push origin main`", options: [
       { optionId: "allow", name: "Allow", kind: "allow" },
       { optionId: "reject", name: "Reject", kind: "reject" }
@@ -125,8 +142,10 @@ const SCENARIOS = {
   tools: [
     { type: "ready" },
     { type: "body", body: "thread" },
-    { type: "capabilities", revert: true },
+    { type: "capabilities", revert: true, contextUsage: true },
+    options("gpt-5"),
     { type: "userMessage", text: "Research the release process and draw the flow." },
+    { type: "busy", value: true },
     { type: "assistantStart" },
     { type: "toolCall", id: "s1", title: "Searched web for release checklist", kind: "fetch", meta: { inferenceToolName: "web_search" }, status: "completed", rawInput: { query: "software release checklist best practices" }, content: [{ type: "text", text: 'Found 5 result(s) for "software release checklist best practices"' }] },
     { type: "toolCall", id: "f1", title: "Fetched https://semver.org", kind: "fetch", meta: { inferenceToolName: "webfetch" }, status: "completed", rawInput: { url: "https://semver.org" }, content: [{ type: "text", text: "Fetched 4210 characters from https://semver.org" }] },
@@ -136,7 +155,51 @@ const SCENARIOS = {
     { type: "toolCall", id: "r2", title: "Read src/release/tag.ts", kind: "read", status: "completed" },
     { type: "toolCall", id: "r3", title: "Grep for version bump", kind: "search", status: "completed", rawInput: { query: "bumpVersion" } },
     { type: "assistantChunk", text: "Here is the release flow:\n\n```mermaid\nflowchart TD\n  A[Merge to main] --> B{Tests pass?}\n  B -- yes --> C[Bump version]\n  B -- no --> D[Fix and retry]\n  C --> E[Tag release]\n  E --> F[Publish]\n```\n\nThat covers the full path from merge to publish." },
-    { type: "assistantEnd" }
+    { type: "assistantEnd" },
+    { type: "busy", value: false },
+    { type: "usage", used: 88600, size: 200000, cost: 0.21 }
+  ],
+  // A focused code-editing turn: reasoning, an edit rendered as a diff card, a
+  // benchmark run, the end-of-turn file-changes summary and the context ring.
+  diff: [
+    { type: "ready" },
+    { type: "body", body: "thread" },
+    { type: "capabilities", revert: true, editRequests: "inline", checkpoints: true, showFileChanges: true, contextUsage: true },
+    options("claude-sonnet-4-5"),
+    { type: "userMessage", text: "Orders load with an N+1 query when I include their line items. Fix it and prove the win with the benchmark." },
+    { type: "busy", value: true },
+    { type: "assistantStart" },
+    { type: "thoughtChunk", text: "The serializer touches `order.line_items` inside a loop, so each order triggers its own query.\n\nA single `prefetch_related(\"line_items\")` on the queryset collapses that into two queries total. Then I can run the benchmark task to confirm the drop." },
+    { type: "assistantChunk", text: "Found it. `OrderSerializer` walks `line_items` per order, so a page of 50 orders fires 51 queries. Switching the viewset queryset to prefetch the relation fixes it." },
+    { type: "toolCall", id: "d0", title: "Read orders/api/views.py", kind: "read", status: "completed", locations: [{ path: "orders/api/views.py", line: 61 }] },
+    { type: "toolCall", id: "d1", title: "Edit orders/api/views.py", kind: "edit", status: "completed", rawInput: { path: "orders/api/views.py" }, content: [{ type: "diff", path: "orders/api/views.py", added: 5, removed: 3 }] },
+    { type: "toolCall", id: "d2", title: "Run python manage.py benchmark_orders", kind: "execute", status: "completed", rawInput: { command: "python manage.py benchmark_orders --page-size 50" }, content: [{ type: "text", text: "before:  51 queries   382 ms\nafter:    2 queries    24 ms\n\nrows returned: 50 (unchanged)\nOK" }] },
+    { type: "fileChange", path: "orders/api/views.py", added: 5, removed: 3 },
+    { type: "assistantChunk", text: "Done. The page now runs **2 queries instead of 51** and drops from 382 ms to 24 ms, with the same rows returned. Change is in [orders/api/views.py](orders/api/views.py)." },
+    { type: "assistantEnd" },
+    { type: "busy", value: false },
+    { type: "usage", used: 33750, size: 200000, cost: 0.07 }
+  ],
+  // The session browser: two workspace folders, grouped, with every liveness
+  // state (running / waiting / waking / not running) and varied ages.
+  sessions: [
+    { type: "ready" },
+    options("adaptive"),
+    { type: "sessions", activeId: "s1",
+      folders: [
+        { path: "/Users/dev/Projects/web-app", name: "web-app" },
+        { path: "/Users/dev/Projects/api-service", name: "api-service" }
+      ],
+      statuses: { s1: "running", s2: "idle", s4: "idle", s6: "starting" },
+      sessions: [
+        { id: "s1", short_id: "devin-8f2a", title: "Centralise token refresh in the auth module", working_directory: "/Users/dev/Projects/web-app", last_activity_ago: "2m ago" },
+        { id: "s2", short_id: "devin-3c7d", title: "Fix a flaky integration test", working_directory: "/Users/dev/Projects/web-app", last_activity_ago: "1h ago" },
+        { id: "s3", short_id: "devin-a10b", title: "Add pagination to the users endpoint", working_directory: "/Users/dev/Projects/web-app", last_activity_ago: "yesterday" },
+        { id: "s4", short_id: "devin-6e4f", title: "Button component theme tokens", working_directory: "/Users/dev/Projects/api-service", last_activity_ago: "3d ago" },
+        { id: "s5", short_id: "devin-b22c", title: "Move settings into env config", working_directory: "/Users/dev/Projects/api-service", last_activity_ago: "5d ago" },
+        { id: "s6", short_id: "devin-9d81", title: "Investigate 502s on the API gateway", working_directory: "/Users/dev/Projects/api-service", last_activity_ago: "1w ago" }
+      ]
+    }
   ]
 };
 

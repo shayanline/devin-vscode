@@ -370,21 +370,6 @@ body {
   border-color: var(--vscode-focusBorder);
 }
 
-.session-newchat {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin: 2px 2px 6px;
-  padding: 8px;
-  border-radius: 4px;
-  cursor: pointer;
-  font-weight: 600;
-}
-
-.session-newchat:hover {
-  background: var(--vscode-list-hoverBackground);
-}
-
 .sessions-empty-sm {
   padding: 16px 8px;
   text-align: center;
@@ -411,6 +396,42 @@ body {
   min-height: 0;
   display: flex;
   flex-direction: column;
+  position: relative;
+}
+
+/* Jump-to-bottom button, mirroring VS Code's .chat-scroll-down: a small round
+   secondary button pinned bottom-right of the thread, shown only when scrolled
+   up (via .visible), 27px circle with a centered chevron. */
+.chat-scroll-down {
+  display: none;
+  position: absolute;
+  bottom: 10px;
+  right: 14px;
+  z-index: 10;
+  width: 27px;
+  height: 27px;
+  padding: 0;
+  border-radius: 100%;
+  border: 1px solid var(--vscode-chat-requestBorder, var(--vscode-widget-border, transparent));
+  background: var(--vscode-button-secondaryBackground, var(--vscode-editorWidget-background));
+  color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+  cursor: pointer;
+  align-items: center;
+  justify-content: center;
+  box-shadow: var(--vscode-widget-shadow, rgba(0, 0, 0, 0.36)) 0 2px 8px;
+}
+
+.chat-scroll-down:hover {
+  background: var(--vscode-button-secondaryHoverBackground, var(--vscode-toolbar-hoverBackground));
+}
+
+.chat-scroll-down.visible {
+  display: inline-flex;
+}
+
+.chat-scroll-down .codicon {
+  margin: 0;
+  font-size: 16px;
 }
 
 #thread,
@@ -509,14 +530,14 @@ body {
   height: 14px;
 }
 
-/* Send button: 28x28 filled, radius small, mirroring VS Code's
+/* Send button: 24x24 filled, radius small, mirroring VS Code's
    .chat-submit-button > .action-label (button colours + 120ms bg transition). */
 .send-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
+  width: 24px;
+  height: 24px;
   border: none;
   border-radius: var(--dv-radius-sm);
   background: var(--vscode-button-background);
@@ -553,7 +574,7 @@ body {
 }
 
 .send-btn .codicon {
-  font-size: 19px;
+  font-size: 18px;
 }
 
 .btn {
@@ -1398,9 +1419,11 @@ body {
   color: var(--vscode-foreground);
 }
 
+/* Confirming: a neutral rounded pill (VS Code's .confirming), the label itself
+   shimmers via .dv-shimmer rather than turning red. */
 .checkpoint-row.confirming .checkpoint-restore {
-  color: var(--vscode-errorForeground);
-  border-color: var(--vscode-errorForeground);
+  background: var(--vscode-sideBar-background, var(--vscode-list-hoverBackground));
+  border-color: var(--vscode-panel-border);
 }
 
 .checkpoint-restore .codicon {
@@ -1488,6 +1511,12 @@ body {
 /* Headless (assistant-first) turns have no request, so retrying the empty
    request text is meaningless: hide the footer's Retry there. */
 .turn.headless .chat-footer .footer-retry {
+  display: none;
+}
+
+/* VS Code shows Retry only on the last response; hide it on every earlier one
+   (the .is-last class is maintained by refreshRetryButtons). */
+.chat-footer:not(.is-last) .footer-retry {
   display: none;
 }
 
@@ -2645,10 +2674,26 @@ body {
 .elicit-option {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
+  gap: 6px;
+  padding: 5px 6px;
   border-radius: var(--dv-radius-md);
   cursor: pointer;
+}
+
+/* The "Other" row keeps its check + label pinned to the top while the answer
+   textarea, sitting to their right, grows down over wrapped lines. */
+.elicit-option:has(.elicit-other) {
+  align-items: flex-start;
+}
+
+.elicit-option:has(.elicit-other) .elicit-number,
+.elicit-option:has(.elicit-other) .elicit-indicator,
+.elicit-option:has(.elicit-other) .elicit-option-label {
+  margin-top: 5px;
+}
+
+.elicit-option:has(.elicit-other) .elicit-option-label {
+  flex: 0 0 auto;
 }
 
 .elicit-option:hover {
@@ -2669,12 +2714,24 @@ body {
   pointer-events: none;
 }
 
+/* Leading 1-based option number (VS Code's .chat-question-list-number). */
+.elicit-number {
+  flex: 0 0 auto;
+  min-width: 12px;
+  text-align: right;
+  font-size: 0.85em;
+  opacity: 0.5;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Trailing check, shown only when the row is selected (VS Code's
+   .chat-question-list-indicator, pinned to the right with margin-left:auto). */
 .elicit-indicator {
-  flex: 0 0 16px;
-  width: 16px;
+  flex: 0 0 auto;
+  margin-left: auto;
   font-size: 14px;
   visibility: hidden;
-  color: var(--vscode-icon-foreground, var(--vscode-foreground));
+  color: var(--vscode-list-activeSelectionForeground, var(--vscode-foreground));
 }
 
 .elicit-native:checked ~ .elicit-indicator {
@@ -2685,9 +2742,18 @@ body {
   flex: 1 1 auto;
 }
 
+/* The "Other" answer sits to the right of the label, fills the remaining width,
+   and wraps onto new lines (auto-growing) as the text exceeds the width. */
 .elicit-option .elicit-other {
   flex: 1 1 auto;
-  min-width: 120px;
+  min-width: 0;
+  resize: none;
+  overflow: hidden;
+  min-height: 26px;
+  max-height: 160px;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: 1.4;
 }
 
 /* Highlight the question card flagged after a failed submit. */
