@@ -717,7 +717,23 @@ the jsdom harness (`scripts/webview-harness.js`) + a Playwright preview
 screenshot before moving on. Nothing here trusts the old plan's "done" flags —
 treat every item as to-verify-then-fix.
 
-**Phase A — Motion foundation (highest visual impact).**
+> **Status: all six phases shipped (v0.6.23 → v0.6.29).** Each phase was
+> verified in the jsdom harness + a Playwright preview screenshot, committed on
+> `main`, and installed. Item-level notes and any deferrals are inline below.
+> Remaining divergences are the documented boundaries at the end of this
+> section (ACP/platform limits), plus the tool-content rendering follow-up
+> tracked in §11.
+>
+> | Phase | Version | Notes |
+> |---|---|---|
+> | A — motion foundation | 0.6.23 / 0.6.24 | grid collapse, comet border, easings, copy cross-fade, footer model+time, used-refs frame |
+> | B — composer polish | 0.6.25 | send/stop icons, attachment pills + image thumbs + implicit "current file" pill, picker chrome, usage-ring tiers |
+> | C — content-part fidelity | 0.6.26 | markdown margins, edit-pill icon+status, framed terminal, question-carousel list rows + freeform, confirmation title, inline-anchor 0.5px, `inlineReferences.style` |
+> | D — docked widgets | 0.6.27 | docked plan/todo (auto-collapse + inline snapshot), docked working set with +/- totals, squared input top |
+> | E — behaviour gaps | 0.6.28 | `editRequests:input` mode, Delete-to-restore keybinding, welcome sizing/chips, `_cognition.ai/*` notification logging |
+> | F — polish | 0.6.29 | thinking `fixedScrolling` peek, streaming entrance variants, timestamp relative↔absolute flip |
+
+**Phase A — Motion foundation (highest visual impact). ✅ Shipped v0.6.23–0.6.24.**
 - A1. Introduce a shared collapse utility (`grid-template-rows:1fr↔0fr`,
   `180ms/140ms cubic-bezier(0.2,0,0,1)`, reduced-motion gated) and convert
   thinking, tools, used-refs, and long confirmations off native `<details>`
@@ -729,7 +745,7 @@ treat every item as to-verify-then-fix.
 - A3. Adopt `cubic-bezier(0.2,0,0,1)` and VS Code timings for chevrons, footer
   reveal (`0.1s ease-in-out`), and the copy→check cross-fade. (§4.4, §9)
 
-**Phase B — Composer polish.**
+**Phase B — Composer polish. ✅ Shipped v0.6.25.**
 - B1. Send icon → `codicon-arrow-up` (+0.5px nudge, `120ms` bg transition);
   stop → `codicon-debug-stop`; focus rings on send/stop. (§5.3)
 - B2. Attachments: `requestBorder`/`18px`/`11px` pill chrome, per-extension file
@@ -738,7 +754,7 @@ treat every item as to-verify-then-fix.
 - B3. Pickers: align mode/model dropdown buttons to `.chat-input-picker-item`
   tokens; usage ring amber/error tiers + hover-expand `%`. (§5.4, §5.5, §5.8)
 
-**Phase C — Content-part fidelity.**
+**Phase C — Content-part fidelity. ✅ Shipped v0.6.26.**
 - C1. Markdown: `p` margin 16px, heading bottom `0.875em`. (§6.1)
 - C2. Edit pill: file-type icon + status label ("Edited"/"Created"); optional
   progress-fill sweep. (§6.7)
@@ -751,13 +767,13 @@ treat every item as to-verify-then-fix.
   slot. (§6.10)
 - C6. Inline anchor: `0.5px` border + `show-file-icons`. (§6.8)
 
-**Phase D — Docked widgets & changes.**
+**Phase D — Docked widgets & changes. ✅ Shipped v0.6.27.**
 - D1. Dock the **live plan/todo** above the composer (flush, squared input top)
   with auto-collapse; keep an inline history snapshot. (§6.12)
 - D2. Working set: dock flush on the composer, square the input top corners, add
   total +/- counts in the header; optional per-turn changes pill. (§6.13)
 
-**Phase E — Behaviour gaps.**
+**Phase E — Behaviour gaps. ✅ Shipped v0.6.28.**
 - E1. Add the `input` value to `devin.editRequests` (edit in the bottom
   composer). (§7.3)
 - E2. Explicit "Undo" affordance + `Delete` keybinding → `revertExecute`. (§7.4)
@@ -766,10 +782,22 @@ treat every item as to-verify-then-fix.
 - E4. Investigate `_cognition.ai/*` notifications for MCP start/interaction dim
   lines; surface if present. (§6.14)
 
-**Phase F — Nice-to-have / low priority.**
-- Timing relative↔absolute flip (§4.5); streaming entrance variants (§9);
-  thinking `fixedScrolling` peek (§6.3); `#` variable completions (§5.7); model
-  hover cost card (§5.5); export/import sessions (§7.2); KaTeX math (§6.1).
+> **Phase E notes.** E2 shipped as the **Delete/Backspace keybinding** on the
+> focused request bubble (Enter/Space edits); the standalone Undo icon was
+> intentionally omitted because with checkpoints enabled (the default) VS Code
+> itself shows **Restore**, which the checkpoint row already provides. E4 shipped
+> as **notification logging only** — surfacing MCP start/interaction rows is
+> blocked until we capture the real `_cognition.ai/*` payload shapes.
+
+**Phase F — Nice-to-have / low priority. ✅ Shipped v0.6.29 (3 of 7; rest deferred).**
+- ✅ Timing relative↔absolute flip (§4.5); streaming entrance variants
+  (`devin.incrementalRendering.animationStyle`, §9); thinking `fixedScrolling`
+  peek (`devin.thinking.style`, default fixedScrolling, §6.3).
+- ➖ Deferred (data / platform limits): model hover cost card (§5.5 — ACP has
+  no per-model metadata/pricing), `#` variable completions (§5.7 — redundant
+  with `@`, no symbol provider in a webview), export/import sessions (§7.2 —
+  Devin persists sessions server-side), KaTeX math (§6.1 — heavy dependency for
+  output Devin does not emit).
 
 **Explicitly not doing (documented boundaries):**
 - 🚫 Tool risk badge (no ACP risk), redo & fork (`-32601` / non-deterministic),
@@ -777,6 +805,31 @@ treat every item as to-verify-then-fix.
 - ➖ Thumbs/Report-Issue telemetry, Copilot quota/entitlement/sign-in flows,
   PR/extensions/subagent parts, followup chips, Monaco input editor, live-Monaco
   code blocks.
+
+---
+
+## 11. Follow-up: tool-content rendering (running commands, questions)
+
+Phases A–F made the **chrome** match VS Code, but the **inside** of a tool card
+is still low-fidelity: the tool body renders `rawInput` as a raw JSON `<pre>`
+("Input") and results as a plain `<pre>`. Copilot instead renders each tool
+**kind** with a purpose-built view — a terminal command block for a run, a file
+pill for a read, a diff for an edit — and never shows the argument JSON.
+
+Plan:
+- Replace the generic "Input: {json}" section with **kind-aware** rendering:
+  - `execute` → a shell **command block** (extract `command`/`cmd`/`script`/`args`)
+    ahead of the (already framed) terminal/text output; not JSON.
+  - `read` / `edit` / `move` / `delete` → suppress the JSON (the title + file
+    pill + diff already convey it).
+  - `search` → a one-line "Search: {query/pattern}"; `fetch` → the URL.
+  - unknown / MCP tools → keep the JSON, but as a collapsed **"Raw input"**
+    fallback rather than the primary content.
+- Confirm the exact `rawInput` key names against a real Devin session (the tool
+  arg shapes are agent-specific), and handle common aliases.
+
+This is tracked separately from the six styling phases because it needs real
+ACP tool payloads to get the field extraction exactly right.
 
 ---
 
