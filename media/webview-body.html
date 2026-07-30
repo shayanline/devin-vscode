@@ -17,6 +17,7 @@
       <button id="title-btn" class="title-btn"><span id="chat-title">Chat</span><i class="codicon codicon-chevron-down title-chev"></i></button>
       <span class="spacer"></span>
       <span id="status"></span>
+      <button id="terminate-btn" class="icon-btn hidden" title="Terminate this session (stop its process)"><i class="codicon codicon-circle-slash"></i></button>
     </div>
 
     <div id="body">
@@ -42,8 +43,8 @@
           </div>
           <div class="toolbar-right">
             <button id="usage" class="usage-ring hidden" title=""></button>
-            <button id="send" class="send-btn" title="Send (Enter)" disabled><i class="codicon codicon-arrow-up"></i></button>
-            <button id="stop" class="send-btn stop hidden" title="Stop"><i class="codicon codicon-debug-stop"></i></button>
+            <button id="send" class="send-btn" title="Send (Enter)" disabled><svg class="send-glyph" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v3.5a1.5 1.5 0 0 1-1.5 1.5H5"/><path d="M7.5 6.5 5 9l2.5 2.5"/></svg></button>
+            <button id="stop" class="send-btn stop hidden" title="Stop"><i class="codicon codicon-stop-circle"></i></button>
           </div>
         </div>
       </div>

@@ -376,6 +376,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
         case "leaveToList":
           this.leaveToList();
           return;
+        case "terminateSession":
+          this.terminateSession(String(msg.id || ""));
+          return;
         case "takeoverDecision":
           this.resolveTakeover(String(msg.requestId || ""), String(msg.decision || "cancel"));
           return;
@@ -776,6 +779,25 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
   // the next chat.
   private leaveToList(): void {
     this.clearAttachments();
+  }
+
+  // Terminate a session's live process (kill its acp + terminals), freeing its
+  // lock and turning its dot gray. The conversation is preserved and can be
+  // woken again later. If the visible session is terminated it stays on screen
+  // as history and re-wakes on the next send.
+  private terminateSession(id: string): void {
+    const rt = this.runtimes.get(id);
+    if (!rt) {
+      return;
+    }
+    this.destroyRuntime(rt);
+    this.runtimes.delete(id);
+    this.starting.delete(id);
+    if (this.activeId === id) {
+      this.setBusy(false);
+    }
+    this.broadcastStatuses();
+    void this.refreshSessions();
   }
 
   private clearAttachments(): void {

@@ -155,6 +155,15 @@ test("session list shows liveness dots and offers take-over", async () => {
   assert.ok(cls.some((c) => c.includes("dot-idle")), "an idle (amber) dot");
   assert.ok(cls.some((c) => c.includes("dot-dead")), "a dead (gray) dot for the session with no status");
 
+  // Live sessions offer a terminate action; dead ones do not.
+  const rows = [...h.document.querySelectorAll("#sessions-list .session-item")];
+  const terminate = rows[0].querySelector(".session-actions .codicon-circle-slash");
+  assert.ok(terminate, "a live session row has a terminate button");
+  assert.ok(!rows[2].querySelector(".codicon-circle-slash"), "a dead session row has no terminate button");
+  terminate.parentElement.click();
+  await h.settle(5);
+  assert.ok(h.posted.some((m) => m.type === "terminateSession" && m.id === "aaa"), "terminate posts terminateSession");
+
   // A locked session offers take-over, which posts the decision back.
   h.post({ type: "lockConflict", requestId: "lock-1", id: "aaa", pid: 4242 });
   await h.settle(10);
