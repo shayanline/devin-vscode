@@ -212,6 +212,25 @@ import { renderMarkdown } from "./markdown.js";
     el.thread.scrollTop = el.thread.scrollHeight;
   }
 
+  // Match VS Code's dynamic working-border speed: the "comet" duration scales
+  // with input width (clamped 1.4s-2.5s) so it travels at a consistent visual
+  // pace at any panel width. Mirrors chatInputPart._updateWorkingProgressAnimationDuration.
+  let workingDuration = 0;
+  function updateWorkingDuration(width) {
+    const safe = Math.max(50, width || el.inputBox.clientWidth || 300);
+    const d = Math.min(2.5, Math.max(1.4, 0.55 + 0.075 * Math.sqrt(safe)));
+    if (Math.abs(d - workingDuration) < 0.05) return;
+    workingDuration = d;
+    el.inputBox.style.setProperty("--dv-input-working-duration", d.toFixed(2) + "s");
+    // Force a one-frame restart so a new duration takes effect mid-flight
+    // (browsers otherwise keep the old duration until the current cycle ends).
+    if (el.inputBox.classList.contains("busy")) {
+      el.inputBox.classList.add("anim-restart");
+      void el.inputBox.offsetWidth;
+      requestAnimationFrame(() => el.inputBox.classList.remove("anim-restart"));
+    }
+  }
+
   // Responsive composer: progressively drop labels, then whole controls, as the
   // panel narrows, so the toolbar never overlaps. Worst case keeps just Send.
   if (window.ResizeObserver) {
@@ -220,6 +239,7 @@ import { renderMarkdown } from "./markdown.js";
       el.inputBox.classList.toggle("cmp-sm", w < 380); // labels -> icons only
       el.inputBox.classList.toggle("cmp-xs", w < 280); // hide mode/model/context
       el.inputBox.classList.toggle("cmp-xxs", w < 190); // only Send remains
+      updateWorkingDuration(w);
     });
     ro.observe(el.inputBox);
   }
@@ -496,11 +516,58 @@ import { renderMarkdown } from "./markdown.js";
     return b;
   }
 
-  function flashCheck(b) {
-    const i = b.querySelector("i");
-    const prev = i.className;
-    i.className = "codicon codicon-check";
-    setTimeout(() => { i.className = prev; }, 1200);
+  // Copy button with VS Code's two-icon cross-fade (copy <-> check), mirroring
+  // chat.css's .chat-copy-action-icon-copy/-copied layered swap. `cls` is the
+  // base button class (msg-action in toolbars, code-btn in code blocks).
+  function copyButton(title, cls, getText) {
+    const b = document.createElement("button");
+    b.className = cls + " dv-copy";
+    b.title = title;
+    b.innerHTML =
+      '<span class="dv-copy-icons">' +
+      '<i class="codicon codicon-copy dv-copy-i"></i>' +
+      '<i class="codicon codicon-check dv-copy-i2"></i>' +
+      "</span>";
+    b.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      vscode.postMessage({ type: "copyText", text: getText() });
+      b.classList.add("copied");
+      setTimeout(() => b.classList.remove("copied"), 1200);
+    });
+    return b;
+  }
+
+  // Shared collapsible, built div-first (not <details>) so the grid
+  // 1fr<->0fr height + opacity collapse can animate, mirroring VS Code's
+  // chatCollapsibleContentPart. Native <details> accessibility is preserved via
+  // role=button + aria-expanded + Enter/Space toggling on the header. Returns
+  // { root, header (fill with the summary row), body (fill with content),
+  // setCollapsed, isCollapsed }. Add `dv-nocollapse` to the root to freeze it.
+  function makeCollapsible(rootClass, opts) {
+    opts = opts || {};
+    const root = document.createElement("div");
+    root.className = rootClass + (opts.startCollapsed === false ? "" : " dv-collapsed");
+    const header = document.createElement("div");
+    header.className = "dv-collapsible-header";
+    header.setAttribute("role", "button");
+    header.tabIndex = 0;
+    const anim = document.createElement("div");
+    anim.className = "dv-collapsible-anim";
+    const inner = document.createElement("div");
+    inner.className = "dv-collapsible-anim-inner";
+    anim.appendChild(inner);
+    root.appendChild(header);
+    root.appendChild(anim);
+    const sync = () => header.setAttribute("aria-expanded", root.classList.contains("dv-collapsed") ? "false" : "true");
+    const setCollapsed = (v) => { root.classList.toggle("dv-collapsed", !!v); sync(); };
+    const toggle = () => { if (!root.classList.contains("dv-nocollapse")) setCollapsed(!root.classList.contains("dv-collapsed")); };
+    header.addEventListener("click", (e) => { e.stopPropagation(); toggle(); });
+    header.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); }
+    });
+    sync();
+    return { root, header, body: inner, setCollapsed, isCollapsed: () => root.classList.contains("dv-collapsed") };
   }
 
   // Create a new turn shell (request container + checkpoint row + response
@@ -557,10 +624,7 @@ import { renderMarkdown } from "./markdown.js";
     if (reqActions) reqActions.remove();
     reqActions = document.createElement("div");
     reqActions.className = "msg-actions req-actions";
-    reqActions.appendChild(actionBtn("codicon-copy", "Copy", (b) => {
-      vscode.postMessage({ type: "copyText", text: turn.text });
-      flashCheck(b);
-    }));
+    reqActions.appendChild(copyButton("Copy", "msg-action", () => turn.text));
     if (canEditTurn(turn)) {
       reqActions.appendChild(actionBtn("codicon-edit", "Edit Request", () => startEditing(turn)));
     }
@@ -599,10 +663,7 @@ import { renderMarkdown } from "./markdown.js";
     if (footer) footer.remove();
     footer = document.createElement("div");
     footer.className = "chat-footer";
-    footer.appendChild(actionBtn("codicon-copy", "Copy", (b) => {
-      vscode.postMessage({ type: "copyText", text: turn.resp.innerText.trim() });
-      flashCheck(b);
-    }));
+    footer.appendChild(copyButton("Copy", "msg-action", () => turn.resp.innerText.trim()));
     footer.appendChild(actionBtn("codicon-refresh", "Retry", () => {
       if (turn.text) vscode.postMessage({ type: "send", text: turn.text, newSession: false });
     }));
@@ -863,12 +924,7 @@ import { renderMarkdown } from "./markdown.js";
       const lang = (pre.getAttribute("data-lang") || "").toLowerCase();
       const bar = document.createElement("div");
       bar.className = "code-toolbar";
-      bar.appendChild(codeBtn("codicon-copy", "Copy", (b) => {
-        vscode.postMessage({ type: "copyText", text: getText() });
-        const i = b.querySelector("i");
-        i.className = "codicon codicon-check";
-        setTimeout(() => { i.className = "codicon codicon-copy"; }, 1200);
-      }));
+      bar.appendChild(copyButton("Copy", "code-btn", getText));
       bar.appendChild(codeBtn("codicon-insert", "Insert at cursor", () => vscode.postMessage({ type: "insertAtCursor", text: getText() })));
       bar.appendChild(codeBtn("codicon-go-to-file", "Apply to file", () => vscode.postMessage({ type: "applyToFile", text: getText() })));
       if (SHELL_LANGS.has(lang)) {
@@ -1000,22 +1056,19 @@ import { renderMarkdown } from "./markdown.js";
       finalizeBlock();
       hideWelcome();
       ensureTurn();
-      const details = document.createElement("details");
-      details.className = "thinking thinking-active";
-      const summary = document.createElement("summary");
+      const c = makeCollapsible("thinking thinking-active", { startCollapsed: true });
       const chev = document.createElement("i");
       chev.className = "codicon codicon-chevron-right thinking-chevron";
       const label = document.createElement("span");
       label.className = "thinking-label";
       label.textContent = "Thinking\u2026";
-      summary.appendChild(chev);
-      summary.appendChild(label);
+      c.header.appendChild(chev);
+      c.header.appendChild(label);
       const bodyEl = document.createElement("div");
       bodyEl.className = "thinking-body";
-      details.appendChild(summary);
-      details.appendChild(bodyEl);
-      respTarget().appendChild(details);
-      block = { kind: "thinking", mid, details, body: bodyEl, label, buffer: "", start: Date.now(), timer: null };
+      c.body.appendChild(bodyEl);
+      respTarget().appendChild(c.root);
+      block = { kind: "thinking", mid, details: c.root, body: bodyEl, label, buffer: "", start: Date.now(), timer: null };
       const tb = block;
       tb.timer = setInterval(() => {
         if (!tb.label) return;
@@ -1137,9 +1190,8 @@ import { renderMarkdown } from "./markdown.js";
       finalizeBlock();
       hideWelcome();
       ensureTurn();
-      const node = document.createElement("details");
-      node.className = "tool";
-      const summary = document.createElement("summary");
+      const c = makeCollapsible("tool", { startCollapsed: true });
+      const node = c.root;
       const chev = document.createElement("i");
       chev.className = "codicon codicon-chevron-right tool-chevron";
       const kindIcon = document.createElement("i");
@@ -1148,16 +1200,15 @@ import { renderMarkdown } from "./markdown.js";
       label.className = "label";
       const statEl = document.createElement("i");
       statEl.className = "codicon tool-status";
-      summary.appendChild(chev);
-      summary.appendChild(kindIcon);
-      summary.appendChild(label);
-      summary.appendChild(statEl);
+      c.header.appendChild(chev);
+      c.header.appendChild(kindIcon);
+      c.header.appendChild(label);
+      c.header.appendChild(statEl);
       const bodyEl = document.createElement("div");
       bodyEl.className = "tool-body";
-      node.appendChild(summary);
-      node.appendChild(bodyEl);
+      c.body.appendChild(bodyEl);
       respTarget().appendChild(node);
-      entry = { node, kindIcon, label, statEl, bodyEl, data: {} };
+      entry = { node, kindIcon, label, statEl, bodyEl, data: {}, collapse: c };
       toolEls.set(m.id, entry);
     }
     // Merge incrementally: updates may carry only some fields.
@@ -1169,7 +1220,10 @@ import { renderMarkdown } from "./markdown.js";
     if (Array.isArray(m.content) && m.content.length) d.content = m.content;
     if (Array.isArray(m.locations) && m.locations.length) d.locations = m.locations;
 
-    entry.node.className = "tool " + (d.status || "pending");
+    // Update only the status class (className overwrite would wipe the
+    // dv-collapsed / tool-empty state the collapsible controller manages).
+    ["pending", "in_progress", "completed", "failed", "cancelled"].forEach((s) => entry.node.classList.remove(s));
+    entry.node.classList.add(d.status || "pending");
     entry.kindIcon.className = "codicon tool-kind " + (TOOL_KIND_ICONS[d.kind] || TOOL_KIND_ICONS.other);
     entry.statEl.className = "codicon tool-status " + statusIcon(d.status);
     setToolLabel(entry.label, d.title);
@@ -1197,19 +1251,17 @@ import { renderMarkdown } from "./markdown.js";
     if (!turn.refs || !turn.refs.size) return;
     let box = turn.usedRefsEl;
     if (!box) {
-      box = document.createElement("details");
-      box.className = "used-refs";
-      const summary = document.createElement("summary");
+      const c = makeCollapsible("used-refs", { startCollapsed: true });
+      box = c.root;
       const chev = document.createElement("i");
       chev.className = "codicon codicon-chevron-right used-refs-chevron";
       const label = document.createElement("span");
       label.className = "used-refs-label";
-      summary.appendChild(chev);
-      summary.appendChild(label);
+      c.header.appendChild(chev);
+      c.header.appendChild(label);
       const body = document.createElement("div");
       body.className = "used-refs-body";
-      box.appendChild(summary);
-      box.appendChild(body);
+      c.body.appendChild(body);
       turn.resp.insertBefore(box, turn.resp.firstChild);
       turn.usedRefsEl = box;
       turn.usedRefsBody = body;
@@ -1273,7 +1325,10 @@ import { renderMarkdown } from "./markdown.js";
         body.appendChild(sec);
       });
       // Terminal cards are worth showing open by default.
-      if (!entry.node.dataset.autoOpened) { entry.node.open = true; entry.node.dataset.autoOpened = "1"; }
+      if (!entry.node.dataset.autoOpened) {
+        if (entry.collapse) entry.collapse.setCollapsed(false);
+        entry.node.dataset.autoOpened = "1";
+      }
     }
 
     const diffItems = (d.content || []).filter((c) => c.type === "diff" && c.path);
@@ -1290,7 +1345,9 @@ import { renderMarkdown } from "./markdown.js";
       body.appendChild(sec);
     }
 
+    // An empty tool has nothing to reveal, so it must not collapse/expand.
     entry.node.classList.toggle("tool-empty", !hasContent);
+    entry.node.classList.toggle("dv-nocollapse", !hasContent);
   }
 
   // A file reference rendered as a VS Code style pill: a file-type icon, the

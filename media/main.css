@@ -88,6 +88,97 @@
   }
 }
 
+/* Shared collapsible (thinking, tools, used references), built div-first so the
+   grid 1fr<->0fr height + opacity collapse animates, mirroring VS Code's
+   chatCollapsibleContentPart (180ms/140ms cubic-bezier(0.2,0,0,1)). The header
+   is keyboard-operable (role=button + Enter/Space). */
+.dv-collapsible-header {
+  display: flex;
+  align-items: center;
+  gap: var(--dv-space-2);
+  cursor: pointer;
+  user-select: none;
+}
+
+.dv-collapsible-header:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+  border-radius: var(--dv-radius-xs);
+}
+
+.dv-collapsible-anim {
+  display: grid;
+  grid-template-rows: 1fr;
+  opacity: 1;
+  visibility: visible;
+  transition:
+    grid-template-rows 180ms cubic-bezier(0.2, 0, 0, 1),
+    opacity 140ms cubic-bezier(0.2, 0, 0, 1),
+    visibility 0s;
+}
+
+.dv-collapsed > .dv-collapsible-anim {
+  grid-template-rows: 0fr;
+  opacity: 0;
+  visibility: hidden;
+  transition:
+    grid-template-rows 180ms cubic-bezier(0.2, 0, 0, 1),
+    opacity 140ms cubic-bezier(0.2, 0, 0, 1),
+    visibility 0s linear 180ms;
+}
+
+.dv-collapsible-anim-inner {
+  min-height: 0;
+  overflow: hidden;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dv-collapsible-anim {
+    transition: none !important;
+  }
+}
+
+/* Copy button: two stacked codicons that cross-fade (copy <-> check), matching
+   VS Code's .chat-copy-action-icon-copy/-copied layered swap. */
+.dv-copy-icons {
+  display: inline-grid;
+  place-items: center;
+}
+
+.dv-copy-icons > .codicon {
+  grid-area: 1 / 1;
+  font-size: 13px;
+  transition:
+    opacity 140ms cubic-bezier(0.2, 0, 0, 1),
+    transform 140ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+.dv-copy .dv-copy-i {
+  opacity: 1;
+  transform: none;
+}
+
+.dv-copy .dv-copy-i2 {
+  opacity: 0;
+  transform: scale(0.92);
+}
+
+.dv-copy.copied .dv-copy-i {
+  opacity: 0;
+  transform: scale(0.92);
+}
+
+.dv-copy.copied .dv-copy-i2 {
+  opacity: 1;
+  transform: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dv-copy-icons > .codicon {
+    transition: none;
+  }
+}
+
 * {
   box-sizing: border-box;
 }
@@ -596,42 +687,101 @@ body {
   border-color: var(--vscode-focusBorder);
 }
 
-/* While generating, sweep a blue highlight all the way around the input
-   border (matching the focus colour). A conic gradient rotates and is masked
-   to just the 1px border ring. */
+/* While generating, run VS Code's two-layer "comet" around the input border: a
+   sharp beam (::before) and a blurred glow (::after), both conic gradients
+   masked to the border ring, spinning 135deg->495deg. Colour is the dedicated
+   chat working-border token; duration scales with width (set in JS, 1.4s-2.5s).
+   Mirrors chatInputPart / chat.css .chat-input-container.working. */
 @property --devin-angle {
   syntax: "<angle>";
-  initial-value: 0deg;
+  initial-value: 135deg;
   inherits: false;
 }
 
-#input-box.busy {
-  border-color: transparent;
+#input-box {
+  --dv-input-working-duration: 2s;
+  --dv-input-working-color: var(
+    --vscode-chat-inputWorkingBorderColor1,
+    var(--vscode-button-background, var(--vscode-focusBorder, #3794ff))
+  );
 }
 
-#input-box.busy::before {
+#input-box::before,
+#input-box::after {
   content: "";
   position: absolute;
   inset: -1px;
   border-radius: 8px;
-  padding: 1px;
-  background: conic-gradient(
-    from var(--devin-angle),
-    transparent 0deg,
-    transparent 270deg,
-    var(--vscode-focusBorder, #3794ff) 330deg,
-    var(--vscode-focusBorder, #3794ff) 360deg
-  );
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 350ms ease;
   -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
   -webkit-mask-composite: xor;
   mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
   mask-composite: exclude;
-  pointer-events: none;
-  animation: devin-border 1.5s linear infinite;
+}
+
+/* Sharp beam */
+#input-box::before {
+  z-index: 2;
+  padding: 1px;
+  background: conic-gradient(
+    from var(--devin-angle),
+    transparent 0deg,
+    color-mix(in srgb, var(--dv-input-working-color) 90%, transparent) 20deg,
+    var(--dv-input-working-color) 30deg,
+    color-mix(in srgb, var(--dv-input-working-color) 60%, transparent) 50deg,
+    transparent 90deg,
+    transparent 360deg
+  );
+}
+
+/* Blurred glow */
+#input-box::after {
+  z-index: 1;
+  padding: 2px;
+  filter: blur(1.5px);
+  background: conic-gradient(
+    from var(--devin-angle),
+    transparent 0deg,
+    color-mix(in srgb, var(--dv-input-working-color) 60%, transparent) 25deg,
+    color-mix(in srgb, var(--dv-input-working-color) 35%, transparent) 50deg,
+    transparent 90deg,
+    transparent 360deg
+  );
+}
+
+#input-box.busy {
+  overflow: visible;
+  border-color: var(--vscode-input-border, transparent);
+}
+
+#input-box.busy:focus-within {
+  border-color: color-mix(in srgb, var(--vscode-focusBorder) 40%, transparent);
+}
+
+#input-box.busy::before,
+#input-box.busy::after {
+  opacity: 1;
+  animation: devin-border var(--dv-input-working-duration) linear infinite;
+}
+
+/* One-frame guard so a duration change restarts the spin cleanly. */
+#input-box.anim-restart::before,
+#input-box.anim-restart::after {
+  animation: none;
 }
 
 @keyframes devin-border {
-  to { --devin-angle: 360deg; }
+  from { --devin-angle: 135deg; }
+  to { --devin-angle: 495deg; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #input-box.busy::before,
+  #input-box.busy::after {
+    animation: none;
+  }
 }
 
 #input {
@@ -1083,7 +1233,7 @@ body {
   gap: 2px;
   margin-top: 2px;
   opacity: 0;
-  transition: opacity 0.12s ease;
+  transition: opacity 0.1s ease-in-out;
 }
 
 .req-actions {
@@ -1131,7 +1281,7 @@ body {
   gap: 2px;
   margin-top: 2px;
   opacity: 0;
-  transition: opacity 0.12s ease;
+  transition: opacity 0.1s ease-in-out;
 }
 
 .turn:not(.complete) .chat-footer {
@@ -1163,7 +1313,7 @@ body {
   font-size: var(--dv-fs-xs);
   color: var(--dv-dim);
   opacity: 0;
-  transition: opacity 0.12s ease;
+  transition: opacity 0.1s ease-in-out;
 }
 
 .turn:hover .turn-ts,
@@ -1265,7 +1415,7 @@ body {
   display: flex;
   gap: 2px;
   opacity: 0;
-  transition: opacity 0.12s ease;
+  transition: opacity 0.1s ease-in-out;
 }
 
 .bubble pre:hover .code-toolbar,
@@ -1419,18 +1569,8 @@ body {
   color: var(--dv-dim);
 }
 
-.thinking > summary {
-  display: flex;
-  align-items: center;
-  gap: var(--dv-space-2);
-  list-style: none;
-  cursor: pointer;
+.thinking > .dv-collapsible-header {
   font-size: var(--dv-fs-s);
-  user-select: none;
-}
-
-.thinking > summary::-webkit-details-marker {
-  display: none;
 }
 
 /* Label takes the row; the chevron sits at the far right and reveals on
@@ -1459,22 +1599,27 @@ body {
 .thinking-chevron {
   order: 2;
   font-size: 13px;
-  transition: transform 0.12s ease;
+  transition: opacity 100ms ease-in-out, transform 180ms cubic-bezier(0.2, 0, 0, 1);
   opacity: 0;
 }
 
-.thinking > summary:hover .thinking-chevron,
-.thinking[open] > summary .thinking-chevron {
+.thinking > .dv-collapsible-header:hover .thinking-chevron,
+.thinking:not(.dv-collapsed) > .dv-collapsible-header .thinking-chevron {
   opacity: 0.7;
 }
 
-.thinking[open] > summary .thinking-chevron {
+.thinking:not(.dv-collapsed) > .dv-collapsible-header .thinking-chevron {
   transform: rotate(90deg);
+}
+
+/* Headroom inside the collapse wrapper so the curved header->spine connector
+   (drawn above the body) is not clipped by the wrapper's overflow:hidden. */
+.thinking .dv-collapsible-anim-inner {
+  padding-top: var(--dv-space-5);
 }
 
 .thinking-body {
   position: relative;
-  margin-top: var(--dv-space-2);
   margin-left: var(--dv-space-3);
   font-size: var(--dv-fs-s);
 }
@@ -1530,7 +1675,7 @@ body {
 
 /* Curved connector dropping from the header into the first node, matching the
    VS Code rounded corner (only while the box is expanded). */
-.thinking[open] .thinking-body::before {
+.thinking:not(.dv-collapsed) .thinking-body::before {
   content: "";
   position: absolute;
   left: 3px;
@@ -1557,30 +1702,20 @@ body {
   color: var(--dv-dim);
 }
 
-.used-refs > summary {
-  display: flex;
-  align-items: center;
-  gap: var(--dv-space-2);
-  list-style: none;
-  cursor: pointer;
-  user-select: none;
+.used-refs > .dv-collapsible-header {
   opacity: 0.85;
 }
 
-.used-refs > summary::-webkit-details-marker {
-  display: none;
-}
-
-.used-refs > summary:hover {
+.used-refs > .dv-collapsible-header:hover {
   opacity: 1;
 }
 
 .used-refs-chevron {
   font-size: 13px;
-  transition: transform 0.12s ease;
+  transition: opacity 100ms ease-in-out, transform 180ms cubic-bezier(0.2, 0, 0, 1);
 }
 
-.used-refs[open] > summary .used-refs-chevron {
+.used-refs:not(.dv-collapsed) > .dv-collapsible-header .used-refs-chevron {
   transform: rotate(90deg);
 }
 
@@ -1642,19 +1777,10 @@ body {
   font-size: 0.92em;
 }
 
-.tool > summary {
-  display: flex;
-  align-items: center;
+.tool > .dv-collapsible-header {
   gap: 6px;
   padding: 1px 0;
-  cursor: pointer;
-  list-style: none;
-  user-select: none;
   color: var(--vscode-foreground);
-}
-
-.tool > summary::-webkit-details-marker {
-  display: none;
 }
 
 /* Verb normal, the rest dimmed, like VS Code's tool lines. */
@@ -1662,7 +1788,7 @@ body {
   color: var(--vscode-descriptionForeground, #9d9d9d);
 }
 
-.tool > summary:hover .tool-detail {
+.tool > .dv-collapsible-header:hover .tool-detail {
   color: var(--vscode-foreground);
 }
 
@@ -1683,18 +1809,18 @@ body {
    Specificity is raised above `.tool .codicon` so the opacity actually wins. */
 .tool .tool-chevron {
   order: 2;
-  transition: transform 0.12s ease;
+  transition: opacity 100ms ease-in-out, transform 180ms cubic-bezier(0.2, 0, 0, 1);
   flex: 0 0 auto;
   font-size: 13px;
   opacity: 0;
 }
 
-.tool:hover > summary .tool-chevron,
-.tool[open] > summary .tool-chevron {
+.tool:hover > .dv-collapsible-header .tool-chevron,
+.tool:not(.dv-collapsed) > .dv-collapsible-header .tool-chevron {
   opacity: 0.6;
 }
 
-.tool[open] > summary .tool-chevron {
+.tool:not(.dv-collapsed) > .dv-collapsible-header .tool-chevron {
   transform: rotate(90deg);
 }
 
@@ -1704,7 +1830,7 @@ body {
   display: none;
 }
 
-.tool.tool-empty > summary {
+.tool.tool-empty > .dv-collapsible-header {
   cursor: default;
 }
 
