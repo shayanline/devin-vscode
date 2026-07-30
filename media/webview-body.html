@@ -1,4 +1,14 @@
 <div id="app">
+  <!-- Shown from first paint (before the bundle runs) until the panel is ready
+       and the session list has loaded, so there is one loading state instead of
+       blank -> shell -> late spinner. -->
+  <div id="boot">
+    <div class="boot-inner">
+      <div class="boot-spinner"></div>
+      <div class="boot-label">Loading Devin&hellip;</div>
+    </div>
+  </div>
+
   <div id="setup" class="hidden"></div>
 
   <div id="chat" class="hidden">

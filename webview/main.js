@@ -5,6 +5,7 @@ import { renderMarkdown } from "./markdown.js";
   const $ = (id) => document.getElementById(id);
 
   const el = {
+    boot: $("boot"),
     setup: $("setup"),
     chat: $("chat"),
     chatTitle: $("chat-title"),
@@ -134,6 +135,17 @@ import { renderMarkdown } from "./markdown.js";
     el.setup.classList.toggle("hidden", v !== "setup");
     el.chat.classList.toggle("hidden", v !== "chat");
   }
+
+  // Dismiss the boot overlay once there is real content to show (setup, the
+  // session list, or an error). Idempotent.
+  let booted = false;
+  function hideBoot() {
+    if (booted) return;
+    booted = true;
+    if (el.boot) el.boot.classList.add("hidden");
+  }
+  // Safety net: never let the overlay stick if the host is slow or silent.
+  setTimeout(hideBoot, 15000);
 
   function setBody(b) {
     body = b;
@@ -740,9 +752,17 @@ import { renderMarkdown } from "./markdown.js";
     footer.className = "chat-footer";
     // VS Code's ChatMessageFooter order: Retry first, then Copy (thumbs/report
     // are telemetry we drop). Retry carries a class so it can be hidden on
-    // headless (request-less) turns.
+    // headless (request-less) turns. Retry regenerates the response: rewind to
+    // before this turn and re-run the same request (replacing the answer),
+    // rather than appending a duplicate turn. When revert is unavailable it
+    // falls back to resending as a new turn.
     const retry = actionBtn("codicon-refresh", "Retry", () => {
-      if (turn.text) vscode.postMessage({ type: "send", text: turn.text, newSession: false });
+      if (!turn.text) return;
+      if (caps.revert && !busy && turnMapped(turn)) {
+        revertAndResend(turn, turn.text);
+      } else {
+        vscode.postMessage({ type: "send", text: turn.text, newSession: false });
+      }
     });
     retry.classList.add("footer-retry");
     footer.appendChild(retry);
@@ -2778,7 +2798,7 @@ import { renderMarkdown } from "./markdown.js";
 
   function handleMessage(m) {
     switch (m.type) {
-      case "setup": renderSetup(m.health || {}); break;
+      case "setup": hideBoot(); renderSetup(m.health || {}); break;
       case "ready": setView("chat"); setBody("list"); break;
       case "body": setView("chat"); setBody(m.body === "list" ? "list" : "thread"); break;
       case "workspace": break;
@@ -2792,7 +2812,7 @@ import { renderMarkdown } from "./markdown.js";
           openAutocomplete((m.items || []).map((f) => ({ kind: "file", path: f.path, label: f.label, detail: f.detail })));
         }
         break;
-      case "sessions": renderSessions(m.sessions, m.activeId, m.folders); break;
+      case "sessions": hideBoot(); renderSessions(m.sessions, m.activeId, m.folders); break;
       case "sessionReady": el.status.textContent = ""; break;
       case "status": el.status.textContent = m.text || ""; break;
       case "clear":
@@ -2857,7 +2877,7 @@ import { renderMarkdown } from "./markdown.js";
       case "model": if (m.model) selectModelUid(m.model); break;
       case "terminalOutput": updateTerminal(m); break;
       case "usage": renderUsage(m); break;
-      case "error": renderError(m.text); break;
+      case "error": hideBoot(); renderError(m.text); break;
       case "capabilities":
         caps = Object.assign(caps, {
           revert: !!m.revert,
