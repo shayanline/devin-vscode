@@ -2,7 +2,7 @@
   "name": "devin-vscode",
   "displayName": "Devin for VS Code",
   "description": "A native chat panel for the Devin CLI, powered by the Agent Client Protocol. Streaming replies, per workspace sessions, and trackable diffs.",
-  "version": "0.6.34",
+  "version": "0.6.35",
   "publisher": "shayanline",
   "author": "Shayan Khaksar",
   "license": "MIT",
@@ -203,6 +203,12 @@
           "type": "boolean",
           "default": false,
           "description": "When the chat opens, resume the last session used in this workspace."
+        },
+        "devin.idleSessionKeepAliveMinutes": {
+          "type": "number",
+          "default": 60,
+          "minimum": 0,
+          "description": "How long to keep an idle live session (waiting for you) alive before it is automatically exited. Running sessions are never auto-exited. Set to 0 to keep idle sessions alive indefinitely."
         },
         "devin.showThinking": {
           "type": "boolean",
