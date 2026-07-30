@@ -9,6 +9,9 @@ streaming replies, live tool calls, and every edit shown as a diff you can keep
 or undo. Your chats are saved per workspace, so you can pick any one back up
 later. No terminal, no context switching.
 
+The interface is inspired by GitHub Copilot Chat and follows the same design, so
+if you use Copilot it feels familiar from the first message.
+
 > **Preview.** Early release, under active development. Expect rough edges and
 > frequent updates. Feedback and issues are welcome.
 
