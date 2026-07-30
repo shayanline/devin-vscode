@@ -438,7 +438,8 @@ body {
   font-size: 14px;
 }
 
-/* Send / stop buttons: square, filled (match the other toolbar buttons) */
+/* Send button: 22x22 filled, radius small, mirroring VS Code's
+   .chat-submit-button > .action-label (button colours + 120ms bg transition). */
 .send-btn {
   display: inline-flex;
   align-items: center;
@@ -446,23 +447,43 @@ body {
   width: 22px;
   height: 22px;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--dv-radius-sm);
   background: var(--vscode-button-background);
   color: var(--vscode-button-foreground);
   cursor: pointer;
   flex: 0 0 auto;
+  transition: background-color 120ms ease, color 120ms ease;
 }
 
 .send-btn:hover:not(:disabled) {
   background: var(--vscode-button-hoverBackground);
 }
 
-/* Disabled Send is just the icon: no background/border/container. */
+.send-btn:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+/* Optical centring: VS Code nudges the up-arrow glyph down half a pixel. */
+.send-btn .codicon-arrow-up::before {
+  transform: translateY(0.5px);
+}
+
+/* Disabled Send keeps the filled look, dimmed (VS Code keeps the button). */
 .send-btn:disabled {
-  background: transparent;
-  color: var(--vscode-icon-foreground, var(--vscode-foreground));
   opacity: 0.4;
   cursor: default;
+}
+
+/* Stop is VS Code's cancel action: a plain icon-foreground button (not filled),
+   with a toolbar hover, not the primary button treatment. */
+.send-btn.stop {
+  background: transparent;
+  color: var(--vscode-icon-foreground, var(--vscode-foreground));
+}
+
+.send-btn.stop:hover {
+  background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
 }
 
 .send-btn .codicon {
@@ -505,11 +526,11 @@ body {
   gap: 3px;
   height: 22px;
   max-width: 150px;
-  padding: 2px 5px;
+  padding: 3px 6px;
   border: none;
   border-radius: 4px;
   background: transparent;
-  color: var(--vscode-foreground);
+  color: var(--vscode-icon-foreground, var(--vscode-foreground));
   font-family: inherit;
   font-size: 0.9em;
   line-height: 1;
@@ -522,7 +543,8 @@ body {
 
 .dd { min-width: 0; }
 
-.dd-btn:hover {
+.dd-btn:hover,
+.dd-btn.open {
   background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
 }
 
@@ -535,6 +557,13 @@ body {
 .dd-btn .codicon {
   font-size: 13px;
   opacity: 0.7;
+}
+
+/* Trailing chevron, matching VS Code's picker chevron (10px, dimmed). */
+.dd-btn .codicon-chevron-down {
+  font-size: 10px;
+  margin-left: 4px;
+  opacity: 0.75;
 }
 
 .dd-icon {
@@ -883,8 +912,26 @@ body {
   background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
 }
 
+.usage-ring:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+/* The % label is hidden at rest and expands on hover/focus, matching VS Code's
+   context-usage widget (max-width/opacity transition). */
 .usage-pct {
   font-size: 0.78em;
+  max-width: 0;
+  opacity: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  transition: max-width 0.1s ease-out, opacity 0.1s ease-out;
+}
+
+.usage-ring:hover .usage-pct,
+.usage-ring:focus-visible .usage-pct {
+  max-width: 4em;
+  opacity: 1;
 }
 
 .usage-popup {
@@ -976,19 +1023,59 @@ body {
   padding: 0 2px 6px;
 }
 
+/* Attachment pill, matching VS Code's chat-attached-context-attachment:
+   18px tall, 11px, a 1px requestBorder outline, no fill. */
 .chip {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 1px 2px 1px 6px;
-  border: 1px solid var(--vscode-panel-border);
-  border-radius: 4px;
-  font-size: 0.85em;
-  background: var(--vscode-badge-background, transparent);
+  height: 18px;
+  max-width: 100%;
+  padding: 0 4px 0 6px;
+  border: 1px solid var(--dv-border);
+  border-radius: var(--dv-radius-sm);
+  font-size: 11px;
+  background: transparent;
+}
+
+.chip:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
 }
 
 .chip .codicon {
   font-size: 13px;
+  flex: 0 0 auto;
+}
+
+.chip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Image attachments show a small thumbnail instead of a generic icon. */
+.chip-thumb {
+  width: 13px;
+  height: 13px;
+  border-radius: 2px;
+  object-fit: cover;
+  flex: 0 0 auto;
+}
+
+/* Implicit "current file" pill: toggle sits first; when disabled the border is
+   dashed and the label italic/dim (VS Code's .implicit.disabled). */
+.chip.implicit {
+  padding-left: 2px;
+}
+
+.chip.implicit.disabled {
+  border-style: dashed;
+}
+
+.chip.implicit.disabled .chip-label {
+  font-style: italic;
+  opacity: 0.7;
 }
 
 .chip-x {
@@ -996,9 +1083,10 @@ body {
   padding: 1px;
   border: none;
   background: transparent;
-  color: inherit;
+  color: var(--vscode-descriptionForeground, inherit);
   cursor: pointer;
   border-radius: 3px;
+  flex: 0 0 auto;
 }
 
 .chip-x:hover {

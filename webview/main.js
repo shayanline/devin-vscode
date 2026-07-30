@@ -273,6 +273,8 @@ import { renderMarkdown } from "./markdown.js";
     opts = opts || {};
     const btn = document.createElement("button");
     btn.className = "dd-btn";
+    btn.setAttribute("aria-haspopup", "true");
+    btn.setAttribute("aria-expanded", "false");
     const btnIcon = document.createElement("span");
     btnIcon.className = "dd-icon";
     const label = document.createElement("span");
@@ -314,7 +316,11 @@ import { renderMarkdown } from "./markdown.js";
     let current = "";
     let filterText = "";
 
-    function close() { menu.classList.add("hidden"); }
+    function close() {
+      menu.classList.add("hidden");
+      btn.classList.remove("open");
+      btn.setAttribute("aria-expanded", "false");
+    }
     function labelFor(v) {
       const it = items.find((x) => x.value === v);
       return it ? it.name : v || "";
@@ -395,9 +401,15 @@ import { renderMarkdown } from "./markdown.js";
     btn.addEventListener("click", (ev) => {
       ev.stopPropagation();
       document.querySelectorAll(".dd-menu").forEach((m) => { if (m !== menu) m.classList.add("hidden"); });
+      document.querySelectorAll(".dd-btn.open").forEach((b) => {
+        if (b !== btn) { b.classList.remove("open"); b.setAttribute("aria-expanded", "false"); }
+      });
       filterText = "";
       renderMenu();
       menu.classList.toggle("hidden");
+      const open = !menu.classList.contains("hidden");
+      btn.classList.toggle("open", open);
+      btn.setAttribute("aria-expanded", open ? "true" : "false");
     });
 
     return {
@@ -414,6 +426,7 @@ import { renderMarkdown } from "./markdown.js";
 
   document.addEventListener("click", () => {
     document.querySelectorAll(".dd-menu").forEach((m) => m.classList.add("hidden"));
+    document.querySelectorAll(".dd-btn.open").forEach((b) => { b.classList.remove("open"); b.setAttribute("aria-expanded", "false"); });
     closeUsagePopup();
     closeTitleMenu();
   });
@@ -1733,28 +1746,120 @@ import { renderMarkdown } from "./markdown.js";
     });
   }
 
-  // --- Attachments ---------------------------------------------------------
+  // --- Attachments + implicit context -------------------------------------
+
+  let lastAttachments = [];
+  // The active-editor "current file" that VS Code shows as an implicit context
+  // pill: { path, name, line1?, line2?, enabled } or null.
+  let implicit = null;
+
+  // Best-effort file-type codicon by extension. A webview cannot reach VS Code's
+  // file icon theme, so this maps the common cases; unknown falls back to file.
+  const FILE_ICONS = {
+    js: "codicon-file-code", jsx: "codicon-file-code", ts: "codicon-file-code", tsx: "codicon-file-code",
+    py: "codicon-file-code", rb: "codicon-file-code", go: "codicon-file-code", rs: "codicon-file-code",
+    java: "codicon-file-code", c: "codicon-file-code", h: "codicon-file-code", cpp: "codicon-file-code",
+    cs: "codicon-file-code", php: "codicon-file-code", sh: "codicon-terminal", bash: "codicon-terminal",
+    zsh: "codicon-terminal", html: "codicon-file-code", css: "codicon-file-code", scss: "codicon-file-code",
+    json: "codicon-json", md: "codicon-markdown", markdown: "codicon-markdown",
+    png: "codicon-file-media", jpg: "codicon-file-media", jpeg: "codicon-file-media", gif: "codicon-file-media",
+    svg: "codicon-file-media", webp: "codicon-file-media", pdf: "codicon-file-pdf",
+    zip: "codicon-file-zip", tar: "codicon-file-zip", gz: "codicon-file-zip"
+  };
+  function fileIconFor(name) {
+    const ext = (String(name || "").split(".").pop() || "").toLowerCase();
+    return FILE_ICONS[ext] || "codicon-file";
+  }
 
   function renderAttachments(items) {
+    lastAttachments = Array.isArray(items) ? items : [];
+    renderComposerContext();
+  }
+
+  // Renders the implicit "current file" pill (first) followed by the explicit
+  // attachment pills, into the shared #attachments row.
+  function renderComposerContext() {
     el.attachments.innerHTML = "";
-    if (!items || items.length === 0) { el.attachments.classList.add("hidden"); return; }
+    const hasImplicit = !!(implicit && implicit.path);
+    if (!hasImplicit && lastAttachments.length === 0) { el.attachments.classList.add("hidden"); return; }
     el.attachments.classList.remove("hidden");
-    items.forEach((a) => {
-      const chip = document.createElement("span");
-      chip.className = "chip";
+    if (hasImplicit) el.attachments.appendChild(implicitChip(implicit));
+    lastAttachments.forEach((a) => el.attachments.appendChild(attachmentChip(a)));
+  }
+
+  function attachmentChip(a) {
+    const chip = document.createElement("span");
+    chip.className = "chip";
+    chip.tabIndex = 0;
+    chip.setAttribute("role", "button");
+    chip.dataset.id = a.id;
+    if (a.type === "image" && a.thumb) {
+      const img = document.createElement("img");
+      img.className = "chip-thumb";
+      img.src = a.thumb;
+      img.alt = "";
+      chip.appendChild(img);
+    } else {
       const icon = document.createElement("i");
-      icon.className = "codicon " + (a.type === "image" ? "codicon-file-media" : a.type === "selection" ? "codicon-selection" : "codicon-file");
-      const label = document.createElement("span");
-      label.textContent = a.label;
-      const x = document.createElement("button");
-      x.className = "chip-x";
-      x.innerHTML = '<i class="codicon codicon-close"></i>';
-      x.addEventListener("click", () => vscode.postMessage({ type: "removeAttachment", id: a.id }));
+      icon.className = "codicon " + (a.type === "image" ? "codicon-file-media" : a.type === "selection" ? "codicon-selection" : fileIconFor(a.label));
       chip.appendChild(icon);
-      chip.appendChild(label);
-      chip.appendChild(x);
-      el.attachments.appendChild(chip);
-    });
+    }
+    const label = document.createElement("span");
+    label.className = "chip-label";
+    label.textContent = a.label;
+    chip.appendChild(label);
+    const x = document.createElement("button");
+    x.className = "chip-x";
+    x.tabIndex = -1;
+    x.title = "Remove from context";
+    x.innerHTML = '<i class="codicon codicon-close"></i>';
+    x.addEventListener("click", (e) => { e.stopPropagation(); vscode.postMessage({ type: "removeAttachment", id: a.id }); });
+    chip.appendChild(x);
+    chip.addEventListener("keydown", (e) => onChipKey(e, chip));
+    return chip;
+  }
+
+  function implicitChip(ic) {
+    const chip = document.createElement("span");
+    chip.className = "chip implicit" + (ic.enabled ? "" : " disabled");
+    chip.tabIndex = 0;
+    chip.setAttribute("role", "button");
+    chip.title = ic.path;
+    // VS Code renders the toggle (x when enabled, + when disabled) before the
+    // label. Clicking it includes/excludes the current file.
+    const toggle = document.createElement("button");
+    toggle.className = "chip-x";
+    toggle.tabIndex = -1;
+    toggle.title = ic.enabled ? "Don't include the current file" : "Include the current file";
+    toggle.innerHTML = '<i class="codicon ' + (ic.enabled ? "codicon-close" : "codicon-add") + '"></i>';
+    toggle.addEventListener("click", (e) => { e.stopPropagation(); vscode.postMessage({ type: "setImplicit", enabled: !ic.enabled }); });
+    const icon = document.createElement("i");
+    icon.className = "codicon " + fileIconFor(ic.name);
+    const label = document.createElement("span");
+    label.className = "chip-label";
+    const range = ic.line1 ? ":" + ic.line1 + (ic.line2 && ic.line2 !== ic.line1 ? "-" + ic.line2 : "") : "";
+    label.textContent = ic.name + range;
+    chip.appendChild(toggle);
+    chip.appendChild(icon);
+    chip.appendChild(label);
+    chip.addEventListener("keydown", (e) => onChipKey(e, chip));
+    return chip;
+  }
+
+  // Arrow keys move focus between pills; Delete/Backspace removes the focused
+  // one (or disables the implicit pill).
+  function onChipKey(e, chip) {
+    const chips = [...el.attachments.querySelectorAll(".chip")];
+    const i = chips.indexOf(chip);
+    if (e.key === "ArrowRight") { e.preventDefault(); (chips[i + 1] || chips[0]).focus(); }
+    else if (e.key === "ArrowLeft") { e.preventDefault(); (chips[i - 1] || chips[chips.length - 1]).focus(); }
+    else if (e.key === "Delete" || e.key === "Backspace") {
+      e.preventDefault();
+      const next = chips[i + 1] || chips[i - 1];
+      if (chip.classList.contains("implicit")) vscode.postMessage({ type: "setImplicit", enabled: false });
+      else if (chip.dataset.id) vscode.postMessage({ type: "removeAttachment", id: chip.dataset.id });
+      if (next) next.focus();
+    }
   }
 
   // --- Reusable session list (shared by the full list and the title menu) --
@@ -2156,11 +2261,17 @@ import { renderMarkdown } from "./markdown.js";
   function ringSvg(pct) {
     const r = 7, c = 2 * Math.PI * r;
     const off = c * (1 - Math.min(100, Math.max(0, pct)) / 100);
-    const warn = pct >= 85 ? "var(--vscode-charts-red, #f14c4c)" : "var(--vscode-progressBar-background)";
+    // Arc colour matches VS Code's context-usage widget: normal icon colour,
+    // amber past 75%, red past 90%; track is the dimmed disabled foreground.
+    const arc = pct >= 90
+      ? "var(--vscode-editorError-foreground, #f14c4c)"
+      : pct >= 75
+        ? "var(--vscode-editorWarning-foreground, #cca700)"
+        : "var(--vscode-icon-foreground, var(--vscode-foreground))";
     return (
       `<svg width="16" height="16" viewBox="0 0 18 18" aria-hidden="true">` +
-      `<circle cx="9" cy="9" r="7" fill="none" stroke="var(--vscode-panel-border)" stroke-width="2.5"/>` +
-      `<circle cx="9" cy="9" r="7" fill="none" stroke="${warn}" stroke-width="2.5" stroke-linecap="round"` +
+      `<circle cx="9" cy="9" r="7" fill="none" stroke="var(--vscode-disabledForeground, var(--vscode-panel-border))" stroke-width="2.5" opacity="0.5"/>` +
+      `<circle cx="9" cy="9" r="7" fill="none" stroke="${arc}" stroke-width="2.5" stroke-linecap="round"` +
       ` stroke-dasharray="${c.toFixed(2)}" stroke-dashoffset="${off.toFixed(2)}" transform="rotate(-90 9 9)"/></svg>`
     );
   }
@@ -2317,6 +2428,10 @@ import { renderMarkdown } from "./markdown.js";
       case "fileChange": addFileChange(m); break;
       case "workingSet": renderWorkingSet(m.files); break;
       case "attachments": renderAttachments(m.items); break;
+      case "implicitContext":
+        implicit = m.file ? { path: m.file.path, name: m.file.name, line1: m.file.line1, line2: m.file.line2, enabled: m.enabled !== false } : null;
+        renderComposerContext();
+        break;
       case "permission": showPermission(m); break;
       case "elicitation": showElicitation(m); break;
       case "busy": setBusy(m.value); refreshTurnChrome(); break;
