@@ -1871,6 +1871,51 @@ body {
   color: var(--vscode-foreground);
 }
 
+/* Docked plan/todo variant: the #todo-widget slot draws the card, so the inner
+   .plan is chromeless; a collapsible header carries the title + count + a
+   chevron, and the rows live in the collapsible body. */
+.plan.plan-docked {
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  background: transparent;
+}
+
+.plan-docked > .dv-collapsible-header {
+  padding: var(--dv-space-3) var(--dv-space-4);
+}
+
+.plan-docked-title {
+  flex: 1;
+  min-width: 0;
+  margin-bottom: 0;
+  text-transform: none;
+  letter-spacing: normal;
+  opacity: 1;
+  font-size: var(--dv-fs-s);
+}
+
+.plan-count {
+  color: var(--dv-dim);
+  font-size: var(--dv-fs-s);
+  font-variant-numeric: tabular-nums;
+}
+
+.plan-chevron {
+  order: -1;
+  font-size: 13px;
+  opacity: 0.7;
+  transition: transform 180ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+.plan-docked:not(.dv-collapsed) > .dv-collapsible-header .plan-chevron {
+  transform: rotate(90deg);
+}
+
+.plan-docked .dv-collapsible-anim-inner {
+  padding: 0 var(--dv-space-4) var(--dv-space-3);
+}
+
 /* Tool calls & file changes. VS Code renders tool invocations as understated
    single-line text (a verb + dimmed detail), not boxed cards, expandable in
    place for the input/result. */
@@ -2337,25 +2382,58 @@ body {
 }
 
 /* Working set */
+/* Docked widgets (plan/todo + working set) sit flush on top of the composer,
+   sharing VS Code's editing-session look: a panel on the input background with
+   a rounded top and a flat bottom that meets the input. */
+#todo-widget,
 #working-set {
-  border: 1px solid var(--vscode-panel-border);
-  border-radius: 6px;
-  margin-bottom: 8px;
+  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+  border-bottom: none;
+  border-radius: var(--dv-radius-lg) var(--dv-radius-lg) 0 0;
+  background: var(--vscode-editor-background);
   overflow: hidden;
+}
+
+/* When the plan is docked above it, the working set is mid-stack: square top. */
+#todo-widget:not(.hidden) ~ #working-set {
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+
+/* Square the input's top corners when a widget is docked flush above it. */
+#input-box.docked-above {
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
 }
 
 .ws-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
   padding: 6px 10px;
   font-size: 0.9em;
   font-weight: 600;
 }
 
+.ws-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.ws-counts {
+  display: inline-flex;
+  gap: 6px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
 .ws-actions {
   display: flex;
   gap: 6px;
+  flex: 0 0 auto;
 }
 
 .ws-file {

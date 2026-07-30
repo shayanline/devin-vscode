@@ -25,6 +25,7 @@ import { renderMarkdown } from "./markdown.js";
     permissionTray: $("permission-tray"),
     elicitationTray: $("elicitation-tray"),
     workingSet: $("working-set"),
+    todoWidget: $("todo-widget"),
     attachments: $("attachments"),
     autocomplete: $("autocomplete")
   };
@@ -1136,37 +1137,104 @@ import { renderMarkdown } from "./markdown.js";
     hideWelcome();
     newTurn(undefined, text);
   }
-  function renderPlan(entries) {
-    hideWorking();
-    finalizeBlock();
-    hideWelcome();
-    ensureTurn();
-    // Reuse a single plan box per turn so live updates replace it.
-    let box = currentTurn && currentTurn.planEl;
-    if (!box) {
-      box = document.createElement("div");
-      box.className = "plan";
-      respTarget().appendChild(box);
-      if (currentTurn) currentTurn.planEl = box;
-    }
-    box.innerHTML = "";
+  // The plan/todo list shows live in a docked widget above the composer (VS
+  // Code's chat-todo-list-widget), then snapshots into the transcript when the
+  // turn completes so history keeps it. `planUserToggled` tracks a manual
+  // expand/collapse so auto-collapse does not fight the user.
+  let planUserToggled = false;
+
+  function planRow(entry) {
+    const st = entry.status === "completed" ? "done" : entry.status === "in_progress" ? "active" : "pending";
+    const row = document.createElement("div");
+    row.className = "plan-entry plan-" + st;
+    const mark = document.createElement("i");
+    mark.className = "codicon plan-mark " + (st === "done" ? "codicon-pass-filled" : st === "active" ? "codicon-loading codicon-modifier-spin" : "codicon-circle-large-outline");
+    const txt = document.createElement("span");
+    txt.textContent = entry.content;
+    row.appendChild(mark);
+    row.appendChild(txt);
+    return row;
+  }
+
+  // A static plan card, used for the inline history snapshot left in a turn.
+  function planCard(entries) {
+    const box = document.createElement("div");
+    box.className = "plan";
     const title = document.createElement("div");
     title.className = "plan-title";
     title.textContent = "Plan";
     box.appendChild(title);
-    (entries || []).forEach((entry) => {
-      const st = entry.status === "completed" ? "done" : entry.status === "in_progress" ? "active" : "pending";
-      const row = document.createElement("div");
-      row.className = "plan-entry plan-" + st;
-      const mark = document.createElement("i");
-      mark.className = "codicon plan-mark " + (st === "done" ? "codicon-pass-filled" : st === "active" ? "codicon-loading codicon-modifier-spin" : "codicon-circle-large-outline");
-      const txt = document.createElement("span");
-      txt.textContent = entry.content;
-      row.appendChild(mark);
-      row.appendChild(txt);
-      box.appendChild(row);
-    });
+    (entries || []).forEach((e) => box.appendChild(planRow(e)));
+    return box;
+  }
+
+  function renderPlan(entries) {
+    hideWorking();
+    hideWelcome();
+    ensureTurn();
+    if (currentTurn) currentTurn.planEntries = entries || [];
+    renderDockedPlan(entries || []);
     scrollToBottom();
+  }
+
+  // Builds/updates the docked todo widget above the composer. Auto-collapses
+  // once work is under way (a task is active or done) unless the user toggled.
+  function renderDockedPlan(entries) {
+    if (!entries.length) { hideDockedPlan(); return; }
+    const done = entries.filter((e) => e.status === "completed").length;
+    let ctrl = el.todoWidget._ctrl;
+    if (!ctrl) {
+      el.todoWidget.innerHTML = "";
+      ctrl = makeCollapsible("plan plan-docked", { startCollapsed: false });
+      const chev = document.createElement("i");
+      chev.className = "codicon codicon-chevron-right plan-chevron";
+      const title = document.createElement("span");
+      title.className = "plan-title plan-docked-title";
+      title.textContent = "Plan";
+      const count = document.createElement("span");
+      count.className = "plan-count";
+      ctrl.header.appendChild(chev);
+      ctrl.header.appendChild(title);
+      ctrl.header.appendChild(count);
+      el.todoWidget.appendChild(ctrl.root);
+      el.todoWidget._ctrl = ctrl;
+      el.todoWidget._count = count;
+      ctrl.header.addEventListener("click", () => { planUserToggled = true; });
+      ctrl.header.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") planUserToggled = true; });
+    }
+    el.todoWidget._count.textContent = done + "/" + entries.length;
+    ctrl.body.innerHTML = "";
+    entries.forEach((e) => ctrl.body.appendChild(planRow(e)));
+    if (!planUserToggled) {
+      ctrl.setCollapsed(entries.some((e) => e.status === "in_progress" || e.status === "completed"));
+    }
+    el.todoWidget.classList.remove("hidden");
+    updateComposerDock();
+  }
+
+  function hideDockedPlan() {
+    el.todoWidget.classList.add("hidden");
+    el.todoWidget.innerHTML = "";
+    el.todoWidget._ctrl = null;
+    updateComposerDock();
+  }
+
+  // On turn completion, leave the final plan in the transcript as history and
+  // clear the docked widget.
+  function commitPlanSnapshot() {
+    if (currentTurn && currentTurn.planEntries && currentTurn.planEntries.length && !currentTurn.planSnapped) {
+      currentTurn.planSnapped = true;
+      currentTurn.resp.appendChild(planCard(currentTurn.planEntries));
+    }
+    planUserToggled = false;
+    hideDockedPlan();
+  }
+
+  // Square the input's top corners when a widget (plan / working set) is docked
+  // flush on top of it, mirroring VS Code.
+  function updateComposerDock() {
+    const docked = !el.todoWidget.classList.contains("hidden") || !el.workingSet.classList.contains("hidden");
+    el.inputBox.classList.toggle("docked-above", docked);
   }
   const TOOL_KIND_ICONS = {
     read: "codicon-file",
@@ -1431,6 +1499,7 @@ import { renderMarkdown } from "./markdown.js";
     const added = typeof m === "object" ? m.added : undefined;
     const removed = typeof m === "object" ? m.removed : undefined;
     const created = typeof m === "object" && m.created;
+    if (path) wsCounts.set(path, { added: added || 0, removed: removed || 0 });
     finalizeBlock();
     hideWelcome();
     ensureTurn();
@@ -1743,14 +1812,41 @@ import { renderMarkdown } from "./markdown.js";
 
   // --- Working set ---------------------------------------------------------
 
+  // Latest per-file +added/-removed counts, accumulated from fileChange events,
+  // so the working set can show per-file and total line deltas like VS Code.
+  const wsCounts = new Map();
+
+  function countBadges(target, added, removed) {
+    if (added) {
+      const a = document.createElement("span");
+      a.className = "label-added";
+      a.textContent = "+" + added;
+      target.appendChild(a);
+    }
+    if (removed) {
+      const r = document.createElement("span");
+      r.className = "label-removed";
+      r.textContent = "-" + removed;
+      target.appendChild(r);
+    }
+  }
+
   function renderWorkingSet(files) {
     el.workingSet.innerHTML = "";
-    if (!files || files.length === 0) { el.workingSet.classList.add("hidden"); return; }
+    if (!files || files.length === 0) { el.workingSet.classList.add("hidden"); updateComposerDock(); return; }
     el.workingSet.classList.remove("hidden");
     const header = document.createElement("div");
     header.className = "ws-header";
     const label = document.createElement("span");
+    label.className = "ws-label";
     label.textContent = `${files.length} changed file${files.length > 1 ? "s" : ""}`;
+    // Total +added / -removed across the working set (VS Code's line counts).
+    let totAdded = 0, totRemoved = 0;
+    files.forEach((f) => { const c = wsCounts.get(f.path); if (c) { totAdded += c.added || 0; totRemoved += c.removed || 0; } });
+    const counts = document.createElement("span");
+    counts.className = "ws-counts";
+    countBadges(counts, totAdded, totRemoved);
+    label.appendChild(counts);
     const actions = document.createElement("div");
     actions.className = "ws-actions";
     actions.appendChild(btn("Open all", "secondary", () => vscode.postMessage({ type: "openAllDiffs" })));
@@ -1764,7 +1860,15 @@ import { renderMarkdown } from "./markdown.js";
       row.className = "ws-file";
       const link = document.createElement("a");
       link.className = "file-change";
-      link.textContent = f.name;
+      const icon = document.createElement("i");
+      icon.className = "codicon " + fileIconFor(f.name) + " file-pill-icon";
+      const nm = document.createElement("span");
+      nm.className = "file-pill-name";
+      nm.textContent = f.name;
+      link.appendChild(icon);
+      link.appendChild(nm);
+      const c = wsCounts.get(f.path);
+      if (c) countBadges(link, c.added, c.removed);
       link.title = f.path;
       link.addEventListener("click", () => vscode.postMessage({ type: "openDiff", path: f.path }));
       const grp = document.createElement("div");
@@ -1775,6 +1879,7 @@ import { renderMarkdown } from "./markdown.js";
       row.appendChild(grp);
       el.workingSet.appendChild(row);
     });
+    updateComposerDock();
   }
 
   // --- Attachments + implicit context -------------------------------------
@@ -2152,6 +2257,8 @@ import { renderMarkdown } from "./markdown.js";
       if (wasBusy && currentTurn && !currentTurn.replayed && !currentTurn.completedAt) {
         currentTurn.completedAt = Date.now();
       }
+      // Move the live plan into the transcript as history and undock it.
+      if (wasBusy) commitPlanSnapshot();
     }
   }
 
@@ -2424,6 +2531,9 @@ import { renderMarkdown } from "./markdown.js";
         previewWaiters.clear();
         el.permissionTray.innerHTML = "";
         el.elicitationTray.innerHTML = "";
+        planUserToggled = false;
+        hideDockedPlan();
+        wsCounts.clear();
         renderWorkingSet([]);
         renderAttachments([]);
         toolEls.clear();
