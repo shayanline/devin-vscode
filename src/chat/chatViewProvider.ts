@@ -48,9 +48,10 @@ interface Runtime {
   lastActivityAt: number; // for idle auto-exit
   mode?: string;
   model?: string;
-  // A permission/elicitation request from a background session, re-surfaced to
-  // the webview when the session is next opened.
-  pending?: { requestId: string; payload: Record<string, unknown> };
+  // Permission/elicitation requests from a background session, re-surfaced to
+  // the webview when the session is next opened. Several can be outstanding at
+  // once, so this is a queue rather than a single slot.
+  pending: { requestId: string; payload: Record<string, unknown> }[];
 }
 
 // The dot shown next to a session in the list.
@@ -67,6 +68,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
   private activeId?: string;
   // A runtime "starting" label per id (e.g. waking / creating), for the dots.
   private readonly starting = new Set<string>();
+  // In-flight load/wake per session id. `onDidReceiveMessage` is fire-and-forget,
+  // so two quick opens of the same session would otherwise both spawn a
+  // `devin acp` (the second orphaning the first and holding its lock). Sharing
+  // the promise keeps it to one process.
+  private readonly loading = new Map<string, Promise<void>>();
   // A brand-new session being created (id not known until session/new returns).
   private startingNew?: Promise<Runtime>;
   private idleTimer?: NodeJS.Timeout;
@@ -87,6 +93,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
   // current-file behaviour). Mirrored to the composer as a pill.
   private implicitEnabled = true;
   private implicitTimer?: NodeJS.Timeout;
+  private changeListSub?: vscode.Disposable;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -95,7 +102,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     private readonly statusBar: StatusBar,
     private readonly output: vscode.OutputChannel
   ) {
-    this.changes.onDidChangeList((paths) => this.postWorkingSet(paths));
+    this.changeListSub = this.changes.onDidChangeList((paths) => this.postWorkingSet(paths));
     this.implicitEnabled = this.cfg().get<boolean>("implicitContext.enabled", true);
     // Keep the implicit "current file" pill in sync with the active editor and
     // its selection (the latter debounced, since selection changes fire often).
@@ -188,6 +195,26 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
       clearInterval(this.idleTimer);
       this.idleTimer = undefined;
     }
+    if (this.implicitTimer) {
+      clearTimeout(this.implicitTimer);
+      this.implicitTimer = undefined;
+    }
+    // Settle every in-flight agent request so its client-side call never hangs.
+    for (const [, e] of this.permissionResolvers) {
+      e.resolve({ outcome: { outcome: "cancelled" } });
+    }
+    this.permissionResolvers.clear();
+    for (const [, e] of this.elicitationResolvers) {
+      e.resolve({ action: "cancel" });
+    }
+    this.elicitationResolvers.clear();
+    for (const [, resolve] of this.takeoverResolvers) {
+      resolve("cancel");
+    }
+    this.takeoverResolvers.clear();
+    this.loading.clear();
+    this.changeListSub?.dispose();
+    this.changeListSub = undefined;
     for (const rt of this.runtimes.values()) {
       this.destroyRuntime(rt);
     }
@@ -245,7 +272,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
       busy: false,
       awaiting: 0,
       replaying: false,
-      lastActivityAt: Date.now()
+      lastActivityAt: Date.now(),
+      pending: []
     };
     ref = rt;
     client.setHost(this);
@@ -260,6 +288,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
   // the pool and, if it was the visible one, reflect the disconnected state.
   private onRuntimeExit(rt: Runtime): void {
     if (rt.id) {
+      // Settle any prompt the agent was still waiting on so its client-side
+      // call does not hang and no dead widget is left on screen.
+      this.settleRequestsFor(rt.id);
       this.runtimes.delete(rt.id);
       this.starting.delete(rt.id);
     }
@@ -282,14 +313,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
   // --- Status dots ---------------------------------------------------------
 
   private broadcastStatuses(): void {
-    const statuses: Record<string, SessionStatus> = {};
-    for (const id of this.starting) {
-      statuses[id] = "starting";
-    }
-    for (const [id, rt] of this.runtimes) {
-      statuses[id] = rt.busy && rt.awaiting === 0 ? "running" : "idle";
-    }
-    this.post({ type: "sessionStatuses", statuses, activeId: this.activeId });
+    this.post({ type: "sessionStatuses", statuses: this.statusMap(), activeId: this.activeId });
     this.statusBar.set({ connected: this.isReady(), mode: this.currentMode, model: this.currentModel });
   }
 
@@ -315,6 +339,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
       const idle = !rt.busy && rt.awaiting === 0;
       if (idle && now - rt.lastActivityAt > maxIdleMs) {
         this.log(`[idle-exit] session ${rt.id} exceeded ${minutes}m idle; exiting`);
+        this.settleRequestsFor(rt.id);
         this.destroyRuntime(rt);
         this.runtimes.delete(rt.id);
         this.starting.delete(rt.id);
@@ -332,7 +357,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
   }
 
   private post(message: unknown): void {
-    void this.view?.webview.postMessage(message);
+    // postMessage rejects if the webview is being disposed; swallow it so it
+    // never surfaces as an unhandled rejection in the extension host.
+    this.view?.webview.postMessage(message).then(undefined, () => {});
   }
 
   private log(line: string): void {
@@ -379,9 +406,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
           return;
         case "revertExecute":
           await this.handleRevertExecute(Number(msg.head), msg.resendText, !!msg.newSession);
-          return;
-        case "newSession":
-          await this.newSession();
           return;
         case "loadSession":
           await this.loadSession(String(msg.id || ""));
@@ -457,14 +481,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
         case "rejectAll":
           await this.changes.rejectAll();
           return;
-        case "reviewChanges":
-          await vscode.commands.executeCommand("workbench.view.scm");
-          return;
         case "addContext":
           await this.addContext();
-          return;
-        case "addSelection":
-          await this.addSelection();
           return;
         case "setImplicit":
           this.implicitEnabled = !!msg.enabled;
@@ -495,9 +513,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
           return;
         case "authenticate":
           await this.authenticate();
-          return;
-        case "saveDefaults":
-          await this.saveDefaults(msg.model, msg.mode);
           return;
         case "setConfig":
           await this.setConfig(msg.key, msg.value);
@@ -648,16 +663,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     const term = vscode.window.createTerminal({ name: "Devin Login", env: this.env });
     term.show(true);
     term.sendText(`${quote(bin)} auth login`);
-    this.post({ type: "authStarted" });
-  }
-
-  private async saveDefaults(model: unknown, mode: unknown): Promise<void> {
-    if (typeof model === "string") {
-      await this.cfg().update("defaultModel", model, vscode.ConfigurationTarget.Global);
-    }
-    if (typeof mode === "string") {
-      await this.cfg().update("defaultMode", mode, vscode.ConfigurationTarget.Global);
-    }
   }
 
   // Persist a UI preference the webview toggled (e.g. a "don't ask again"
@@ -831,6 +836,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     if (!live) {
       return;
     }
+    this.settleRequestsFor(id);
     this.destroyRuntime(live);
     this.runtimes.delete(id);
     this.starting.delete(id);
@@ -879,6 +885,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     if (!id || !(await this.ensureReady())) {
       return;
     }
+    const inflight = this.loading.get(id);
+    if (inflight) {
+      // A load/wake for this session is already running; make it the active one
+      // and share its result rather than spawning a second acp.
+      this.activeId = id;
+      return inflight;
+    }
+    const p = this.doLoadSession(id);
+    this.loading.set(id, p);
+    try {
+      await p;
+    } finally {
+      this.loading.delete(id);
+    }
+  }
+
+  private async doLoadSession(id: string): Promise<void> {
     const already = this.runtimes.get(id);
     this.activeId = id;
     this.changes.clear();
@@ -917,10 +940,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
       this.post({ type: "sessionReady", sessionId: id });
       this.ensureIdleTimer();
     } catch (err) {
-      // Waking failed: drop the half-spawned runtime so the row goes gray again.
+      // Waking failed: drop the half-spawned runtime so the row goes gray again,
+      // and stop pointing `activeId` at a runtime that no longer exists.
       if (!already) {
         this.destroyRuntime(rt);
         this.runtimes.delete(id);
+        if (this.activeId === id) {
+          this.activeId = undefined;
+        }
       }
       loadFailed = err instanceof Error ? err.message : String(err);
     } finally {
@@ -939,11 +966,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
         // next prompt re-expands the conversation and orphans it.
         await this.postTurnHead(false);
         this.broadcastStatuses();
-        // Re-surface a permission/question this session raised while it was in the
-        // background, now that it is visible again.
+        // Re-surface permissions/questions this session raised while it was in
+        // the background, now that it is visible again.
         const opened = this.runtimes.get(id);
-        if (opened?.pending && this.activeId === id) {
-          this.post(opened.pending.payload);
+        if (opened && this.activeId === id) {
+          for (const p of opened.pending) {
+            this.post(p.payload);
+          }
         }
         void this.refreshSessions();
       }
@@ -963,6 +992,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     this.activeId = id;
     this.store.setActive(id);
     this.changes.clear();
+    // Drop the previous session's pending composer attachments so they do not
+    // bleed into this one (loadSession/wakeSession/newSession all do the same).
+    this.attachments = [];
+    this.postAttachments();
     this.currentMode = rt.mode;
     this.currentModel = rt.model;
     this.postCapabilities();
@@ -977,9 +1010,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     this.broadcastStatuses();
     // An instant restore does not reload, so the current head stays valid.
     await this.postTurnHead(true);
-    // Re-surface a prompt this session raised while backgrounded.
-    if (rt.pending) {
-      this.post(rt.pending.payload);
+    // Re-surface any prompts this session raised while backgrounded.
+    for (const p of rt.pending) {
+      this.post(p.payload);
     }
     void this.refreshSessions();
   }
@@ -997,6 +1030,22 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
       await this.activateSession(id);
       return;
     }
+    const inflight = this.loading.get(id);
+    if (inflight) {
+      // A load/wake for this session is already spawning an acp; share it.
+      this.activeId = id;
+      return inflight;
+    }
+    const p = this.doWakeSession(id);
+    this.loading.set(id, p);
+    try {
+      await p;
+    } finally {
+      this.loading.delete(id);
+    }
+  }
+
+  private async doWakeSession(id: string): Promise<void> {
     this.activeId = id;
     this.changes.clear();
     this.attachments = [];
@@ -1032,6 +1081,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
       if (this.runtimes.get(id) === rt) {
         this.destroyRuntime(rt);
         this.runtimes.delete(id);
+        if (this.activeId === id) {
+          this.activeId = undefined;
+        }
       }
       wakeFailed = err instanceof Error ? err.message : String(err);
     } finally {
@@ -1077,9 +1129,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
           trackedIds: this.store.ids(),
           cwdById: this.store.cwds()
         });
-        const timeout = new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error("devin list timed out")), 20000)
-        );
+        const timeout = new Promise<never>((_, reject) => {
+          const t = setTimeout(() => reject(new Error("devin list timed out")), 20000);
+          t.unref?.();
+        });
         const { sessions: live, prunedIds } = await Promise.race([listing, timeout]);
         // Drop tracked ids Devin no longer knows about so stale rows self-heal,
         // but NEVER prune a session we still hold a live runtime for (or are
@@ -1189,6 +1242,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     // Kill its live runtime first (frees the lock), then delete server-side.
     const rt = this.runtimes.get(id);
     if (rt) {
+      this.settleRequestsFor(id);
       this.destroyRuntime(rt);
       this.runtimes.delete(id);
       this.starting.delete(id);
@@ -1720,30 +1774,49 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     }
   }
 
+  // Settle every outstanding permission/elicitation request owned by a session
+  // as cancelled, so the agent's client-side calls never hang and the resolver
+  // maps do not leak. Used both by the user Stop button and by every teardown
+  // path (terminate, delete, idle-exit, process exit), where these would
+  // otherwise be left unresolved with a dead prompt still on screen.
+  private settleRequestsFor(sessionId: string): void {
+    if (!sessionId) {
+      return;
+    }
+    for (const [rid, e] of [...this.permissionResolvers]) {
+      if (e.rid === sessionId) {
+        e.resolve({ outcome: { outcome: "cancelled" } });
+        this.permissionResolvers.delete(rid);
+      }
+    }
+    for (const [rid, e] of [...this.elicitationResolvers]) {
+      if (e.rid === sessionId) {
+        e.resolve({ action: "cancel" });
+        this.elicitationResolvers.delete(rid);
+      }
+    }
+    const rt = this.runtimes.get(sessionId);
+    if (rt) {
+      rt.awaiting = 0;
+      // The questions/permissions are no longer outstanding, so drop the stored
+      // payloads: they must not re-surface when the session is reopened.
+      rt.pending = [];
+    }
+    // Close any open permission/question widgets for the visible session.
+    if (this.activeId === sessionId) {
+      this.post({ type: "cancelPrompts" });
+    }
+  }
+
   cancel(): void {
     const rt = this.active();
     if (rt) {
       rt.client.cancel(rt.id);
-      // Resolve pending requests owned by the visible session as cancelled.
-      for (const [rid, e] of [...this.permissionResolvers]) {
-        if (e.rid === rt.id) {
-          e.resolve({ outcome: { outcome: "cancelled" } });
-          this.permissionResolvers.delete(rid);
-        }
-      }
-      for (const [rid, e] of [...this.elicitationResolvers]) {
-        if (e.rid === rt.id) {
-          e.resolve({ action: "cancel" });
-          this.elicitationResolvers.delete(rid);
-        }
-      }
-      rt.awaiting = 0;
-      // The question/permission is no longer outstanding, so drop the stored
-      // payload: it must not re-surface when the session is reopened.
-      rt.pending = undefined;
+      this.settleRequestsFor(rt.id);
+    } else {
+      // No live session, but still close any stray prompt widgets.
+      this.post({ type: "cancelPrompts" });
     }
-    // Close any open permission/question widgets in the webview.
-    this.post({ type: "cancelPrompts" });
     this.setBusy(false);
   }
 
@@ -1942,7 +2015,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     };
     if (rt) {
       rt.awaiting++;
-      rt.pending = { requestId, payload };
+      rt.pending.push({ requestId, payload });
     }
     // Show now if it's the visible session; otherwise mark amber and re-surface
     // when the session is opened.
@@ -1987,7 +2060,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     };
     if (rt) {
       rt.awaiting++;
-      rt.pending = { requestId, payload };
+      rt.pending.push({ requestId, payload });
     }
     if (!rt || this.activeId === rt.id) {
       this.post(payload);
@@ -2012,21 +2085,30 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     }
   }
 
-  // Drop a resolved request from its runtime's awaiting count and clear the
-  // stored pending payload if it was the one just answered.
+  // Drop a resolved request from its runtime's awaiting count and remove the
+  // stored pending payload for the request just answered.
   private clearAwaiting(rid: string, requestId: string): void {
     const rt = this.runtimes.get(rid);
     if (rt) {
       rt.awaiting = Math.max(0, rt.awaiting - 1);
-      if (rt.pending?.requestId === requestId) {
-        rt.pending = undefined;
-      }
+      rt.pending = rt.pending.filter((p) => p.requestId !== requestId);
     }
     this.broadcastStatuses();
   }
 
+  // Resolve an agent-supplied path against the session's cwd when it is
+  // relative, so it never accidentally resolves against the extension host's
+  // own working directory.
+  private resolvePath(p: string, sessionId?: string): string {
+    if (path.isAbsolute(p)) {
+      return p;
+    }
+    const base = this.runtimeBySessionId(sessionId)?.cwd || this.cwd();
+    return path.join(base, p);
+  }
+
   async readTextFile(params: ReadTextFileParams): Promise<{ content: string }> {
-    const full = params.path;
+    const full = this.resolvePath(params.path, params.sessionId);
     let content = await fs.promises.readFile(full, "utf8");
     if (params.line || params.limit) {
       const lines = content.split("\n");
@@ -2068,7 +2150,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
   }
 
   async writeTextFile(params: WriteTextFileParams): Promise<Record<string, never>> {
-    const full = params.path;
+    const full = this.resolvePath(params.path, params.sessionId);
     let original: string | null = null;
     try {
       original = await fs.promises.readFile(full, "utf8");
@@ -2253,8 +2335,15 @@ function textOf(content: any): string {
   return "";
 }
 
+// Quote a binary path for the user's shell before it is sent to a VS Code
+// terminal. On POSIX, single-quote and escape any embedded single quotes so no
+// path metacharacter ($, ;, spaces, quotes) can break out; on Windows, paths
+// cannot contain `"`, so double-quoting when there is whitespace is enough.
 function quote(p: string): string {
-  return /\s/.test(p) ? `"${p}"` : p;
+  if (process.platform === "win32") {
+    return /\s/.test(p) ? `"${p}"` : p;
+  }
+  return `'${p.replace(/'/g, `'\\''`)}'`;
 }
 
 function getNonce(): string {
