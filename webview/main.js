@@ -131,7 +131,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   function applyModelOptions(families, currentModel) {
     const list = Array.isArray(families) ? families.slice() : [];
     const adaptive = list.filter(isAdaptive);
-    const rest = list.filter((f) => !isAdaptive(f)).sort((a, b) => a.name.localeCompare(b.name));
+    const rest = list.filter((f) => !isAdaptive(f)).sort((a, b) => (a.name || "").localeCompare(b.name || ""));
     modelFamilies = [...adaptive, ...rest];
     const items = [];
     modelFamilies.forEach((f) => items.push({ value: f.id, name: f.name }));
@@ -641,7 +641,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
 
   function updateAutocomplete() {
     const value = el.input.value;
-    const caret = el.input.selectionStart || value.length;
+    const caret = el.input.selectionStart ?? value.length;
     if (value.startsWith("/") && value.indexOf(" ") === -1) {
       const q = value.slice(1).toLowerCase();
       const items = commands.filter((c) => c.name.toLowerCase().includes(q)).slice(0, 40)
@@ -703,7 +703,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       return;
     }
     const value = el.input.value;
-    const caret = el.input.selectionStart || value.length;
+    const caret = el.input.selectionStart ?? value.length;
     const before = value.slice(0, caret).replace(/@([^\s@]*)$/, "");
     el.input.value = before + value.slice(caret);
     vscode.postMessage({ type: "addMention", path: item.path });
@@ -1410,13 +1410,22 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   }
   function sameMid(a, b) { return (a || null) === (b || null); }
 
-  // Rendering is throttled to animation frames so a fast stream doesn't
-  // re-parse the whole buffer on every chunk (which is O(n^2) for long turns).
+  // Rendering is throttled so a fast stream doesn't re-parse the whole buffer
+  // on every chunk (which is O(n^2) for long turns). Normal turns render on the
+  // next animation frame (snappy); once the open buffer is large, re-parsing it
+  // 60x/second is wasteful, so it falls back to a coarser ~120ms cadence to cap
+  // CPU. `finalizeBlock` always renders directly, so the final state is exact.
   let renderScheduled = false;
+  let lastRenderAt = 0;
   function scheduleRender() {
     if (renderScheduled) return;
     renderScheduled = true;
-    requestAnimationFrame(() => { renderScheduled = false; renderOpenBlock(); });
+    const run = () => { renderScheduled = false; lastRenderAt = now(); renderOpenBlock(); };
+    if (block && block.buffer && block.buffer.length > 20000) {
+      setTimeout(run, Math.max(0, 120 - (now() - lastRenderAt)));
+    } else {
+      requestAnimationFrame(run);
+    }
   }
   // Split the reasoning buffer into a chain of steps, one per blank-line
   // separated block, and render each as a node on the connector timeline. A
@@ -2973,6 +2982,19 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     currentTurn = null;
     toolEls.clear();
     terminalCache.clear();
+    // Reset the transient per-session UI that is NOT part of the moved DOM, so
+    // the previous session's working-set deltas, context-usage ring, docked
+    // plan and "Working…" placeholder do not bleed into the next view. The host
+    // clears its change set on every switch, so an empty start is correct here.
+    workingEl = null;
+    wsCounts.clear();
+    renderWorkingSet([]);
+    lastUsage = null;
+    el.usage.classList.add("hidden");
+    el.usage.innerHTML = "";
+    closeUsagePopup();
+    planUserToggled = false;
+    hideDockedPlan();
   }
 
   // Re-mount a retained transcript (real nodes, listeners intact) without a
@@ -3033,10 +3055,19 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     }
   }
 
-  // A status-only update (no list change): refresh the dots in place.
+  // A status-only update (no list change): refresh the dots. Status ticks can
+  // be frequent and often carry no change, so skip the (full) list rebuild when
+  // the statuses and active id are identical to the last render, to avoid
+  // churning the DOM and dropping row focus. A genuine change always yields a
+  // different signature, so no update is ever missed.
+  let lastStatusSig = "";
   function applyStatuses(statuses, activeId) {
-    sessionStatuses = statuses || {};
+    const next = statuses || {};
+    sessionStatuses = next;
     if (activeId !== undefined) lastActiveId = activeId;
+    const sig = Object.keys(next).sort().map((k) => k + ":" + next[k]).join(",") + "|" + (lastActiveId || "");
+    if (sig === lastStatusSig) return;
+    lastStatusSig = sig;
     if (listCtrl) listCtrl.refresh();
     if (menuCtrl) menuCtrl.refresh();
     updateTerminateBtn();
@@ -3441,7 +3472,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       text += `\n[exited ${sig ? "signal " + sig : "code " + (code == null ? "?" : code)}]`;
     }
     terminalCache.set(m.terminalId, { output: text, exitStatus: m.exitStatus });
-    el.thread.querySelectorAll(`pre[data-terminal="${m.terminalId}"]`).forEach((pre) => {
+    const sel = window.CSS && CSS.escape ? CSS.escape(m.terminalId) : m.terminalId.replace(/["\\\]]/g, "\\$&");
+    el.thread.querySelectorAll(`pre[data-terminal="${sel}"]`).forEach((pre) => {
       pre.textContent = text || "\u2026";
       scrollToBottom();
     });
@@ -3587,13 +3619,17 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         break;
       case "permission": showPermission(m); break;
       case "elicitation": showElicitation(m); break;
+      // Every turn's edit/restore chrome depends on the busy state
+      // (canEditTurn/canRestoreTurn gate on !busy), so rebuild them all.
       case "busy": setBusy(m.value); refreshTurnChrome(); break;
       case "cancelPrompts": cancelPrompts(); break;
       case "mode": if (m.mode) modeDropdown.setCurrent(m.mode); break;
       case "model": if (m.model) selectModelUid(m.model); break;
       case "terminalOutput": updateTerminal(m); break;
       case "usage": renderUsage(m); break;
-      case "error": hideBoot(); renderError(m.text); break;
+      // A failed revert reports `error` rather than `reverted`, so abandon any
+      // pending revert here to avoid a stale head trimming the wrong turn later.
+      case "error": hideBoot(); pendingRevert = null; renderError(m.text); break;
       case "capabilities":
         caps = Object.assign(caps, {
           revert: !!m.revert,
