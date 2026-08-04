@@ -6,7 +6,9 @@
 //   npm run compile && node scripts/preview.js
 //   # then: playwright-cli open "file://.../scripts/.preview/index.html"
 //
-// A --scenario flag selects which mock conversation to render (default: full).
+// A --scenario flag selects which mock conversation to render (default: full),
+// and --width sets the panel width in pixels (default 460, the narrow sidebar).
+// The README screenshots are captured at a wider one, see docs/screenshots.md.
 
 const fs = require("fs");
 const path = require("path");
@@ -14,6 +16,9 @@ const path = require("path");
 const ROOT = path.resolve(__dirname, "..");
 const OUT_DIR = path.join(ROOT, "scripts", ".preview");
 const MEDIA = path.join(ROOT, "media");
+
+const widthIdx = process.argv.indexOf("--width");
+const panelWidth = widthIdx >= 0 ? Number(process.argv[widthIdx + 1]) || 460 : 460;
 
 // VS Code "Dark Modern"-ish tokens, enough for the chat panel to look right.
 const VARS = {
@@ -226,8 +231,8 @@ body {
   color: var(--vscode-foreground);
   background: var(--vscode-sideBar-background);
 }
-/* Emulate the narrow sidebar panel width. */
-#app { max-width: 460px; }
+/* Emulate the panel width (--width, default the narrow sidebar). */
+#app { max-width: ${panelWidth}px; }
 </style>
 <link rel="stylesheet" href="${cssCodicon}" />
 <link rel="stylesheet" href="${cssMain}" />
@@ -262,5 +267,6 @@ ${body}
 const flagIdx = process.argv.indexOf("--scenario");
 const scenarioName = flagIdx >= 0 ? process.argv[flagIdx + 1] : "full";
 const out = build(scenarioName);
+
 console.log("Preview written to:", out);
 console.log("Open with: playwright-cli open \"file://" + out + "\"");
