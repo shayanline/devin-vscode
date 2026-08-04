@@ -65,15 +65,34 @@
     input.addEventListener("change", () => onChange(input.checked));
     return h("label", { class: "settings-toggle" }, [input, h("span", { class: "settings-toggle-track" })]);
   }
+  // A dropdown built on a real <select>, the way VS Code's own Settings editor
+  // does it: native keyboard handling, native option grouping, and the platform
+  // popup, none of which a custom menu gets for free (and a custom menu would be
+  // clipped by the scrolling page anyway). The wrapper exists only to draw the
+  // chevron over it, since a <select> cannot carry pseudo-element content.
+  //
+  // An option may carry a `group`, and consecutive options sharing one are put in
+  // an <optgroup>, which is what gives the workspace folders their heading and
+  // divider.
   function select(options, value, onChange) {
     const sel = h("select", { class: "settings-select" });
+    let group = null;
     for (const o of options) {
       const opt = h("option", { value: o.value, text: o.label });
-      if (o.value === value) opt.selected = true;
-      sel.appendChild(opt);
+      opt.selected = o.value === value;
+      if (o.group) {
+        if (!group || group.label !== o.group) {
+          group = h("optgroup", { label: o.group });
+          sel.appendChild(group);
+        }
+        group.appendChild(opt);
+      } else {
+        group = null;
+        sel.appendChild(opt);
+      }
     }
     sel.addEventListener("change", () => onChange(sel.value));
-    return sel;
+    return h("span", { class: "settings-select-wrap" }, [sel, icon("chevron-down")]);
   }
   function textInput(value, placeholder, onCommit) {
     const inp = h("input", { class: "settings-input", type: "text", placeholder: placeholder || "" });
@@ -283,18 +302,18 @@
   // buttons, so a workspace with several folders gets a dropdown instead.
   function renderScopePicker(tabs) {
     if (tabs.length > 2) {
-      // The folders are grouped under a heading rather than each carrying a
-      // "Workspace:" prefix, which keeps the control narrow.
-      const sel = h("select", { class: "settings-select settings-scope-select", "aria-label": "Settings scope" });
-      const folders = h("optgroup", { label: "Workspace folder" });
-      for (const t of tabs) {
-        const opt = h("option", { value: t.key, text: t.label });
-        opt.selected = t.key === scope;
-        (t.key === "user" ? sel : folders).appendChild(opt);
-      }
-      sel.appendChild(folders);
-      sel.addEventListener("change", () => setScope(sel.value));
-      return sel;
+      // The folders sit under a heading rather than each carrying a "Workspace:"
+      // prefix, which keeps the control narrow and reads as one grouped list.
+      const wrap = select(
+        tabs.map((t) => ({ value: t.key, label: t.label, group: t.key === "user" ? undefined : "Workspace folder" })),
+        scope,
+        setScope
+      );
+      wrap.classList.add("settings-scope-picker");
+      const sel = wrap.querySelector("select");
+      sel.classList.add("settings-scope-select");
+      sel.setAttribute("aria-label", "Settings scope");
+      return wrap;
     }
     const group = h("div", { class: "settings-scope-tabs", role: "tablist", "aria-label": "Settings scope" });
     for (const t of tabs) {
@@ -568,15 +587,16 @@
         ]);
       });
       // One adder for all three buckets, instead of an input per bucket.
+      let addTo = "allow";
       const bucketSel = select(
         [{ value: "allow", label: "Allow" }, { value: "deny", label: "Deny" }, { value: "ask", label: "Ask" }],
-        "allow", () => {}
+        addTo, (v) => { addTo = v; }
       );
       const ruleInput = textInput("", "Exec(git status), Read(**), MCP(github)", () => {});
       const submit = () => {
         const v = (ruleInput.value || "").trim();
         if (!v) return;
-        post("settings:permission", { scope: g.scope, root: g.root, bucket: bucketSel.value, value: v });
+        post("settings:permission", { scope: g.scope, root: g.root, bucket: addTo, value: v });
         ruleInput.value = "";
       };
       ruleInput.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); submit(); } });
@@ -600,8 +620,8 @@
         group("Sandbox", [
           keySelect("sandbox.network_mode", "Network mode", [
             { value: "full", label: "Full" },
-            { value: "limited", label: "Limited (GET, HEAD, OPTIONS)" }
-          ], "Domain filtering when running with --sandbox. Marked unstable by the CLI."),
+            { value: "limited", label: "Limited" }
+          ], "Domain filtering when running with --sandbox, which the CLI marks unstable. Limited allows only GET, HEAD and OPTIONS."),
           keyList("sandbox.allowed_domains", "Allowed domains", "github.com, **.npmjs.org"),
           keyList("sandbox.denied_domains", "Denied domains", "evil.example.com")
         ], { reset: true }),
@@ -684,6 +704,8 @@
   }
 
   function hookModalBody(close, g) {
+    let event = "PreToolUse";
+    let hookType = "command";
     const eventSel = select([
       { value: "PreToolUse", label: "PreToolUse" },
       { value: "PostToolUse", label: "PostToolUse" },
@@ -692,8 +714,11 @@
       { value: "Stop", label: "Stop" },
       { value: "SessionStart", label: "SessionStart" },
       { value: "SessionEnd", label: "SessionEnd" }
-    ], "PreToolUse", () => {});
-    const typeSel = select([{ value: "command", label: "Command" }, { value: "prompt", label: "Prompt" }], "command", () => {});
+    ], event, (v) => { event = v; });
+    const typeSel = select(
+      [{ value: "command", label: "Command" }, { value: "prompt", label: "Prompt" }],
+      hookType, (v) => { hookType = v; }
+    );
     const matcher = textInput("", "matcher (optional), e.g. exec", () => {});
     const value = textInput("", "shell command, or prompt text", () => {});
     const timeout = textInput("", "timeout seconds (optional)", () => {});
@@ -710,7 +735,7 @@
           const v = (value.value || "").trim();
           if (!v) return;
           post("settings:addHook", {
-            scope: g.scope, root: g.root, event: eventSel.value, hookType: typeSel.value,
+            scope: g.scope, root: g.root, event, hookType,
             matcher: (matcher.value || "").trim(), value: v, timeout: (timeout.value || "").trim()
           });
           close();
