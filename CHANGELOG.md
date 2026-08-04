@@ -10,6 +10,23 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 > first Marketplace release (0.6.61) group those rapid iterations by milestone
 > rather than listing every intermediate build.
 
+## [0.6.90] - 2026-08-04
+
+### Changed
+- Every dropdown in the settings panel now follows VS Code's own Settings editor,
+  using its `settings.dropdown*` theme tokens (falling back to `dropdown.*`), a
+  flat 2 pixel corner and the codicon chevron, instead of the platform's default
+  select control. They stay real `select` elements, which keeps native keyboard
+  handling, native option grouping and the platform popup that VS Code itself
+  uses, and cannot be clipped by the scrolling page the way a custom menu would.
+  The scope picker keeps its heading and divider for the workspace folders, now
+  through the same shared helper as every other dropdown.
+- Text inputs and the search box moved to the same 2 pixel corner, so the whole
+  control set matches.
+- The sandbox network mode options are now Full and Limited, with the methods
+  Limited allows moved into the row's hint. The long option label was stretching
+  that one dropdown wider than the rest of the column.
+
 ## [0.6.89] - 2026-08-04
 
 Session lifecycle across a window reload or an extension restart, and a

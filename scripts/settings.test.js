@@ -212,6 +212,15 @@ test("a workspace with several folders gets a picker, not a row of tabs", () => 
   assert.ok(h.document.querySelector(".settings-scope-select"), "expected a scope picker");
   assert.strictEqual(h.document.querySelector(".settings-scope-btn"), null);
 
+  // Global sits on its own and the folders are grouped, which is what gives the
+  // list its heading and divider.
+  const groups = h.all(".settings-scope-select optgroup");
+  assert.deepStrictEqual(groups.map((g) => g.label), ["Workspace folder"]);
+  assert.deepStrictEqual([...groups[0].children].map(h.text), ["web-app", "api-service"]);
+  const sel = h.document.querySelector(".settings-scope-select");
+  assert.strictEqual(sel.children[0].tagName, "OPTION", "Global should not be inside the group");
+  assert.strictEqual(h.text(sel.children[0]), "Global");
+
   const picker = h.document.querySelector(".settings-scope-select");
   picker.value = h.data.folders[1].path;
   picker.dispatchEvent(new h.window.Event("change"));
