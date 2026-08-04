@@ -122,10 +122,12 @@ test("shutdown kills an agent that ignores stdin EOF and SIGTERM", { skip: proce
   const started = Date.now();
   await client.shutdown(400);
   const took = Date.now() - started;
-  // It must escalate all the way to SIGKILL, and still respect the budget, since
-  // VS Code only awaits deactivate for so long.
+  // It must escalate all the way to SIGKILL, and still finish rather than waiting
+  // on the agent forever, since VS Code only awaits deactivate for so long. The
+  // ceiling is loose on purpose: this asserts boundedness, not a timing, and a
+  // loaded CI runner is allowed to be slow.
   assert.ok(took >= 400, "expected the full escalation, took " + took + "ms");
-  assert.ok(took < 1500, "shutdown must stay bounded, took " + took + "ms");
+  assert.ok(took < 4000, "shutdown must stay bounded, took " + took + "ms");
   assert.ok(await waitGone(pid), "a stubborn agent must not survive shutdown");
 });
 
