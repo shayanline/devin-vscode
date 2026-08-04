@@ -9,6 +9,11 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 > builds were packaged locally without a separate tag, so the entries below the
 > first Marketplace release (0.6.61) group those rapid iterations by milestone
 > rather than listing every intermediate build.
+>
+> The same happened between 0.6.65 and 0.6.91: each was built and installed
+> locally while the work was in progress, and they reach the Marketplace together
+> in 0.6.92. Their entries are kept separate because each is a coherent change
+> worth reading on its own.
 
 ## [0.6.92] - 2026-08-04
 
