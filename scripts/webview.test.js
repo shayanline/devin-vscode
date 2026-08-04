@@ -231,7 +231,7 @@ test("returning to an idle session restores its transcript without reloading", a
   assert.strictEqual(h.errors().length, 0, "restore threw: " + JSON.stringify(h.errors()));
 });
 
-test("a session that changed in the background is reloaded, not restored", async () => {
+test("a changed, now-idle session is reloaded, not restored", async () => {
   const h = createHarness();
   h.post({ type: "ready" });
   h.post({ type: "body", body: "thread" });
@@ -243,8 +243,45 @@ test("a session that changed in the background is reloaded, not restored", async
   await h.settle(20);
   h.document.getElementById("history-btn").click();
   await h.settle(10);
-  // A started working again while backgrounded.
+  // A changed while backgrounded and has since gone idle: its snapshot is stale,
+  // and reloading an idle runtime is safe.
   h.post({ type: "sessionActivity", id: "A" });
+  h.post({
+    type: "sessions",
+    sessions: [{ id: "A", short_id: "A", title: "A", working_directory: "/w" }],
+    activeId: null,
+    statuses: { A: "idle" },
+    folders: [{ path: "/w", name: "w" }]
+  });
+  await h.settle(10);
+  h.document.querySelector("#sessions-list .session-main").click();
+  await h.settle(10);
+  assert.ok(h.posted.some((m) => m.type === "loadSession" && m.id === "A"), "changed idle session reloads");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("returning to a session with a turn in flight re-attaches, never reloads", async () => {
+  // Reloading a running session over its live channel aborts the prompt
+  // ("Agent communication channel closed"), so a running session must activate.
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear", pendingSend: true });
+  h.post({ type: "capabilities", revert: true });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "userMessage", text: "hello from A" });
+  h.post({ type: "assistantStart" });
+  h.post({
+    type: "sessions",
+    sessions: [{ id: "A", short_id: "A", title: "A", working_directory: "/w" }],
+    activeId: "A",
+    statuses: { A: "running" },
+    folders: [{ path: "/w", name: "w" }]
+  });
+  await h.settle(20);
+  // Leave to the list mid-turn, then reopen while still running.
+  h.document.getElementById("history-btn").click();
+  await h.settle(10);
   h.post({
     type: "sessions",
     sessions: [{ id: "A", short_id: "A", title: "A", working_directory: "/w" }],
@@ -253,9 +290,16 @@ test("a session that changed in the background is reloaded, not restored", async
     folders: [{ path: "/w", name: "w" }]
   });
   await h.settle(10);
+  const loadsBefore = h.posted.filter((m) => m.type === "loadSession").length;
   h.document.querySelector("#sessions-list .session-main").click();
   await h.settle(10);
-  assert.ok(h.posted.some((m) => m.type === "loadSession" && m.id === "A"), "changed session reloads");
+  assert.ok(h.posted.some((m) => m.type === "activateSession" && m.id === "A"), "running session re-attaches");
+  assert.strictEqual(
+    h.posted.filter((m) => m.type === "loadSession").length,
+    loadsBefore,
+    "a running session must not be reloaded"
+  );
+  assert.deepStrictEqual(h.reqTexts(), ["hello from A"], "the user message is preserved and stays first");
   assert.strictEqual(h.errors().length, 0);
 });
 

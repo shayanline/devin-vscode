@@ -2,7 +2,7 @@
   "name": "devin-vscode",
   "displayName": "Devin for VS Code",
   "description": "A native chat panel for the Devin CLI, powered by the Agent Client Protocol. Streaming replies, per workspace sessions, and trackable diffs.",
-  "version": "0.6.64",
+  "version": "0.6.87",
   "publisher": "shayanline",
   "author": "Shayan Khaksar",
   "license": "MIT",
@@ -66,6 +66,24 @@
         "icon": "$(add)"
       },
       {
+        "command": "devin.newSessionEditor",
+        "title": "New Session (Editor)",
+        "category": "Devin",
+        "icon": "$(split-horizontal)"
+      },
+      {
+        "command": "devin.newSessionWindow",
+        "title": "New Session (Window)",
+        "category": "Devin",
+        "icon": "$(multiple-windows)"
+      },
+      {
+        "command": "devin.newSessionTerminal",
+        "title": "New Devin CLI Session (Terminal)",
+        "category": "Devin",
+        "icon": "$(terminal)"
+      },
+      {
         "command": "devin.showSessions",
         "title": "Show Sessions",
         "category": "Devin",
@@ -94,6 +112,12 @@
         "title": "About / Status",
         "category": "Devin",
         "icon": "$(info)"
+      },
+      {
+        "command": "devin.openSettings",
+        "title": "Open Settings",
+        "category": "Devin",
+        "icon": "$(gear)"
       },
       {
         "command": "devin.acceptChange",
@@ -139,13 +163,6 @@
         {
           "command": "devin.openChangeDiff",
           "when": "false"
-        }
-      ],
-      "view/title": [
-        {
-          "command": "devin.newSession",
-          "when": "view == devin.chatView",
-          "group": "navigation@1"
         }
       ],
       "scm/title": [

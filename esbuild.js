@@ -43,11 +43,25 @@ async function main() {
     logLevel: "info"
   });
 
+  // The settings surface is its own webview bundle (feature 3).
+  const settingsCtx = await esbuild.context({
+    entryPoints: ["webview/settings.js"],
+    bundle: true,
+    format: "iife",
+    minify: production,
+    sourcemap: !production,
+    platform: "browser",
+    target: "es2020",
+    outfile: "dist/settings.js",
+    logLevel: "info"
+  });
+
+  const contexts = [extensionCtx, webviewCtx, mermaidCtx, settingsCtx];
   if (watch) {
-    await Promise.all([extensionCtx.watch(), webviewCtx.watch(), mermaidCtx.watch()]);
+    await Promise.all(contexts.map((c) => c.watch()));
   } else {
-    await Promise.all([extensionCtx.rebuild(), webviewCtx.rebuild(), mermaidCtx.rebuild()]);
-    await Promise.all([extensionCtx.dispose(), webviewCtx.dispose(), mermaidCtx.dispose()]);
+    await Promise.all(contexts.map((c) => c.rebuild()));
+    await Promise.all(contexts.map((c) => c.dispose()));
   }
 }
 

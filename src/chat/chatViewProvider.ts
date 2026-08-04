@@ -57,10 +57,18 @@ interface Runtime {
 // The dot shown next to a session in the list.
 type SessionStatus = "running" | "idle" | "starting";
 
-export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
-  public static readonly viewType = "devin.chatView";
-
-  private view?: vscode.WebviewView;
+// One chat surface. The sidebar view and each editor/window panel is its own
+// ChatController bound to a single `vscode.Webview`, with its own visible
+// session and its own runtime pool. Shared singletons (SessionStore,
+// ChangeTracker, StatusBar) are passed in by the ChatManager.
+export class ChatController implements AcpHost {
+  private webview?: vscode.Webview;
+  // How to bring this surface to the front (focus the view, or reveal the panel).
+  private reveal?: () => void;
+  // When set (a freshly created editor/window surface), start a new session as
+  // soon as the webview is ready instead of showing the session list.
+  autoNewSession = false;
+  private readonly ownDisposables: vscode.Disposable[] = [];
 
   // Live runtimes keyed by session id. Absent = dead (gray) history.
   private readonly runtimes = new Map<string, Runtime>();
@@ -99,14 +107,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     private readonly context: vscode.ExtensionContext,
     private readonly store: SessionStore,
     private readonly changes: ChangeTracker,
-    private readonly statusBar: StatusBar,
-    private readonly output: vscode.OutputChannel
+    private readonly statusBar: StatusBar | undefined,
+    private readonly output: vscode.OutputChannel,
+    private readonly kind: "view" | "editor" = "view"
   ) {
     this.changeListSub = this.changes.onDidChangeList((paths) => this.postWorkingSet(paths));
     this.implicitEnabled = this.cfg().get<boolean>("implicitContext.enabled", true);
     // Keep the implicit "current file" pill in sync with the active editor and
     // its selection (the latter debounced, since selection changes fire often).
-    this.context.subscriptions.push(
+    // Stored per controller so an editor/window surface cleans them up on close.
+    this.ownDisposables.push(
       vscode.window.onDidChangeActiveTextEditor(() => this.postImplicitContext()),
       vscode.window.onDidChangeTextEditorSelection((e) => {
         if (e.textEditor === vscode.window.activeTextEditor) this.scheduleImplicitPost();
@@ -173,18 +183,25 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
 
   // --- Webview lifecycle ---------------------------------------------------
 
-  resolveWebviewView(view: vscode.WebviewView): void {
-    this.view = view;
-    view.webview.options = {
+  // Bind this controller to a webview (from a WebviewView or a WebviewPanel).
+  // `reveal` brings the surface to the front when focus() is called.
+  bind(webview: vscode.Webview, reveal?: () => void): void {
+    this.webview = webview;
+    this.reveal = reveal;
+    webview.options = {
       enableScripts: true,
       localResourceRoots: [this.context.extensionUri]
     };
-    view.webview.html = this.getHtml(view.webview);
-    view.webview.onDidReceiveMessage((msg) => this.onMessage(msg));
+    webview.html = this.getHtml(webview);
+    webview.onDidReceiveMessage((msg) => this.onMessage(msg));
   }
 
   focus(): void {
-    void vscode.commands.executeCommand("devin.chatView.focus");
+    if (this.reveal) {
+      this.reveal();
+    } else {
+      void vscode.commands.executeCommand("devin.chatView.focus");
+    }
   }
 
   // Kill every live ACP process (and its terminals) so a window reload or
@@ -215,6 +232,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     this.loading.clear();
     this.changeListSub?.dispose();
     this.changeListSub = undefined;
+    for (const d of this.ownDisposables) {
+      try { d.dispose(); } catch { /* ignore */ }
+    }
+    this.ownDisposables.length = 0;
     for (const rt of this.runtimes.values()) {
       this.destroyRuntime(rt);
     }
@@ -296,7 +317,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     }
     if (this.activeId === rt.id) {
       this.setBusy(false);
-      this.statusBar.set({ connected: false });
+      this.statusBar?.set({ connected: false });
     }
     this.broadcastStatuses();
   }
@@ -314,7 +335,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
 
   private broadcastStatuses(): void {
     this.post({ type: "sessionStatuses", statuses: this.statusMap(), activeId: this.activeId });
-    this.statusBar.set({ connected: this.isReady(), mode: this.currentMode, model: this.currentModel });
+    this.statusBar?.set({ connected: this.isReady(), mode: this.currentMode, model: this.currentModel });
   }
 
   // Auto-exit idle (amber) runtimes that have been waiting longer than the
@@ -359,7 +380,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
   private post(message: unknown): void {
     // postMessage rejects if the webview is being disposed; swallow it so it
     // never surfaces as an unhandled rejection in the extension host.
-    this.view?.webview.postMessage(message).then(undefined, () => {});
+    this.webview?.postMessage(message).then(undefined, () => {});
   }
 
   private log(line: string): void {
@@ -406,6 +427,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
           return;
         case "revertExecute":
           await this.handleRevertExecute(Number(msg.head), msg.resendText, !!msg.newSession);
+          return;
+        case "newSession":
+          await this.newSession();
+          return;
+        case "newSessionAt":
+          await this.newSessionAt(String(msg.target || "view"));
+          return;
+        case "openSettings":
+          await vscode.commands.executeCommand("devin.openSettings");
           return;
         case "loadSession":
           await this.loadSession(String(msg.id || ""));
@@ -538,12 +568,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     // known readiness so the sidebar is never blank while it runs; the check
     // below then reconciles (switching to setup only if the CLI is missing or
     // signed out).
-    if (this.context.globalState.get<boolean>(ChatViewProvider.READY_HINT, false)) {
+    if (this.context.globalState.get<boolean>(ChatController.READY_HINT, false)) {
       this.post({ type: "ready" });
       void this.publishInitialOptions();
     }
     await this.runHealthCheck();
     await this.pushReadiness();
+    // A freshly opened editor/window surface starts a new session immediately
+    // instead of landing on the session list.
+    if (this.autoNewSession && this.isReady() && !this.activeId) {
+      this.autoNewSession = false;
+      this.post({ type: "body", body: "thread" });
+      await this.newSession();
+    }
   }
 
   private static readonly READY_HINT = "devin.readyHint.v1";
@@ -557,12 +594,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
   // Decides whether the webview shows the setup panel or the chat.
   private async pushReadiness(): Promise<void> {
     // Remember readiness so the next launch can paint the chat shell instantly.
-    void this.context.globalState.update(ChatViewProvider.READY_HINT, this.isReady());
+    void this.context.globalState.update(ChatController.READY_HINT, this.isReady());
     if (this.isReady()) {
       this.post({ type: "ready" });
       void this.publishInitialOptions();
       await this.refreshSessions();
-      if (this.cfg().get<boolean>("autoResumeLast", false)) {
+      // Auto-resume only applies to the sidebar surface. Editor/window surfaces
+      // that were freshly opened start a new session instead (see onWebviewReady).
+      if (this.kind === "view" && !this.autoNewSession && this.cfg().get<boolean>("autoResumeLast", false)) {
         const last = this.store.activeId();
         if (last && !this.activeId) {
           this.post({ type: "body", body: "thread" });
@@ -639,8 +678,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     this.log(
       `[health] path=${this.health.path} found=${this.health.found} loggedIn=${this.health.loggedIn} version=${this.health.version || ""} ${this.health.error || ""}`
     );
-    this.statusBar.setInfo({ version: this.health.version, account: this.health.account });
-    this.statusBar.set({ connected: this.isReady(), mode: this.currentMode, model: this.currentModel });
+    this.statusBar?.setInfo({ version: this.health.version, account: this.health.account });
+    this.statusBar?.set({ connected: this.isReady(), mode: this.currentMode, model: this.currentModel });
   }
 
   private async browseCli(): Promise<void> {
@@ -669,7 +708,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
   // checkbox). Allowlisted so the webview cannot write arbitrary settings.
   private static readonly WRITABLE_KEYS = new Set(["editing.confirmEditRequestRemoval"]);
   private async setConfig(key: unknown, value: unknown): Promise<void> {
-    if (typeof key !== "string" || !ChatViewProvider.WRITABLE_KEYS.has(key)) return;
+    if (typeof key !== "string" || !ChatController.WRITABLE_KEYS.has(key)) return;
     await this.cfg().update(key, value, vscode.ConfigurationTarget.Global);
   }
 
@@ -807,10 +846,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
   }
 
   // Leaving the active session for the sessions list. The session keeps running
-  // in the background (its runtime stays alive, shown green/amber in the list);
-  // we only detach the composer's pending attachments so they do not bleed into
-  // the next chat.
+  // in the background (its runtime stays alive, shown green/amber in the list).
+  // Detaching `activeId` is what makes "background" real: a turn still in flight
+  // stops streaming into the now-hidden thread, and its completion/error is not
+  // posted to the list view. Returning to the session re-attaches (activate).
   private leaveToList(): void {
+    this.activeId = undefined;
     this.clearAttachments();
   }
 
@@ -860,6 +901,25 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     this.postAttachments();
   }
 
+  // Start a new session in a chosen location. "view" is this surface; the
+  // others run the corresponding registered command (handled by ChatManager).
+  private async newSessionAt(target: string): Promise<void> {
+    switch (target) {
+      case "editor":
+        await vscode.commands.executeCommand("devin.newSessionEditor");
+        return;
+      case "window":
+        await vscode.commands.executeCommand("devin.newSessionWindow");
+        return;
+      case "terminal":
+        await vscode.commands.executeCommand("devin.newSessionTerminal");
+        return;
+      default:
+        await this.newSession();
+        return;
+    }
+  }
+
   async newSession(): Promise<void> {
     if (!(await this.ensureReady())) {
       return;
@@ -870,7 +930,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     this.attachments = [];
     this.focus();
     this.post({ type: "body", body: "thread" });
-    this.post({ type: "clear" });
+    // `reset` tells the webview this is a fresh session so it clears the title
+    // (and code badge) instead of keeping the previous session's.
+    this.post({ type: "clear", reset: true });
     try {
       await this.createSession();
     } catch (err) {
@@ -903,6 +965,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
 
   private async doLoadSession(id: string): Promise<void> {
     const already = this.runtimes.get(id);
+    // Never reload a session whose turn is in flight: issuing a loadSession over
+    // its live channel aborts the running prompt ("channel closed"). Re-attach
+    // to the running runtime instead (it keeps streaming).
+    if (already && already.busy) {
+      await this.activateSession(id);
+      return;
+    }
     this.activeId = id;
     this.changes.clear();
     this.attachments = [];
@@ -1008,8 +1077,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     }
     this.post({ type: "busy", value: rt.busy });
     this.broadcastStatuses();
-    // An instant restore does not reload, so the current head stays valid.
-    await this.postTurnHead(true);
+    // An instant restore does not reload, so the current head stays valid. Skip
+    // the head read while a turn is in flight so it never contends with the
+    // running prompt on the channel; the next completion refreshes it.
+    if (!rt.busy) {
+      await this.postTurnHead(true);
+    }
     // Re-surface any prompts this session raised while backgrounded.
     for (const p of rt.pending) {
       this.post(p.payload);
@@ -1269,7 +1342,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     const modelOpt = byId.get("model");
     this.currentMode = modeOpt?.currentValue || currentModeId || this.currentMode;
     this.currentModel = modelOpt?.currentValue || this.currentModel;
-    this.statusBar.set({ connected: this.isReady(), mode: this.currentMode, model: this.currentModel });
+    this.statusBar?.set({ connected: this.isReady(), mode: this.currentMode, model: this.currentModel });
     this.postModelOptions(this.currentModel || "adaptive");
   }
 
@@ -1279,7 +1352,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     const families = cachedFamilies();
     const payload = {
       type: "options",
-      modes: ChatViewProvider.STATIC_MODES,
+      modes: ChatController.STATIC_MODES,
       currentMode: this.currentMode || "accept-edits",
       models: families,
       currentModel
@@ -1329,7 +1402,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
     }
     const payload = {
       type: "options",
-      modes: ChatViewProvider.STATIC_MODES,
+      modes: ChatController.STATIC_MODES,
       currentMode: cfgMode || "accept-edits",
       models: families,
       currentModel: cfgModel || "adaptive"
@@ -1356,7 +1429,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
         rt.model = model;
         this.currentModel = model;
       }
-      this.statusBar.set({ connected: true, mode: this.currentMode, model: this.currentModel });
+      this.statusBar?.set({ connected: true, mode: this.currentMode, model: this.currentModel });
       this.post({ type: "mode", mode: this.currentMode });
       if (this.currentModel) {
         this.post({ type: "model", model: this.currentModel });
@@ -1378,7 +1451,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
         this.log(`[set-mode-failed] ${err instanceof Error ? err.message : String(err)}`);
       }
     }
-    this.statusBar.set({ connected: this.isReady(), mode: this.currentMode, model: this.currentModel });
+    this.statusBar?.set({ connected: this.isReady(), mode: this.currentMode, model: this.currentModel });
     this.post({ type: "mode", mode });
   }
 
@@ -1394,7 +1467,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
         this.log(`[set-model-failed] ${err instanceof Error ? err.message : String(err)}`);
       }
     }
-    this.statusBar.set({ connected: this.isReady(), mode: this.currentMode, model: this.currentModel });
+    this.statusBar?.set({ connected: this.isReady(), mode: this.currentMode, model: this.currentModel });
     this.post({ type: "model", model });
   }
 
@@ -1973,7 +2046,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, AcpHost {
         if (rt) rt.mode = u.currentModeId || rt.mode;
         if (active) {
           this.currentMode = u.currentModeId || this.currentMode;
-          this.statusBar.set({ connected: this.isReady(), mode: this.currentMode, model: this.currentModel });
+          this.statusBar?.set({ connected: this.isReady(), mode: this.currentMode, model: this.currentModel });
           this.post({ type: "mode", mode: u.currentModeId });
         }
         return;

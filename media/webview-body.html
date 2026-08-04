@@ -12,11 +12,28 @@
   <div id="setup" class="hidden"></div>
 
   <div id="chat" class="hidden">
+    <!-- Full-height sessions sidebar on the LEFT; the chat content shrinks to
+         its right when it is open. A drag handle between them resizes it. -->
+    <div id="sessions-panel" class="hidden"></div>
+    <div id="sessions-resizer" class="hidden" title="Drag to resize"></div>
+    <div id="chat-main">
     <div id="chat-header">
-      <button id="history-btn" class="icon-btn" title="Back to sessions"><i class="codicon codicon-arrow-left"></i></button>
-      <button id="title-btn" class="title-btn"><span id="chat-title">Chat</span><i class="codicon codicon-chevron-down title-chev"></i></button>
+      <!-- Thread-mode left cluster. panel-toggle either toggles the docked
+           sessions panel (wide) or opens the session switcher (narrow). -->
+      <button id="panel-toggle" class="icon-btn hidden"></button>
+      <span id="header-divider" class="header-divider hidden"></span>
+      <button id="history-btn" class="icon-btn hidden" title="Back to sessions"><i class="codicon codicon-arrow-left"></i></button>
+      <!-- Refresh sits in front of the "Sessions" title on the list page. -->
+      <button id="list-refresh-btn" class="icon-btn hidden" title="Refresh sessions"><i class="codicon codicon-refresh"></i></button>
+      <button id="title-btn" class="title-btn"><span id="title-code" class="session-code hidden"></span><span id="chat-title">Chat</span></button>
       <span class="spacer"></span>
       <span id="status"></span>
+      <!-- List-mode right cluster -->
+      <div id="new-session-dd" class="hidden"></div>
+      <button id="list-search-btn" class="icon-btn hidden" title="Search sessions"><i class="codicon codicon-search"></i></button>
+      <button id="list-filter-btn" class="icon-btn hidden" title="Filter sessions"><i class="codicon codicon-filter"></i></button>
+      <button id="settings-btn" class="icon-btn hidden" title="Devin settings"><i class="codicon codicon-gear"></i></button>
+      <!-- Thread-mode right cluster -->
       <button id="terminate-btn" class="icon-btn hidden" title="Terminate this session (stop its process)"></button>
     </div>
 
@@ -51,6 +68,7 @@
           </div>
         </div>
       </div>
+    </div>
     </div>
   </div>
 </div>

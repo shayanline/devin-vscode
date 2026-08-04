@@ -31,8 +31,11 @@ PATH and helps you finish setup.
 - Streaming answers, with Devin's reasoning shown as it works
 - Every file edit as a native VS Code diff, keep or undo per file
 - Approve the CLI's tool actions and answer its questions inline
+- Open a new chat in the sidebar, the editor area, a new window, or a terminal (the `+` split button)
+- An embedded sessions panel, beside the chat when there is room, with search, filter, and refresh
 - A browser of your Devin CLI sessions, grouped by workspace, that survives restarts
 - Pick the Devin model and mode right from the panel
+- A settings surface (the gear) for Devin's rules, skills, MCP servers, hooks, permissions, and more
 - `/` for Devin commands and skills, `@` to attach files, and image paste
 - Markdown replies with syntax highlighting and Mermaid diagrams
 
