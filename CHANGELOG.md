@@ -10,6 +10,89 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 > first Marketplace release (0.6.61) group those rapid iterations by milestone
 > rather than listing every intermediate build.
 
+## [0.6.87] - 2026-08-04
+
+A large iteration on the settings surface (the Devin customizations editor),
+plus a session lifecycle fix. This groups the rapid builds from 0.6.66 through
+0.6.87.
+
+### Added
+- Create flows throughout the settings: new skill (scaffolds a SKILL.md), add
+  MCP server, add hook, and install plugin. Each opens from an Add button in the
+  section and is presented as a modal.
+- A Plugins section listing installed plugins with update and remove, and an
+  install form (a Git source or a local path).
+- MCP OAuth login and logout. Login runs in a terminal so the interactive code
+  flow can complete, and the buttons follow the real login state read from the
+  stored tokens, so a signed in server shows only Log out.
+- Edit and remove actions on skills, instructions, hooks, and MCP servers.
+  Removals confirm first, and Edit opens the underlying file next to the
+  settings tab.
+- Reset to defaults per value section (Models, Behaviour, Network, Advanced),
+  which clears that section's keys in the chosen scope.
+- Per scope grouping across every project aware section (Instructions, Skills,
+  MCP, Hooks, Permissions, and the value sections). Each shows a User group and
+  one group per workspace folder, so a multi root workspace is fully supported
+  without a folder switcher.
+- An "Overridden in Workspace" hint on a User setting when a folder genuinely
+  sets a different value.
+- Advanced toggles for a PTY backed non interactive exec and OSC escape
+  sequences.
+
+### Changed
+- MCP servers are read from the correct location (`mcp_config.json` globally and
+  under `.devin/` per folder), so configured servers actually appear.
+- MCP subtitles show a safe summary only (the URL host and path, or the command
+  name), never the raw command, args, or headers, so tokens are not exposed.
+- Instructions read AGENTS.md first and fall back to CLAUDE.md. Create always
+  creates AGENTS.md.
+- Action buttons (edit, remove, and so on) are icon only with tooltips, and
+  buttons no longer show a stray border.
+- Files opened from the settings now open as a tab next to the settings tab.
+
+### Fixed
+- Leaving an active session mid turn and returning no longer throws "Agent
+  communication channel closed" or scrambles message order. Leaving detaches the
+  running turn, and returning reattaches instead of reloading over the live
+  channel.
+- MCP remove, enable, and disable pass the matching scope, so global servers can
+  be removed.
+- Skill paths the CLI prints with a `~` prefix now resolve correctly.
+- The "Overridden in Workspace" hint no longer shows when the folder value
+  matches the User value.
+- The empty leading card in the Hooks section is gone.
+
+### Removed
+- The separate gitignored "local" scope. Settings use User and Workspace only,
+  and you decide what to gitignore.
+
+## [0.6.65] - 2026-07-31
+
+Three features carried over from GitHub Copilot Chat, modelled on the VS Code
+chat contrib.
+
+### Added
+- **New session locations.** The `+` in the chat title is now a split button (a
+  primary `+` plus a chevron) offering New Session in the sidebar, in the editor
+  area, in a new window, or as a Devin CLI session in a terminal. Multiple editor
+  and window chats can run at once, each an independent surface.
+- **Embedded sessions panel.** A history button in the chat header toggles a
+  sessions list beside the chat when the surface is wide enough (~600px) and
+  stacked above it when narrow, using the same rule on every surface. The list
+  gained a toolbar: new session, refresh, a status filter (all / running / idle),
+  and a collapsible search under an icon.
+- **Settings surface.** A gear opens a Devin customizations editor exposing the
+  full Devin CLI config surface: default model and mode, rules and instructions,
+  skills, MCP servers (add, enable, disable, remove via the CLI), hooks,
+  permissions, behaviour (attribution, updates, notifications, gitignore), proxy
+  and sandbox, and terminal display settings, each with a user / project / local
+  scope where supported.
+
+### Changed
+- The chat provider was refactored into a per surface controller managed by a
+  ChatManager, so the sidebar view and each editor/window panel run independently
+  while sharing the session store and change tracker.
+
 ## [0.6.64] - 2026-07-31
 
 ### Fixed
@@ -186,6 +269,8 @@ Initial development: the foundation of the extension.
 - A jsdom based webview test harness with regression tests, and a browser
   preview harness for visual iteration.
 
+[0.6.87]: https://github.com/shayanline/devin-vscode/releases/tag/v0.6.87
+[0.6.65]: https://github.com/shayanline/devin-vscode/releases/tag/v0.6.65
 [0.6.64]: https://github.com/shayanline/devin-vscode/releases/tag/v0.6.64
 [0.6.63]: https://github.com/shayanline/devin-vscode/releases/tag/v0.6.63
 [0.6.62]: https://github.com/shayanline/devin-vscode/releases/tag/v0.6.62

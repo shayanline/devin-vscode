@@ -19,10 +19,22 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     chatTitle: $("chat-title"),
     historyBtn: $("history-btn"),
     titleBtn: $("title-btn"),
+    titleCode: $("title-code"),
+    panelToggle: $("panel-toggle"),
+    headerDivider: $("header-divider"),
+    newSessionDd: $("new-session-dd"),
+    sessionsResizer: $("sessions-resizer"),
+    listSearchBtn: $("list-search-btn"),
+    listFilterBtn: $("list-filter-btn"),
+    listRefreshBtn: $("list-refresh-btn"),
+    settingsBtn: $("settings-btn"),
     terminateBtn: $("terminate-btn"),
     status: $("status"),
     usage: $("usage"),
     sessionsList: $("sessions-list"),
+    sessionsPanel: $("sessions-panel"),
+    chatMain: $("chat-main"),
+    bodyEl: $("body"),
     thread: $("thread"),
     input: $("input"),
     send: $("send"),
@@ -66,6 +78,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   let curSessionId = null;
   let listCtrl = null; // full sessions-list controller
   let menuCtrl = null; // title-dropdown controller
+  let panelCtrl = null; // embedded side-panel controller (feature 2)
+  let sessionsPanelOpen = false; // whether the embedded side panel is shown
 
   let commands = [];
   let ac = null;
@@ -176,16 +190,228 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     // The composer lives outside the body panels, so mark the list view so its
     // session-scoped widgets (working set, context ring) hide while browsing.
     el.composer.classList.toggle("list-mode", list);
-    el.chatTitle.textContent = list ? "Sessions" : currentTitle;
     el.input.placeholder = list ? "Start a new chat\u2026" : "Ask Devin, or type @ to add a file";
-    // Back arrow + title switcher only make sense inside a session (thread view).
-    el.historyBtn.classList.toggle("hidden", list);
-    el.titleBtn.classList.toggle("as-heading", list);
-    if (list) { closeTitleMenu(); detachComposerFromSession(); }
+    if (list) { closeTitleMenu(); detachComposerFromSession(); closeSessionsPanel(); }
+    renderHeader();
     updateComposerDock();
     updateTerminateBtn();
     updateScrollDownButton();
   }
+
+  // --- Custom webview title bar --------------------------------------------
+  // We drive all controls from the webview header (VS Code's own view/title
+  // buttons are removed): the Sessions list header (New/Search/Filter/Refresh/
+  // Settings) and the in-session header (panel toggle, back, title + subtitle,
+  // rename, terminate).
+  function mkIcon(name) {
+    const i = document.createElement("i");
+    i.className = "codicon codicon-" + name;
+    return i;
+  }
+  function setBtnIcon(btn, name) {
+    btn.textContent = "";
+    btn.appendChild(mkIcon(name));
+  }
+
+  function currentSessionMeta() {
+    return curSessionId ? lastSessions.find((s) => s.id === curSessionId) : null;
+  }
+
+  function renderHeader() {
+    const list = body === "list";
+    // List-mode cluster: refresh sits in front of the title, the rest on the right.
+    el.listRefreshBtn.classList.toggle("hidden", !list);
+    el.newSessionDd.classList.toggle("hidden", !list);
+    el.listSearchBtn.classList.toggle("hidden", !list);
+    el.listFilterBtn.classList.toggle("hidden", !list);
+    el.settingsBtn.classList.toggle("hidden", !list);
+    // Thread-mode clusters.
+    el.historyBtn.classList.toggle("hidden", list);
+    el.headerDivider.classList.toggle("hidden", list);
+    el.titleBtn.classList.toggle("as-heading", list);
+    el.chatTitle.textContent = list ? "Sessions" : currentTitle;
+    // In a session, the session code shows as a badge to the left of the title.
+    const meta = list ? null : currentSessionMeta();
+    if (!list && meta && meta.short_id) {
+      el.titleCode.textContent = meta.short_id;
+      el.titleCode.classList.remove("hidden");
+    } else {
+      el.titleCode.textContent = "";
+      el.titleCode.classList.add("hidden");
+    }
+    if (list) {
+      el.panelToggle.classList.add("hidden");
+    } else {
+      updatePanelToggle();
+    }
+  }
+
+  // In-session: whether there is room for the docked sessions panel beside the
+  // thread. Wide -> a sidebar toggle for the docked panel; narrow -> a
+  // list-tree button that opens the session switcher dropdown instead.
+  const SIDE_BY_SIDE_MIN = 600;
+  function hasRoomForPanel() {
+    return el.chat.clientWidth >= SIDE_BY_SIDE_MIN;
+  }
+  function updatePanelToggle() {
+    if (body !== "thread") return;
+    el.panelToggle.classList.remove("hidden");
+    if (hasRoomForPanel()) {
+      setBtnIcon(el.panelToggle, sessionsPanelOpen ? "layout-sidebar-left-off" : "layout-sidebar-left");
+      el.panelToggle.title = sessionsPanelOpen ? "Hide sessions" : "Show sessions";
+      el.panelToggle.classList.toggle("active", sessionsPanelOpen);
+    } else {
+      // No room for a docked panel: the list-tree button opens the switcher.
+      if (sessionsPanelOpen) closeSessionsPanel();
+      setBtnIcon(el.panelToggle, "list-tree");
+      el.panelToggle.title = "Switch session";
+      el.panelToggle.classList.remove("active");
+    }
+  }
+
+  function openSessionsPanel() {
+    if (!hasRoomForPanel()) { toggleTitleMenu(); return; }
+    sessionsPanelOpen = true;
+    el.sessionsPanel.classList.remove("hidden");
+    el.sessionsResizer.classList.remove("hidden");
+    el.chat.classList.add("panel-open");
+    if (!panelCtrl) {
+      panelCtrl = mountSessionList(el.sessionsPanel, { controls: "panel" });
+    } else {
+      panelCtrl.refresh();
+    }
+    vscode.postMessage({ type: "refreshSessions" });
+    updatePanelToggle();
+  }
+  function closeSessionsPanel() {
+    sessionsPanelOpen = false;
+    el.sessionsPanel.classList.add("hidden");
+    el.sessionsResizer.classList.add("hidden");
+    el.chat.classList.remove("panel-open");
+    if (body === "thread") updatePanelToggle();
+  }
+  function toggleSessionsPanel() {
+    if (sessionsPanelOpen) closeSessionsPanel();
+    else openSessionsPanel();
+  }
+
+  // The test harness (jsdom) has no ResizeObserver; guard it.
+  if (typeof ResizeObserver !== "undefined") {
+    const ro = new ResizeObserver(() => { if (body === "thread") updatePanelToggle(); });
+    ro.observe(el.chat);
+  }
+
+  // A small floating popover/menu anchored to a header button. `align` is
+  // "center" | "left" | "right" relative to the anchor; the box is clamped to
+  // the viewport so it never renders off-screen, and flips above the anchor if
+  // it would overflow the bottom.
+  function makeFloater(anchor, content, align, onClose) {
+    const boxEl = document.createElement("div");
+    boxEl.className = "dv-floater";
+    boxEl.appendChild(content);
+    document.body.appendChild(boxEl);
+    const r = anchor.getBoundingClientRect();
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const bw = boxEl.offsetWidth;
+    const bh = boxEl.offsetHeight;
+    let left;
+    if (align === "center") left = r.left + r.width / 2 - bw / 2;
+    else if (align === "left") left = r.left;
+    else left = r.right - bw;
+    left = Math.max(4, Math.min(left, vw - bw - 4));
+    let top = r.bottom + 4;
+    if (top + bh > vh - 4 && r.top - bh - 4 >= 0) top = r.top - bh - 4;
+    top = Math.max(4, top);
+    boxEl.style.left = left + "px";
+    boxEl.style.top = top + "px";
+    boxEl.addEventListener("mousedown", (e) => e.stopPropagation());
+    const onDown = (e) => { if (!boxEl.contains(e.target) && !anchor.contains(e.target)) close(); };
+    const onKey = (e) => { if (e.key === "Escape") close(); };
+    setTimeout(() => {
+      document.addEventListener("mousedown", onDown, true);
+      document.addEventListener("keydown", onKey, true);
+    }, 0);
+    function close() {
+      document.removeEventListener("mousedown", onDown, true);
+      document.removeEventListener("keydown", onKey, true);
+      boxEl.remove();
+      if (onClose) onClose();
+    }
+    return { el: boxEl, close };
+  }
+
+  // The New Session dropdown, shared by the labelled header button and the
+  // icon-only button in the sessions panel / switcher.
+  let newSessionFloater = null;
+  function openNewSessionMenu(anchor) {
+    if (newSessionFloater) { newSessionFloater.close(); return; }
+    const menu = document.createElement("div");
+    menu.className = "dv-menu";
+    const items = [
+      { icon: "new-session", label: "New Session", target: "view" },
+      { icon: "split-horizontal", label: "New Session (Editor)", target: "editor" },
+      { icon: "multiple-windows", label: "New Session (Window)", target: "window" },
+      { icon: "terminal", label: "New Devin CLI Session (Terminal)", target: "terminal" }
+    ];
+    for (const it of items) {
+      const row = document.createElement("button");
+      row.className = "dv-menu-item";
+      row.appendChild(mkIcon(it.icon));
+      row.appendChild(Object.assign(document.createElement("span"), { textContent: it.label }));
+      row.addEventListener("click", () => { vscode.postMessage({ type: "newSessionAt", target: it.target }); if (newSessionFloater) newSessionFloater.close(); });
+      menu.appendChild(row);
+    }
+    newSessionFloater = makeFloater(anchor, menu, "center", () => { newSessionFloater = null; });
+  }
+  function buildNewSessionButton() {
+    const b = document.createElement("button");
+    b.className = "new-session-btn";
+    b.title = "New session";
+    b.appendChild(mkIcon("new-session"));
+    b.appendChild(Object.assign(document.createElement("span"), { textContent: "New Session" }));
+    b.appendChild(mkIcon("chevron-down"));
+    b.addEventListener("click", (e) => { e.stopPropagation(); openNewSessionMenu(b); });
+    return b;
+  }
+  el.newSessionDd.appendChild(buildNewSessionButton());
+
+  // Drag the divider between the sessions sidebar and the chat content to
+  // resize the panel freely.
+  el.sessionsResizer.addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = el.sessionsPanel.getBoundingClientRect().width;
+    document.body.style.cursor = "col-resize";
+    document.body.classList.add("dv-resizing");
+    const onMove = (ev) => {
+      let w = startW + (ev.clientX - startX);
+      const maxW = Math.max(240, el.chat.clientWidth - 320);
+      w = Math.max(220, Math.min(w, maxW));
+      el.sessionsPanel.style.width = w + "px";
+    };
+    const onUp = () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = "";
+      document.body.classList.remove("dv-resizing");
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  });
+
+  // Header button wiring.
+  el.panelToggle.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (hasRoomForPanel()) toggleSessionsPanel();
+    else toggleTitleMenu();
+  });
+  el.listSearchBtn.addEventListener("click", (e) => { e.stopPropagation(); if (listCtrl) listCtrl.toggleSearch(el.listSearchBtn); });
+  el.listFilterBtn.addEventListener("click", (e) => { e.stopPropagation(); if (listCtrl) listCtrl.toggleFilter(el.listFilterBtn); });
+  el.listRefreshBtn.addEventListener("click", () => { spinBtn(el.listRefreshBtn); vscode.postMessage({ type: "refreshSessions" }); });
+  el.settingsBtn.addEventListener("click", () => vscode.postMessage({ type: "openSettings" }));
+
+  function spinBtn(btn) { btn.classList.add("spin"); setTimeout(() => btn.classList.remove("spin"), 600); }
 
   // Entering the sessions list turns the composer into a clean "new chat" box:
   // the draft, attachments, request-edit binding, docked plan and busy state
@@ -236,7 +462,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   el.titleBtn.addEventListener("click", (e) => {
     if (body === "list") return;
     e.stopPropagation();
-    toggleTitleMenu();
+    // Clicking the session title renames it.
+    if (curSessionId) vscode.postMessage({ type: "renameSession", id: curSessionId, title: currentTitle });
   });
 
   // --- Composer ------------------------------------------------------------
@@ -2827,12 +3054,19 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
 
   // --- Reusable session list (shared by the full list and the title menu) --
 
-  function filterSessions(sessions, q) {
+  function filterSessions(sessions, q, status) {
     q = (q || "").trim().toLowerCase();
-    if (!q) return sessions;
-    return sessions.filter((s) =>
-      (s.title || "").toLowerCase().includes(q) || (s.short_id || s.id || "").toLowerCase().includes(q)
-    );
+    return sessions.filter((s) => {
+      if (status && status !== "all") {
+        const st = sessionStatuses[s.id];
+        const alive = st === "running" || st === "idle" || st === "starting";
+        if (status === "running" && !(st === "running" || st === "starting")) return false;
+        if (status === "idle" && st !== "idle") return false;
+        if (status === "dead" && alive) return false;
+      }
+      if (!q) return true;
+      return (s.title || "").toLowerCase().includes(q) || (s.short_id || s.id || "").toLowerCase().includes(q);
+    });
   }
 
   // Groups sessions by workspace (workspace folders first) with collapsible
@@ -2892,34 +3126,172 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     });
   }
 
-  // Mounts a search box + grouped rows into `container`; returns { refresh }.
+  // Buckets sessions by last-activity date, with collapsible headers.
+  function renderDateGroups(container, sessions, activeId) {
+    const now = Date.now() / 1000;
+    const bucket = (ts) => {
+      if (!ts) return "Older";
+      const d = now - ts;
+      if (d < 86400) return "Today";
+      if (d < 172800) return "Yesterday";
+      if (d < 604800) return "This week";
+      if (d < 2592000) return "This month";
+      return "Older";
+    };
+    const order = ["Today", "Yesterday", "This week", "This month", "Older"];
+    const groups = new Map();
+    sessions.forEach((s) => { const k = bucket(s.last_activity_at); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(s); });
+    order.forEach((label) => {
+      const rows = groups.get(label);
+      if (!rows) return;
+      const key = "date:" + label;
+      const collapsed = collapsedGroups.has(key);
+      const header = document.createElement("div");
+      header.className = "group-header" + (collapsed ? " collapsed" : "");
+      const chev = document.createElement("i");
+      chev.className = "codicon codicon-chevron-down group-chevron";
+      const txt = document.createElement("span");
+      txt.className = "group-label";
+      txt.textContent = label;
+      const count = document.createElement("span");
+      count.className = "group-count";
+      count.textContent = String(rows.length);
+      header.append(chev, txt, count);
+      const box = document.createElement("div");
+      box.className = "group-items" + (collapsed ? " hidden" : "");
+      rows.forEach((s) => box.appendChild(sessionRow(s, activeId)));
+      header.addEventListener("click", () => {
+        const nowCollapsed = !collapsedGroups.has(key);
+        if (nowCollapsed) collapsedGroups.add(key); else collapsedGroups.delete(key);
+        box.classList.toggle("hidden", nowCollapsed);
+        header.classList.toggle("collapsed", nowCollapsed);
+      });
+      container.appendChild(header);
+      container.appendChild(box);
+    });
+  }
+
   function mountSessionList(container, opts) {
     opts = opts || {};
     container.innerHTML = "";
-    const state = { q: "" };
-    const search = document.createElement("input");
-    search.className = "session-search";
-    search.type = "text";
-    search.placeholder = "Search by title or code\u2026";
-    search.addEventListener("input", () => { state.q = search.value; renderBody(); });
-    search.addEventListener("click", (e) => e.stopPropagation());
-    search.addEventListener("keydown", (e) => e.stopPropagation());
-    const body = document.createElement("div");
-    body.className = "session-list-body";
-    container.appendChild(search);
-    container.appendChild(body);
+    const state = { q: "", status: "all", grouping: "workspace" };
+    let searchFloater = null;
+    let filterFloater = null;
+    let refreshBtn = null;
+    let refreshTimer = null;
+
+    // Optional in-list toolbar, used by the side panel and the title switcher.
+    // The full-screen list is driven from the header instead (controls omitted).
+    if (opts.controls === "panel") {
+      const mkTool = (iconName, title, onClick) => {
+        const b = document.createElement("button");
+        b.className = "session-tool-btn";
+        b.title = title;
+        b.setAttribute("aria-label", title);
+        b.appendChild(mkIcon(iconName));
+        b.addEventListener("click", (e) => { e.stopPropagation(); onClick(b); });
+        return b;
+      };
+      const toolbar = document.createElement("div");
+      toolbar.className = "session-toolbar";
+      // Spin until the refreshed list actually arrives (devin list can take a
+      // few seconds), with a safety stop so it never spins forever.
+      refreshBtn = mkTool("refresh", "Refresh sessions", () => {
+        refreshBtn.classList.add("spin");
+        clearTimeout(refreshTimer);
+        refreshTimer = setTimeout(() => refreshBtn.classList.remove("spin"), 15000);
+        vscode.postMessage({ type: "refreshSessions" });
+      });
+      const titleLabel = document.createElement("span");
+      titleLabel.className = "session-panel-title";
+      titleLabel.textContent = "Sessions";
+      const spacer = document.createElement("span");
+      spacer.className = "session-tool-spacer";
+      const newBtn = mkTool("new-session", "New session", (b) => openNewSessionMenu(b));
+      const searchBtn = mkTool("search", "Search sessions", (b) => api.toggleSearch(b));
+      const filterBtn = mkTool("filter", "Filter sessions", (b) => api.toggleFilter(b));
+      toolbar.append(refreshBtn, titleLabel, spacer, newBtn, searchBtn, filterBtn);
+      container.appendChild(toolbar);
+    }
+
+    const bodyEl = document.createElement("div");
+    bodyEl.className = "session-list-body";
+    container.appendChild(bodyEl);
+
     function renderBody() {
-      body.innerHTML = "";
+      // A refresh finished: stop the spinner.
+      if (refreshBtn) { clearTimeout(refreshTimer); refreshBtn.classList.remove("spin"); }
+      bodyEl.innerHTML = "";
       if (!lastSessions.length) {
-        body.innerHTML = '<div class="sessions-empty"><i class="codicon codicon-comment-discussion"></i><div>No chats yet.</div></div>';
+        bodyEl.innerHTML = '<div class="sessions-empty"><i class="codicon codicon-comment-discussion"></i><div>No chats yet.</div></div>';
         return;
       }
-      const filtered = filterSessions(lastSessions, state.q);
-      if (!filtered.length) { body.innerHTML = '<div class="sessions-empty-sm">No matching sessions</div>'; return; }
-      renderSessionGroups(body, filtered, lastActiveId, lastFolders);
+      const filtered = filterSessions(lastSessions, state.q, state.status);
+      if (!filtered.length) { bodyEl.innerHTML = '<div class="sessions-empty-sm">No matching sessions</div>'; return; }
+      if (state.grouping === "none") {
+        filtered.forEach((s) => bodyEl.appendChild(sessionRow(s, lastActiveId)));
+      } else if (state.grouping === "date") {
+        renderDateGroups(bodyEl, filtered, lastActiveId);
+      } else {
+        renderSessionGroups(bodyEl, filtered, lastActiveId, lastFolders);
+      }
     }
+
+    function toggleSearch(anchor) {
+      if (searchFloater) { searchFloater.close(); return; }
+      const inp = document.createElement("input");
+      inp.className = "session-search-pop";
+      inp.type = "text";
+      inp.placeholder = "Search sessions\u2026";
+      inp.value = state.q;
+      inp.addEventListener("input", () => { state.q = inp.value; renderBody(); });
+      inp.addEventListener("keydown", (e) => { e.stopPropagation(); if (e.key === "Escape" && searchFloater) searchFloater.close(); });
+      searchFloater = makeFloater(anchor, inp, "right", () => { searchFloater = null; });
+      inp.focus();
+    }
+
+    function toggleFilter(anchor) {
+      if (filterFloater) { filterFloater.close(); return; }
+      const menu = document.createElement("div");
+      menu.className = "dv-menu session-filter-menu";
+      const build = () => {
+        menu.innerHTML = "";
+        const group = (title, options, get, set) => {
+          const label = document.createElement("div");
+          label.className = "dv-menu-label";
+          label.textContent = title;
+          menu.appendChild(label);
+          for (const [val, lab] of options) {
+            const row = document.createElement("button");
+            row.className = "dv-menu-item radio" + (get() === val ? " checked" : "");
+            const chk = mkIcon(get() === val ? "check" : "blank");
+            chk.classList.add("dv-menu-check");
+            row.appendChild(chk);
+            row.appendChild(Object.assign(document.createElement("span"), { textContent: lab }));
+            row.addEventListener("click", (e) => { e.stopPropagation(); set(val); build(); renderBody(); });
+            menu.appendChild(row);
+          }
+        };
+        group("Status", [["all", "All"], ["running", "Running"], ["idle", "Idle"], ["dead", "Ended"]], () => state.status, (v) => { state.status = v; });
+        const sep = document.createElement("div");
+        sep.className = "dv-menu-sep";
+        menu.appendChild(sep);
+        group("Group by", [["workspace", "Workspace"], ["date", "Date"], ["none", "None"]], () => state.grouping, (v) => { state.grouping = v; });
+      };
+      build();
+      filterFloater = makeFloater(anchor, menu, "right", () => { filterFloater = null; });
+    }
+
+    const api = {
+      refresh: renderBody,
+      toggleSearch,
+      toggleFilter,
+      setQuery: (q) => { state.q = q; renderBody(); },
+      setStatus: (s) => { state.status = s; renderBody(); },
+      setGrouping: (g) => { state.grouping = g; renderBody(); }
+    };
     renderBody();
-    return { refresh: renderBody };
+    return api;
   }
 
   // --- Title session switcher (dropdown from the header title) -------------
@@ -2932,7 +3304,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     menu.className = "title-menu";
     menu.addEventListener("click", (e) => e.stopPropagation());
     el.titleBtn.parentElement.appendChild(menu);
-    menuCtrl = mountSessionList(menu, {});
+    menuCtrl = mountSessionList(menu, { controls: "panel" });
   }
 
   function closeTitleMenu() {
@@ -2955,6 +3327,12 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     if (menuCtrl) {
       menuCtrl.refresh();
     }
+    if (panelCtrl && sessionsPanelOpen) {
+      panelCtrl.refresh();
+    }
+    // Refresh the in-session header so the subtitle (session code) fills in once
+    // this session's metadata arrives.
+    if (body === "thread") renderHeader();
   }
 
   // Detach the currently mounted transcript into `views` so we can restore it
@@ -3033,11 +3411,20 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     // needs re-pointing (activate); a dead one is spawned in the background
     // (wake) while its transcript stays on screen, so there is no "Waking…"
     // spinner. Only a session we have never displayed here needs a full load.
+    const status = sessionStatuses[id];
+    const running = status === "running";
+    const alive = status === "running" || status === "idle" || status === "starting";
     const haveView = views.has(id) && !dirtyViews.has(id);
-    const alive = !!sessionStatuses[id];
     snapshotCurrent();
     curSessionId = id;
-    if (haveView) {
+    if (running && views.has(id)) {
+      // A turn is in flight. Reloading its transcript over the live channel
+      // aborts the prompt ("channel closed"), so re-attach to the running
+      // session instead and let it keep streaming into the restored thread.
+      restoreView(id);
+      dirtyViews.delete(id);
+      vscode.postMessage({ type: "activateSession", id });
+    } else if (haveView) {
       restoreView(id);
       if (alive) {
         vscode.postMessage({ type: "activateSession", id });
@@ -3070,6 +3457,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     lastStatusSig = sig;
     if (listCtrl) listCtrl.refresh();
     if (menuCtrl) menuCtrl.refresh();
+    if (panelCtrl && sessionsPanelOpen) panelCtrl.refresh();
     updateTerminateBtn();
   }
 
@@ -3548,11 +3936,22 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         el.status.textContent = "";
         // The thread now shows this session; retire any retained snapshot for it.
         if (m.sessionId) { curSessionId = m.sessionId; views.delete(m.sessionId); dirtyViews.delete(m.sessionId); }
+        // Refresh the header so the title and code badge reflect the session now
+        // shown (e.g. after starting a new session).
+        renderHeader();
         updateTerminateBtn();
         break;
       case "status": el.status.textContent = m.text || ""; break;
       case "clear":
         workingEl = null;
+        // A fresh session resets the header title and code badge instead of
+        // keeping the previous session's.
+        if (m.reset) {
+          currentTitle = "Chat";
+          curSessionId = null;
+          closeTitleMenu();
+          renderHeader();
+        }
         // A freshly cleared thread starts pinned at the bottom.
         stickToBottom = true;
         // Drop any in-progress request edit so its banner/target don't dangle

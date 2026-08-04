@@ -1,10 +1,11 @@
 import * as vscode from "vscode";
-import { ChatViewProvider } from "./chat/chatViewProvider";
+import { ChatManager } from "./chat/chatManager";
 import { ChangeTracker } from "./diff/changeTracker";
 import { SessionStore } from "./session/sessionStore";
 import { StatusBar } from "./ui/statusBar";
 import { reapOrphanedAgents } from "./cli/reaper";
 import { sweepStaleLocks } from "./cli/sessionLocks";
+import { SettingsPanel } from "./settings/settingsPanel";
 
 export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel("Devin");
@@ -25,22 +26,27 @@ export function activate(context: vscode.ExtensionContext): void {
   const statusBar = new StatusBar();
   context.subscriptions.push(output, changes.register(), statusBar);
 
-  const provider = new ChatViewProvider(context, store, changes, statusBar, output);
+  const manager = new ChatManager(context, store, changes, statusBar, output);
   context.subscriptions.push(
-    vscode.window.registerWebviewViewProvider(ChatViewProvider.viewType, provider, {
+    vscode.window.registerWebviewViewProvider(ChatManager.viewType, manager, {
       webviewOptions: { retainContextWhenHidden: true }
     }),
-    // Ensure the ACP process is killed on reload/deactivate.
-    { dispose: () => provider.dispose() }
+    vscode.window.registerWebviewPanelSerializer(ChatManager.editorViewType, manager),
+    // Ensure the ACP processes are killed on reload/deactivate.
+    { dispose: () => manager.dispose() }
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand("devin.focusChat", () => provider.focus()),
-    vscode.commands.registerCommand("devin.newSession", () => provider.newSession()),
-    vscode.commands.registerCommand("devin.showSessions", () => provider.showSessionsView()),
-    vscode.commands.registerCommand("devin.cancel", () => provider.cancel()),
-    vscode.commands.registerCommand("devin.runSetup", () => provider.runSetup()),
-    vscode.commands.registerCommand("devin.showInfo", () => provider.showInfo())
+    vscode.commands.registerCommand("devin.focusChat", () => manager.focus()),
+    vscode.commands.registerCommand("devin.newSession", () => manager.newSession()),
+    vscode.commands.registerCommand("devin.newSessionEditor", () => manager.newSessionEditor()),
+    vscode.commands.registerCommand("devin.newSessionWindow", () => manager.newSessionWindow()),
+    vscode.commands.registerCommand("devin.newSessionTerminal", () => manager.newSessionTerminal()),
+    vscode.commands.registerCommand("devin.showSessions", () => manager.showSessions()),
+    vscode.commands.registerCommand("devin.cancel", () => manager.cancel()),
+    vscode.commands.registerCommand("devin.runSetup", () => manager.runSetup()),
+    vscode.commands.registerCommand("devin.showInfo", () => manager.showInfo()),
+    vscode.commands.registerCommand("devin.openSettings", () => SettingsPanel.show(context))
   );
 }
 
