@@ -15,7 +15,21 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 > in 0.6.92. Their entries are kept separate because each is a coherent change
 > worth reading on its own.
 
-## [Unreleased]
+## [0.6.93] - 2026-08-04
+
+Refreshes the Marketplace listing, whose README was published before the
+screenshots were rebuilt.
+
+### Changed
+- Every README screenshot is now exactly 620 by 860 pixels. They ranged from
+  440x720 to 460x1197, so the two by two grid rendered them at four different
+  scales with ragged gaps. The cause was capturing an element, which is as tall as
+  its content, so each is now a viewport capture with the transcript scrolled to
+  the bottom, the way the panel leaves it after a turn.
+- They are also captured wider. At the narrowest panel width the request bubble,
+  the reply text and the question form all wrapped hard enough to look cramped.
+  `scripts/preview.js` takes a `--width` flag for this, so a capture no longer
+  depends on the browser window.
 
 ### Fixed
 - Tags in a settings list (an MCP server's transport, `disabled`, the env count)

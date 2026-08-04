@@ -20,10 +20,14 @@ the extension across a range of real work.
 
 ## Size
 
-Every image is **460 by 820** pixels, with no exceptions. The README lays them
+Every image is **620 by 860** pixels, with no exceptions. The README lays them
 out two to a row, so images of different heights leave ragged gaps and each one
-renders at a different scale. 460 wide is the sidebar panel width, so a capture
-is life sized rather than a shrunken wide window.
+renders at a different scale.
+
+620 wide is a comfortably sized panel rather than the narrowest one it can run
+in: at 460 the request bubble, the reply text and the question form all wrapped
+hard enough to look cramped. Set it with `--width`, which the panel applies to
+`#app`, so a capture never depends on the browser window.
 
 That means capturing the **viewport**, not an element: an element capture is as
 tall as its content, which is what made the earlier set range from 671 to 1197
@@ -37,7 +41,7 @@ expected to continue, and the composer stays in frame.
 
    ```bash
    npm run compile
-   node scripts/preview.js --scenario full
+   node scripts/preview.js --scenario full --width 620
    npx http-server -p 8787 .          # or: python3 -m http.server 8787
    ```
 
@@ -46,7 +50,7 @@ expected to continue, and the composer stays in frame.
 
    ```bash
    playwright-cli goto "http://localhost:8787/scripts/.preview/index.html"
-   playwright-cli resize 460 820
+   playwright-cli resize 620 860
    playwright-cli eval "(() => { const t = document.getElementById('thread'); t.scrollTop = t.scrollHeight; })()"
    playwright-cli screenshot --filename=docs/screenshots/02-refactor-and-tests.png
    ```
@@ -62,11 +66,13 @@ expected to continue, and the composer stays in frame.
    playwright-cli eval "(() => { const t = document.getElementById('thread'); const svg = t.querySelector('svg'); t.scrollTop += svg.getBoundingClientRect().top - t.getBoundingClientRect().top - 210; })()"
    ```
 
-4. Check the result is still 460 by 820 before committing:
+4. Check every image is still 620 by 860 before committing:
 
    ```bash
-   file docs/screenshots/*.png
+   file docs/screenshots/*.png     # all four must report 620 x 860
    ```
+
+   The count must stay even, so the grid never ends on a half empty row.
 
 ## Adding or changing sample data
 
