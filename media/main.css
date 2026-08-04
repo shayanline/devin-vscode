@@ -3442,6 +3442,7 @@ body.dv-resizing #sessions-resizer {
   min-width: 0;
 }
 .settings-field-label {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -3470,7 +3471,9 @@ body.dv-resizing #sessions-resizer {
   opacity: 1;
 }
 /* Marks a row the active scope sets itself, rather than inherits. It sits in the
-   gutter, the way VS Code marks a modified setting, so labels stay aligned. */
+   gutter, the way VS Code marks a modified setting, so labels stay aligned. It is
+   anchored to the label rather than the row, so it stays beside the label when a
+   row stacks its control underneath. */
 .settings-dot {
   position: absolute;
   left: -11px;
@@ -3571,6 +3574,54 @@ body.dv-resizing #sessions-resizer {
   margin: 14px 0 2px;
 }
 
+/* A stacked row: the control sits under the label and takes the full width.
+   Used for anything typed into, where a right-aligned control's 180px is not
+   enough to read a path, a domain list or a proxy URL. */
+.settings-field.stacked {
+  display: block;
+}
+.settings-field.stacked .settings-field-control {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+.settings-field.stacked .settings-input,
+.settings-field.stacked .settings-textarea {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+/* A dropdown beside a stacked input (the permission bucket) keeps its own width. */
+.settings-field.stacked .settings-select-wrap {
+  flex: 0 0 auto;
+}
+.settings-field.stacked .settings-select {
+  min-width: 110px;
+}
+
+/* A form (every modal) is one full width column: labels above their controls,
+   and no row separators, which suits a dialog better than a settings list. */
+.settings-form .settings-field {
+  display: block;
+  border-bottom: none;
+}
+.settings-form .settings-field:first-child {
+  padding-top: 0;
+}
+.settings-form .settings-field-control {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+.settings-form .settings-input,
+.settings-form .settings-textarea,
+.settings-form .settings-select-wrap {
+  width: 100%;
+}
+.settings-form .settings-select {
+  width: 100%;
+  min-width: 0;
+}
+
 /* Controls */
 .settings-input {
   padding: 4px 8px;
@@ -3585,6 +3636,40 @@ body.dv-resizing #sessions-resizer {
 }
 .settings-input:focus {
   border-color: var(--vscode-focusBorder);
+}
+.settings-textarea {
+  min-height: 70px;
+  padding: 6px 8px;
+  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+  border-radius: var(--dv-radius-xs);
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  font-family: inherit;
+  font-size: 0.9em;
+  line-height: 1.5;
+  resize: vertical;
+  outline: none;
+}
+.settings-textarea:focus {
+  border-color: var(--vscode-focusBorder);
+}
+
+/* Hover tooltip, matching VS Code's hover widget rather than the platform
+   tooltip. Fixed, so it is never clipped by the scrolling page. */
+.settings-tip {
+  position: fixed;
+  z-index: 200;
+  max-width: 320px;
+  padding: 4px 8px;
+  border: 1px solid var(--vscode-editorHoverWidget-border, var(--vscode-widget-border, var(--vscode-panel-border)));
+  border-radius: var(--dv-radius-xs);
+  background: var(--vscode-editorHoverWidget-background, var(--vscode-editorWidget-background));
+  color: var(--vscode-editorHoverWidget-foreground, var(--vscode-editorWidget-foreground, var(--vscode-foreground)));
+  font-size: 0.85em;
+  line-height: 1.4;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  pointer-events: none;
+  word-break: break-word;
 }
 
 /* Dropdowns follow VS Code's own Settings editor, down to its dropdown theme

@@ -241,6 +241,73 @@ test("there is no manual refresh, since the panel follows the files itself", () 
   assert.ok(!h.posted.some((m) => m.type === "settings:refresh"));
 });
 
+test("icon-only actions carry a tooltip, not just an accessible name", () => {
+  const h = createSettings();
+  h.openSection("MCP");
+  const icons = h.all("#settings-content .settings-icon-btn");
+  assert.ok(icons.length >= 4);
+  for (const b of icons) {
+    const tip = b.getAttribute("data-tip");
+    assert.ok(tip, "an icon-only action needs a tooltip: " + b.outerHTML.slice(0, 80));
+    // The tooltip and the accessible name must not drift apart.
+    assert.strictEqual(tip, b.getAttribute("aria-label"));
+    // The platform tooltip is replaced, not doubled up.
+    assert.strictEqual(b.getAttribute("title"), null);
+  }
+});
+
+test("moving between sections asks the host to re-read the files", () => {
+  const h = createSettings();
+  h.openSection("Skills");
+  assert.ok(h.posted.some((m) => m.type === "settings:reload"), "expected a reload on section change");
+  // Switching scope does the same, through the message that retargets the CLI.
+  h.posted.length = 0;
+  h.openScope("Workspace");
+  assert.ok(h.posted.some((m) => m.type === "settings:setRoot"));
+});
+
+test("a typed value gets the full row width, a fixed-size control does not", () => {
+  const h = createSettings();
+  h.openSection("Advanced");
+  // proxy.url is typed, so its row stacks; proxy.mode is a dropdown, so it does not.
+  assert.ok(h.row("proxy.url").classList.contains("stacked"));
+  assert.ok(!h.row("proxy.mode").classList.contains("stacked"));
+  assert.ok(h.row("sandbox.allowed_domains").classList.contains("stacked"));
+  h.openSection("General");
+  assert.ok(!h.row("attribution").classList.contains("stacked"), "a toggle row should stay inline");
+});
+
+test("the hook form names its value field after the type, and fits the prompt", () => {
+  const h = createSettings();
+  h.openSection("Hooks").click("Add");
+  const labels = () => h.all(".settings-modal .settings-field-label").map(h.text);
+  const modal = () => h.document.querySelector(".settings-modal");
+
+  assert.deepStrictEqual(labels(), ["Event", "Type", "Command", "Matcher", "Timeout"]);
+  assert.ok(modal().querySelector("input[type=text]"));
+  assert.strictEqual(modal().querySelector("textarea"), null);
+
+  // Switching to a prompt renames the field and swaps in a multi-line control.
+  const type = h.all(".settings-modal select")[1];
+  type.value = "prompt";
+  type.dispatchEvent(new h.window.Event("change"));
+  assert.deepStrictEqual(labels(), ["Event", "Type", "Prompt", "Matcher", "Timeout"]);
+  assert.ok(modal().querySelector("textarea"), "a prompt needs room for more than one line");
+
+  // What was typed in each control survives switching between them.
+  modal().querySelector("textarea").value = "Check the open pull requests.";
+  type.value = "command";
+  type.dispatchEvent(new h.window.Event("change"));
+  type.value = "prompt";
+  type.dispatchEvent(new h.window.Event("change"));
+  assert.strictEqual(modal().querySelector("textarea").value, "Check the open pull requests.");
+
+  h.click("Add hook");
+  const msg = h.last("settings:addHook");
+  assert.strictEqual(msg.hookType, "prompt");
+  assert.strictEqual(msg.value, "Check the open pull requests.");
+});
+
 test("with nothing configured, every section still offers a way in", () => {
   const h = createSettings({ empty: true });
   h.openSection("Instructions");
