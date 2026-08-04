@@ -3929,8 +3929,28 @@ body.dv-resizing #sessions-resizer {
   gap: 8px;
   margin-top: 16px;
 }
-.settings-working {
+/* A switched-off entry (a disabled MCP server) reads as switched off: its name
+   and subtitle are struck through, while its tags stay legible. */
+.settings-list-row.disabled .settings-list-name,
+.settings-list-row.disabled .settings-list-sub {
+  text-decoration: line-through;
+}
+.settings-list-row.disabled .settings-list-main {
+  opacity: 0.7;
+}
+
+/* A control waiting on the host: it shows the work running and takes no further
+   input, so a write cannot be fired twice. */
+.settings-btn.busy,
+.settings-icon-btn.busy,
+.settings-input.busy,
+.settings-select.busy,
+.settings-toggle.busy {
   cursor: progress;
+  opacity: 0.7;
+}
+.settings-select-wrap:has(> .settings-select.busy) > .codicon-chevron-down {
+  opacity: 0.4;
 }
 
 /* ==========================================================================

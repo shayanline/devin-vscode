@@ -308,6 +308,95 @@ test("the hook form names its value field after the type, and fits the prompt", 
   assert.strictEqual(msg.value, "Check the open pull requests.");
 });
 
+test("a disabled MCP server reads as switched off", () => {
+  const h = createSettings();
+  h.openSection("MCP");
+  const rows = h.all(".settings-list-row");
+  const off = rows.filter((r) => r.classList.contains("disabled"));
+  assert.strictEqual(off.length, 1, "only the disabled server should be marked");
+  assert.strictEqual(h.text(off[0].querySelector(".settings-list-name")), "issue-tracker");
+  // The name is its own element so the strike-through misses the tags.
+  assert.ok(off[0].querySelector(".settings-list-title .settings-tag"));
+  // An enabled server carries no state class.
+  const on = rows.find((r) => h.text(r.querySelector(".settings-list-name")) === "github");
+  assert.ok(!on.classList.contains("disabled"));
+});
+
+test("an action that hands work to the host shows itself running", () => {
+  const h = createSettings();
+  h.openSection("MCP");
+  const disable = h.all("#settings-content .settings-icon-btn").find((b) => b.getAttribute("aria-label") === "Disable");
+  disable.click();
+  assert.ok(h.last("settings:mcpVerb"), "the verb should have been sent");
+  assert.ok(disable.classList.contains("busy"), "the button should show the work running");
+  assert.strictEqual(disable.disabled, true, "and take no further clicks, so it cannot fire twice");
+  assert.ok(disable.querySelector(".codicon-loading"), "expected a spinner in place of the icon");
+
+  // Answering with nothing changed (a declined confirmation) still releases it.
+  h.send({ type: "settings:idle" });
+  assert.ok(!disable.classList.contains("busy"));
+  assert.strictEqual(disable.disabled, false);
+  assert.ok(!disable.querySelector(".codicon-loading"));
+});
+
+test("every kind of control shows it, and only when work was really started", () => {
+  const h = createSettings();
+  // A toggle writes, so it shows the write running.
+  const box = h.control("attribution");
+  box.checked = false;
+  box.dispatchEvent(new h.window.Event("change"));
+  assert.ok(h.last("settings:setPath"));
+  assert.ok(box.closest(".settings-toggle").classList.contains("busy"));
+
+  // Removing a permission chip is a write too.
+  const h2 = createSettings();
+  h2.openSection("Permissions");
+  const x = h2.all(".settings-perm-x")[0];
+  x.click();
+  assert.ok(h2.last("settings:permission"));
+  assert.ok(x.classList.contains("busy"));
+
+  // Opening a form starts nothing, so its button must not sit there spinning.
+  const h3 = createSettings();
+  h3.openSection("Skills");
+  const add = h3.all("#settings-content .settings-btn").find((b) => h3.text(b) === "Add");
+  add.click();
+  assert.ok(!add.classList.contains("busy"));
+  assert.strictEqual(h3.document.querySelector(".settings-modal .codicon-loading"), null);
+});
+
+test("a submitted form waits for the host before closing", () => {
+  const h = createSettings();
+  h.openSection("Skills").click("Add");
+  const name = h.document.querySelector(".settings-modal input[type=text]");
+  name.value = "release-notes";
+  h.click("Create skill");
+
+  assert.strictEqual(h.last().type, "settings:createSkill");
+  // Still open, with the submit button showing the work, so the result lands
+  // somewhere the user is still looking.
+  const modal = h.document.querySelector(".settings-modal");
+  assert.ok(modal, "the form should stay open until the host answers");
+  assert.ok(modal.querySelector(".codicon-loading"));
+
+  h.send({ type: "settings:data", data: h.data });
+  assert.strictEqual(h.document.querySelector(".settings-modal"), null, "and close once it has");
+});
+
+test("re-entering a text field without editing it writes nothing", () => {
+  const h = createSettings();
+  h.openSection("Advanced");
+  const url = h.row("proxy.url").querySelector("input");
+  url.dispatchEvent(new h.window.Event("blur"));
+  assert.strictEqual(h.last("settings:setPath"), undefined, "an unchanged blur must not write");
+  assert.ok(!url.classList.contains("busy"));
+
+  url.value = "http://proxy.internal:3128";
+  url.dispatchEvent(new h.window.Event("blur"));
+  assert.strictEqual(h.last("settings:setPath").value, "http://proxy.internal:3128");
+  assert.ok(url.classList.contains("busy"));
+});
+
 test("with nothing configured, every section still offers a way in", () => {
   const h = createSettings({ empty: true });
   h.openSection("Instructions");

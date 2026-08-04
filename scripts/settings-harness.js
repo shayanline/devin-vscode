@@ -67,6 +67,11 @@ function createSettings(opts) {
     all,
     text,
     visibleRows,
+    // Send a message to the webview, the way the extension host does.
+    send(msg) {
+      window.dispatchEvent(new window.MessageEvent("message", { data: msg }));
+      return api;
+    },
     // Section names in the sidebar, in order.
     sections: () => all("#settings-nav .settings-nav-item").map(text),
     activeSection: () => text(document.querySelector(".settings-nav-item.active")),
