@@ -9,8 +9,35 @@ export class SessionStore {
   private static readonly TITLES_KEY = "devin.sessionTitles.v1";
   private static readonly OPTIONS_KEY = "devin.options.v1";
   private static readonly CWDS_KEY = "devin.sessionCwd.v1";
+  private static readonly INTERRUPTED_KEY = "devin.interrupted.v1";
 
   constructor(private readonly state: vscode.Memento) {}
+
+  // Sessions whose turn was still in flight when the window reloaded or the
+  // extension shut down. A `devin acp` agent cannot outlive its extension host
+  // (it runs its commands and file writes through us), so the turn dies with it;
+  // recording that lets the next window say so instead of silently losing it.
+  interrupted(): string[] {
+    return this.state.get<string[]>(SessionStore.INTERRUPTED_KEY, []);
+  }
+
+  // Returns the Thenable so a shutdown path can await the write: an unawaited
+  // update is not guaranteed to flush before the host exits.
+  markInterrupted(ids: string[]): Thenable<void> {
+    if (!ids.length) {
+      return Promise.resolve();
+    }
+    const next = [...new Set([...this.interrupted(), ...ids])].slice(0, 50);
+    return this.state.update(SessionStore.INTERRUPTED_KEY, next);
+  }
+
+  clearInterrupted(id: string): void {
+    const current = this.interrupted();
+    if (!current.includes(id)) {
+      return;
+    }
+    void this.state.update(SessionStore.INTERRUPTED_KEY, current.filter((x) => x !== id));
+  }
 
   // Cache the last-known mode/model options so the composer dropdowns are
   // populated immediately on open, before any session exists.

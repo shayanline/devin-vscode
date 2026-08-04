@@ -50,20 +50,6 @@ export async function listSkills(ctx: CliContext): Promise<NamedItem[]> {
   return items;
 }
 
-// `devin rules list` prints, per rule:  NAME [Type] always-on
-export async function listRules(ctx: CliContext): Promise<NamedItem[]> {
-  const r = await run(ctx, ["rules", "list"]);
-  if (!r.out.trim()) return [];
-  const items: NamedItem[] = [];
-  for (const line of r.out.split(/\r?\n/)) {
-    const t = line.trim();
-    if (!t || /^available rules/i.test(t)) continue;
-    const m = t.match(/^(\S+)\s+\[([^\]]*)\]\s*(.*)$/);
-    if (m) items.push({ name: m[1], source: m[2], description: m[3].trim() });
-  }
-  return items;
-}
-
 // `devin plugins list` prints installed plugins (name, version, blocked status).
 export async function listPlugins(ctx: CliContext): Promise<NamedItem[]> {
   const r = await run(ctx, ["plugins", "list"]);

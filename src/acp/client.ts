@@ -1,4 +1,4 @@
-import { spawn, ChildProcessWithoutNullStreams } from "child_process";
+import { spawn, execFile, ChildProcessWithoutNullStreams } from "child_process";
 import { EventEmitter } from "events";
 import { JsonRpcConnection } from "./connection";
 import {
@@ -46,6 +46,7 @@ export class AcpClient extends EventEmitter {
   private child?: ChildProcessWithoutNullStreams;
   private conn?: JsonRpcConnection;
   private host?: AcpHost;
+  private exited = false;
   initializeResult?: InitializeResult;
 
   constructor(private readonly options: AcpClientOptions) {
@@ -69,6 +70,7 @@ export class AcpClient extends EventEmitter {
 
     child.on("error", (err) => this.emit("log", `[spawn-error] ${err.message}`));
     child.on("close", (code) => {
+      this.exited = true;
       this.emit("log", `[acp-exit] code=${code}`);
       // Reap any MCP children that outlived the agent.
       this.killTree("SIGKILL");
@@ -261,6 +263,10 @@ export class AcpClient extends EventEmitter {
     return this.conn.request<T>(method, params);
   }
 
+  // Stop the agent while this extension host stays alive (terminating one
+  // session, a failed start). Fire and forget: the follow-up SIGKILL runs on a
+  // timer, which is only reliable because we are still here to fire it. Use
+  // `shutdown()` on the way out instead.
   dispose(): void {
     this.conn?.dispose();
     // SIGTERM the whole group (lets the agent + docker-based MCP shut down
@@ -278,11 +284,72 @@ export class AcpClient extends EventEmitter {
     }
   }
 
-  // Signal the agent's entire process group. Falls back to signalling just the
-  // child if the group send fails (e.g. Windows, or the group is already gone).
+  // Stop the agent for good and resolve only once it is really gone, so a caller
+  // that is shutting the extension down can await it rather than racing the
+  // host's exit (a `setTimeout` escalation never fires once the host is gone).
+  //
+  // Escalates within `timeoutMs`: closing stdin is a clean EOF most stdio agents
+  // exit on, then SIGTERM the process group so docker-backed MCP servers get to
+  // tidy up, then SIGKILL. Any turn should be cancelled by the caller first.
+  async shutdown(timeoutMs = 800): Promise<void> {
+    if (!this.child || this.exited) {
+      this.conn?.dispose();
+      return;
+    }
+    const deadline = Date.now() + timeoutMs;
+    this.conn?.dispose();
+    if (await this.waitForExit(Math.round(timeoutMs * 0.5))) {
+      return;
+    }
+    this.killTree("SIGTERM");
+    if (await this.waitForExit(deadline - Date.now())) {
+      return;
+    }
+    this.emit("log", "[acp-shutdown] agent ignored SIGTERM, killing");
+    this.killTree("SIGKILL");
+    await this.waitForExit(150);
+  }
+
+  // Resolves true once the process has closed, false if `ms` runs out first.
+  private waitForExit(ms: number): Promise<boolean> {
+    if (this.exited) {
+      return Promise.resolve(true);
+    }
+    if (ms <= 0) {
+      return Promise.resolve(false);
+    }
+    return new Promise((resolve) => {
+      const done = (): void => {
+        clearTimeout(timer);
+        resolve(true);
+      };
+      const timer = setTimeout(() => {
+        this.off("exit", done);
+        resolve(this.exited);
+      }, ms);
+      this.once("exit", done);
+    });
+  }
+
+  // Signal the agent's entire process tree: its process group on POSIX, or
+  // taskkill on Windows, which has no groups (so a plain child.kill there would
+  // strand the MCP servers the agent spawned).
   private killTree(signal: NodeJS.Signals): void {
     const pid = this.child?.pid;
     if (!pid) {
+      return;
+    }
+    if (process.platform === "win32") {
+      try {
+        execFile("taskkill", ["/PID", String(pid), "/T", "/F"], () => {});
+      } catch {
+        // taskkill missing; fall through to the direct kill below
+      }
+      try {
+        this.child?.kill();
+      } catch {
+        // already gone
+      }
       return;
     }
     try {

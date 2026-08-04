@@ -144,7 +144,28 @@ export class ChatManager implements vscode.WebviewViewProvider, vscode.WebviewPa
     return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.env.HOME || process.cwd();
   }
 
+  // Whichever stop path runs first wins, so the fallback dispose after an awaited
+  // shutdown is a no-op rather than a second round of signals.
+  private stopped = false;
+
+  // Stop every surface for good and resolve once every agent has really exited.
+  // Called from `deactivate`, which VS Code awaits, so a window reload leaves no
+  // stranded agents, MCP servers or running commands behind.
+  async shutdown(): Promise<void> {
+    if (this.stopped) {
+      return;
+    }
+    this.stopped = true;
+    const controllers = [this.sidebar, ...this.panels.keys()].filter(Boolean) as ChatController[];
+    await Promise.all(controllers.map((c) => c.shutdown()));
+    this.panels.clear();
+  }
+
   dispose(): void {
+    if (this.stopped) {
+      return;
+    }
+    this.stopped = true;
     this.sidebar?.dispose();
     for (const controller of this.panels.keys()) {
       controller.dispose();

@@ -207,7 +207,78 @@ export class ChatController implements AcpHost {
   // Kill every live ACP process (and its terminals) so a window reload or
   // extension deactivate does not leave stranded `devin acp` agents (and their
   // MCP servers). This is item 6: stop all sessions on exit.
+  //
+  // Synchronous, so the escalation to SIGKILL is left on a timer. Prefer
+  // `shutdown()` when the extension host itself is going away, since that timer
+  // will not fire once it has exited.
   dispose(): void {
+    this.stopLocalState();
+    for (const rt of this.runtimes.values()) {
+      this.destroyRuntime(rt);
+    }
+    this.runtimes.clear();
+    this.starting.clear();
+    this.activeId = undefined;
+  }
+
+  // Stop everything for good on the way out (window reload, extension
+  // deactivate), and resolve only once every agent is really gone.
+  //
+  // A `devin acp` agent cannot be handed over to the next extension host: it
+  // runs its shell commands, file writes and permission prompts through us, over
+  // our stdio, so leaving it alive would strand an agent that can do nothing
+  // while still holding the CLI's session lock. Instead each one is stopped
+  // deterministically here, and any session with a turn in flight is recorded so
+  // the next window can say the turn was interrupted rather than losing it
+  // silently.
+  async shutdown(): Promise<void> {
+    const live = [...this.runtimes.values()];
+    const interrupted = live.filter((rt) => rt.id && (rt.busy || rt.awaiting > 0)).map((rt) => rt.id);
+    this.stopLocalState();
+    this.runtimes.clear();
+    this.starting.clear();
+    this.activeId = undefined;
+    // Record before killing: the write has to be in flight while the host is
+    // still alive to flush it.
+    const recorded = this.store.markInterrupted(interrupted);
+    await Promise.all(live.map((rt) => this.stopRuntime(rt)));
+    try {
+      await recorded;
+    } catch {
+      // workspaceState is best effort; losing the note is not worth failing on
+    }
+  }
+
+  // Stop one runtime in order: cancel the turn so the agent can stop cleanly,
+  // stop its commands, wait for the agent to exit, then force anything left.
+  private async stopRuntime(rt: Runtime): Promise<void> {
+    if (rt.busy && rt.id) {
+      try {
+        rt.client.cancel(rt.id);
+      } catch {
+        // the pipe may already be gone
+      }
+    }
+    try {
+      rt.terminals.requestStopAll();
+    } catch {
+      // ignore
+    }
+    try {
+      await rt.client.shutdown();
+    } catch {
+      // ignore
+    }
+    try {
+      rt.terminals.forceStopAll();
+    } catch {
+      // ignore
+    }
+  }
+
+  // Everything except the runtimes: timers, in-flight agent requests, and our
+  // own subscriptions. Shared by both stop paths.
+  private stopLocalState(): void {
     if (this.idleTimer) {
       clearInterval(this.idleTimer);
       this.idleTimer = undefined;
@@ -236,12 +307,6 @@ export class ChatController implements AcpHost {
       try { d.dispose(); } catch { /* ignore */ }
     }
     this.ownDisposables.length = 0;
-    for (const rt of this.runtimes.values()) {
-      this.destroyRuntime(rt);
-    }
-    this.runtimes.clear();
-    this.starting.clear();
-    this.activeId = undefined;
   }
 
   // --- Runtime pool --------------------------------------------------------
@@ -601,8 +666,13 @@ export class ChatController implements AcpHost {
       await this.refreshSessions();
       // Auto-resume only applies to the sidebar surface. Editor/window surfaces
       // that were freshly opened start a new session instead (see onWebviewReady).
-      if (this.kind === "view" && !this.autoNewSession && this.cfg().get<boolean>("autoResumeLast", false)) {
-        const last = this.store.activeId();
+      const last = this.store.activeId();
+      // Always reopen a session whose turn we had to kill on the way out, even
+      // when auto-resume is off: landing on the session list with no word of the
+      // interruption is the one case where it is genuinely confusing.
+      const wasInterrupted = !!last && this.store.interrupted().includes(last);
+      const resume = wasInterrupted || this.cfg().get<boolean>("autoResumeLast", false);
+      if (this.kind === "view" && !this.autoNewSession && resume) {
         if (last && !this.activeId) {
           this.post({ type: "body", body: "thread" });
           await this.loadSession(last);
@@ -940,6 +1010,17 @@ export class ChatController implements AcpHost {
     }
   }
 
+  // Tell the thread, once, that this session's turn was killed by a window reload
+  // or an extension shutdown, so an interrupted turn is visible and re-sendable
+  // rather than silently missing.
+  private reportInterrupted(id: string): void {
+    if (!this.store.interrupted().includes(id)) {
+      return;
+    }
+    this.store.clearInterrupted(id);
+    this.post({ type: "interrupted" });
+  }
+
   // Open a session: reuse its live runtime if it is already alive, otherwise
   // wake it (spawn a fresh acp and load its history). Either way the session is
   // alive when this returns. Item 4.
@@ -1031,6 +1112,7 @@ export class ChatController implements AcpHost {
         this.reportLoadFailure(loadFailed);
       } else {
         this.post({ type: "loaded" });
+        this.reportInterrupted(id);
         // The head read right after a reload is NOT a reliable revert target: the
         // next prompt re-expands the conversation and orphans it.
         await this.postTurnHead(false);
@@ -1148,6 +1230,7 @@ export class ChatController implements AcpHost {
       this.postCapabilities();
       if (this.activeId === id) {
         this.post({ type: "sessionReady", sessionId: id });
+        this.reportInterrupted(id);
       }
       this.ensureIdleTimer();
     } catch (err) {

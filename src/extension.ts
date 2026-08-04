@@ -7,6 +7,12 @@ import { reapOrphanedAgents } from "./cli/reaper";
 import { sweepStaleLocks } from "./cli/sessionLocks";
 import { SettingsPanel } from "./settings/settingsPanel";
 
+// Held at module scope so `deactivate` can await the shutdown. A `devin acp`
+// agent runs its commands, file writes and permission prompts through this
+// extension host over our stdio, so it cannot be handed to the next one: the
+// only safe move on the way out is to stop every agent deterministically.
+let manager: ChatManager | undefined;
+
 export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel("Devin");
   // Clean up anything left stranded by a previous crash or force-quit before we
@@ -26,30 +32,39 @@ export function activate(context: vscode.ExtensionContext): void {
   const statusBar = new StatusBar();
   context.subscriptions.push(output, changes.register(), statusBar);
 
-  const manager = new ChatManager(context, store, changes, statusBar, output);
+  manager = new ChatManager(context, store, changes, statusBar, output);
+  const chat = manager;
   context.subscriptions.push(
-    vscode.window.registerWebviewViewProvider(ChatManager.viewType, manager, {
+    vscode.window.registerWebviewViewProvider(ChatManager.viewType, chat, {
       webviewOptions: { retainContextWhenHidden: true }
     }),
-    vscode.window.registerWebviewPanelSerializer(ChatManager.editorViewType, manager),
-    // Ensure the ACP processes are killed on reload/deactivate.
-    { dispose: () => manager.dispose() }
+    vscode.window.registerWebviewPanelSerializer(ChatManager.editorViewType, chat),
+    // A backstop for any path that disposes the extension without calling
+    // `deactivate`. After an awaited shutdown this is a no-op.
+    { dispose: () => chat.dispose() }
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand("devin.focusChat", () => manager.focus()),
-    vscode.commands.registerCommand("devin.newSession", () => manager.newSession()),
-    vscode.commands.registerCommand("devin.newSessionEditor", () => manager.newSessionEditor()),
-    vscode.commands.registerCommand("devin.newSessionWindow", () => manager.newSessionWindow()),
-    vscode.commands.registerCommand("devin.newSessionTerminal", () => manager.newSessionTerminal()),
-    vscode.commands.registerCommand("devin.showSessions", () => manager.showSessions()),
-    vscode.commands.registerCommand("devin.cancel", () => manager.cancel()),
-    vscode.commands.registerCommand("devin.runSetup", () => manager.runSetup()),
-    vscode.commands.registerCommand("devin.showInfo", () => manager.showInfo()),
+    vscode.commands.registerCommand("devin.focusChat", () => chat.focus()),
+    vscode.commands.registerCommand("devin.newSession", () => chat.newSession()),
+    vscode.commands.registerCommand("devin.newSessionEditor", () => chat.newSessionEditor()),
+    vscode.commands.registerCommand("devin.newSessionWindow", () => chat.newSessionWindow()),
+    vscode.commands.registerCommand("devin.newSessionTerminal", () => chat.newSessionTerminal()),
+    vscode.commands.registerCommand("devin.showSessions", () => chat.showSessions()),
+    vscode.commands.registerCommand("devin.cancel", () => chat.cancel()),
+    vscode.commands.registerCommand("devin.runSetup", () => chat.runSetup()),
+    vscode.commands.registerCommand("devin.showInfo", () => chat.showInfo()),
     vscode.commands.registerCommand("devin.openSettings", () => SettingsPanel.show(context))
   );
 }
 
-export function deactivate(): void {
-  // Subscriptions dispose the provider and ACP process.
+// VS Code awaits this (with a timeout) before tearing the extension host down,
+// which is the only point where we can wait for the agents to actually exit. The
+// synchronous dispose path cannot: its escalation to SIGKILL sits on a timer that
+// never fires once the host has gone, which is how an agent that ignores SIGTERM
+// used to survive as an orphan until the next window reaped it.
+export async function deactivate(): Promise<void> {
+  const chat = manager;
+  manager = undefined;
+  await chat?.shutdown();
 }
