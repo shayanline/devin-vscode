@@ -15,6 +15,13 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 > in 0.6.92. Their entries are kept separate because each is a coherent change
 > worth reading on its own.
 
+## [Unreleased]
+
+### Fixed
+- Tags in a settings list (an MCP server's transport, `disabled`, the env count)
+  no longer break one letter per line when the panel is narrow, which happens in
+  a split editor group. They keep their width and wrap as whole tags.
+
 ## [0.6.92] - 2026-08-04
 
 ### Added

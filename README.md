@@ -43,12 +43,12 @@ PATH and helps you finish setup.
 
 <table>
   <tr>
-    <td width="50%"><img src="https://raw.githubusercontent.com/shayanline/devin-vscode/main/docs/screenshots/01-session-list.png" width="100%" /></td>
-    <td width="50%"><img src="https://raw.githubusercontent.com/shayanline/devin-vscode/main/docs/screenshots/02-refactor-and-tests.png" width="100%" /></td>
+    <td width="50%"><img src="https://raw.githubusercontent.com/shayanline/devin-vscode/main/docs/screenshots/01-session-list.png" width="100%" alt="The session browser, with sessions grouped by workspace folder and a liveness dot on each" /></td>
+    <td width="50%"><img src="https://raw.githubusercontent.com/shayanline/devin-vscode/main/docs/screenshots/02-refactor-and-tests.png" width="100%" alt="A refactor turn: grouped tool calls, an edit with line counts, a plan, a question and a permission prompt" /></td>
   </tr>
   <tr>
-    <td width="50%"><img src="https://raw.githubusercontent.com/shayanline/devin-vscode/main/docs/screenshots/03-fix-with-diff.png" width="100%" /></td>
-    <td width="50%"><img src="https://raw.githubusercontent.com/shayanline/devin-vscode/main/docs/screenshots/04-research-and-diagram.png" width="100%" /></td>
+    <td width="50%"><img src="https://raw.githubusercontent.com/shayanline/devin-vscode/main/docs/screenshots/03-fix-with-diff.png" width="100%" alt="A bug fix on Claude Sonnet 4.5, with reasoning, grouped tools and an edit shown as a diff" /></td>
+    <td width="50%"><img src="https://raw.githubusercontent.com/shayanline/devin-vscode/main/docs/screenshots/04-research-and-diagram.png" width="100%" alt="A research turn on GPT-5: web search, fetch and MCP tool cards, and a Mermaid diagram rendered inline" /></td>
   </tr>
 </table>
 
