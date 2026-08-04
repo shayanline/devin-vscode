@@ -97,18 +97,90 @@
   function textInput(value, placeholder, onCommit) {
     const inp = h("input", { class: "settings-input", type: "text", placeholder: placeholder || "" });
     inp.value = value || "";
-    const commit = () => onCommit(inp.value.trim());
+    const commit = () => { if (onCommit) onCommit(inp.value.trim()); };
     inp.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); commit(); } });
     inp.addEventListener("blur", commit);
     return inp;
   }
+  // For values where newlines are the point (a hook's prompt), so Enter inserts
+  // one instead of submitting.
+  function textArea(value, placeholder, rows) {
+    const ta = h("textarea", { class: "settings-textarea", rows: String(rows || 4), placeholder: placeholder || "" });
+    ta.value = value || "";
+    return ta;
+  }
   function btn(label, iconName, onClick, cls) {
     return h("button", { class: "settings-btn " + (cls || ""), onclick: onClick }, [iconName ? icon(iconName) : null, label]);
   }
-  // Icon-only action button (edit / remove / etc.) with a tooltip.
-  function iconBtn(iconName, title, onClick, cls) {
-    return h("button", { class: "settings-icon-btn " + (cls || ""), title, "aria-label": title, onclick: onClick }, [icon(iconName)]);
+  // Icon-only action button (edit / remove / etc.). The name is its accessible
+  // label and its hover tooltip, since there is no visible text to go on.
+  function iconBtn(iconName, tip, onClick, cls) {
+    return h("button", {
+      class: "settings-icon-btn " + (cls || ""), "data-tip": tip, "aria-label": tip, onclick: onClick
+    }, [icon(iconName)]);
   }
+  // --- Tooltips ------------------------------------------------------------
+  // VS Code shows its own hover widget rather than the platform tooltip, and only
+  // after a beat, so anything carrying `data-tip` gets the same treatment: one
+  // shared element, positioned against the target, escaping the scrolling page.
+  // Keyboard focus shows it too, since an icon-only action has no visible label.
+  const TIP_DELAY = 550;
+  let tipEl = null;
+  let tipTimer = null;
+  let tipTarget = null;
+
+  function hideTip() {
+    if (tipTimer) {
+      clearTimeout(tipTimer);
+      tipTimer = null;
+    }
+    tipTarget = null;
+    if (tipEl) {
+      tipEl.remove();
+      tipEl = null;
+    }
+  }
+
+  function showTip(target) {
+    const text = target.getAttribute("data-tip");
+    if (!text || !target.isConnected) return;
+    tipEl = h("div", { class: "settings-tip", role: "tooltip", text });
+    document.body.appendChild(tipEl);
+    const r = target.getBoundingClientRect();
+    const t = tipEl.getBoundingClientRect();
+    const margin = 6;
+    // Below by default, above when there is no room, and clamped horizontally.
+    let top = r.bottom + 4;
+    if (top + t.height > window.innerHeight - margin) {
+      top = Math.max(margin, r.top - t.height - 4);
+    }
+    let left = r.left + r.width / 2 - t.width / 2;
+    left = Math.max(margin, Math.min(left, window.innerWidth - t.width - margin));
+    tipEl.style.top = Math.round(top) + "px";
+    tipEl.style.left = Math.round(left) + "px";
+  }
+
+  function armTip(target) {
+    if (target === tipTarget) return;
+    hideTip();
+    if (!target) return;
+    tipTarget = target;
+    tipTimer = setTimeout(() => {
+      tipTimer = null;
+      showTip(target);
+    }, TIP_DELAY);
+  }
+
+  const tipFor = (e) => (e.target && e.target.closest ? e.target.closest("[data-tip]") : null);
+  document.addEventListener("mouseover", (e) => armTip(tipFor(e)));
+  document.addEventListener("mouseleave", hideTip);
+  document.addEventListener("focusin", (e) => armTip(tipFor(e)));
+  document.addEventListener("focusout", hideTip);
+  // A tooltip must never linger over what it was describing.
+  document.addEventListener("click", hideTip, true);
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") hideTip(); }, true);
+  window.addEventListener("scroll", hideTip, true);
+
   function tag(text, cls) { return h("span", { class: "settings-tag " + (cls || ""), text }); }
   function empty(text) { return h("div", { class: "settings-empty", text }); }
   function splitList(v) { return (v || "").split(",").map((s) => s.trim()).filter(Boolean); }
@@ -137,15 +209,21 @@
       body
     ]);
   }
-  // One setting row: label and hint on the left, controls on the right.
+  // One setting row. A control people type into is stacked under the label so it
+  // gets the row's full width, the way VS Code's own Settings editor lays out a
+  // text setting: a path, a domain list or a proxy URL is unreadable in the 180px
+  // a right-aligned control leaves. Fixed width controls (a dropdown, a toggle)
+  // stay on the right, where they line up into a column you can scan.
   function fieldRow(label, control, hint, extra) {
-    return h("div", { class: "settings-field" }, [
+    const controls = [].concat(control).filter(Boolean);
+    const stacked = controls.some((c) => c.matches && c.matches("input[type=text], textarea"));
+    return h("div", { class: "settings-field" + (stacked ? " stacked" : "") }, [
       h("div", { class: "settings-field-main" }, [
         h("div", { class: "settings-field-label" }, [].concat(label)),
         hint ? h("div", { class: "settings-field-hint", text: hint }) : null,
         extra || null
       ]),
-      h("div", { class: "settings-field-control" }, control)
+      h("div", { class: "settings-field-control" }, controls)
     ]);
   }
   // A list row: title (plus tags) and a subtitle on the left, actions on the right.
@@ -153,7 +231,7 @@
     return h("div", { class: "settings-list-row" }, [
       h("div", { class: "settings-list-main" }, [
         h("div", { class: "settings-list-title" }, [].concat(title)),
-        sub ? h("div", { class: "settings-list-sub oneline", text: sub, title: sub }) : null
+        sub ? h("div", { class: "settings-list-sub oneline", text: sub, "data-tip": sub }) : null
       ]),
       h("div", { class: "settings-row-actions" }, actions)
     ]);
@@ -168,9 +246,11 @@
     const onKey = (e) => { if (e.key === "Escape") close(); };
     const head = h("div", { class: "settings-modal-head" }, [
       h("div", { class: "settings-modal-title", text: title }),
-      h("button", { class: "settings-icon-btn", title: "Close", "aria-label": "Close", onclick: close }, [icon("close")])
+      h("button", { class: "settings-icon-btn", "data-tip": "Close", "aria-label": "Close", onclick: close }, [icon("close")])
     ]);
-    dialog.append(head, h("div", { class: "settings-modal-body" }, build(close)));
+    // `settings-form` stacks every row: in a form, one full width column reads
+    // better than labels and controls fighting over a narrow dialog.
+    dialog.append(head, h("div", { class: "settings-modal-body settings-form" }, build(close)));
     overlay.appendChild(dialog);
     overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) close(); });
     setTimeout(() => document.addEventListener("keydown", onKey, true), 0);
@@ -229,7 +309,7 @@
   function keyRow(key, label, control, hint) {
     const g = activeValues();
     const setHere = (g.setKeys || []).indexOf(key) >= 0;
-    const marks = setHere ? [h("span", { class: "settings-dot", title: "Set in " + scopeLabelOf(scope) })] : [];
+    const marks = setHere ? [h("span", { class: "settings-dot", "data-tip": "Set in " + scopeLabelOf(scope) })] : [];
     const notes = [];
     if (scope === "user") {
       const o = overrideNote(key);
@@ -285,14 +365,17 @@
     for (const s of SECTIONS) {
       nav.appendChild(h("button", {
         class: "settings-nav-item" + (s.id === active && !query ? " active" : ""),
-        onclick: () => { active = s.id; query = ""; render(); }
+        // Render from what we have straight away, and ask the host to re-read the
+        // files behind this section, so arriving at one never shows a stale view.
+        onclick: () => { active = s.id; query = ""; render(); post("settings:reload"); }
       }, [icon(s.icon), h("span", { text: s.label })]));
     }
   }
 
   function setScope(key) {
     scope = key;
-    // Tell the host, so project-scoped CLI verbs run in that folder.
+    // Tell the host, so project-scoped CLI verbs run in that folder. It answers
+    // with freshly read data, so switching scope also picks up outside edits.
     post("settings:setRoot", { path: key === "user" ? "" : key });
     render();
   }
@@ -321,7 +404,7 @@
         class: "settings-scope-btn" + (t.key === scope ? " active" : ""),
         role: "tab",
         "aria-selected": t.key === scope ? "true" : "false",
-        title: t.key === "user" ? "Settings for every workspace" : t.key,
+        "data-tip": t.key === "user" ? "Applies to every workspace" : t.key,
         onclick: () => setScope(t.key)
       }, [t.label]));
     }
@@ -355,7 +438,7 @@
     const g = activeValues();
     if (!g.path || sectionOf(active).global) return null;
     return h("div", { class: "settings-scope-file" }, [
-      h("span", { class: "settings-scope-file-path oneline", text: (g.exists ? "Editing " : "Not created yet: ") + g.path, title: g.path }),
+      h("span", { class: "settings-scope-file-path oneline", text: (g.exists ? "Editing " : "Not created yet: ") + g.path, "data-tip": g.path }),
       g.exists
         ? iconBtn("go-to-file", "Open this config file", () => post("settings:openFile", { path: g.path }))
         : iconBtn("add", "Create this config file", () => post("settings:createFile", { path: g.path, template: "{\n}\n" })),
@@ -576,7 +659,7 @@
           h("span", { class: "settings-perm-chip" }, [
             h("span", { text: v }),
             h("button", {
-              class: "settings-perm-x", title: "Remove " + v, "aria-label": "Remove " + v,
+              class: "settings-perm-x", "data-tip": "Remove " + v, "aria-label": "Remove " + v,
               onclick: () => post("settings:permission", { scope: g.scope, root: g.root, bucket, value: v, remove: true })
             }, [icon("close")])
           ])
@@ -592,7 +675,7 @@
         [{ value: "allow", label: "Allow" }, { value: "deny", label: "Deny" }, { value: "ask", label: "Ask" }],
         addTo, (v) => { addTo = v; }
       );
-      const ruleInput = textInput("", "Exec(git status), Read(**), MCP(github)", () => {});
+      const ruleInput = textInput("", "Exec(git status), Read(**), MCP(github)");
       const submit = () => {
         const v = (ruleInput.value || "").trim();
         if (!v) return;
@@ -687,10 +770,10 @@
   // --- Create forms --------------------------------------------------------
   // Each form targets the scope it was opened from, so it never asks for a scope.
   function skillModalBody(close, g) {
-    const name = textInput("", "skill-name", () => {});
+    const name = textInput("", "release-notes");
     return h("div", null, [
       h("div", { class: "settings-modal-desc", text: "Scaffolds a SKILL.md in " + scopeLabelOf(scope) + ". The name becomes the slash command (/name)." }),
-      fieldRow("Name", name),
+      fieldRow("Name", name, "Becomes the slash command, so /release-notes."),
       modalActions([
         btn("Cancel", null, close),
         btn("Create skill", "add", () => {
@@ -717,22 +800,35 @@
     ], event, (v) => { event = v; });
     const typeSel = select(
       [{ value: "command", label: "Command" }, { value: "prompt", label: "Prompt" }],
-      hookType, (v) => { hookType = v; }
+      hookType, (v) => { hookType = v; renderValue(); }
     );
-    const matcher = textInput("", "matcher (optional), e.g. exec", () => {});
-    const value = textInput("", "shell command, or prompt text", () => {});
-    const timeout = textInput("", "timeout seconds (optional)", () => {});
+    const matcher = textInput("", "exec");
+    const timeout = textInput("", "30");
+    // Both controls are built up front and swapped, so switching type back and
+    // forth keeps whatever was typed in each.
+    const command = textInput("", "npm run lint -- --fix");
+    const prompt = textArea("", "Remember to run the tests before committing.");
+    // The field is named for the type that is actually selected, rather than
+    // offering one box labelled with both.
+    const valueRow = h("div");
+    const renderValue = () => {
+      valueRow.innerHTML = "";
+      valueRow.appendChild(hookType === "prompt"
+        ? fieldRow("Prompt", prompt, "Injected into the conversation when the event fires.")
+        : fieldRow("Command", command, "Run by your shell when the event fires."));
+    };
+    renderValue();
     return h("div", null, [
       h("div", { class: "settings-modal-desc", text: "Runs a command or injects a prompt on a lifecycle event, in " + scopeLabelOf(scope) + "." }),
       fieldRow("Event", eventSel),
       fieldRow("Type", typeSel),
-      fieldRow("Matcher", matcher),
-      fieldRow("Command or prompt", value),
-      fieldRow("Timeout", timeout),
+      valueRow,
+      fieldRow("Matcher", matcher, "Only run for tools whose name matches this. Leave it empty for every tool."),
+      fieldRow("Timeout", timeout, "Seconds to allow before the hook is abandoned. Optional."),
       modalActions([
         btn("Cancel", null, close),
         btn("Add hook", "add", () => {
-          const v = (value.value || "").trim();
+          const v = (hookType === "prompt" ? prompt.value : command.value).trim();
           if (!v) return;
           post("settings:addHook", {
             scope: g.scope, root: g.root, event, hookType,
@@ -745,14 +841,14 @@
   }
 
   function mcpModalBody(close, g) {
-    const name = textInput("", "server name", () => {});
-    const cmd = textInput("", "https://mcp.example.com/mcp  OR  npx -y @scope/server", () => {});
-    const envIn = textInput("", "KEY=value, KEY2=value2", () => {});
+    const name = textInput("", "github");
+    const cmd = textInput("", "https://mcp.example.com/mcp");
+    const envIn = textInput("", "TOKEN=abc123, REGION=eu");
     return h("div", null, [
       h("div", { class: "settings-modal-desc", text: "Adds a server to " + scopeLabelOf(scope) + ". Enter a URL for HTTP transport, or a command line for stdio." }),
       fieldRow("Name", name),
-      fieldRow("URL or command", cmd),
-      fieldRow("Env (optional)", envIn),
+      fieldRow("URL or command", cmd, "A URL uses HTTP transport. A command line (npx -y @scope/server) uses stdio."),
+      fieldRow("Env", envIn, "Comma separated KEY=value pairs. Optional."),
       modalActions([
         btn("Cancel", null, close),
         btn("Add server", "add", () => {
@@ -783,10 +879,10 @@
   }
 
   function pluginModalBody(close) {
-    const src = textInput("", "github.com/org/repo  or  a local path", () => {});
+    const src = textInput("", "github.com/org/repo");
     return h("div", null, [
       h("div", { class: "settings-modal-desc", text: "Installs from a Git source or a local path. Required plugins are installed too." }),
-      fieldRow("Source", src),
+      fieldRow("Source", src, "A Git source or a local path."),
       modalActions([
         btn("Cancel", null, close),
         btn("Install", "cloud-download", () => {

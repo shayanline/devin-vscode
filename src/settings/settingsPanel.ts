@@ -212,6 +212,11 @@ export class SettingsPanel {
           await this.ensureCli();
           await this.sendData();
           return;
+        case "settings:reload":
+          // Sent when moving between sections, so arriving at one always reflects
+          // what is on disk now rather than what was there when the panel opened.
+          await this.sendData();
+          return;
         case "settings:setPath":
           await this.setValue(scopeOf(msg.scope), String(msg.path), msg.value, msg.root ? String(msg.root) : this.root());
           return;

@@ -10,6 +10,35 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 > first Marketplace release (0.6.61) group those rapid iterations by milestone
 > rather than listing every intermediate build.
 
+## [0.6.91] - 2026-08-04
+
+### Added
+- Icon-only actions (MCP log in, enable, remove, edit, clear override, and the
+  rest) now show a tooltip on hover after a short delay, drawn as VS Code's own
+  hover widget rather than the platform tooltip, and on keyboard focus too, since
+  those buttons have no visible label. Long paths and truncated descriptions use
+  the same hover.
+- Moving between sections re-reads the config from disk, so arriving at a section
+  never shows a stale view. Switching scope already did this, through the message
+  that retargets the CLI at that folder.
+
+### Changed
+- Values you type (a proxy URL, a domain list, a hook command) now sit under their
+  label and take the full width, the way VS Code's own Settings editor lays out a
+  text setting. A right-aligned control left them about 180 pixels, which is not
+  enough to read a path or a list. Dropdowns and toggles stay on the right, where
+  they line up into a column that can be scanned.
+- Every modal is now a single full width column with no row separators, so the
+  Add hook, Add MCP server, New skill and Install plugin forms use the width they
+  have instead of squeezing controls into the right half.
+- The Add hook form names its value field after the type that is selected, showing
+  **Command** or **Prompt** rather than one box labelled with both, and a prompt
+  gets a resizable multi-line box. Whatever was typed in each survives switching
+  between them.
+- Placeholders in those forms are examples again rather than a second copy of the
+  label, and the fields that needed explaining (matcher, timeout, MCP transport,
+  skill name) now carry a hint.
+
 ## [0.6.90] - 2026-08-04
 
 ### Changed
