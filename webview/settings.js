@@ -57,12 +57,90 @@
     return e;
   }
   function icon(name) { return h("i", { class: "codicon codicon-" + name }); }
-  function post(type, extra) { vscode.postMessage(Object.assign({ type }, extra || {})); }
+
+  // Messages that make the host do work and answer when it is finished, either
+  // with fresh data or with `settings:idle` when nothing changed (a confirmation
+  // was declined). Everything else is a read or a navigation.
+  const MUTATING = new Set([
+    "settings:setPath", "settings:resetSection", "settings:permission", "settings:addHook",
+    "settings:removeHook", "settings:createSkill", "settings:createFile", "settings:deletePath",
+    "settings:mcpAdd", "settings:mcpVerb", "settings:mcpLogin", "settings:pluginVerb",
+    "settings:clearExtensionModel"
+  ]);
+  // Counts work handed to the host, so a control can tell whether the click it
+  // just handled actually started something.
+  let mutations = 0;
+
+  function post(type, extra) {
+    if (MUTATING.has(type)) mutations++;
+    vscode.postMessage(Object.assign({ type }, extra || {}));
+  }
+
+  // --- Busy state ----------------------------------------------------------
+  // Every write goes to the host and comes back as a fresh read, which can take
+  // a moment (an MCP or plugin verb shells out to the CLI). The control that
+  // started it shows that it is running and stops accepting input, so nothing
+  // looks dead and the same write cannot be fired twice.
+  const busyEls = new Map(); // element -> how to restore it
+  let busyTimer = null;
+
+  function markBusy(el) {
+    if (!el || busyEls.has(el)) return;
+    if (el.tagName === "BUTTON") {
+      const ic = el.querySelector(".codicon");
+      const before = ic ? ic.className : null;
+      if (ic) {
+        ic.className = "codicon codicon-loading codicon-modifier-spin";
+      } else {
+        el.prepend(icon("loading modifier-spin"));
+      }
+      busyEls.set(el, () => {
+        if (before !== null && ic) ic.className = before;
+        else el.querySelector(".codicon")?.remove();
+      });
+    } else {
+      // A toggle's tick box is the input, but the visible control is its label.
+      const visible = el.type === "checkbox" ? el.closest(".settings-toggle") || el : el;
+      visible.classList.add("busy");
+      busyEls.set(el, () => visible.classList.remove("busy"));
+    }
+    el.disabled = true;
+    el.classList.add("busy");
+    el.setAttribute("aria-busy", "true");
+    // Insurance: never leave a control stuck if an answer somehow never lands.
+    if (busyTimer) clearTimeout(busyTimer);
+    busyTimer = setTimeout(clearBusy, 15000);
+  }
+
+  function clearBusy() {
+    if (busyTimer) {
+      clearTimeout(busyTimer);
+      busyTimer = null;
+    }
+    for (const [el, restore] of busyEls) {
+      restore();
+      el.disabled = false;
+      el.classList.remove("busy");
+      el.removeAttribute("aria-busy");
+    }
+    busyEls.clear();
+  }
+
+  // Wraps a control's handler: if handling it actually gave the host work, the
+  // control shows it running. The answer re-renders, which replaces these
+  // elements outright, so nothing has to be undone by hand.
+  function whileBusy(el, handler) {
+    return (...args) => {
+      const before = mutations;
+      handler(...args);
+      if (mutations > before) markBusy(el);
+    };
+  }
 
   function toggle(checked, onChange) {
     const input = h("input", { type: "checkbox" });
     input.checked = !!checked;
-    input.addEventListener("change", () => onChange(input.checked));
+    input.addEventListener("change", whileBusy(input, () => onChange(input.checked)));
     return h("label", { class: "settings-toggle" }, [input, h("span", { class: "settings-toggle-track" })]);
   }
   // A dropdown built on a real <select>, the way VS Code's own Settings editor
@@ -91,13 +169,22 @@
         sel.appendChild(opt);
       }
     }
-    sel.addEventListener("change", () => onChange(sel.value));
+    sel.addEventListener("change", whileBusy(sel, () => onChange(sel.value)));
     return h("span", { class: "settings-select-wrap" }, [sel, icon("chevron-down")]);
   }
   function textInput(value, placeholder, onCommit) {
     const inp = h("input", { class: "settings-input", type: "text", placeholder: placeholder || "" });
     inp.value = value || "";
-    const commit = () => { if (onCommit) onCommit(inp.value.trim()); };
+    // Commit only a real change: blur fires even when nothing was edited, and
+    // writing the same value back would cost a pointless round trip and flash the
+    // field as busy just for clicking through it.
+    let committed = inp.value.trim();
+    const commit = whileBusy(inp, () => {
+      const next = inp.value.trim();
+      if (next === committed) return;
+      committed = next;
+      if (onCommit) onCommit(next);
+    });
     inp.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); commit(); } });
     inp.addEventListener("blur", commit);
     return inp;
@@ -110,14 +197,24 @@
     return ta;
   }
   function btn(label, iconName, onClick, cls) {
-    return h("button", { class: "settings-btn " + (cls || ""), onclick: onClick }, [iconName ? icon(iconName) : null, label]);
+    const b = h("button", { class: "settings-btn " + (cls || "") }, [iconName ? icon(iconName) : null, label]);
+    b.addEventListener("click", whileBusy(b, onClick));
+    return b;
+  }
+  // A text link that acts like a button, for an action inside a sentence.
+  function linkBtn(label, onClick) {
+    const b = h("button", { class: "settings-link" }, [label]);
+    b.addEventListener("click", whileBusy(b, onClick));
+    return b;
   }
   // Icon-only action button (edit / remove / etc.). The name is its accessible
   // label and its hover tooltip, since there is no visible text to go on.
   function iconBtn(iconName, tip, onClick, cls) {
-    return h("button", {
-      class: "settings-icon-btn " + (cls || ""), "data-tip": tip, "aria-label": tip, onclick: onClick
+    const b = h("button", {
+      class: "settings-icon-btn " + (cls || ""), "data-tip": tip, "aria-label": tip
     }, [icon(iconName)]);
+    b.addEventListener("click", whileBusy(b, onClick));
+    return b;
   }
   // --- Tooltips ------------------------------------------------------------
   // VS Code shows its own hover widget rather than the platform tooltip, and only
@@ -227,8 +324,10 @@
     ]);
   }
   // A list row: title (plus tags) and a subtitle on the left, actions on the right.
-  function listRow(title, sub, actions) {
-    return h("div", { class: "settings-list-row" }, [
+  // `cls` carries state such as `disabled`, which strikes the name and subtitle
+  // through so a switched-off entry reads as switched off at a glance.
+  function listRow(title, sub, actions, cls) {
+    return h("div", { class: "settings-list-row " + (cls || "") }, [
       h("div", { class: "settings-list-main" }, [
         h("div", { class: "settings-list-title" }, [].concat(title)),
         sub ? h("div", { class: "settings-list-sub oneline", text: sub, "data-tip": sub }) : null
@@ -259,6 +358,18 @@
   }
   function modalActions(children) {
     return h("div", { class: "settings-modal-actions" }, children);
+  }
+  // A submitted form stays open with its button spinning until the host answers,
+  // rather than closing onto a panel that has not caught up yet.
+  let pendingClose = null;
+  function deferClose(close) {
+    pendingClose = close;
+  }
+  function closePending() {
+    if (!pendingClose) return;
+    const close = pendingClose;
+    pendingClose = null;
+    close();
   }
 
   // --- Scope ---------------------------------------------------------------
@@ -620,7 +731,10 @@
           : iconBtn("circle-slash", "Disable", () => post("settings:mcpVerb", { verb: "disable", name: sv.name, scope: sv.scope, root: g.root })));
         if (sv.file) actions.push(iconBtn("edit", "Edit config", () => post("settings:openFile", { path: sv.file })));
         actions.push(iconBtn("trash", "Remove", () => post("settings:mcpVerb", { verb: "remove", name: sv.name, scope: sv.scope, root: g.root }), "danger"));
-        return listRow([sv.name].concat(meta), sv.detail, actions);
+        // The name is its own element so a disabled server can be struck through
+        // without striking through its tags.
+        const name = h("span", { class: "settings-list-name", text: sv.name });
+        return listRow([name].concat(meta), sv.detail, actions, sv.disabled ? "disabled" : "");
       });
       return group("MCP servers", rows.length ? rows : [empty("No MCP servers here.")],
         { action: addBtn("Add MCP server", mcpModalBody) });
@@ -655,15 +769,14 @@
     permissions() {
       const g = scoped(data.permissions && data.permissions.byScope) || { scope: "user" };
       const rows = ["allow", "deny", "ask"].map((bucket) => {
-        const chips = (g[bucket] || []).map((v) =>
-          h("span", { class: "settings-perm-chip" }, [
-            h("span", { text: v }),
-            h("button", {
-              class: "settings-perm-x", "data-tip": "Remove " + v, "aria-label": "Remove " + v,
-              onclick: () => post("settings:permission", { scope: g.scope, root: g.root, bucket, value: v, remove: true })
-            }, [icon("close")])
-          ])
-        );
+        const chips = (g[bucket] || []).map((v) => {
+          const x = h("button", {
+            class: "settings-perm-x", "data-tip": "Remove " + v, "aria-label": "Remove " + v
+          }, [icon("close")]);
+          x.addEventListener("click", whileBusy(x, () =>
+            post("settings:permission", { scope: g.scope, root: g.root, bucket, value: v, remove: true })));
+          return h("span", { class: "settings-perm-chip" }, [h("span", { text: v }), x]);
+        });
         return h("div", { class: "settings-perm-bucket" }, [
           h("div", { class: "settings-perm-bucket-label", text: bucket }),
           h("div", { class: "settings-perm-chips" }, chips.length ? chips : [h("span", { class: "settings-empty-inline", text: "none" })])
@@ -747,8 +860,8 @@
     return h("div", { class: "settings-notice" }, [
       icon("info"),
       h("span", { text: "Chats here use " + (modelLabel(override) || override) + ", from the VS Code setting devin.defaultModel." }),
-      h("button", { class: "settings-link", onclick: () => post("settings:openExtensionSettings", { query: "defaultModel" }) }, ["Open it"]),
-      h("button", { class: "settings-link", onclick: () => post("settings:clearExtensionModel") }, ["Clear it"])
+      linkBtn("Open it", () => post("settings:openExtensionSettings", { query: "defaultModel" })),
+      linkBtn("Clear it", () => post("settings:clearExtensionModel"))
     ]);
   }
   function modelLabel(uid) {
@@ -780,7 +893,7 @@
           const v = (name.value || "").trim();
           if (!v) return;
           post("settings:createSkill", { name: v, scope: g.scope, root: g.root });
-          close();
+          deferClose(close);
         }, "primary")
       ])
     ]);
@@ -834,7 +947,7 @@
             scope: g.scope, root: g.root, event, hookType,
             matcher: (matcher.value || "").trim(), value: v, timeout: (timeout.value || "").trim()
           });
-          close();
+          deferClose(close);
         }, "primary")
       ])
     ]);
@@ -872,7 +985,7 @@
           }
           if (Object.keys(env).length) options.env = env;
           post("settings:mcpAdd", { options, root: g.root });
-          close();
+          deferClose(close);
         }, "primary")
       ])
     ]);
@@ -889,7 +1002,7 @@
           const v = (src.value || "").trim();
           if (!v) return;
           post("settings:pluginVerb", { verb: "install", arg: v });
-          close();
+          deferClose(close);
         }, "primary")
       ])
     ]);
@@ -903,13 +1016,19 @@
       data = m.data;
       loading.classList.add("hidden");
       content.classList.remove("hidden");
+      clearBusy();
+      closePending();
       render();
+    } else if (m.type === "settings:idle") {
+      // The host finished without changing anything (a confirmation was declined),
+      // so release the control that was waiting on it.
+      clearBusy();
+      closePending();
     } else if (m.type === "settings:error") {
       loading.classList.add("hidden");
       content.classList.remove("hidden");
+      clearBusy();
       content.prepend(h("div", { class: "settings-error", text: m.text || "Something went wrong." }));
-    } else if (m.type === "settings:busy") {
-      document.body.classList.toggle("settings-working", !!m.value);
     }
   });
 

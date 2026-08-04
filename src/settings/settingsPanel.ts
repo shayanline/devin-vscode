@@ -205,8 +205,9 @@ export class SettingsPanel {
   }
 
   private async onMessage(msg: any): Promise<void> {
+    const mutating = MUTATING.has(String(msg?.type));
     try {
-      if (MUTATING.has(String(msg?.type))) this.selfWriteAt = Date.now();
+      if (mutating) this.selfWriteAt = Date.now();
       switch (msg?.type) {
         case "settings:load":
           await this.ensureCli();
@@ -255,13 +256,11 @@ export class SettingsPanel {
           await this.sendData();
           return;
         case "settings:pluginVerb": {
-          this.post({ type: "settings:busy", value: true });
           const r = await pluginVerb(this.cli, msg.verb, msg.arg ? String(msg.arg) : undefined);
           if (!r.ok) {
             void vscode.window.showErrorMessage(`Plugin ${msg.verb} failed: ` + (r.err || "unknown error"));
           }
           await this.sendData();
-          this.post({ type: "settings:busy", value: false });
           return;
         }
         case "settings:permission":
@@ -269,23 +268,19 @@ export class SettingsPanel {
           await this.sendData();
           return;
         case "settings:mcpAdd": {
-          this.post({ type: "settings:busy", value: true });
           const r = await mcpAdd(this.ctxFor(msg.root), msg.options as McpAddOptions);
           if (!r.ok) {
             void vscode.window.showErrorMessage("Add MCP server failed: " + (r.err || "unknown error"));
           }
           await this.sendData();
-          this.post({ type: "settings:busy", value: false });
           return;
         }
         case "settings:mcpVerb": {
-          this.post({ type: "settings:busy", value: true });
           const r = await mcpVerb(this.ctxFor(msg.root), msg.verb, String(msg.name), msg.scope ? scopeOf(msg.scope) : undefined);
           if (!r.ok) {
             void vscode.window.showErrorMessage(`MCP ${msg.verb} failed: ` + (r.err || "unknown error"));
           }
           await this.sendData();
-          this.post({ type: "settings:busy", value: false });
           return;
         }
         case "settings:mcpLogin":
@@ -298,6 +293,12 @@ export class SettingsPanel {
       }
     } catch (err) {
       this.post({ type: "settings:error", text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      // Every mutating message is answered, so the control that started it always
+      // stops showing itself as running. Most paths already answered with fresh
+      // data; this covers the ones that changed nothing, such as a confirmation
+      // the user declined.
+      if (mutating) this.post({ type: "settings:idle" });
     }
   }
 

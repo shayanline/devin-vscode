@@ -10,6 +10,31 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 > first Marketplace release (0.6.61) group those rapid iterations by milestone
 > rather than listing every intermediate build.
 
+## [0.6.92] - 2026-08-04
+
+### Added
+- Every action that hands work to the extension host now shows that it is
+  running, and stops accepting input until it finishes, so nothing looks dead and
+  the same write cannot be fired twice. An icon action swaps its glyph for a
+  spinner, a toggle, dropdown or field dims, and a submitted form stays open with
+  its button spinning until the host answers, rather than closing onto a panel
+  that has not caught up. It covers everything, including disabling an MCP server,
+  removing a permission, resetting a group, clearing an override and installing a
+  plugin, because the controls derive it from whether the click actually gave the
+  host work rather than each action opting in.
+- The host now answers every write, even one that changed nothing (a confirmation
+  you declined), so a control can never be left spinning.
+
+### Changed
+- A disabled MCP server is struck through on its name and its subtitle, and
+  dimmed, so a switched-off server reads as switched off rather than being told so
+  by a small tag. Its tags stay legible.
+
+### Fixed
+- Leaving a text field without editing it no longer writes the same value back.
+  Blur committed unconditionally, which cost a pointless round trip through the
+  config file on every focus change.
+
 ## [0.6.91] - 2026-08-04
 
 ### Added
