@@ -2,7 +2,7 @@
   "name": "devin-vscode",
   "displayName": "Devin for VS Code",
   "description": "A native chat panel for the Devin CLI, powered by the Agent Client Protocol. Streaming replies, per workspace sessions, and trackable diffs.",
-  "version": "0.6.87",
+  "version": "0.6.90",
   "publisher": "shayanline",
   "author": "Shayan Khaksar",
   "license": "AGPL-3.0-or-later",
@@ -206,7 +206,7 @@
         "devin.defaultModel": {
           "type": "string",
           "default": "",
-          "description": "Default model alias to request for new sessions (e.g. auto, sonnet, opus, gpt). Empty uses the CLI default (Adaptive)."
+          "markdownDescription": "Model for chats started in this extension (e.g. `auto`, `sonnet`, `opus`, `gpt`). The model picker in the chat composer writes this setting, and it takes precedence over the Devin CLI's own default. Leave it empty to follow the CLI's `agent.model` instead, which you can set in **Devin: Open Settings**."
         },
         "devin.defaultMode": {
           "type": "string",
@@ -223,7 +223,7 @@
             "Bypass: auto-approve all tool calls"
           ],
           "default": "accept-edits",
-          "description": "Session mode for new sessions."
+          "description": "Mode that chats started in this extension begin in."
         },
         "devin.autoResumeLast": {
           "type": "boolean",
@@ -362,6 +362,7 @@
     "harness": "node scripts/webview-harness.js",
     "probe": "node scripts/acp-probe.js",
     "preview": "npm run compile && node scripts/preview.js",
+    "preview:settings": "npm run compile && node scripts/preview-settings.js",
     "package": "vsce package --no-dependencies",
     "publish:vsce": "vsce publish --no-dependencies",
     "publish:ovsx": "ovsx publish --no-dependencies"

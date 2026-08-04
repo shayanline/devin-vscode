@@ -1,4 +1,4 @@
-import { spawn, ChildProcess } from "child_process";
+import { spawn, execFile, ChildProcess } from "child_process";
 import { StringDecoder } from "string_decoder";
 
 export interface EnvVariable {
@@ -143,22 +143,37 @@ export class TerminalManager {
   }
 
   kill(terminalId: string): void {
-    const term = this.terminals.get(terminalId);
+    this.signal(this.terminals.get(terminalId), "SIGTERM");
+  }
+
+  // Signal one terminal's whole process tree. The commands run here are children
+  // of the extension host, so anything left alive when the host exits would be
+  // orphaned (the agent reaper only looks for `devin acp`), which is why every
+  // shutdown path has to reach them.
+  private signal(term: Term | undefined, sig: "SIGTERM" | "SIGKILL"): void {
     if (!term || term.exitStatus) {
       return;
     }
     const pid = term.child.pid;
+    if (process.platform === "win32") {
+      // Windows has no process groups, so end the tree with taskkill.
+      if (pid) {
+        try { execFile("taskkill", ["/PID", String(pid), "/T", "/F"], () => {}); } catch { /* ignore */ }
+      }
+      try { term.child.kill(); } catch { /* already gone */ }
+      return;
+    }
     try {
-      // Signal the whole group (negative pid) so the shell and its children go
-      // down together; fall back to the direct child if that is not possible.
-      if (process.platform !== "win32" && pid) {
-        process.kill(-pid, "SIGTERM");
+      // Negative pid signals the group, so the shell and its children go down
+      // together; fall back to the direct child if that is not possible.
+      if (pid) {
+        process.kill(-pid, sig);
       } else {
-        term.child.kill();
+        term.child.kill(sig);
       }
     } catch {
       try {
-        term.child.kill();
+        term.child.kill(sig);
       } catch {
         // already gone
       }
@@ -174,5 +189,22 @@ export class TerminalManager {
     for (const id of [...this.terminals.keys()]) {
       this.release(id);
     }
+  }
+
+  // Shutdown, step one: ask every running command to stop, keeping the entries so
+  // survivors can be forced afterwards.
+  requestStopAll(): void {
+    for (const [, term] of this.terminals) {
+      this.signal(term, "SIGTERM");
+    }
+  }
+
+  // Shutdown, step two: SIGKILL whatever ignored the SIGTERM, once it has had
+  // time to land, so the exiting host leaves nothing behind.
+  forceStopAll(): void {
+    for (const [, term] of this.terminals) {
+      this.signal(term, "SIGKILL");
+    }
+    this.terminals.clear();
   }
 }

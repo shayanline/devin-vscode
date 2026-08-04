@@ -5,10 +5,8 @@ import * as path from "path";
 import * as crypto from "crypto";
 import {
   ConfigScope,
-  loadAllConfigs,
   loadConfigFile,
   mcpOauthDir,
-  mergedValue,
   readConfig,
   setConfigPath,
   stripJsonComments,
@@ -20,14 +18,65 @@ import { CliContext, listPlugins, listSkills, mcpAdd, mcpVerb, McpAddOptions, pl
 import { checkHealth, loginShellEnv } from "../cli/locate";
 import { listModelFamilies } from "../cli/models";
 
+// This extension's id, used to filter VS Code's Settings editor when linking out
+// to the settings that control the extension rather than the Devin CLI.
+const EXTENSION_ID = "shayanline.devin-vscode";
+
+// Every value row the settings surface renders, with the default Devin applies
+// when the key is absent from the config. This one table drives the controls,
+// the "set here" markers, the override comparison, and Reset to defaults, so
+// those four can never disagree about what a default is.
+const ROW_DEFAULTS: Record<string, unknown> = {
+  "agent.model": "",
+  "agent.show_history_on_continue": true,
+  attribution: true,
+  auto_update: true,
+  notify: "smart",
+  respect_gitignore: false,
+  include_gitignored_files: false,
+  show_hints: true,
+  "proxy.mode": "system",
+  "proxy.url": "",
+  "proxy.no_proxy": "",
+  "sandbox.network_mode": "full",
+  "sandbox.allowed_domains": [],
+  "sandbox.denied_domains": [],
+  theme_mode: "",
+  unicode_mode: "auto",
+  pty_for_noninteractive_exec: false,
+  disable_osc: false,
+  "read_config_from.agents_standard": true,
+  "read_config_from.cursor": true,
+  "read_config_from.windsurf": true,
+  "read_config_from.claude": true
+};
+const ROW_KEYS = Object.keys(ROW_DEFAULTS);
+
+// Messages that write to disk. Each one refreshes the panel itself, so the file
+// watcher can ignore the change it just caused.
+const MUTATING = new Set([
+  "settings:setPath", "settings:resetSection", "settings:addHook", "settings:permission",
+  "settings:createFile", "settings:deletePath", "settings:removeHook", "settings:createSkill",
+  "settings:mcpAdd", "settings:mcpVerb", "settings:pluginVerb", "settings:clearExtensionModel"
+]);
+
 // The Devin customizations / settings surface: a webview editor panel with a
-// section sidebar (Models, Rules, Skills, MCP, Hooks, Permissions, Behaviour,
-// Network, Advanced) exposing the full Devin CLI config surface.
+// section sidebar (General, Instructions, Skills, Plugins, MCP, Hooks,
+// Permissions, Advanced) and a scope picker (Global, plus each workspace folder),
+// exposing the full Devin CLI config surface. Settings that control this
+// extension live in VS Code settings and are only linked to from here.
 export class SettingsPanel {
   private static current?: SettingsPanel;
   private readonly panel: vscode.WebviewPanel;
+  private readonly disposables: vscode.Disposable[] = [];
+  private watchers: fs.FSWatcher[] = [];
+  private watchedDirs = "";
+  private watchTimer?: NodeJS.Timeout;
   private cli: CliContext = { cliPath: "devin" };
   private disposed = false;
+  // When the config changes while the panel is hidden, refresh on reveal instead.
+  private stale = false;
+  private selfWriteAt = 0;
 
   static show(context: vscode.ExtensionContext): void {
     if (SettingsPanel.current) {
@@ -47,17 +96,35 @@ export class SettingsPanel {
   constructor(private readonly context: vscode.ExtensionContext, panel: vscode.WebviewPanel) {
     this.panel = panel;
     panel.webview.html = this.getHtml(panel.webview);
-    panel.webview.onDidReceiveMessage((msg) => void this.onMessage(msg));
+    panel.webview.onDidReceiveMessage((msg) => void this.onMessage(msg), undefined, this.disposables);
+    // The panel mirrors files on disk, so keep it live: watch the config
+    // directories, and pick up changes to the extension settings it discloses.
+    this.disposables.push(
+      panel.onDidChangeViewState(() => {
+        if (this.panel.visible && this.stale) {
+          this.stale = false;
+          void this.sendData();
+        }
+      }),
+      vscode.workspace.onDidChangeConfiguration((e) => {
+        if (e.affectsConfiguration("devin")) this.queueRefresh();
+      }),
+      // A folder added or removed changes the scope tabs, so never skip it.
+      vscode.workspace.onDidChangeWorkspaceFolders(() => this.queueRefresh(true))
+    );
     panel.onDidDispose(() => {
       this.disposed = true;
+      this.stopWatching();
+      for (const d of this.disposables) d.dispose();
+      this.disposables.length = 0;
       if (SettingsPanel.current === this) {
         SettingsPanel.current = undefined;
       }
     });
   }
 
-  // The active workspace folder for project-scoped reads/writes. Defaults to the
-  // first folder; in a multi-root workspace the user picks which folder applies.
+  // The active workspace folder for project-scoped reads/writes, following the
+  // scope tab. Defaults to the first folder.
   private selectedRoot?: string;
 
   private folders(): { name: string; path: string }[] {
@@ -83,21 +150,73 @@ export class SettingsPanel {
     this.panel.webview.postMessage(message).then(undefined, () => {});
   }
 
+  // --- Live refresh ---------------------------------------------------------
+
+  // Watch the directories holding the config files this panel edits, so an edit
+  // made in a text editor or terminal shows up without pressing Refresh. Called
+  // on every refresh, and re-attaches only when the set of directories that
+  // exist has changed (a .devin folder may be created while the panel is open).
+  private startWatching(): void {
+    const dirs = [userConfigDir(), ...this.folders().map((f) => path.join(f.path, ".devin"))]
+      .filter((d) => {
+        try { return fs.existsSync(d); } catch { return false; }
+      });
+    const signature = dirs.join("\n");
+    if (signature === this.watchedDirs && this.watchers.length) return;
+    this.stopWatching();
+    this.watchedDirs = signature;
+    for (const dir of dirs) {
+      try {
+        this.watchers.push(fs.watch(dir, () => this.queueRefresh()));
+      } catch {
+        // Watching is a nicety. A platform that refuses is not an error.
+      }
+    }
+  }
+
+  private stopWatching(): void {
+    if (this.watchTimer) {
+      clearTimeout(this.watchTimer);
+      this.watchTimer = undefined;
+    }
+    for (const w of this.watchers) {
+      try { w.close(); } catch { /* already closed */ }
+    }
+    this.watchers = [];
+    this.watchedDirs = "";
+  }
+
+  private queueRefresh(force?: boolean): void {
+    if (this.disposed) return;
+    if (!this.panel.visible) {
+      this.stale = true;
+      return;
+    }
+    // Every write from this panel already re-renders, so drop the file watcher's
+    // echo of it: rendering twice would steal focus from whatever the user
+    // clicked next. Only our own writes are dropped, never an outside edit,
+    // because there is no manual Refresh to fall back on.
+    if (!force && Date.now() - this.selfWriteAt < 1500) return;
+    if (this.watchTimer) clearTimeout(this.watchTimer);
+    this.watchTimer = setTimeout(() => {
+      this.watchTimer = undefined;
+      void this.sendData();
+    }, 300);
+  }
+
   private async onMessage(msg: any): Promise<void> {
     try {
+      if (MUTATING.has(String(msg?.type))) this.selfWriteAt = Date.now();
       switch (msg?.type) {
         case "settings:load":
           await this.ensureCli();
           await this.sendData();
           return;
-        case "settings:refresh":
-          await this.sendData();
-          return;
         case "settings:setPath":
-          setConfigPath(scopeOf(msg.scope), String(msg.path), msg.value, msg.root ? String(msg.root) : this.root());
-          await this.sendData();
+          await this.setValue(scopeOf(msg.scope), String(msg.path), msg.value, msg.root ? String(msg.root) : this.root());
           return;
         case "settings:setRoot":
+          // Follows the scope tab, so project-scoped CLI verbs run in that folder.
           this.selectedRoot = String(msg.path || "") || undefined;
           this.cli.cwd = this.root();
           await this.sendData();
@@ -106,7 +225,10 @@ export class SettingsPanel {
           await this.resetSection(scopeOf(msg.scope), Array.isArray(msg.keys) ? msg.keys.map(String) : [], String(msg.label || "this section"), msg.root ? String(msg.root) : this.root());
           return;
         case "settings:openExtensionSettings":
-          await vscode.commands.executeCommand("workbench.action.openSettings", "@ext:shayanline.devin-vscode");
+          await this.openExtensionSettings(msg.query ? String(msg.query) : "");
+          return;
+        case "settings:clearExtensionModel":
+          await this.clearExtensionModel();
           return;
         case "settings:openFile":
           await this.openFile(String(msg.path || ""));
@@ -180,11 +302,54 @@ export class SettingsPanel {
     return { ...this.cli, cwd: (typeof root === "string" && root) ? root : this.root() };
   }
 
+  // The value a key would have in a scope if that scope did not set it: Devin's
+  // documented default at Global scope, and whatever Global resolves to for a
+  // workspace folder.
+  private fallbackValue(scope: ConfigScope, root: string | undefined, key: string): unknown {
+    if (scope === "user" || !root) return ROW_DEFAULTS[key];
+    return defaulted(loadConfigFile("user").data, key);
+  }
+
+  // Write a value setting. Writing the value that already applies would only add
+  // a redundant key and leave the row looking changed, so the key is removed
+  // instead, the way VS Code drops a setting you return to its default.
+  private async setValue(scope: ConfigScope, key: string, value: unknown, root?: string): Promise<void> {
+    let next = value;
+    if (next !== undefined && key in ROW_DEFAULTS &&
+        JSON.stringify(next) === JSON.stringify(this.fallbackValue(scope, root, key))) {
+      next = undefined;
+    }
+    setConfigPath(scope, key, next, root);
+    await this.sendData();
+  }
+
+  // Open VS Code's Settings editor filtered to this extension, optionally
+  // narrowed further so a link lands on the settings it names.
+  private async openExtensionSettings(query: string): Promise<void> {
+    const filter = `@ext:${EXTENSION_ID}` + (query ? ` ${query}` : "");
+    await vscode.commands.executeCommand("workbench.action.openSettings", filter);
+  }
+
+  // Clear the extension's model override so chats started here fall back to the
+  // Devin CLI's own `agent.model`. Both targets are cleared, since the chat
+  // panel's model picker writes the Workspace one.
+  private async clearExtensionModel(): Promise<void> {
+    const cfg = vscode.workspace.getConfiguration("devin");
+    for (const target of [vscode.ConfigurationTarget.Workspace, vscode.ConfigurationTarget.Global]) {
+      try {
+        await cfg.update("defaultModel", undefined, target);
+      } catch {
+        // Workspace target throws with no workspace open. Global still applies.
+      }
+    }
+    await this.sendData();
+  }
+
   // Reset a section: remove its keys from the given scope (and folder, for
   // project scope) so they fall back to Devin's defaults. Confirmed first.
   private async resetSection(scope: ConfigScope, keys: string[], label: string, root?: string): Promise<void> {
     if (!keys.length) return;
-    const where = scope === "user" ? "User" : "Workspace";
+    const where = scope === "user" ? "Global" : "Workspace";
     const choice = await vscode.window.showWarningMessage(
       `Reset ${label} to defaults in ${where}? This removes those settings from the config.`,
       { modal: true },
@@ -347,8 +512,7 @@ export class SettingsPanel {
 
   private async sendData(): Promise<void> {
     if (this.disposed) return;
-    const root = this.root();
-    const files = loadAllConfigs(root);
+    this.startWatching();
     const [skills, plugins] = await Promise.all([
       listSkills(this.cli).catch(() => []),
       listPlugins(this.cli).catch(() => [])
@@ -362,28 +526,23 @@ export class SettingsPanel {
     const userSkills = this.resolveSkills(skills.filter((s) => !(s.source || "").includes("project")));
 
     const data = {
-      root: root || null,
-      userConfigPath: userConfigPath(),
-      hasProject: !!root,
       folders: this.folders(),
-      activeRoot: root || null,
-      scopes: files.map((f) => ({ scope: f.scope, path: f.path, exists: f.exists })),
       models: { families },
-      // Value settings for the User scope and for every workspace folder, so the
-      // UI can show a collapsible group per scope/folder and edit each one.
-      userValues: this.valueSettings("user"),
-      folderValues: Object.fromEntries(this.folders().map((f) => [f.path, this.valueSettings("project", f.path)])),
+      // One entry per scope: its config file, the effective value of every row
+      // (the User value shows through on a folder scope), and which keys that
+      // scope sets explicitly, so the UI can mark set, inherited and overridden.
+      valuesByScope: groups.map((g) => this.valueGroup(g)),
       // Per folder: keys whose effective value genuinely overrides the User value.
       folderOverrides: Object.fromEntries(this.folders().map((f) => [f.path, this.overriddenKeys(f.path)])),
-      // Every project-scoped section is grouped the same way: a User group plus
-      // one group per workspace folder.
-      rules: {
-        byScope: groups.map((g) => ({ ...g, file: this.ruleFileForDir(g.scope === "user" ? userConfigDir() : g.root!) })),
-        readConfigFrom: (mergedValue(files, "read_config_from") as Record<string, unknown>) || {}
+      // Settings owned by this extension, disclosed here but edited in VS Code.
+      extension: {
+        defaultModel: vscode.workspace.getConfiguration("devin").get<string>("defaultModel", "") || ""
+      },
+      instructions: {
+        byScope: groups.map((g) => ({ ...g, file: this.ruleFileForDir(g.scope === "user" ? userConfigDir() : g.root!) }))
       },
       skills: {
-        byScope: groups.map((g) => ({ ...g, list: g.scope === "user" ? userSkills : this.scanProjectSkills(g.root!) })),
-        dirs: [path.join(userConfigDir(), "skills"), root ? path.join(root, ".devin", "skills") : ""].filter(Boolean)
+        byScope: groups.map((g) => ({ ...g, list: g.scope === "user" ? userSkills : this.scanProjectSkills(g.root!) }))
       },
       mcp: { byScope: groups.map((g) => ({ ...g, servers: this.mcpServersForScope(g.scope, g.root) })) },
       hooks: { byScope: groups.map((g) => ({ ...g, entries: this.hooksForScope(g.scope, g.root) })) },
@@ -393,57 +552,56 @@ export class SettingsPanel {
     this.post({ type: "settings:data", data });
   }
 
-  // The scope groups every section renders: User plus one per workspace folder.
+  // The scope groups every section renders: Global plus one per workspace folder.
   private scopeGroups(): { scope: ConfigScope; root?: string; title: string }[] {
     const folders = this.folders();
     const single = folders.length === 1;
-    const groups: { scope: ConfigScope; root?: string; title: string }[] = [{ scope: "user", title: "User" }];
+    const groups: { scope: ConfigScope; root?: string; title: string }[] = [{ scope: "user", title: "Global" }];
     for (const f of folders) {
       groups.push({ scope: "project", root: f.path, title: single ? "Workspace" : "Workspace · " + f.name });
     }
     return groups;
   }
 
-  // Value-setting keys the Workspace genuinely overrides: it must EXPLICITLY set
-  // the key (not just inherit the default) AND its value must differ from the
-  // User value. This avoids flagging keys the user only ever set at User scope.
+  // The effective config for a scope: the User file, or the User file with this
+  // folder's file layered on top (objects merged one level, the way Devin merges
+  // them), so a folder tab shows the value that actually applies.
+  private effectiveData(scope: ConfigScope, root?: string): Record<string, unknown> {
+    const user = loadConfigFile("user").data;
+    if (scope === "user" || !root) return user;
+    return mergeConfig(user, loadConfigFile("project", root).data);
+  }
+
+  // One scope's rows: the effective value of every key, plus the keys this scope
+  // sets itself (which is what separates "unset" from "set to the default").
+  private valueGroup(g: { scope: ConfigScope; root?: string; title: string }): unknown {
+    const file = loadConfigFile(g.scope, g.root);
+    const eff = this.effectiveData(g.scope, g.root);
+    const values: Record<string, unknown> = {};
+    for (const k of ROW_KEYS) {
+      values[k] = defaulted(eff, k);
+    }
+    return {
+      scope: g.scope,
+      root: g.root,
+      title: g.title,
+      path: file.path,
+      exists: file.exists,
+      values,
+      setKeys: ROW_KEYS.filter((k) => pick(file.data, k) !== undefined)
+    };
+  }
+
+  // Keys the Workspace genuinely overrides: it must EXPLICITLY set the key (not
+  // just inherit the default) AND its value must differ from the User value.
   private overriddenKeys(root?: string): string[] {
     if (!root) return [];
     const user = loadConfigFile("user").data;
     const project = loadConfigFile("project", root).data;
-    return VALUE_KEYS.filter((k) => {
+    return ROW_KEYS.filter((k) => {
       if (pick(project, k) === undefined) return false;
-      return JSON.stringify(keyValue(project, k)) !== JSON.stringify(keyValue(user, k));
+      return JSON.stringify(defaulted(project, k)) !== JSON.stringify(defaulted(user, k));
     });
-  }
-
-  // The value-based settings, read raw from one scope's config (user, project,
-  // or project-local). Booleans fall back to Devin's documented default when the
-  // key is unset in that scope.
-  private valueSettings(scope: ConfigScope, root?: string): unknown {
-    const d = loadConfigFile(scope, root).data;
-    return {
-      agentModel: pick(d, "agent.model") ?? "",
-      showHistoryOnContinue: pick(d, "agent.show_history_on_continue") !== false,
-      behaviour: {
-        attribution: pick(d, "attribution") !== false,
-        auto_update: pick(d, "auto_update") !== false,
-        notify: (pick(d, "notify") as string) || "smart",
-        respect_gitignore: pick(d, "respect_gitignore") === true,
-        include_gitignored_files: pick(d, "include_gitignored_files") === true,
-        show_hints: pick(d, "show_hints") !== false
-      },
-      network: {
-        proxy: (pick(d, "proxy") as Record<string, unknown>) || { mode: "system" },
-        sandbox: (pick(d, "sandbox") as Record<string, unknown>) || { allowed_domains: [], denied_domains: [], network_mode: "full" }
-      },
-      advanced: {
-        theme_mode: (pick(d, "theme_mode") as string) || "",
-        unicode_mode: (pick(d, "unicode_mode") as string) || "auto",
-        pty_for_noninteractive_exec: pick(d, "pty_for_noninteractive_exec") === true,
-        disable_osc: pick(d, "disable_osc") === true
-      }
-    };
   }
 
   // The instruction entry for a directory. Devin reads AGENTS.md; CLAUDE.md is
@@ -654,34 +812,26 @@ function quoteArg(p: string): string {
   return /[^A-Za-z0-9_./-]/.test(p) ? `'${p.replace(/'/g, `'\\''`)}'` : p;
 }
 
-// The value-setting keys the scope switcher edits.
-const VALUE_KEYS = [
-  "agent.model", "agent.show_history_on_continue", "attribution", "auto_update",
-  "notify", "respect_gitignore", "include_gitignored_files", "show_hints",
-  "proxy", "sandbox", "theme_mode", "unicode_mode",
-  "pty_for_noninteractive_exec", "disable_osc"
-];
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
 
-// The effective value of a value-setting key in a config object, applying the
-// same defaults the UI uses (so equal effective values compare equal).
-function keyValue(d: Record<string, unknown>, key: string): unknown {
-  const v = pick(d, key);
-  switch (key) {
-    case "agent.model": return v ?? "";
-    case "notify": return v || "smart";
-    case "theme_mode": return v || "";
-    case "unicode_mode": return v || "auto";
-    case "proxy": return v || { mode: "system" };
-    case "sandbox": return v || { allowed_domains: [], denied_domains: [], network_mode: "full" };
-    case "respect_gitignore":
-    case "include_gitignored_files":
-    case "pty_for_noninteractive_exec":
-    case "disable_osc":
-      return v === true;
-    default:
-      // attribution, auto_update, show_hints, agent.show_history_on_continue
-      return v !== false;
+// Layer one config file over another the way Devin merges them: later keys win,
+// and object values (agent, proxy, sandbox, read_config_from) merge one level so
+// a folder can override a single sub-key.
+function mergeConfig(base: Record<string, unknown>, over: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...base };
+  for (const [k, v] of Object.entries(over)) {
+    const b = out[k];
+    out[k] = isPlainObject(b) && isPlainObject(v) ? { ...b, ...v } : v;
   }
+  return out;
+}
+
+// A row's value in a config object, falling back to Devin's documented default.
+function defaulted(d: Record<string, unknown>, key: string): unknown {
+  const v = pick(d, key);
+  return v === undefined ? ROW_DEFAULTS[key] : v;
 }
 
 // Read a dotted path from a config object.

@@ -35,7 +35,7 @@ PATH and helps you finish setup.
 - An embedded sessions panel, beside the chat when there is room, with search, filter, and refresh
 - A browser of your Devin CLI sessions, grouped by workspace, that survives restarts
 - Pick the Devin model and mode right from the panel
-- A settings surface (the gear) for Devin's rules, skills, MCP servers, hooks, permissions, and more
+- A settings surface (the gear) for the Devin CLI's own configuration: instructions, skills, plugins, MCP servers, hooks, permissions, and more, global or per workspace folder, with search
 - `/` for Devin commands and skills, `@` to attach files, and image paste
 - Markdown replies with syntax highlighting and Mermaid diagrams
 
@@ -54,8 +54,16 @@ PATH and helps you finish setup.
 
 ## Settings
 
-Set defaults like the Devin model, mode, and checkpoints in the **Devin** section
-of VS Code settings. If `devin` is not on your PATH, point `devin.cliPath` at it.
+Settings live in whichever place owns them, and each links to the other:
+
+- **This extension** (session mode, the model new chats start with, the thinking
+  display, checkpoints, edit requests, `devin.cliPath`) lives in the **Devin**
+  section of VS Code settings. If `devin` is not on your PATH, point
+  `devin.cliPath` at it.
+- **The Devin CLI** (instructions, skills, plugins, MCP servers, hooks,
+  permissions, proxy, sandbox) lives in **Devin: Open Settings**, the gear in the
+  chat panel, which edits the CLI's own config files. Pick Global or a workspace
+  folder at the top.
 
 ## Contributing
 

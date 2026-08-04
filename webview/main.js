@@ -2885,14 +2885,43 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     }
   }
 
+  // Docked working set above the composer. Collapsible (like the plan) with a
+  // chevron, and the file list scrolls once it gets long. The collapsible is
+  // cached so its collapsed state survives the frequent re-renders during a turn.
   function renderWorkingSet(files) {
-    el.workingSet.innerHTML = "";
-    if (!files || files.length === 0) { el.workingSet.classList.add("hidden"); updateComposerDock(); return; }
+    if (!files || files.length === 0) { hideWorkingSet(); return; }
     el.workingSet.classList.remove("hidden");
-    const header = document.createElement("div");
-    header.className = "ws-header";
-    const label = document.createElement("span");
-    label.className = "ws-label";
+    let ctrl = el.workingSet._ctrl;
+    if (!ctrl) {
+      el.workingSet.innerHTML = "";
+      ctrl = makeCollapsible("ws-collapsible", { startCollapsed: false });
+      ctrl.header.classList.add("ws-header");
+      const chev = document.createElement("i");
+      chev.className = "codicon codicon-chevron-right ws-chevron";
+      const label = document.createElement("span");
+      label.className = "ws-label";
+      const main = document.createElement("div");
+      main.className = "ws-header-main";
+      main.appendChild(chev);
+      main.appendChild(label);
+      const actions = document.createElement("div");
+      actions.className = "ws-actions";
+      actions.appendChild(btn("Open all", "secondary", () => vscode.postMessage({ type: "openAllDiffs" })));
+      actions.appendChild(btn("Keep all", "primary", () => vscode.postMessage({ type: "acceptAll" })));
+      actions.appendChild(btn("Undo all", "secondary", () => vscode.postMessage({ type: "rejectAll" })));
+      // Header toggles the collapse, so the action buttons must not bubble.
+      actions.addEventListener("click", (e) => e.stopPropagation());
+      ctrl.header.appendChild(main);
+      ctrl.header.appendChild(actions);
+      const list = document.createElement("div");
+      list.className = "ws-list";
+      ctrl.body.appendChild(list);
+      el.workingSet.appendChild(ctrl.root);
+      el.workingSet._ctrl = ctrl;
+      el.workingSet._label = label;
+      el.workingSet._list = list;
+    }
+    const label = el.workingSet._label;
     label.textContent = `${files.length} changed file${files.length > 1 ? "s" : ""}`;
     // Total +added / -removed across the working set (VS Code's line counts).
     let totAdded = 0, totRemoved = 0;
@@ -2901,14 +2930,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     counts.className = "ws-counts";
     countBadges(counts, totAdded, totRemoved);
     label.appendChild(counts);
-    const actions = document.createElement("div");
-    actions.className = "ws-actions";
-    actions.appendChild(btn("Open all", "secondary", () => vscode.postMessage({ type: "openAllDiffs" })));
-    actions.appendChild(btn("Keep all", "primary", () => vscode.postMessage({ type: "acceptAll" })));
-    actions.appendChild(btn("Undo all", "secondary", () => vscode.postMessage({ type: "rejectAll" })));
-    header.appendChild(label);
-    header.appendChild(actions);
-    el.workingSet.appendChild(header);
+    const list = el.workingSet._list;
+    list.innerHTML = "";
     files.forEach((f) => {
       const row = document.createElement("div");
       row.className = "ws-file";
@@ -2931,8 +2954,17 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       grp.appendChild(iconBtn("codicon-discard", "Undo", () => vscode.postMessage({ type: "rejectFile", path: f.path })));
       row.appendChild(link);
       row.appendChild(grp);
-      el.workingSet.appendChild(row);
+      list.appendChild(row);
     });
+    updateComposerDock();
+  }
+
+  function hideWorkingSet() {
+    el.workingSet.classList.add("hidden");
+    el.workingSet.innerHTML = "";
+    el.workingSet._ctrl = null;
+    el.workingSet._label = null;
+    el.workingSet._list = null;
     updateComposerDock();
   }
 
@@ -3742,6 +3774,39 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     scrollToBottom();
   }
 
+  // The window reloaded (or the extension restarted) while this session had a
+  // turn in flight. The agent runs its commands and file edits through the
+  // extension host, so it cannot survive that: say so plainly, and offer to send
+  // the same message again.
+  function renderInterrupted() {
+    setBusy(false);
+    hideWorking();
+    finalizeBlock();
+    hideWelcome();
+    const box = document.createElement("div");
+    box.className = "tray-card interrupted-card";
+    const head = document.createElement("div");
+    head.className = "error-head";
+    const icon = document.createElement("i");
+    icon.className = "codicon codicon-debug-disconnect";
+    const msg = document.createElement("span");
+    msg.textContent = "The last turn stopped when the window reloaded. Your files and the rest of this conversation are untouched.";
+    head.appendChild(icon);
+    head.appendChild(msg);
+    box.appendChild(head);
+    if (lastUserText) {
+      const row = document.createElement("div");
+      row.className = "options";
+      row.appendChild(btn("Send it again", "primary", () => {
+        box.remove();
+        vscode.postMessage({ type: "send", text: lastUserText, newSession: false });
+      }));
+      box.appendChild(row);
+    }
+    respTarget().appendChild(box);
+    scrollToBottom();
+  }
+
   // Short local time (HH:MM) for turn timestamps.
   function fmtTime(ts) {
     try { return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
@@ -4029,6 +4094,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       // A failed revert reports `error` rather than `reverted`, so abandon any
       // pending revert here to avoid a stale head trimming the wrong turn later.
       case "error": hideBoot(); pendingRevert = null; renderError(m.text); break;
+      case "interrupted": hideBoot(); renderInterrupted(); break;
       case "capabilities":
         caps = Object.assign(caps, {
           revert: !!m.revert,

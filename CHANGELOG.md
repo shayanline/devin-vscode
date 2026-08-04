@@ -10,6 +10,127 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 > first Marketplace release (0.6.61) group those rapid iterations by milestone
 > rather than listing every intermediate build.
 
+## [0.6.89] - 2026-08-04
+
+Session lifecycle across a window reload or an extension restart, and a
+collapsible working set.
+
+A `devin acp` agent cannot be handed to a new extension host: it runs its shell
+commands, file writes and permission prompts *through* this extension, over our
+stdio. Leaving one alive would strand an agent that can do nothing while still
+holding the CLI's session lock, so the safe move is to stop every agent
+deterministically and make the reload a clean handover instead.
+
+### Changed
+- The working set above the composer is now collapsible, with a chevron in its
+  header, so a turn that touches a lot of files no longer squeezes the
+  transcript. Its file list scrolls once it grows past roughly 260 pixels
+  instead of stretching the dock, and Open all, Keep all and Undo all stay in
+  the header without toggling the collapse when clicked. The collapsed state is
+  kept across the frequent re-renders during a turn.
+
+### Fixed
+- Shutdown now finishes the job. `deactivate` is awaited and escalates per agent
+  within a bounded budget: cancel the turn, close stdin (a clean EOF most stdio
+  agents exit on), SIGTERM the process group so docker-backed MCP servers can
+  tidy up, then SIGKILL. Previously the escalation to SIGKILL sat on a
+  `setTimeout(…).unref()` inside a process that was about to exit, so it never
+  fired: an agent that ignored SIGTERM survived as an orphan until the next
+  window's reaper collected it, holding a session lock in the meantime.
+- Commands the agent was running are now stopped on the way out too, with the
+  same two passes. They are children of the extension host, and the orphan reaper
+  only looks for `devin acp`, so a long build or test run that ignored SIGTERM
+  could previously be left running with nothing to collect it.
+- A turn in flight is now cancelled before the agent is stopped, rather than the
+  process being signalled from under it.
+- Windows no longer strands the agent's children. `killTree` had no process group
+  to signal there and fell back to killing only the direct child, so MCP servers
+  and command trees survived. Both now go through `taskkill /T /F`.
+- Waiting for the agents to actually exit also removes a self-inflicted lock
+  race: the reloaded window could previously find its own dying agent still
+  holding the session lock and ask you to take over your own session.
+
+### Added
+- An interrupted turn is now reported instead of vanishing. If the window reloads
+  mid-turn, the session is recorded, reopened on the other side even when
+  `devin.autoResumeLast` is off, and the thread shows a notice saying the turn
+  stopped and that your files and the rest of the conversation are untouched,
+  with a "Send it again" action.
+- `scripts/lifecycle.test.js` covers the shutdown path against fake agents that
+  ignore stdin EOF and SIGTERM, so the escalation and the bounded budget are
+  guarded rather than assumed.
+
+## [0.6.88] - 2026-08-04
+
+A simplification pass over the settings surface. Nothing was removed: every
+option and action is still there, in about a third of the vertical space.
+
+### Changed
+- Scope is now chosen once at the top, not repeated down the page. The page shows
+  one scope at a time, the way VS Code's own Settings editor does. Previously
+  every setting was rendered once per scope, so the six Behaviour toggles
+  appeared twice in a single folder workspace and four times with three folders.
+  With one folder open the scopes are two tabs. With several, they collapse into
+  a picker with the folders grouped, so a six folder workspace no longer wraps
+  into a wall of buttons.
+- The **User** scope is now called **Global**, since it applies to every
+  workspace rather than to a particular user of the machine.
+- Ten sections became eight: Models & Mode and Behaviour merged into **General**,
+  Rules & Instructions became **Instructions**, and Network & Sandbox merged into
+  **Advanced**. Skills, Plugins, Hooks, MCP Servers, and Permissions are
+  unchanged. Plugins hides the scope picker, because the CLI installs a plugin
+  once for the machine and a choice there would have no effect.
+- One row rhythm throughout: a group is a small heading plus rows separated by
+  hairlines, replacing the bordered card with its own title and description. A
+  single toggle no longer costs a titled box.
+- Row actions (edit, remove, and so on) are dimmed until the row is hovered or
+  focused, rather than competing for attention at full strength.
+- Permissions takes one rule input with a bucket dropdown, replacing three
+  always visible inputs that used their placeholder as a label.
+- Reset now sits on the group whose keys it clears, and only appears when the
+  active scope actually sets one of them, so it is never a no-op.
+- `devin.defaultModel` and `devin.defaultMode` descriptions now say they apply to
+  chats started in the extension, and that an empty `devin.defaultModel` follows
+  the Devin CLI's own `agent.model`.
+
+### Added
+- A search box that filters settings across every section at once, matching a
+  row's label, its hint, its config key, and its group heading.
+- "Set here" markers, so a row says whether the active scope sets it or inherits
+  the Global value, with a Clear override action on a folder scope. A folder scope
+  now shows the value that actually applies rather than the bare default.
+- Deep links from General into VS Code settings for the extension's own options
+  (all of them, session defaults, thinking display, checkpoints and editing).
+- Disclosure of the one place the two settings systems overlap: when the VS Code
+  setting `devin.defaultModel` is set, the CLI model row carries a notice saying
+  it is overridden for chats in the extension, with links to open or clear it.
+  Previously the panel's model control silently had no effect on those chats. It
+  is a notice on the affected row rather than a setting of its own, so this
+  surface still only ever edits Devin CLI config, and it appears only while the
+  conflict exists.
+- The config file the active scope writes to is named under the toolbar, with an
+  open or create action, which replaces the Config files list.
+- The panel refreshes itself when a config file changes on disk, when a `devin.*`
+  VS Code setting changes, or when it is revealed after a change, so the manual
+  Refresh button is gone.
+- `npm run preview:settings` renders the settings panel in a browser from mock
+  data, and `scripts/settings.test.js` covers the surface, including a guard that
+  every config key keeps a row and every section keeps its actions.
+
+### Fixed
+- Setting a value back to the one that already applies no longer leaves the row
+  marked as changed. The key is removed from the config instead of being written
+  back, the way VS Code drops a setting you return to its default. At a workspace
+  folder that means matching the Global value clears the override, and removing a
+  nested key no longer leaves an empty `"proxy": {}` behind.
+- The sidebar no longer promises a "Mode" setting that was never on the page.
+  Mode is a VS Code setting and is linked to from General.
+- Import rules from other tools (`read_config_from`) is now scope aware, instead
+  of always writing to the Global config while sitting under a folder heading.
+- Removed dead code left behind by earlier iterations: an unused list row helper,
+  an unreachable folder switcher, a decorative collapse that never collapsed, and
+  four unused config and CLI helpers.
+
 ## [0.6.87] - 2026-08-04
 
 A large iteration on the settings surface (the Devin customizations editor),

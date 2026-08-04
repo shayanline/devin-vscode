@@ -47,10 +47,6 @@ export function mcpOauthDir(): string {
   return path.join(dataHome, "devin", "mcp", "oauth");
 }
 
-export function projectMcpConfigPaths(root: string): { scope: ConfigScope; path: string }[] {
-  return [{ scope: "project", path: path.join(root, ".devin", "mcp_config.json") }];
-}
-
 export function projectConfigPath(root: string): string {
   return path.join(root, ".devin", "config.json");
 }
@@ -105,59 +101,27 @@ export function loadConfigFile(scope: ConfigScope, root?: string): ConfigFile {
   return { scope, path: p, exists: fs.existsSync(p), data: readConfig(p) };
 }
 
-// The config files that apply, in precedence order (lowest to highest): user,
-// then project. `root` is the workspace folder (project root).
-export function loadAllConfigs(root?: string): ConfigFile[] {
-  const files: ConfigFile[] = [loadConfigFile("user", root)];
-  if (root) {
-    files.push(loadConfigFile("project", root));
-  }
-  return files;
-}
-
-// Merge a top-level key across files (later files win / override by key for
-// objects; for arrays we concatenate and de-dupe, matching Devin's permission
-// merge and mcp override-by-name semantics well enough for display).
-export function mergedValue(files: ConfigFile[], key: string): unknown {
-  let acc: unknown;
-  for (const f of files) {
-    const v = f.data[key];
-    if (v === undefined) continue;
-    if (Array.isArray(v)) {
-      acc = Array.isArray(acc) ? [...(acc as unknown[]), ...v] : [...v];
-    } else if (v && typeof v === "object") {
-      acc = { ...(acc && typeof acc === "object" ? (acc as object) : {}), ...(v as object) };
-    } else {
-      acc = v;
-    }
-  }
-  return acc;
-}
-
-// Write a shallow patch of top-level keys into a config file, creating the
-// directory and file if needed. Comments in that file are not preserved.
-export function writeConfigPatch(scope: ConfigScope, patch: Record<string, unknown>, root?: string): string {
-  const p = scope === "user" ? userConfigPath() : projectConfigPath(root || process.cwd());
-  const current = readConfig(p);
-  const next = { ...current, ...patch };
-  fs.mkdirSync(path.dirname(p), { recursive: true });
-  fs.writeFileSync(p, JSON.stringify(next, null, 2) + "\n", "utf8");
-  return p;
-}
-
-// Set a dotted path (e.g. "agent.model", "proxy.mode") in a config file.
+// Set a dotted path (e.g. "agent.model", "proxy.mode") in a config file. An
+// undefined value removes the key, along with any parent object it leaves empty,
+// so a removed setting does not linger as `"proxy": {}`.
 export function setConfigPath(scope: ConfigScope, dotted: string, value: unknown, root?: string): string {
   const p = scope === "user" ? userConfigPath() : projectConfigPath(root || process.cwd());
   const current = readConfig(p);
   const keys = dotted.split(".");
+  const chain: Record<string, unknown>[] = [current];
   let node: Record<string, unknown> = current;
   for (let i = 0; i < keys.length - 1; i++) {
     const k = keys[i];
     if (!node[k] || typeof node[k] !== "object") node[k] = {};
     node = node[k] as Record<string, unknown>;
+    chain.push(node);
   }
   if (value === undefined) {
     delete node[keys[keys.length - 1]];
+    for (let i = chain.length - 1; i > 0; i--) {
+      if (Object.keys(chain[i]).length) break;
+      delete chain[i - 1][keys[i - 1]];
+    }
   } else {
     node[keys[keys.length - 1]] = value;
   }

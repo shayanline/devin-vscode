@@ -9,6 +9,7 @@ Thanks for your interest. Issues and pull requests are welcome.
 - `npm run check-types` type checks and `npm test` runs the webview unit tests.
 - `npm run package` builds a `.vsix` you can install with `code --install-extension`.
 - `npm run preview -- --scenario full` opens a mock chat in a browser for fast UI iteration without the CLI. See [the screenshots guide](docs/screenshots.md) for the scenarios behind the README images and how to regenerate them.
+- `npm run preview:settings` does the same for the settings panel. It takes `--section <id>`, `--multi-root` (two workspace folders, so the scope tabs show both), and `--empty` (nothing configured, for the empty states). The mock payload lives in `scripts/settings-fixture.js` and is shared with the tests.
 
 ## Releasing
 
