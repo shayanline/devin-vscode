@@ -3,15 +3,15 @@
 [![VS Code Marketplace](https://badgen.net/vs-marketplace/v/shayanline.devin-vscode?label=Marketplace)](https://marketplace.visualstudio.com/items?itemName=shayanline.devin-vscode)
 [![Latest release](https://img.shields.io/github/v/release/shayanline/devin-vscode?label=Release)](https://github.com/shayanline/devin-vscode/releases/latest)
 
-**Brings the [Devin CLI](https://docs.devin.ai/cli) natively into VS Code.**
-Chat with Devin in a side panel instead of a terminal. Ask it to build a
-feature, fix a bug, refactor, or explain code, and watch it work: streaming
-replies, live tool calls, and every edit shown as a diff you can keep or undo.
-Each chat is a real Devin CLI session, saved per workspace, so you can pick any
-one back up later.
+**Runs the [Devin CLI](https://docs.devin.ai/cli) in a native VS Code panel.**
+Chat with Devin in a side panel instead of a terminal, and ask it to build a
+feature, fix a bug, refactor, or explain code. Replies stream in, tool calls run
+once you approve them, and every file edit is shown as a diff you can keep or
+undo. Each chat is a real Devin CLI session, saved per workspace, so you can
+reopen it later.
 
-The interface is inspired by GitHub Copilot Chat and follows the same design, so
-if you use Copilot it feels familiar from the first message.
+The interface follows GitHub Copilot Chat, so it is familiar if you already use
+Copilot.
 
 > **Preview.** Early release, under active development. Expect rough edges and
 > frequent updates. Feedback and issues are welcome.
@@ -28,16 +28,20 @@ PATH and helps you finish setup.
 
 ## What you get
 
-- Streaming answers, with Devin's reasoning shown as it works
-- Every file edit as a native VS Code diff, keep or undo per file
-- Approve the CLI's tool actions and answer its questions inline
-- Open a new chat in the sidebar, the editor area, a new window, or a terminal (the `+` split button)
-- An embedded sessions panel, beside the chat when there is room, with search, filter, and refresh
-- A browser of your Devin CLI sessions, grouped by workspace, that survives restarts
-- Pick the Devin model and mode right from the panel
-- A settings surface (the gear) for the Devin CLI's own configuration: instructions, skills, plugins, MCP servers, hooks, permissions, and more, global or per workspace folder, with search
-- `/` for Devin commands and skills, `@` to attach files, and image paste
-- Markdown replies with syntax highlighting and Mermaid diagrams
+- Streaming replies, with Devin's reasoning shown as it works.
+- Every file edit shown as a native VS Code diff, kept or undone per file.
+- Approve or decline the tools Devin runs, and answer its questions, inline in
+  the chat.
+- Open a chat in the sidebar, the editor area, a new window, or a terminal, from
+  the `+` split button.
+- Sessions saved per workspace that survive restarts, listed in a built in panel
+  grouped by workspace, with search and a status filter.
+- The Devin model and mode (code, ask, plan, or bypass) picked from the composer.
+- The Devin CLI's own configuration edited from the gear: instructions, skills,
+  plugins, MCP servers, hooks, permissions, and more, per machine or per
+  workspace folder, with search.
+- `/` for Devin commands and skills, `@` to attach files, and image paste.
+- Markdown replies with syntax highlighting and inline Mermaid diagrams.
 
 ## Screenshots
 
