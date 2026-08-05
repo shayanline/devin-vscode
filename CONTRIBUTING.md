@@ -15,10 +15,11 @@ Thanks for your interest. Issues and pull requests are welcome.
 
 Releases are automated. To cut one:
 
-1. Bump the version and create the tag: `npm version patch` (or `minor` / `major`).
-2. Push it: `git push --follow-tags`.
+1. Add the new version's entry to [`CHANGELOG.md`](CHANGELOG.md). The release notes are taken from it.
+2. Bump the version and create the tag: `npm version patch` (or `minor` / `major`).
+3. Push it: `git push --follow-tags`.
 
-The [release workflow](.github/workflows/release.yml) then type checks, tests, builds the extension, creates a GitHub Release with the `.vsix` attached, and publishes to the VS Code Marketplace (and Open VSX). The [CI workflow](.github/workflows/ci.yml) runs the same checks on every push and pull request.
+The [release workflow](.github/workflows/release.yml) then type checks, tests, builds the extension, creates a GitHub Release with the `.vsix` attached, and publishes to the VS Code Marketplace (and Open VSX). The release body is the matching `CHANGELOG.md` section (via `scripts/changelog-notes.js`) with GitHub's "Full Changelog" link appended, so if the entry is missing the notes fall back to a link to the changelog. The [CI workflow](.github/workflows/ci.yml) runs the same checks on every push and pull request.
 
 One time setup for Marketplace publishing:
 
