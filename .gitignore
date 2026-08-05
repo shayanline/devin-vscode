@@ -10,3 +10,4 @@ release-notes.md
 
 # playwright-cli scratch artifacts
 .playwright-cli/
+.vscode/*
