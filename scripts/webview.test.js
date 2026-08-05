@@ -719,3 +719,521 @@ test("per-turn edit/restore chrome builds while busy (no throw)", async () => {
 
   assert.strictEqual(h.errors().length, 0, "toggling busy threw: " + JSON.stringify(h.errors()));
 });
+
+test("queued messages render as bubbles, edit in place keeps position, remove drops them", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "queued", items: [{ id: "q1", text: "first queued" }, { id: "q2", text: "second queued" }] });
+  await h.settle(20);
+
+  const box = h.document.querySelector("#thread .queued-inline");
+  assert.ok(box, "the queued block renders at the bottom of the transcript");
+  assert.ok(box.querySelector(".queued-divider"), "it has a Queued divider");
+  const rows = box.querySelectorAll(".queued-item");
+  assert.strictEqual(rows.length, 2, "one bubble per queued message");
+  assert.strictEqual(box.querySelectorAll(".queued-bubble")[0].textContent, "first queued");
+
+  // Edit the first: it loads into the composer for an in-place edit and is NOT
+  // dropped from the queue (its slot is kept), so it cannot jump to the end.
+  rows[0].querySelector(".queued-actions").querySelectorAll("button")[0].click();
+  await h.settle(10);
+  assert.strictEqual(h.document.getElementById("input").value, "first queued", "edit loads text into the composer");
+  assert.ok(!h.posted.some((m) => m.type === "removeQueued" && m.id === "q1"), "editing does not drop it from the queue");
+  assert.ok(h.document.getElementById("input-editing-banner"), "an editing banner is shown");
+  assert.ok(rows[0].classList.contains("editing"), "the edited bubble is marked");
+  // The host is told which message is being edited, so only that one is held
+  // back when it reaches the head (earlier ones keep sending).
+  assert.ok(h.posted.some((m) => m.type === "queueEditing" && m.id === "q1"), "editing holds just that message");
+
+  // Submitting the edit updates it in place (same position), not a fresh send.
+  h.document.getElementById("input").value = "first edited";
+  h.document.getElementById("input").dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  await h.settle(10);
+  const edit = h.posted.find((m) => m.type === "editQueued");
+  assert.ok(edit && edit.id === "q1" && edit.text === "first edited", "submit updates the queued item in place");
+  assert.ok(!h.posted.some((m) => m.type === "send"), "editing a queued item is not a fresh send");
+  assert.ok(!h.document.getElementById("input-editing-banner"), "the editing banner clears after submit");
+  // Committing the edit releases the hold so that message can be sent.
+  assert.ok(h.posted.some((m) => m.type === "queueEditing" && m.id === null), "committing releases the hold");
+
+  // Each bubble carries edit / send-immediately / remove, like VS Code's pending row.
+  const actionBtns = rows[1].querySelector(".queued-actions").querySelectorAll("button");
+  assert.strictEqual(actionBtns.length, 3, "edit, send immediately, and remove");
+
+  // Send the second immediately: it jumps to the front of the queue.
+  actionBtns[1].click();
+  await h.settle(10);
+  assert.ok(h.posted.some((m) => m.type === "sendQueuedNow" && m.id === "q2"), "send immediately promotes it");
+
+  // Remove the second: drops it.
+  actionBtns[2].click();
+  await h.settle(10);
+  assert.ok(h.posted.some((m) => m.type === "removeQueued" && m.id === "q2"), "remove asks the host to drop it");
+
+  // An empty update removes the block.
+  h.post({ type: "queued", items: [] });
+  await h.settle(10);
+  assert.ok(!h.document.querySelector("#thread .queued-inline"), "an empty queue removes the block");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("session load hides the replay behind the spinner until it settles", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear", loading: true });
+  await h.settle(10);
+
+  const thread = h.thread();
+  assert.ok(thread.classList.contains("loading-replay"), "the transcript is hidden while replaying");
+  assert.ok(thread.querySelector(".thread-loading"), "the loading spinner is shown");
+
+  h.post({ type: "userChunk", text: "old question" });
+  h.post({ type: "assistantChunk", text: "old answer" });
+  h.post({ type: "loaded" });
+  await h.settle(10);
+
+  assert.ok(!thread.classList.contains("loading-replay"), "the transcript is revealed once loaded");
+  assert.ok(!thread.querySelector(".thread-loading"), "the spinner is gone once loaded");
+  assert.deepStrictEqual(h.reqTexts(), ["old question"]);
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a backgrounded session waiting on input shows the attention dot", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({
+    type: "sessions",
+    sessions: [{ id: "aaa", short_id: "aaa", title: "Waiting one", working_directory: "/w" }],
+    activeId: null,
+    statuses: { aaa: "attention" }
+  });
+  await h.settle(20);
+
+  const dot = h.document.querySelector("#sessions-list .session-dot");
+  assert.ok(dot.className.includes("dot-attention"), "the attention dot is rendered");
+  assert.strictEqual(dot.title, "Needs your input");
+  // The row is still treated as live, so it keeps its terminate action.
+  assert.ok(h.document.querySelector("#sessions-list .session-item .kill-glyph"), "an attention session is live");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("keyboard shortcuts: Ctrl/Cmd+Esc stops, ArrowUp recalls, Ctrl/Cmd+. opens pickers", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "capabilities", revert: true });
+  h.post({ type: "userMessage", text: "recall me" });
+  h.post({ type: "assistantStart" });
+  h.post({ type: "assistantChunk", text: "working" });
+  await h.settle(20);
+
+  // Ctrl/Cmd+Esc while busy stops the turn.
+  h.post({ type: "busy", value: true });
+  await h.settle(5);
+  h.document.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Escape", metaKey: true, bubbles: true }));
+  await h.settle(5);
+  assert.ok(h.posted.some((m) => m.type === "cancel"), "Ctrl/Cmd+Esc asks the host to cancel");
+  h.post({ type: "busy", value: false });
+  await h.settle(5);
+
+  // ArrowUp on an empty composer recalls the last message.
+  const input = h.document.getElementById("input");
+  input.value = "";
+  input.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
+  await h.settle(5);
+  assert.strictEqual(input.value, "recall me", "ArrowUp recalls the last message into the composer");
+
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("leaving a working session and returning never shows two Working lines", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({
+    type: "sessions",
+    sessions: [
+      { id: "aaa", short_id: "aaa", title: "A", working_directory: "/w" },
+      { id: "bbb", short_id: "bbb", title: "B", working_directory: "/w" }
+    ],
+    activeId: null,
+    statuses: { aaa: "idle", bbb: "idle" }
+  });
+  await h.settle(20);
+  const openRow = (code) => [...h.document.querySelectorAll("#sessions-list .session-item")]
+    .find((r) => r.querySelector(".session-code").textContent === code)
+    .querySelector(".session-main").click();
+
+  // Open A and leave it mid turn, with the "Working…" line on screen.
+  openRow("aaa");
+  h.post({ type: "sessionReady", sessionId: "aaa" });
+  h.post({ type: "userMessage", text: "go" });
+  h.post({ type: "assistantStart" });
+  h.post({ type: "busy", value: true });
+  await h.settle(20);
+  assert.strictEqual(h.thread().querySelectorAll(".working").length, 1, "one Working line while it runs");
+
+  // Switch away and back (the transcript is retained), then send again.
+  openRow("bbb");
+  h.post({ type: "sessionReady", sessionId: "bbb" });
+  await h.settle(10);
+  openRow("aaa");
+  await h.settle(10);
+  h.post({ type: "userMessage", text: "second" });
+  h.post({ type: "assistantStart" });
+  await h.settle(20);
+
+  assert.strictEqual(
+    h.thread().querySelectorAll(".working").length,
+    1,
+    "the retained one is not left behind next to a new one"
+  );
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("an unsent draft stays with its own session when switching", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({
+    type: "sessions",
+    sessions: [
+      { id: "aaa", short_id: "aaa", title: "A", working_directory: "/w" },
+      { id: "bbb", short_id: "bbb", title: "B", working_directory: "/w" }
+    ],
+    activeId: null,
+    statuses: { aaa: "idle", bbb: "idle" }
+  });
+  await h.settle(20);
+  const input = h.document.getElementById("input");
+  const openRow = (code) => [...h.document.querySelectorAll("#sessions-list .session-item")]
+    .find((r) => r.querySelector(".session-code").textContent === code)
+    .querySelector(".session-main").click();
+
+  // Open A, leave a draft, then switch to B: B must start clean.
+  openRow("aaa");
+  h.post({ type: "sessionReady", sessionId: "aaa" });
+  await h.settle(10);
+  input.value = "draft for A";
+  openRow("bbb");
+  h.post({ type: "sessionReady", sessionId: "bbb" });
+  await h.settle(10);
+  assert.strictEqual(input.value, "", "the draft does not follow into the other session");
+
+  // Back to A: its own draft comes back.
+  openRow("aaa");
+  await h.settle(10);
+  assert.strictEqual(input.value, "draft for A", "the session's own draft is restored");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("the status filter is multi select, offers Terminated, and can sort by state", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({
+    type: "sessions",
+    sessions: [
+      { id: "run", short_id: "run", title: "Running one", working_directory: "/w", last_activity_at: 10 },
+      { id: "idle", short_id: "idle", title: "Idle one", working_directory: "/w", last_activity_at: 30 },
+      { id: "dead", short_id: "dead", title: "Dead one", working_directory: "/w", last_activity_at: 20 }
+    ],
+    activeId: null,
+    statuses: { run: "running", idle: "idle" }
+  });
+  await h.settle(20);
+
+  h.document.getElementById("list-filter-btn").click();
+  await h.settle(10);
+  const labels = [...h.document.querySelectorAll(".session-filter-menu .dv-menu-item span")].map((s) => s.textContent);
+  assert.ok(labels.includes("Terminated"), "the dead state is called Terminated");
+  assert.ok(!labels.includes("Ended"), "the old Ended label is gone");
+  assert.ok(labels.includes("Last activity") && labels.includes("State"), "a Sort by group is offered");
+
+  // Tick Running, then also Terminated: both are kept (multi select).
+  const click = (text) => [...h.document.querySelectorAll(".session-filter-menu .dv-menu-item")]
+    .find((r) => r.textContent.trim() === text).click();
+  click("Running");
+  await h.settle(10);
+  let ids = [...h.document.querySelectorAll("#sessions-list .session-item .session-code")].map((e) => e.textContent);
+  assert.deepStrictEqual(ids, ["run"], "only running shows");
+
+  click("Terminated");
+  await h.settle(10);
+  ids = [...h.document.querySelectorAll("#sessions-list .session-item .session-code")].map((e) => e.textContent).sort();
+  assert.deepStrictEqual(ids, ["dead", "run"], "both selected states show together");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("returning to the list keeps the cached rows and shows the top loading bar", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({
+    type: "sessions",
+    sessions: [{ id: "aaa", short_id: "aaa", title: "One", working_directory: "/w" }],
+    activeId: null,
+    statuses: {}
+  });
+  await h.settle(20);
+  assert.strictEqual(h.document.querySelectorAll("#sessions-list .session-item").length, 1);
+
+  const bar = h.document.querySelector("#body .dv-top-loading");
+  assert.ok(bar, "the loading bar exists");
+  assert.ok(bar.classList.contains("hidden"), "it is hidden when idle");
+
+  // A revalidate must not blank the list: the cached rows stay, the bar runs.
+  h.post({ type: "sessionsLoading" });
+  await h.settle(10);
+  assert.ok(!bar.classList.contains("hidden"), "the bar runs while revalidating");
+  assert.strictEqual(
+    h.document.querySelectorAll("#sessions-list .session-item").length,
+    1,
+    "the cached rows stay on screen instead of being replaced by a spinner"
+  );
+
+  h.post({ type: "sessions", sessions: [{ id: "aaa", short_id: "aaa", title: "One", working_directory: "/w" }], activeId: null, statuses: {} });
+  await h.settle(10);
+  assert.ok(bar.classList.contains("hidden"), "the bar stops once the listing arrives");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a session load runs the top loading bar instead of a spinner", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear", loading: true });
+  await h.settle(10);
+
+  const bar = h.document.querySelector("#body .dv-top-loading");
+  assert.ok(!bar.classList.contains("hidden"), "the bar runs while the session loads");
+  const label = h.thread().querySelector(".thread-loading");
+  assert.ok(label, "a load label is shown");
+  assert.strictEqual(label.querySelectorAll(".codicon-modifier-spin").length, 0, "no spinner icon");
+
+  h.post({ type: "loaded" });
+  await h.settle(10);
+  assert.ok(bar.classList.contains("hidden"), "the bar stops once loaded");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("dragging shows the attach overlay and dropping a file URI attaches it", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  await h.settle(10);
+
+  const chatMain = h.document.getElementById("chat-main");
+  const overlay = chatMain.querySelector(".chat-dnd-overlay");
+  assert.ok(overlay, "the drop overlay exists");
+
+  // Dragging a file over the chat reveals the overlay.
+  const enter = new h.window.Event("dragenter", { bubbles: true, cancelable: true });
+  Object.defineProperty(enter, "dataTransfer", { value: { types: ["Files"] } });
+  chatMain.dispatchEvent(enter);
+  assert.ok(overlay.classList.contains("visible"), "the overlay shows while dragging a file");
+
+  // Dropping an internal file URI (Explorer / editor tab) attaches it by path.
+  const drop = new h.window.Event("drop", { bubbles: true, cancelable: true });
+  Object.defineProperty(drop, "dataTransfer", {
+    value: {
+      types: ["text/uri-list"],
+      files: [],
+      getData: (t) => (t === "text/uri-list" ? "file:///Users/me/src/app%20one.ts" : "")
+    }
+  });
+  chatMain.dispatchEvent(drop);
+  await h.settle(10);
+  assert.ok(!overlay.classList.contains("visible"), "the overlay hides after the drop");
+  assert.ok(
+    h.posted.some((m) => m.type === "addMention" && m.path === "/Users/me/src/app one.ts"),
+    "the dropped file is attached by its decoded path"
+  );
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("an internal multi file drag attaches every file, not just the first", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  await h.settle(10);
+
+  // VS Code truncates the standard text/uri-list to the FIRST resource and puts
+  // them all in application/vnd.code.uri-list, so we must read the internal one.
+  const chatMain = h.document.getElementById("chat-main");
+  const drop = new h.window.Event("drop", { bubbles: true, cancelable: true });
+  Object.defineProperty(drop, "dataTransfer", {
+    value: {
+      types: ["application/vnd.code.uri-list", "text/uri-list"],
+      files: [],
+      getData: (t) =>
+        t === "application/vnd.code.uri-list"
+          ? "file:///w/a.ts\nfile:///w/b.ts\nfile:///w/c.ts"
+          : t === "text/uri-list" ? "file:///w/a.ts" : ""
+    }
+  });
+  chatMain.dispatchEvent(drop);
+  await h.settle(10);
+
+  const added = h.posted.filter((m) => m.type === "addMention").map((m) => m.path);
+  assert.deepStrictEqual(added, ["/w/a.ts", "/w/b.ts", "/w/c.ts"], "all three dragged files are attached");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("while busy, typing turns Send into a Queue button next to Stop", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "capabilities", revert: true });
+  h.post({ type: "userMessage", text: "go" });
+  h.post({ type: "assistantStart" });
+  h.post({ type: "busy", value: true });
+  await h.settle(10);
+
+  const send = h.document.getElementById("send");
+  const stop = h.document.getElementById("stop");
+  assert.ok(!stop.classList.contains("hidden"), "Stop is shown while busy");
+  assert.ok(send.classList.contains("hidden"), "Send is hidden while busy with an empty composer");
+
+  const input = h.document.getElementById("input");
+  input.value = "a follow up";
+  input.dispatchEvent(new h.window.Event("input", { bubbles: true }));
+  await h.settle(10);
+  assert.ok(!send.classList.contains("hidden"), "Send appears once there is text to queue");
+  assert.ok(send.classList.contains("queueing"), "it is in Queue mode while busy");
+  assert.ok(!stop.classList.contains("hidden"), "Stop stays available alongside it");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("stepping between questions updates the question text, not just the options", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "capabilities", revert: true });
+  h.post({
+    type: "elicitation", requestId: "e1", mode: "form", message: "First question about auth?",
+    schema: {
+      type: "object",
+      required: ["q0", "q1"],
+      properties: {
+        q0: { type: "string", title: "Auth", description: "First question about auth?", oneOf: [{ const: "a", title: "A" }, { const: "b", title: "B" }] },
+        q1: { type: "string", title: "DB", description: "Second question about the database?", oneOf: [{ const: "x", title: "X" }, { const: "y", title: "Y" }] }
+      }
+    }
+  });
+  await h.settle(20);
+
+  const titleEl = h.document.querySelector("#elicitation-tray .qc-title");
+  assert.strictEqual(titleEl.textContent, "First question about auth?", "the header shows the first question");
+
+  const nextBtn = [...h.document.querySelectorAll("#elicitation-tray .qc-nav button")].find((b) => (b.title || "").includes("Next"));
+  assert.ok(nextBtn, "there is a Next button");
+  nextBtn.click();
+  await h.settle(10);
+  assert.strictEqual(titleEl.textContent, "Second question about the database?", "the header updates to the second question");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("clicking an external link defers to VS Code (no duplicate open)", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "capabilities", revert: true });
+  h.post({ type: "assistantStart" });
+  h.post({ type: "toolCall", id: "f1", title: "Fetched https://example.com", kind: "fetch",
+    meta: { inferenceToolName: "webfetch" }, status: "pending", rawInput: { url: "https://example.com" } });
+  h.post({ type: "toolCallUpdate", id: "f1", status: "completed", meta: { inferenceToolName: "webfetch" } });
+  await h.settle(20);
+
+  const link = h.document.querySelector("#thread a.tool-summary-value");
+  assert.ok(link, "the fetch tool renders a clickable URL");
+  link.dispatchEvent(new h.window.MouseEvent("click", { bubbles: true, cancelable: true }));
+  await h.settle(10);
+
+  // http(s) links are opened by VS Code's built-in webview link handling; the
+  // webview must NOT also post openExternal or the link opens in two tabs.
+  const opens = h.posted.filter((m) => m.type === "openExternal");
+  assert.strictEqual(opens.length, 0, "the webview does not duplicate VS Code's open");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a skipped plan entry renders struck through with a slash icon", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "capabilities", revert: true });
+  h.post({ type: "plan", entries: [
+    { content: "Do A", status: "completed" },
+    { content: "Skip B", status: "skipped" },
+    { content: "Do C", status: "in_progress" }
+  ] });
+  await h.settle(20);
+
+  const skipped = h.document.querySelector("#todo-widget .plan-skipped");
+  assert.ok(skipped, "a skipped row is rendered");
+  assert.ok(skipped.querySelector(".plan-mark.codicon-circle-slash"), "a skipped entry uses the slash icon");
+  assert.strictEqual(skipped.querySelector(".plan-entry-text").textContent, "Skip B");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("the plan remembers a manual collapse for the next run in the session", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "capabilities", revert: true });
+  // All pending -> the plan opens expanded (no auto-collapse yet).
+  h.post({ type: "plan", entries: [{ content: "Task", status: "pending" }] });
+  await h.settle(10);
+  const widget = h.document.getElementById("todo-widget");
+  let plan = widget.querySelector(".plan-docked");
+  assert.ok(!plan.classList.contains("dv-collapsed"), "the plan starts expanded");
+
+  // The user collapses it by hand.
+  plan.querySelector(".dv-collapsible-header").click();
+  await h.settle(10);
+  assert.ok(plan.classList.contains("dv-collapsed"), "the plan collapses on the user's click");
+
+  // Finish the turn (docked plan is cleared) and start a new one that raises a
+  // fresh plan: it must stay collapsed, honouring the remembered choice.
+  h.post({ type: "busy", value: true });
+  h.post({ type: "busy", value: false });
+  await h.settle(10);
+  h.post({ type: "plan", entries: [{ content: "Task", status: "in_progress" }] });
+  await h.settle(10);
+  plan = widget.querySelector(".plan-docked");
+  assert.ok(plan.classList.contains("dv-collapsed"), "the plan stays collapsed for the next run");
+
+  // A session change (clear) forgets the preference: a fresh plan auto-decides.
+  h.post({ type: "clear" });
+  h.post({ type: "plan", entries: [{ content: "Task", status: "pending" }] });
+  await h.settle(10);
+  plan = widget.querySelector(".plan-docked");
+  assert.ok(!plan.classList.contains("dv-collapsed"), "a new session forgets the collapse preference");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("host-initiated openSession opens the session like a click", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({
+    type: "sessions",
+    sessions: [{ id: "aaa", short_id: "aaa", title: "Background one", working_directory: "/w" }],
+    activeId: null,
+    statuses: { aaa: "attention" }
+  });
+  await h.settle(10);
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "openSession", id: "aaa" });
+  await h.settle(10);
+
+  // An attention (alive, no cached view yet) session opens via a full load.
+  assert.ok(h.posted.some((m) => m.type === "loadSession" && m.id === "aaa"), "opens the session");
+  assert.strictEqual(h.errors().length, 0);
+});
