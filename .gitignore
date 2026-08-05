@@ -6,6 +6,7 @@ out/
 .vscode-test/
 scripts/.preview/
 scripts/.probe/
+release-notes.md
 
 # playwright-cli scratch artifacts
 .playwright-cli/

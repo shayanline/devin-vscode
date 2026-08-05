@@ -59,9 +59,13 @@ jobs:
       - name: Package VSIX
         run: npm run package
 
+      - name: Build release notes from CHANGELOG.md
+        run: node scripts/changelog-notes.js "${GITHUB_REF_NAME#v}" > release-notes.md
+
       - name: Create GitHub Release with the VSIX
         uses: softprops/action-gh-release@v3
         with:
+          body_path: release-notes.md
           generate_release_notes: true
           files: ${{ steps.version.outputs.vsix }}
 
