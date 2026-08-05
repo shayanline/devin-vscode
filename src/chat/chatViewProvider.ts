@@ -52,10 +52,40 @@ interface Runtime {
   // the webview when the session is next opened. Several can be outstanding at
   // once, so this is a queue rather than a single slot.
   pending: { requestId: string; payload: Record<string, unknown> }[];
+  // A "needs your input" notification has already been shown for the current
+  // attention episode, so we don't fire one per tool call. Reset when the
+  // session is opened or its requests are all answered.
+  attentionNotified?: boolean;
+  // Messages the user submitted while a turn was in flight. The blocks (implicit
+  // context + attachments + text) are snapshotted at queue time; the host sends
+  // them in order as the session frees up (VS Code's chat queue).
+  queued: { id: string; text: string; blocks: ContentBlock[] }[];
+  // Webview messages a background turn produced while this session was not the
+  // visible one. Replayed when the session is reopened so its progress is shown
+  // even for a turn that is still running (capped so it can't grow unbounded).
+  bgBuffer: Record<string, unknown>[];
 }
 
-// The dot shown next to a session in the list.
-type SessionStatus = "running" | "idle" | "starting";
+// Cap on a backgrounded session's replay buffer (oldest dropped past this).
+const BG_BUFFER_MAX = 6000;
+
+// Image file extensions we attach inline (as base64), matching VS Code chat's
+// attachable image types. Anything else is attached as text.
+const IMAGE_MIME_BY_EXT: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  bmp: "image/bmp"
+};
+
+// Match VS Code chat's cap on an attached image (it refuses larger ones).
+const MAX_IMAGE_BYTES = 30 * 1024 * 1024;
+
+// The dot shown next to a session in the list. "attention" means a backgrounded
+// session raised a permission/question and is now blocked waiting on the user.
+type SessionStatus = "running" | "idle" | "starting" | "attention";
 
 // One chat surface. The sidebar view and each editor/window panel is its own
 // ChatController bound to a single `vscode.Webview`, with its own visible
@@ -359,7 +389,9 @@ export class ChatController implements AcpHost {
       awaiting: 0,
       replaying: false,
       lastActivityAt: Date.now(),
-      pending: []
+      pending: [],
+      queued: [],
+      bgBuffer: []
     };
     ref = rt;
     client.setHost(this);
@@ -481,6 +513,25 @@ export class ChatController implements AcpHost {
         case "send":
           await this.handleSend(String(msg.text || ""), !!msg.newSession);
           return;
+        case "removeQueued":
+          this.removeQueued(String(msg.id || ""));
+          return;
+        case "editQueued":
+          this.editQueued(String(msg.id || ""), String(msg.text || ""));
+          return;
+        case "sendQueuedNow":
+          this.sendQueuedNow(String(msg.id || ""));
+          return;
+        case "queueEditing": {
+          // Which queued message (if any) the composer is editing. Changing it can
+          // unblock a flush a completed turn deferred, so re-run the drain.
+          this.queueEditingId = msg.id ? String(msg.id) : undefined;
+          const rt = this.active();
+          if (rt) {
+            this.flushQueue(rt);
+          }
+          return;
+        }
         case "cancel":
           this.cancel();
           return;
@@ -518,7 +569,13 @@ export class ChatController implements AcpHost {
           await this.deleteSession(String(msg.id || ""), msg.title);
           return;
         case "refreshSessions":
-          await this.refreshSessions(true);
+          // Only the explicit Refresh button forces a re-listing; going back to
+          // the list serves the cache and revalidates behind it.
+          if (msg.force) {
+            await this.refreshSessions(true);
+          } else {
+            await this.refreshSessionsFast();
+          }
           return;
         case "leaveToList":
           this.leaveToList();
@@ -586,6 +643,9 @@ export class ChatController implements AcpHost {
           return;
         case "attachImage":
           this.attachImage(msg.name, msg.mime, msg.data);
+          return;
+        case "attachDroppedText":
+          this.attachDroppedText(msg.name, msg.text);
           return;
         case "removeAttachment":
           this.removeAttachment(String(msg.id || ""));
@@ -1056,6 +1116,11 @@ export class ChatController implements AcpHost {
     this.activeId = id;
     this.changes.clear();
     this.attachments = [];
+    // A full reload rebuilds the whole transcript, so any buffered background
+    // stream for this runtime is superseded.
+    if (already) {
+      already.bgBuffer = [];
+    }
     // "Waking session…" while a fresh acp spins up; a live one loads instantly.
     this.post({ type: "clear", loading: true, waking: !already });
     if (!already) {
@@ -1105,8 +1170,12 @@ export class ChatController implements AcpHost {
       this.starting.delete(id);
       if (loadFailed) {
         // The agent aborted the load (commonly because a configured MCP server
-        // failed to initialise, which it treats as fatal). Don't strand the user
-        // on a broken empty thread: return to the list with a clear message.
+        // failed to initialise, which it treats as fatal, or the session no
+        // longer exists). Don't strand the user on a broken empty thread: return
+        // to the list with a clear message. Drop the cached listing first so a
+        // session that has since been deleted elsewhere cannot be served back
+        // from the cache and clicked again.
+        this.sessionsCache = undefined;
         this.broadcastStatuses();
         await this.showSessionsView();
         this.reportLoadFailure(loadFailed);
@@ -1124,6 +1193,9 @@ export class ChatController implements AcpHost {
           for (const p of opened.pending) {
             this.post(p.payload);
           }
+          // Republish the queue so any messages still waiting on this session
+          // reappear after a reload, not just after an instant re-attach.
+          this.postQueued(opened);
         }
         void this.refreshSessions();
       }
@@ -1158,6 +1230,10 @@ export class ChatController implements AcpHost {
       this.post({ type: "model", model: rt.model });
     }
     this.post({ type: "busy", value: rt.busy });
+    // Replay anything the turn streamed while this session was in the background
+    // (including a turn still running), so the restored transcript catches up
+    // instead of showing the stale state from when the user left.
+    this.flushBgBuffer(rt);
     this.broadcastStatuses();
     // An instant restore does not reload, so the current head stays valid. Skip
     // the head read while a turn is in flight so it never contends with the
@@ -1169,6 +1245,8 @@ export class ChatController implements AcpHost {
     for (const p of rt.pending) {
       this.post(p.payload);
     }
+    // Restore the composer's queued-message rows for this session.
+    this.postQueued(rt);
     void this.refreshSessions();
   }
 
@@ -1265,13 +1343,15 @@ export class ChatController implements AcpHost {
   // `force` bypasses the short TTL cache (used for explicit refresh/rename/delete);
   // implicit refreshes after a load/prompt reuse the cache to avoid respawning
   // `devin list` repeatedly.
-  async refreshSessions(force = false): Promise<void> {
+  // `staleOk` serves the cache at any age (used when returning to the list, so it
+  // paints instantly) and is paired with a background revalidate.
+  async refreshSessions(force = false, staleOk = false): Promise<void> {
     if (!this.isReady()) {
       return;
     }
     const folders = this.folders();
     let sessions: DevinSession[] = [];
-    if (!force && this.sessionsCache && Date.now() - this.sessionsCache.at < 4000) {
+    if (!force && this.sessionsCache && (staleOk || Date.now() - this.sessionsCache.at < 4000)) {
       sessions = this.sessionsCache.sessions;
     } else {
       this.post({ type: "sessionsLoading" });
@@ -1358,7 +1438,11 @@ export class ChatController implements AcpHost {
       statuses[id] = "starting";
     }
     for (const [id, rt] of this.runtimes) {
-      statuses[id] = rt.busy && rt.awaiting === 0 ? "running" : "idle";
+      if (rt.awaiting > 0 && id !== this.activeId) {
+        statuses[id] = "attention";
+      } else {
+        statuses[id] = rt.busy && rt.awaiting === 0 ? "running" : "idle";
+      }
     }
     return statuses;
   }
@@ -1581,9 +1665,26 @@ export class ChatController implements AcpHost {
       "**/{node_modules,.git,dist,out,build,.venv,__pycache__,target}/**",
       1000
     );
+    // findFiles never returns directories, so derive the folders under each
+    // workspace root from the files, letting a folder be picked by name the way
+    // VS Code's "Add Folder to Chat" does.
+    const roots = (vscode.workspace.workspaceFolders || []).map((f) => f.uri.fsPath);
+    const dirs = new Set<string>();
+    for (const u of uris) {
+      let d = path.dirname(u.fsPath);
+      while (d && roots.some((r) => d !== r && d.startsWith(r + path.sep))) {
+        dirs.add(d);
+        d = path.dirname(d);
+      }
+    }
     const picks: (vscode.QuickPickItem & { id: string })[] = [
       { label: "$(list-selection) Current selection or file", id: "__sel__" },
-      { label: "$(folder-opened) Browse...", id: "__browse__" },
+      { label: "$(file) Browse files...", id: "__browse__" },
+      { label: "$(folder-opened) Browse folders...", id: "__browseDir__" },
+      ...[...dirs].sort().slice(0, 300).map((d) => ({
+        label: "$(folder) " + vscode.workspace.asRelativePath(d) + "/",
+        id: d
+      })),
       ...uris.map((u) => ({ label: "$(file) " + vscode.workspace.asRelativePath(u), id: u.fsPath }))
     ];
     const chosen = await vscode.window.showQuickPick(picks, {
@@ -1597,8 +1698,14 @@ export class ChatController implements AcpHost {
       await this.addSelection();
       return;
     }
-    if (chosen.id === "__browse__") {
-      const picked = await vscode.window.showOpenDialog({ canSelectMany: true, openLabel: "Add" });
+    if (chosen.id === "__browse__" || chosen.id === "__browseDir__") {
+      const dirs = chosen.id === "__browseDir__";
+      const picked = await vscode.window.showOpenDialog({
+        canSelectMany: true,
+        canSelectFiles: !dirs,
+        canSelectFolders: dirs,
+        openLabel: "Add"
+      });
       for (const p of picked || []) {
         await this.addFile(p.fsPath);
       }
@@ -1667,7 +1774,32 @@ export class ChatController implements AcpHost {
   }
 
   private async addFile(fsPath: string): Promise<void> {
+    const ext = path.extname(fsPath).toLowerCase().replace(/^\./, "");
+    const imageMime = IMAGE_MIME_BY_EXT[ext];
     try {
+      // A dropped folder attaches as a listing rather than failing to be read.
+      const stat = await fs.promises.stat(fsPath);
+      if (stat.isDirectory()) {
+        await this.addDirectory(fsPath);
+        return;
+      }
+      // An image file (dropped or @-mentioned) is attached inline as base64 so
+      // the model can actually see it, rather than as unreadable text.
+      if (imageMime) {
+        if (stat.size > MAX_IMAGE_BYTES) {
+          void vscode.window.showWarningMessage(`${path.basename(fsPath)} is too large to attach (over 30 MB).`);
+          return;
+        }
+        const buf = await fs.promises.readFile(fsPath);
+        this.attachments.push({
+          id: `att-${++this.attachSeq}`,
+          label: path.basename(fsPath),
+          type: "image",
+          block: { type: "image", mimeType: imageMime, data: buf.toString("base64") }
+        });
+        this.postAttachments();
+        return;
+      }
       const raw = await fs.promises.readFile(fsPath, "utf8");
       const text = raw.length > 200000 ? raw.slice(0, 200000) : raw;
       this.attachments.push({
@@ -1683,6 +1815,41 @@ export class ChatController implements AcpHost {
     } catch (err) {
       this.log(`[attach-file-failed] ${err instanceof Error ? err.message : String(err)}`);
     }
+  }
+
+  // A dropped folder attaches as a listing of what it contains, so the agent
+  // knows the shape of it and can read whichever files it needs.
+  private async addDirectory(dirPath: string): Promise<void> {
+    const entries = await fs.promises.readdir(dirPath, { withFileTypes: true });
+    const lines = entries
+      .filter((e) => !e.name.startsWith("."))
+      .slice(0, 500)
+      .map((e) => (e.isDirectory() ? `${e.name}/` : e.name))
+      .sort();
+    const label = path.basename(dirPath) || dirPath;
+    this.attachments.push({
+      id: `att-${++this.attachSeq}`,
+      label,
+      type: "directory",
+      block: { type: "text", text: `Folder ${dirPath} contains:\n\n${lines.join("\n")}` }
+    });
+    this.postAttachments();
+  }
+
+  // Attach the raw content of a file dropped from outside the workspace (an OS
+  // drag that gives us bytes but no path). Images arrive via attachImage instead.
+  private attachDroppedText(name: unknown, text: unknown): void {
+    if (typeof text !== "string" || !text.trim()) {
+      return;
+    }
+    const label = typeof name === "string" && name ? name : "file";
+    this.attachments.push({
+      id: `att-${++this.attachSeq}`,
+      label,
+      type: "file",
+      block: { type: "text", text: `Attached file ${label}:\n\n${text.slice(0, 200000)}` }
+    });
+    this.postAttachments();
   }
 
   private async addSelection(): Promise<void> {
@@ -1776,8 +1943,12 @@ export class ChatController implements AcpHost {
     }
 
     let rt = startNew ? undefined : this.active();
+    // One turn at a time within a session: a message sent while the visible
+    // session is mid-turn is queued (and shown as a pending row) rather than
+    // dropped, then auto-sent when the turn finishes.
     if (rt && rt.busy) {
-      return; // one turn at a time within a session
+      this.enqueueMessage(rt, text);
+      return;
     }
     if (!rt) {
       try {
@@ -1803,28 +1974,163 @@ export class ChatController implements AcpHost {
     if (!startNew) {
       this.post({ type: "userMessage", text });
     }
-    this.setRuntimeBusy(sent, true);
-    this.post({ type: "assistantStart" });
-
     const blocks: ContentBlock[] = [...this.buildImplicitBlocks(), ...this.attachments.map((a) => a.block), { type: "text", text }];
     this.attachments = [];
     this.postAttachments();
+    await this.runPrompt(sent, blocks);
+  }
+
+  // Run one prompt turn against a runtime and stream its outcome, rendering only
+  // while that session is the visible one. On completion it flushes the next
+  // queued message, so a session's queue drains itself turn by turn. Shared by a
+  // live send and a queued flush.
+  private async runPrompt(rt: Runtime, blocks: ContentBlock[]): Promise<void> {
+    this.setRuntimeBusy(rt, true);
+    if (this.activeId === rt.id) {
+      this.post({ type: "assistantStart" });
+    }
     try {
-      const result = await sent.client.prompt(sent.id, blocks);
+      const result = await rt.client.prompt(rt.id, blocks);
       // Only render the completion if this session is still the visible one.
-      if (this.activeId === sent.id) {
+      if (this.activeId === rt.id) {
         this.post({ type: "assistantEnd", stopReason: result.stopReason });
-        // A live completion's head is on the current expansion: a reliable
-        // revert target for the next turn.
-        await this.postTurnHead(true);
       }
     } catch (err) {
-      if (this.activeId === sent.id) {
+      if (this.activeId === rt.id) {
         this.post({ type: "error", text: err instanceof Error ? err.message : String(err) });
       }
     } finally {
-      this.setRuntimeBusy(sent, false);
+      this.setRuntimeBusy(rt, false);
+      // Send the next queued message first: the revert-head probe below is an
+      // extra round trip on the same channel, and awaiting it here is what used
+      // to leave a visible gap before a queued message went out.
+      this.flushQueue(rt);
       void this.refreshSessions();
+      // A live completion's head is on the current expansion: a reliable revert
+      // target. Only read it when the session actually went idle, so it never
+      // contends with a queued turn we just started.
+      if (!rt.busy && this.activeId === rt.id) {
+        void this.postTurnHead(true);
+      }
+    }
+  }
+
+  private queueSeq = 0;
+  // The queued message currently being edited in the composer, if any. The queue
+  // still drains past it: only that one message is held back when it reaches the
+  // head, so earlier messages keep going and later ones stay behind it.
+  private queueEditingId?: string;
+
+  // Snapshot a message (implicit context + attachments + text) and add it to the
+  // runtime's queue, then reflect the queue in the composer.
+  private enqueueMessage(rt: Runtime, text: string): void {
+    const blocks: ContentBlock[] = [...this.buildImplicitBlocks(), ...this.attachments.map((a) => a.block), { type: "text", text }];
+    rt.queued.push({ id: `q-${++this.queueSeq}`, text, blocks });
+    this.attachments = [];
+    this.postAttachments();
+    this.postQueued(rt);
+  }
+
+  // Send the next queued message once a runtime is free. Runs one at a time:
+  // runPrompt calls back into this in its finally, so the queue drains in order.
+  private flushQueue(rt: Runtime): void {
+    if (rt.busy || rt.queued.length === 0) {
+      return;
+    }
+    // Hold only the message being edited, and only once it reaches the head: the
+    // ones before it still send, the ones after it wait behind it. Resumes when
+    // the edit is committed or cancelled (see the queueEditing message).
+    if (this.queueEditingId && rt.queued[0].id === this.queueEditingId) {
+      return;
+    }
+    const next = rt.queued.shift()!;
+    this.postQueued(rt);
+    // Route the echo through emit so a flush that happens while the session is
+    // backgrounded is buffered and replays (its user bubble shows on return),
+    // instead of being dropped like the old active-only post.
+    this.emit(rt, { type: "userMessage", text: next.text });
+    void this.runPrompt(rt, next.blocks);
+  }
+
+  // Remove a queued message the user dropped or moved back to the composer.
+  private removeQueued(id: string): void {
+    const rt = this.active();
+    if (!rt) {
+      return;
+    }
+    const before = rt.queued.length;
+    rt.queued = rt.queued.filter((q) => q.id !== id);
+    if (rt.queued.length !== before) {
+      this.postQueued(rt);
+    }
+  }
+
+  // Move a queued message to the front and send it as soon as the session is
+  // free (VS Code's "Send Immediately" on a pending request).
+  private sendQueuedNow(id: string): void {
+    const rt = this.active();
+    if (!rt) {
+      return;
+    }
+    const at = rt.queued.findIndex((q) => q.id === id);
+    if (at <= -1) {
+      return;
+    }
+    if (at > 0) {
+      rt.queued.unshift(rt.queued.splice(at, 1)[0]);
+      this.postQueued(rt);
+    }
+    this.flushQueue(rt);
+  }
+
+  // Update a queued message's text in place, keeping its position in the queue
+  // (editing must not move it to the end).
+  private editQueued(id: string, text: string): void {
+    const rt = this.active();
+    if (!rt || !text.trim()) {
+      return;
+    }
+    const q = rt.queued.find((x) => x.id === id);
+    if (!q) {
+      return;
+    }
+    q.text = text;
+    // The text block is the last block built at enqueue time; update it, keeping
+    // the snapshotted implicit-context and attachment blocks before it.
+    const tail = q.blocks[q.blocks.length - 1];
+    if (tail && tail.type === "text") {
+      tail.text = text;
+    } else {
+      q.blocks.push({ type: "text", text });
+    }
+    this.postQueued(rt);
+  }
+
+  // Replay a backgrounded session's buffered stream into the (now visible)
+  // transcript and clear it, so returning shows the progress the turn made while
+  // it was not on screen.
+  private flushBgBuffer(rt: Runtime): void {
+    if (!rt.bgBuffer.length) {
+      return;
+    }
+    const buffered = rt.bgBuffer;
+    rt.bgBuffer = [];
+    for (const payload of buffered) {
+      this.post(payload);
+    }
+    // The turn-boundary markers (assistantStart/End) are only posted for the
+    // visible session, so a background turn that has already finished never sent
+    // its End. Settle the last replayed block if the turn is done.
+    if (!rt.busy) {
+      this.post({ type: "assistantEnd" });
+    }
+  }
+
+  // Mirror a runtime's queue to the webview, but only while it is visible (the
+  // composer only ever shows the active session's queue).
+  private postQueued(rt: Runtime): void {
+    if (this.activeId === rt.id) {
+      this.post({ type: "queued", items: rt.queued.map((q) => ({ id: q.id, text: q.text })) });
     }
   }
 
@@ -1967,6 +2273,9 @@ export class ChatController implements AcpHost {
   cancel(): void {
     const rt = this.active();
     if (rt) {
+      // Stop interrupts only the current turn; any queued messages remain and
+      // are sent once the interrupt settles (the user clears the queue by hand
+      // if they meant to abandon it).
       rt.client.cancel(rt.id);
       this.settleRequestsFor(rt.id);
     } else {
@@ -2010,7 +2319,18 @@ export class ChatController implements AcpHost {
     this.focus();
     this.leaveToList();
     this.post({ type: "body", body: "list" });
-    await this.refreshSessions(true);
+    await this.refreshSessionsFast();
+  }
+
+  // Returning to the list should be instant: paint the cached listing at any age,
+  // then revalidate in the background so it is still correct. Only a cold cache
+  // waits on `devin list`.
+  private async refreshSessionsFast(): Promise<void> {
+    const warm = !!this.sessionsCache;
+    await this.refreshSessions(false, true);
+    if (warm) {
+      void this.refreshSessions(true);
+    }
   }
 
   // Set a runtime's busy state, mirroring it to the webview only when it is the
@@ -2060,74 +2380,89 @@ export class ChatController implements AcpHost {
 
   // --- Incoming session/update notifications -------------------------------
 
+  // Send a transcript message to the webview if its session is the visible one,
+  // otherwise buffer it on the runtime so the missed stream can be replayed when
+  // the user returns (background progress is never lost). History replays (a
+  // session/load or a silent wake) are neither shown nor buffered here.
+  private emit(rt: Runtime | undefined, payload: Record<string, unknown>): void {
+    if (!rt) {
+      return;
+    }
+    // The visible session streams straight into the transcript. This includes an
+    // active session/load replay (rt.replaying), which is how a reload paints its
+    // history; a silent background wake is suppressed (its cached view is shown).
+    if (this.activeId === rt.id && !rt.silentReplay) {
+      this.post(payload);
+      return;
+    }
+    // A live background turn (not a history replay): buffer so the user sees the
+    // progress it made when they reopen the session.
+    if (!rt.silentReplay && !rt.replaying) {
+      rt.bgBuffer.push(payload);
+      if (rt.bgBuffer.length > BG_BUFFER_MAX) {
+        rt.bgBuffer.splice(0, rt.bgBuffer.length - BG_BUFFER_MAX);
+      }
+    }
+  }
+
   private onUpdate(n: SessionUpdateNotification): void {
     const u = n.update as any;
     const rt = this.runtimeBySessionId(n.sessionId);
-    // Only the visible session streams into the transcript. Background sessions
-    // keep running; their progress is reflected by the status dot, and their
-    // history is replayed when they are next opened. During a silent wake the
-    // webview already shows the cached transcript, so suppress the replay.
-    const active = !!rt && this.activeId === rt.id && !rt.silentReplay;
     switch (u.sessionUpdate) {
-      case "agent_message_chunk":
-        if (active) {
-          const img = imageOf(u.content);
-          if (img) this.post({ type: "assistantImage", mime: img.mimeType, data: img.data, messageId: u.messageId });
-          else this.post({ type: "assistantChunk", text: textOf(u.content), messageId: u.messageId });
-        }
+      case "agent_message_chunk": {
+        const img = imageOf(u.content);
+        if (img) this.emit(rt, { type: "assistantImage", mime: img.mimeType, data: img.data, messageId: u.messageId });
+        else this.emit(rt, { type: "assistantChunk", text: textOf(u.content), messageId: u.messageId });
         return;
+      }
       case "user_message_chunk":
-        if (active) this.post({ type: "userChunk", text: textOf(u.content), messageId: u.messageId });
+        this.emit(rt, { type: "userChunk", text: textOf(u.content), messageId: u.messageId });
         return;
       case "agent_thought_chunk":
-        if (active && this.cfg().get<boolean>("showThinking", true)) {
-          this.post({ type: "thoughtChunk", text: textOf(u.content), messageId: u.messageId });
+        if (this.cfg().get<boolean>("showThinking", true)) {
+          this.emit(rt, { type: "thoughtChunk", text: textOf(u.content), messageId: u.messageId });
         }
         return;
       case "plan":
-        if (active) this.post({ type: "plan", entries: u.entries });
+        this.emit(rt, { type: "plan", entries: u.entries });
         return;
       case "tool_call":
-        if (active) {
-          this.post({
-            type: "toolCall",
-            id: u.toolCallId,
-            title: u.title,
-            kind: u.kind,
-            meta: toolMeta(u),
-            status: u.status || "pending",
-            rawInput: u.rawInput,
-            content: normalizeToolContent(u.content),
-            locations: normalizeLocations(u.locations)
-          });
-        }
+        this.emit(rt, {
+          type: "toolCall",
+          id: u.toolCallId,
+          title: u.title,
+          kind: u.kind,
+          meta: toolMeta(u),
+          status: u.status || "pending",
+          rawInput: u.rawInput,
+          content: normalizeToolContent(u.content),
+          locations: normalizeLocations(u.locations)
+        });
         this.recordDiffs(u, rt);
         return;
       case "tool_call_update":
-        if (active) {
-          this.post({
-            type: "toolCallUpdate",
-            id: u.toolCallId,
-            title: u.title,
-            kind: u.kind,
-            meta: toolMeta(u),
-            status: u.status,
-            rawInput: u.rawInput,
-            content: normalizeToolContent(u.content),
-            locations: normalizeLocations(u.locations)
-          });
-        }
+        this.emit(rt, {
+          type: "toolCallUpdate",
+          id: u.toolCallId,
+          title: u.title,
+          kind: u.kind,
+          meta: toolMeta(u),
+          status: u.status,
+          rawInput: u.rawInput,
+          content: normalizeToolContent(u.content),
+          locations: normalizeLocations(u.locations)
+        });
         this.recordDiffs(u, rt);
         return;
       case "usage_update":
-        if (active) this.post({ type: "usage", used: u.used, size: u.size, cost: u.cost });
+        this.emit(rt, { type: "usage", used: u.used, size: u.size, cost: u.cost });
         return;
       case "available_commands_update":
-        if (active) this.post({ type: "commands", commands: u.availableCommands });
+        this.emit(rt, { type: "commands", commands: u.availableCommands });
         return;
       case "current_mode_update":
         if (rt) rt.mode = u.currentModeId || rt.mode;
-        if (active) {
+        if (rt && this.activeId === rt.id && !rt.silentReplay) {
           this.currentMode = u.currentModeId || this.currentMode;
           this.statusBar?.set({ connected: this.isReady(), mode: this.currentMode, model: this.currentModel });
           this.post({ type: "mode", mode: u.currentModeId });
@@ -2173,10 +2508,13 @@ export class ChatController implements AcpHost {
       rt.awaiting++;
       rt.pending.push({ requestId, payload });
     }
-    // Show now if it's the visible session; otherwise mark amber and re-surface
-    // when the session is opened.
+    // Show now if it's the visible session; otherwise mark it "attention" and
+    // re-surface when the session is opened, plus a one-off notification so the
+    // user knows a background session is blocked waiting on them.
     if (!rt || this.activeId === rt.id) {
       this.post(payload);
+    } else {
+      this.notifyBackgroundAttention(rt);
     }
     this.broadcastStatuses();
     return new Promise<RequestPermissionResult>((resolve) => {
@@ -2220,6 +2558,8 @@ export class ChatController implements AcpHost {
     }
     if (!rt || this.activeId === rt.id) {
       this.post(payload);
+    } else {
+      this.notifyBackgroundAttention(rt);
     }
     this.broadcastStatuses();
     return new Promise((resolve) => {
@@ -2248,8 +2588,31 @@ export class ChatController implements AcpHost {
     if (rt) {
       rt.awaiting = Math.max(0, rt.awaiting - 1);
       rt.pending = rt.pending.filter((p) => p.requestId !== requestId);
+      // Attention episode is over once nothing is outstanding: allow the next
+      // background block to notify again.
+      if (rt.awaiting === 0) {
+        rt.attentionNotified = false;
+      }
     }
     this.broadcastStatuses();
+  }
+
+  // A backgrounded session is now blocked waiting on the user. Show one toast
+  // per attention episode (not per tool call) with an Open action that brings
+  // this surface forward and opens the session so its request can be answered.
+  private notifyBackgroundAttention(rt: Runtime): void {
+    if (rt.attentionNotified) {
+      return;
+    }
+    rt.attentionNotified = true;
+    const title = this.store.titles()[rt.id] || "a background session";
+    void vscode.window.showInformationMessage(`Devin needs your input in ${title}.`, "Open").then((choice) => {
+      if (choice === "Open") {
+        this.focus();
+        this.post({ type: "body", body: "thread" });
+        this.post({ type: "openSession", id: rt.id });
+      }
+    });
   }
 
   // Resolve an agent-supplied path against the session's cwd when it is

@@ -191,7 +191,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     // session-scoped widgets (working set, context ring) hide while browsing.
     el.composer.classList.toggle("list-mode", list);
     el.input.placeholder = list ? "Start a new chat\u2026" : "Ask Devin, or type @ to add a file";
-    if (list) { closeTitleMenu(); detachComposerFromSession(); closeSessionsPanel(); }
+    if (list) { closeTitleMenu(); detachComposerFromSession(); closeSessionsPanel(); stopThreadLoading(); }
     renderHeader();
     updateComposerDock();
     updateTerminateBtn();
@@ -408,10 +408,19 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   });
   el.listSearchBtn.addEventListener("click", (e) => { e.stopPropagation(); if (listCtrl) listCtrl.toggleSearch(el.listSearchBtn); });
   el.listFilterBtn.addEventListener("click", (e) => { e.stopPropagation(); if (listCtrl) listCtrl.toggleFilter(el.listFilterBtn); });
-  el.listRefreshBtn.addEventListener("click", () => { spinBtn(el.listRefreshBtn); vscode.postMessage({ type: "refreshSessions" }); });
+  el.listRefreshBtn.addEventListener("click", () => { spinBtn(el.listRefreshBtn); vscode.postMessage({ type: "refreshSessions", force: true }); });
   el.settingsBtn.addEventListener("click", () => vscode.postMessage({ type: "openSettings" }));
 
   function spinBtn(btn) { btn.classList.add("spin"); setTimeout(() => btn.classList.remove("spin"), 600); }
+
+  // Indeterminate loading bar along the top edge of the body, using the same
+  // travelling accent as the composer's working border. Replaces the spinners
+  // that used to sit inside the thread and the session list.
+  const loadingBar = document.createElement("div");
+  loadingBar.className = "dv-top-loading hidden";
+  el.bodyEl.appendChild(loadingBar);
+  function showLoadingBar() { loadingBar.classList.remove("hidden"); }
+  function hideLoadingBar() { loadingBar.classList.add("hidden"); }
 
   // Entering the sessions list turns the composer into a clean "new chat" box:
   // the draft, attachments, request-edit binding, docked plan and busy state
@@ -431,13 +440,14 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     // stale copy and double up on return.
     el.elicitationTray.innerHTML = "";
     el.permissionTray.innerHTML = "";
-    planUserToggled = false;
+    planCollapsePref = null;
+    wsCollapsePref = null;
     hideDockedPlan();
     closeUsagePopup();
     if (busy) setBusy(false);
   }
 
-  function isAliveStatus(st) { return st === "running" || st === "idle" || st === "starting"; }
+  function isAliveStatus(st) { return st === "running" || st === "idle" || st === "starting" || st === "attention"; }
 
   // The header terminate control is shown only inside a live session's thread.
   function updateTerminateBtn() {
@@ -471,6 +481,13 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   function send() {
     const text = el.input.value.trim();
     if (!text) return;
+    // Editing a queued message updates it in place (keeps its position in the
+    // queue) rather than dropping it and appending a new one at the end.
+    if (editingQueuedId && body !== "list") {
+      vscode.postMessage({ type: "editQueued", id: editingQueuedId, text });
+      finishQueuedEdit();
+      return;
+    }
     // In editRequests:input mode, the composer is editing a past request:
     // submitting rewinds to it and resends instead of appending a new turn.
     // Never in the list view, where the composer is a fresh new-chat box.
@@ -492,6 +509,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
 
   el.send.addEventListener("click", send);
   el.stop.addEventListener("click", () => { vscode.postMessage({ type: "cancel" }); cancelPrompts(); });
+  const isMacLike = /Mac|iP(hone|ad|od)/.test((navigator.platform || navigator.userAgent || ""));
+  el.stop.title = "Stop (" + (isMacLike ? "\u2318" : "Ctrl") + "+Esc)";
 
   // Close any open question/permission widgets (on Stop, or when the host says
   // the request was cancelled). They must not linger or be submittable after
@@ -509,7 +528,18 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       if ((e.key === "Enter" || e.key === "Tab") && ac.items.length) { e.preventDefault(); acceptAutocomplete(ac.items[ac.index]); return; }
       if (e.key === "Escape") { e.preventDefault(); closeAutocomplete(); return; }
     }
+    if (e.key === "Escape" && editingQueuedId) { e.preventDefault(); cancelQueuedEdit(); return; }
     if (e.key === "Escape" && editingTurn) { e.preventDefault(); cancelInputEditing(); return; }
+    // ArrowUp on an empty composer recalls your last message (VS Code's input
+    // history), so it is quick to resend or tweak it.
+    if (e.key === "ArrowUp" && !e.shiftKey && !e.metaKey && !e.ctrlKey && !editingTurn && !editingQueuedId && el.input.value === "" && lastUserText) {
+      e.preventDefault();
+      el.input.value = lastUserText;
+      el.input.setSelectionRange(lastUserText.length, lastUserText.length);
+      autosize();
+      updateSendState();
+      return;
+    }
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
   });
 
@@ -529,8 +559,50 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     if (e.key === "Escape" && inlineEditTurn) finishEditing(inlineEditTurn);
   });
 
+  // Copilot-style chat shortcuts (active whenever the panel is focused):
+  //  - Ctrl/Cmd+Esc stops the current turn,
+  //  - Ctrl/Cmd+.       opens the mode picker,
+  //  - Ctrl/Cmd+Alt+.   opens the model picker.
+  document.addEventListener("keydown", (e) => {
+    if (!(e.metaKey || e.ctrlKey)) return;
+    if (e.key === "Escape") {
+      if (busy) { e.preventDefault(); vscode.postMessage({ type: "cancel" }); cancelPrompts(); }
+      return;
+    }
+    if (e.code === "Period" && body === "thread") {
+      e.preventDefault();
+      openComposerDropdown(e.altKey ? el.modelDD : el.modeDD);
+    }
+  });
+
+  // Open one of the composer's dropdown pickers (mode / model) by keyboard, by
+  // triggering its button when its menu is not already open.
+  function openComposerDropdown(container) {
+    if (!container || container.classList.contains("hidden")) return;
+    const btn = container.querySelector(".dd-btn");
+    const menu = container.querySelector(".dd-menu");
+    if (btn && (!menu || menu.classList.contains("hidden"))) btn.click();
+  }
+
   function updateSendState() {
-    el.send.disabled = !el.input.value.trim();
+    updateComposerButtons();
+  }
+
+  // Show Send / Stop / Queue like Copilot: idle shows Send (disabled when empty);
+  // while a turn runs, Stop is always available AND, as soon as you type, the
+  // Send button turns into a Queue button (a click queues, same as Enter) so you
+  // are not limited to the keyboard.
+  function updateComposerButtons() {
+    const hasText = !!el.input.value.trim();
+    const queueing = busy && hasText;
+    el.stop.classList.toggle("hidden", !busy);
+    // Keep Send visible unless a turn is running with nothing typed (Stop only).
+    el.send.classList.toggle("hidden", busy && !hasText);
+    el.send.disabled = !hasText;
+    el.send.classList.toggle("queueing", queueing);
+    el.send.title = queueing ? "Queue message (Enter)" : "Send (Enter)";
+    const icon = el.send.querySelector("i");
+    if (icon) icon.className = "codicon " + (queueing ? "codicon-add" : "codicon-newline");
   }
 
   el.input.addEventListener("paste", (e) => {
@@ -565,11 +637,17 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   let stickToBottom = true;
   let pinning = false;
   let pinScheduled = false;
+  // True while a session/load replay is streaming in. The transcript is hidden
+  // behind the loading spinner and auto-scroll is frozen, so the user sees a
+  // clean spinner instead of the whole history rendering and scroll-thrashing;
+  // it is revealed and jumped to the bottom once, on `loaded`.
+  let loadingSession = false;
 
   function distanceFromBottom() {
     return el.thread.scrollHeight - el.thread.scrollTop - el.thread.clientHeight;
   }
   function pinNow() {
+    if (loadingSession) return;
     pinning = true;
     el.thread.scrollTop = el.thread.scrollHeight;
     updateScrollDownButton();
@@ -619,6 +697,31 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     if (!wasForcing) forcePinLoop();
   }
 
+  // When the user expands/collapses a section in the transcript, keep that
+  // section pinned where it was rather than following the stream to the bottom
+  // (VS Code's getAnchoredScrollTop). Following is disabled so the growing
+  // response can't fight what the user is reading; scrolling back to the bottom
+  // (or the Stop/scroll-down button) re-engages it.
+  let anchoring = false;
+  function anchorAfterToggle(target, anchorTop) {
+    stickToBottom = false;
+    forcePinUntil = 0; // cancel any post-send force-pin so the expand wins
+    if (anchorTop == null || typeof requestAnimationFrame === "undefined") return;
+    anchoring = true;
+    const until = now() + 340; // spans the collapse height animation
+    const step = () => {
+      if (!anchoring || !target.isConnected) { anchoring = false; return; }
+      const cur = target.getBoundingClientRect().top;
+      if (cur !== anchorTop) el.thread.scrollTop += cur - anchorTop;
+      if (now() < until) requestAnimationFrame(step);
+      else anchoring = false;
+    };
+    requestAnimationFrame(step);
+  }
+  // A genuine user scroll (wheel/touch) hands control back immediately.
+  el.thread.addEventListener("wheel", () => { anchoring = false; }, { passive: true });
+  el.thread.addEventListener("touchstart", () => { anchoring = false; }, { passive: true });
+
   // Detach only when the USER scrolls up (scrollTop decreases). Appended content
   // never moves scrollTop, so streaming can never accidentally detach us; a pin
   // only increases scrollTop. Re-attach whenever we are back at the bottom. This
@@ -629,7 +732,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     const movedUp = st < lastScrollTop - 2;
     lastScrollTop = st;
     updateScrollDownButton();
-    if (pinning || now() < forcePinUntil) return; // ignore our own pins + the forced window
+    // Ignore our own pins, the forced window, and the post-toggle anchor loop:
+    // none of these are the user deciding to follow or leave the bottom.
+    if (pinning || anchoring || now() < forcePinUntil) return;
     if (movedUp && distanceFromBottom() > 40) stickToBottom = false;
     else if (distanceFromBottom() <= 40) stickToBottom = true;
   }, { passive: true });
@@ -685,20 +790,131 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     ro.observe(el.inputBox);
   }
 
-  // Clickable anchors in assistant/user text: external links open in the
-  // browser, everything else is treated as a file path and opened in the editor.
+  // Clickable anchors in assistant/user text. External links (http/mailto) are
+  // opened by VS Code's own built-in webview link handling, so we must NOT also
+  // open them here or the link opens twice. We only handle the rest: a workspace
+  // path opened in the editor.
   el.thread.addEventListener("click", (e) => {
     const a = e.target.closest && e.target.closest("a[href]");
     if (!a) return;
     const href = a.getAttribute("href") || "";
     if (!href || href.startsWith("#")) return;
+    if (/^(https?|mailto):/i.test(href)) return; // let VS Code open it (once)
     e.preventDefault();
-    if (/^https?:\/\//i.test(href)) {
-      vscode.postMessage({ type: "openExternal", url: href });
-    } else {
-      vscode.postMessage({ type: "openFile", path: href.replace(/^file:\/\//, "") });
-    }
+    e.stopPropagation();
+    vscode.postMessage({ type: "openFile", path: href.replace(/^file:\/\//, "") });
   });
+
+  // --- Drag and drop context (files, images), VS Code chat style -----------
+  // Drop files/images onto the chat to attach them as context. Internal drags
+  // (Explorer, editor tabs) arrive as a text/uri-list of file URIs; OS/app drops
+  // arrive as real files (images inline as base64, other files as text). A full
+  // cover overlay with a paperclip pill mirrors VS Code's .chat-dnd-overlay.
+  const dndOverlay = document.createElement("div");
+  dndOverlay.className = "chat-dnd-overlay";
+  dndOverlay.innerHTML = '<span class="attach-context-overlay-text"><i class="codicon codicon-attach"></i><span class="overlay-text">Attach as Context</span></span>';
+  el.chatMain.appendChild(dndOverlay);
+
+  // The drag payloads we can turn into context. VS Code's internal drags carry
+  // every dragged resource in `application/vnd.code.uri-list` (or ResourceURLs /
+  // CodeFiles) and truncate the standard `text/uri-list` to the FIRST resource,
+  // so all of them have to be read or a multi file drag attaches only one.
+  const DND_URI_TYPES = ["application/vnd.code.uri-list", "ResourceURLs", "CodeFiles", "text/uri-list"];
+
+  function dndSupported(e) {
+    const t = (e.dataTransfer && e.dataTransfer.types) || [];
+    const has = (x) => Array.prototype.indexOf.call(t, x) !== -1;
+    return has("Files") || DND_URI_TYPES.some(has);
+  }
+
+  // Collect filesystem paths from whichever drag type is present, in the order
+  // that preserves the full selection.
+  function dropPaths(dt) {
+    const out = [];
+    const get = (t) => { try { return (dt.getData && dt.getData(t)) || ""; } catch { return ""; } };
+    const addUri = (line) => {
+      const s = String(line || "").trim();
+      if (!s || s.charAt(0) === "#" || /^https?:/i.test(s)) return;
+      let p = s;
+      if (/^file:\/\//i.test(s)) {
+        const stripped = s.replace(/^file:\/\//i, "");
+        try { p = decodeURIComponent(stripped); } catch { p = stripped; }
+      }
+      if (p) out.push(p);
+    };
+    const internal = get("application/vnd.code.uri-list");
+    if (internal) internal.split(/\r?\n/).forEach(addUri);
+    if (!out.length) {
+      const res = get("ResourceURLs"); // JSON array of URI strings
+      if (res) { try { JSON.parse(res).forEach(addUri); } catch { /* not JSON */ } }
+    }
+    if (!out.length) {
+      const files = get("CodeFiles"); // JSON array of plain fs paths
+      if (files) { try { JSON.parse(files).forEach((p) => { if (p) out.push(String(p)); }); } catch { /* not JSON */ } }
+    }
+    if (!out.length) {
+      const std = get("text/uri-list");
+      if (std) std.split(/\r?\n/).forEach(addUri);
+    }
+    return out;
+  }
+  let dndDepth = 0;
+  el.chatMain.addEventListener("dragenter", (e) => {
+    if (!dndSupported(e)) return;
+    e.preventDefault();
+    dndDepth++;
+    dndOverlay.classList.add("visible");
+  });
+  el.chatMain.addEventListener("dragover", (e) => {
+    if (!dndSupported(e)) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+  });
+  el.chatMain.addEventListener("dragleave", () => {
+    dndDepth = Math.max(0, dndDepth - 1);
+    if (dndDepth === 0) dndOverlay.classList.remove("visible");
+  });
+  el.chatMain.addEventListener("drop", (e) => {
+    hideDndOverlay();
+    if (!e.dataTransfer || !dndSupported(e)) return;
+    e.preventDefault();
+    handleDrop(e.dataTransfer);
+  });
+  function hideDndOverlay() {
+    dndDepth = 0;
+    dndOverlay.classList.remove("visible");
+  }
+  // A drag that ends or is cancelled outside the panel never fires dragleave on
+  // the container, which would otherwise leave the overlay stuck on screen.
+  window.addEventListener("dragend", hideDndOverlay);
+  window.addEventListener("drop", hideDndOverlay);
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") hideDndOverlay(); });
+
+  function handleDrop(dt) {
+    // Prefer paths (internal Explorer / editor-tab drags, and OS drops that
+    // expose file URLs): attach each by path, letting the host read it.
+    const paths = dropPaths(dt);
+    if (paths.length) {
+      paths.forEach((p) => vscode.postMessage({ type: "addMention", path: p }));
+      return;
+    }
+    // Otherwise we have raw files (an OS/app drop with no path): images inline,
+    // everything else as its text content.
+    const files = dt.files ? Array.prototype.slice.call(dt.files) : [];
+    files.forEach((f) => {
+      const reader = new FileReader();
+      if (f.type && f.type.indexOf("image/") === 0) {
+        reader.onload = () => {
+          const result = String(reader.result || "");
+          vscode.postMessage({ type: "attachImage", name: f.name || "image", mime: f.type, data: result.slice(result.indexOf(",") + 1) });
+        };
+        reader.readAsDataURL(f);
+      } else {
+        reader.onload = () => vscode.postMessage({ type: "attachDroppedText", name: f.name || "file", text: String(reader.result || "") });
+        reader.readAsText(f);
+      }
+    });
+  }
 
   // --- Dropdown component (VS Code style) ----------------------------------
 
@@ -896,6 +1112,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     if (!ac) return;
     el.autocomplete.innerHTML = "";
     el.autocomplete.classList.remove("hidden");
+    let activeRow = null;
     ac.items.forEach((it, i) => {
       const row = document.createElement("div");
       row.className = "ac-item" + (i === ac.index ? " active" : "");
@@ -912,7 +1129,11 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       row.appendChild(secondary);
       row.addEventListener("mousedown", (ev) => { ev.preventDefault(); acceptAutocomplete(it); });
       el.autocomplete.appendChild(row);
+      if (i === ac.index) activeRow = row;
     });
+    // Keep the keyboard-highlighted item visible as the selection moves past the
+    // top or bottom edge of the scrollable menu.
+    if (activeRow) activeRow.scrollIntoView({ block: "nearest" });
   }
 
   function closeAutocomplete() {
@@ -1023,13 +1244,34 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     root.appendChild(anim);
     const sync = () => header.setAttribute("aria-expanded", root.classList.contains("dv-collapsed") ? "false" : "true");
     const setCollapsed = (v) => { root.classList.toggle("dv-collapsed", !!v); sync(); };
-    const toggle = () => { if (!root.classList.contains("dv-nocollapse")) setCollapsed(!root.classList.contains("dv-collapsed")); };
-    header.addEventListener("click", (e) => { e.stopPropagation(); toggle(); });
+    // `userToggled` records that the user opened/closed this section by hand, so
+    // callers never auto-collapse or auto-expand it out from under them (VS
+    // Code persists the manual state and gates auto-collapse on it).
+    let userToggled = false;
+    const userToggle = () => {
+      if (root.classList.contains("dv-nocollapse")) return;
+      userToggled = true;
+      const willExpand = root.classList.contains("dv-collapsed");
+      // Expanding a section in the transcript means the user wants to read it:
+      // capture where it sits, stop following the stream, and pin it there
+      // afterwards (VS Code's getAnchoredScrollTop) so the growing response can't
+      // yank them to the bottom. Collapsing keeps the normal follow behaviour.
+      const anchor = willExpand && el.thread.contains(root);
+      const anchorTop = anchor ? root.getBoundingClientRect().top : null;
+      setCollapsed(!willExpand);
+      if (anchor) anchorAfterToggle(root, anchorTop);
+      if (opts.onUserToggle) opts.onUserToggle();
+    };
+    header.addEventListener("click", (e) => { e.stopPropagation(); userToggle(); });
     header.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); }
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); userToggle(); }
     });
     sync();
-    return { root, header, body: inner, setCollapsed, isCollapsed: () => root.classList.contains("dv-collapsed") };
+    return {
+      root, header, body: inner, setCollapsed,
+      isCollapsed: () => root.classList.contains("dv-collapsed"),
+      userToggled: () => userToggled
+    };
   }
 
   // Create a new turn shell (request container + checkpoint row + response
@@ -1437,10 +1679,11 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   function startInputEditing(turn) {
     // Only one input edit at a time; re-target if already editing another.
     if (editingTurn && editingTurn !== turn) cancelInputEditing();
+    if (editingQueuedId) cancelQueuedEdit();
     editingTurn = turn;
     el.input.value = turn.text;
     el.inputBox.classList.add("editing-request");
-    showEditingBanner();
+    showEditingBanner("Editing message", cancelInputEditing);
     markDiscardable(turn, true);
     el.input.focus();
     el.input.setSelectionRange(el.input.value.length, el.input.value.length);
@@ -1466,19 +1709,20 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     revertAndResend(turn, text);
   }
 
-  function showEditingBanner() {
+  function showEditingBanner(text, onCancel) {
     removeEditingBanner();
     const bar = document.createElement("div");
     bar.className = "input-editing-banner";
     bar.id = "input-editing-banner";
     const label = document.createElement("span");
     label.className = "input-editing-label";
-    label.innerHTML = '<i class="codicon codicon-edit"></i><span>Editing message</span>';
+    label.innerHTML = '<i class="codicon codicon-edit"></i><span></span>';
+    label.querySelector("span").textContent = text || "Editing message";
     const cancel = document.createElement("button");
     cancel.className = "chip-x";
     cancel.title = "Cancel edit (Esc)";
     cancel.innerHTML = '<i class="codicon codicon-close"></i>';
-    cancel.addEventListener("click", (e) => { e.stopPropagation(); cancelInputEditing(); });
+    cancel.addEventListener("click", (e) => { e.stopPropagation(); (onCancel || cancelInputEditing)(); });
     bar.appendChild(label);
     bar.appendChild(cancel);
     el.inputBox.insertBefore(bar, el.inputBox.firstChild);
@@ -1678,8 +1922,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     if (!block) return;
     if (block.kind === "thinking") {
       renderThinkingItems(block);
-      // Keep the fixed-height peek pinned to the latest reasoning.
-      if (block.peek && block.scrollEl) block.scrollEl.scrollTop = block.scrollEl.scrollHeight;
+      // Keep the fixed-height peek pinned to the latest reasoning, unless the
+      // user has expanded it to read back through the chain of thought.
+      if (block.peek && block.scrollEl && !block.collapse.userToggled()) block.scrollEl.scrollTop = block.scrollEl.scrollHeight;
     } else if (block.kind === "user") {
       if (block.turn) { block.turn.text = block.buffer; block.turn.reqText.innerHTML = renderMarkdown(block.buffer); }
     } else {
@@ -1717,7 +1962,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       }
       // A streaming peek collapses to the header when done (unless the user
       // expanded/collapsed it themselves).
-      if (block.peek && !block.userToggled && block.collapse) block.collapse.setCollapsed(true);
+      if (block.peek && block.collapse && !block.collapse.userToggled()) block.collapse.setCollapsed(true);
       const secs = Math.max(1, Math.round((Date.now() - block.start) / 1000));
       if (block.label) block.label.textContent = `Thought for ${secs}s`;
     }
@@ -1739,6 +1984,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   }
   function hideWorking() {
     if (workingEl) { workingEl.remove(); workingEl = null; }
+    // A retained transcript can bring back a "Working…" line this module no
+    // longer tracks, so sweep any stray one: two must never show at once.
+    el.thread.querySelectorAll(".working").forEach((n) => n.remove());
   }
 
   function appendAssistant(text, mid) {
@@ -1796,9 +2044,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       bodyEl.className = "thinking-body";
       c.body.appendChild(bodyEl);
       respTarget().appendChild(c.root);
-      block = { kind: "thinking", mid, details: c.root, body: bodyEl, label, buffer: "", start: Date.now(), timer: null, peek, collapse: c, scrollEl: c.body, userToggled: false };
+      block = { kind: "thinking", mid, details: c.root, body: bodyEl, label, buffer: "", start: Date.now(), timer: null, peek, collapse: c, scrollEl: c.body };
       const tb = block;
-      c.header.addEventListener("click", () => { tb.userToggled = true; });
       tb.timer = setInterval(() => {
         if (!tb.label) return;
         const secs = Math.max(1, Math.round((Date.now() - tb.start) / 1000));
@@ -1847,17 +2094,32 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   }
   // The plan/todo list shows live in a docked widget above the composer (VS
   // Code's chat-todo-list-widget), then snapshots into the transcript when the
-  // turn completes so history keeps it. `planUserToggled` tracks a manual
-  // expand/collapse so auto-collapse does not fight the user.
-  let planUserToggled = false;
+  // turn completes so history keeps it. `planCollapsePref` remembers a manual
+  // expand/collapse (null = no preference, auto) so auto-collapse never fights
+  // the user, and the choice is kept for the next plan raised this session (like
+  // VS Code's per-widget userManuallyExpanded). Reset only on a session change.
+  let planCollapsePref = null;
+  // Same idea for the working-set (file changes) widget: remember a manual
+  // collapse so it survives the widget hiding and reappearing within a session.
+  let wsCollapsePref = null;
 
   function planRow(entry) {
-    const st = entry.status === "completed" ? "done" : entry.status === "in_progress" ? "active" : "pending";
+    const raw = entry.status;
+    const st = raw === "completed" ? "done"
+      : raw === "in_progress" ? "active"
+      : raw === "skipped" || raw === "cancelled" ? "skipped"
+      : "pending";
     const row = document.createElement("div");
     row.className = "plan-entry plan-" + st;
     const mark = document.createElement("i");
-    mark.className = "codicon plan-mark " + (st === "done" ? "codicon-pass-filled" : st === "active" ? "codicon-loading codicon-modifier-spin" : "codicon-circle-large-outline");
+    mark.className = "codicon plan-mark " + (
+      st === "done" ? "codicon-pass-filled"
+        : st === "active" ? "codicon-loading codicon-modifier-spin"
+        : st === "skipped" ? "codicon-circle-slash"
+        : "codicon-circle-large-outline");
+    if (st === "skipped") mark.title = "Skipped";
     const txt = document.createElement("span");
+    txt.className = "plan-entry-text";
     txt.textContent = entry.content;
     row.appendChild(mark);
     row.appendChild(txt);
@@ -1893,7 +2155,10 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     let ctrl = el.todoWidget._ctrl;
     if (!ctrl) {
       el.todoWidget.innerHTML = "";
-      ctrl = makeCollapsible("plan plan-docked", { startCollapsed: false });
+      ctrl = makeCollapsible("plan plan-docked", {
+        startCollapsed: false,
+        onUserToggle: () => { planCollapsePref = el.todoWidget._ctrl.isCollapsed(); }
+      });
       const chev = document.createElement("i");
       chev.className = "codicon codicon-chevron-right plan-chevron";
       const title = document.createElement("span");
@@ -1907,14 +2172,16 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       el.todoWidget.appendChild(ctrl.root);
       el.todoWidget._ctrl = ctrl;
       el.todoWidget._count = count;
-      ctrl.header.addEventListener("click", () => { planUserToggled = true; });
-      ctrl.header.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") planUserToggled = true; });
     }
     el.todoWidget._count.textContent = done + "/" + entries.length;
     ctrl.body.innerHTML = "";
     entries.forEach((e) => ctrl.body.appendChild(planRow(e)));
-    if (!planUserToggled) {
-      ctrl.setCollapsed(entries.some((e) => e.status === "in_progress" || e.status === "completed"));
+    // Honour a remembered manual choice; otherwise auto-collapse once work is
+    // under way (a task is active, done, or skipped).
+    if (planCollapsePref !== null) {
+      ctrl.setCollapsed(planCollapsePref);
+    } else {
+      ctrl.setCollapsed(entries.some((e) => e.status === "in_progress" || e.status === "completed" || e.status === "skipped"));
     }
     el.todoWidget.classList.remove("hidden");
     updateComposerDock();
@@ -1934,7 +2201,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       currentTurn.planSnapped = true;
       currentTurn.resp.appendChild(planCard(currentTurn.planEntries));
     }
-    planUserToggled = false;
+    // Keep the user's collapse preference for the next plan this session; only a
+    // session change clears it.
     hideDockedPlan();
   }
 
@@ -2230,7 +2498,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     if (href && /^https?:\/\//i.test(href)) {
       v = document.createElement("a");
       v.href = href;
-      v.addEventListener("click", (e) => { e.preventDefault(); vscode.postMessage({ type: "openExternal", url: href }); });
+      // The click is handled by the delegated #thread listener; a second handler
+      // here would post openExternal twice and open the link in two tabs.
     } else {
       v = document.createElement("span");
     }
@@ -2612,7 +2881,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     const controls = names.map((key) => buildElicitQuestion(key, props[key], {
       allowOther: data.allowOther,
       required: required.includes(key),
-      hideTitle: names.length === 1 && props[key].title === data.message
+      // The carousel header shows the current question's text (and updates as you
+      // navigate), so the per-card label would just duplicate it.
+      hideTitle: true
     }));
 
     // A one-card-at-a-time carousel (VS Code's chat-question-carousel): the
@@ -2629,7 +2900,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     title.className = "qc-title";
     title.textContent = data.message || "Devin has a question";
     const close = actionBtn("codicon-close", "Cancel", () =>
-      finish("cancel", undefined, controls.map((c) => ({ title: c.title, answer: "" })))
+      finish("cancel", undefined, controls.map((c) => ({ title: c.prompt || c.title, answer: "" })))
     );
     header.appendChild(title);
     header.appendChild(close);
@@ -2669,7 +2940,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       const content = {};
       const recap = controls.map((c) => {
         content[c.key] = c.value();
-        return { title: c.title, answer: c.answerText() };
+        return { title: c.prompt || c.title, answer: c.answerText() };
       });
       finish("accept", content, recap);
     });
@@ -2681,8 +2952,13 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
 
     // Submit stays disabled until EVERY question has an answer (no option is
     // selected by default, so the user must visit each question and pick one).
+    // A tooltip explains why, so the disabled state does not feel broken.
     function updateSubmitState() {
-      submit.disabled = !controls.every((c) => c.answered());
+      const unanswered = controls.filter((c) => !c.answered()).length;
+      submit.disabled = unanswered > 0;
+      submit.title = unanswered > 0
+        ? (controls.length > 1 ? "Answer all questions to submit" : "Answer the question to submit")
+        : "";
     }
     qc.addEventListener("change", updateSubmitState);
     qc.addEventListener("input", updateSubmitState);
@@ -2703,6 +2979,10 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     function show(i) {
       idx = Math.max(0, Math.min(controls.length - 1, i));
       controls.forEach((c, j) => c.el.classList.toggle("hidden", j !== idx));
+      // Track the current question's text in the header so it changes with the
+      // options, not just the choices below it.
+      const cur = controls[idx];
+      title.textContent = (cur && cur.prompt) || data.message || "Devin has a question";
       const label = controls.length + " question" + (controls.length === 1 ? "" : "s");
       step.textContent = controls.length > 1 ? (idx + 1) + " / " + controls.length : label;
       prev.disabled = idx === 0;
@@ -2721,6 +3001,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // "Other" free-text choice, and a plain text/number/boolean fallback.
   function buildElicitQuestion(key, spec, opts) {
     const title = spec.title || spec.description || key;
+    // The full question text (prefer the longer `description`), surfaced in the
+    // carousel header so it updates as you step between questions.
+    const prompt = spec.description || spec.title || "";
     const field = document.createElement("div");
     field.className = "elicit-field";
     if (!opts.hideTitle && (spec.title || spec.description)) {
@@ -2753,7 +3036,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       field.appendChild(input);
       const val = () => (isCheckbox ? input.checked : isNumber ? Number(input.value) : input.value);
       return {
-        key, el: field, title,
+        key, el: field, title, prompt,
         value: val,
         valid: () => (!opts.required || isCheckbox || String(input.value).trim() !== ""),
         // "Answered" gates the Submit button: a boolean always has a state; text
@@ -2829,7 +3112,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     };
     const minItems = spec.minItems || (opts.required ? 1 : 0);
     return {
-      key, el: field, title,
+      key, el: field, title, prompt,
       value: () => (isMulti ? selectedValues() : selectedValues()[0]),
       valid: () => (isMulti ? selectedValues().length >= minItems : (!opts.required || selectedValues().length >= 1)),
       // Submit is gated on every question having at least one option selected.
@@ -2894,7 +3177,10 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     let ctrl = el.workingSet._ctrl;
     if (!ctrl) {
       el.workingSet.innerHTML = "";
-      ctrl = makeCollapsible("ws-collapsible", { startCollapsed: false });
+      ctrl = makeCollapsible("ws-collapsible", {
+        startCollapsed: false,
+        onUserToggle: () => { wsCollapsePref = el.workingSet._ctrl.isCollapsed(); }
+      });
       ctrl.header.classList.add("ws-header");
       const chev = document.createElement("i");
       chev.className = "codicon codicon-chevron-right ws-chevron";
@@ -2956,6 +3242,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       row.appendChild(grp);
       list.appendChild(row);
     });
+    // Honour a remembered manual collapse (the widget is otherwise always shown
+    // expanded), so it survives the working set hiding and reappearing.
+    if (wsCollapsePref !== null) ctrl.setCollapsed(wsCollapsePref);
     updateComposerDock();
   }
 
@@ -2998,6 +3287,126 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     renderComposerContext();
   }
 
+  // --- Queued messages (sent after the current turn finishes) --------------
+
+  // Messages submitted while a turn is in flight are queued by the host rather
+  // than dropped (VS Code's chat queue). They render at the very bottom of the
+  // transcript under a "Queued" divider, as dimmed request bubbles like VS Code's
+  // pending rows, each editable in place (keeps its position) and removable, and
+  // the host auto-sends them in order. A CSS `order` keeps the block pinned below
+  // every turn even when a flush appends a new one.
+  let queuedItems = [];
+  // The queued message being edited in the composer (null = not editing one).
+  let editingQueuedId = null;
+
+  function renderQueued(items) {
+    queuedItems = Array.isArray(items) ? items : [];
+    // The item being edited may have flushed (its turn started) while editing;
+    // drop the stale editing state so the banner does not dangle.
+    if (editingQueuedId && !queuedItems.some((q) => q.id === editingQueuedId)) {
+      clearQueuedEditState();
+    }
+    const existing = el.thread.querySelector(".queued-inline");
+    if (existing) existing.remove();
+    if (queuedItems.length === 0) return;
+    const box = document.createElement("div");
+    box.className = "queued-inline";
+    const head = document.createElement("div");
+    head.className = "queued-divider";
+    // Show the depth so it is obvious the queue is draining as each one goes out.
+    head.textContent = queuedItems.length > 1 ? "Queued (" + queuedItems.length + ")" : "Queued";
+    head.title = "Sent in order once the current response finishes";
+    box.appendChild(head);
+    queuedItems.forEach((q) => box.appendChild(queuedRow(q)));
+    el.thread.appendChild(box);
+    scrollToBottom();
+  }
+
+  // One queued message, styled as a dimmed user request bubble (VS Code's pending
+  // request row) with edit/remove actions that appear on hover.
+  function queuedRow(q) {
+    const item = document.createElement("div");
+    item.className = "queued-item" + (q.id === editingQueuedId ? " editing" : "");
+    item.dataset.id = q.id;
+    const bubble = document.createElement("div");
+    bubble.className = "queued-bubble bubble";
+    bubble.textContent = q.text;
+    const actions = document.createElement("div");
+    actions.className = "queued-actions";
+    actions.appendChild(iconBtn("codicon-edit", "Edit queued message", (e) => { e.stopPropagation(); startQueuedEdit(q); }));
+    // VS Code's "Send Immediately" (Codicon.newLine): jump this one to the front.
+    actions.appendChild(iconBtn("codicon-newline", "Send immediately", (e) => {
+      e.stopPropagation();
+      // Commit an in-progress edit of this same message first, so it is sent
+      // with what is currently typed rather than the stale text.
+      if (editingQueuedId === q.id) {
+        const text = el.input.value.trim();
+        if (text) vscode.postMessage({ type: "editQueued", id: q.id, text });
+        finishQueuedEdit();
+      }
+      vscode.postMessage({ type: "sendQueuedNow", id: q.id });
+    }));
+    actions.appendChild(iconBtn("codicon-close", "Remove from queue", (e) => {
+      e.stopPropagation();
+      if (editingQueuedId === q.id) finishQueuedEdit();
+      vscode.postMessage({ type: "removeQueued", id: q.id });
+    }));
+    item.appendChild(bubble);
+    item.appendChild(actions);
+    return item;
+  }
+
+  // Load a queued message into the composer to edit it in place. It stays in the
+  // queue (its slot is reserved) and is updated on submit, so it never jumps to
+  // the end.
+  function startQueuedEdit(q) {
+    if (editingTurn) cancelInputEditing();
+    editingQueuedId = q.id;
+    // Tell the host which message we are editing: the queue keeps draining past
+    // it, but holds when this one reaches the head until we commit or cancel.
+    vscode.postMessage({ type: "queueEditing", id: q.id });
+    el.input.value = q.text;
+    el.inputBox.classList.add("editing-request");
+    showEditingBanner("Editing queued message", cancelQueuedEdit);
+    el.input.focus();
+    el.input.setSelectionRange(el.input.value.length, el.input.value.length);
+    autosize();
+    updateSendState();
+    markQueuedEditing(); // highlight the row being edited (no full re-render)
+  }
+
+  // Toggle the "editing" highlight on the queued bubble that matches the id being
+  // edited, without rebuilding the list (which would detach the rows).
+  function markQueuedEditing() {
+    el.thread.querySelectorAll(".queued-item").forEach((it) => {
+      it.classList.toggle("editing", !!editingQueuedId && it.dataset.id === editingQueuedId);
+    });
+  }
+
+  // Reset the composer chrome after a queued edit ends (submit or cancel), and
+  // release the host's hold on that message so it can be sent.
+  function clearQueuedEditState() {
+    if (!editingQueuedId) return;
+    editingQueuedId = null;
+    el.inputBox.classList.remove("editing-request");
+    removeEditingBanner();
+    markQueuedEditing();
+    vscode.postMessage({ type: "queueEditing", id: null });
+  }
+
+  function finishQueuedEdit() {
+    clearQueuedEditState();
+    el.input.value = "";
+    closeAutocomplete();
+    autosize();
+    updateSendState();
+  }
+
+  function cancelQueuedEdit() {
+    if (!editingQueuedId) return;
+    finishQueuedEdit();
+  }
+
   // Renders the implicit "current file" pill (first) followed by the explicit
   // attachment pills, into the shared #attachments row.
   function renderComposerContext() {
@@ -3023,7 +3432,11 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       chip.appendChild(img);
     } else {
       const icon = document.createElement("i");
-      icon.className = "codicon " + (a.type === "image" ? "codicon-file-media" : a.type === "selection" ? "codicon-selection" : fileIconFor(a.label));
+      icon.className = "codicon " + (
+        a.type === "image" ? "codicon-file-media"
+          : a.type === "selection" ? "codicon-selection"
+          : a.type === "directory" ? "codicon-folder"
+          : fileIconFor(a.label));
       chip.appendChild(icon);
     }
     const label = document.createElement("span");
@@ -3086,19 +3499,46 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
 
   // --- Reusable session list (shared by the full list and the title menu) --
 
+  // `status` is a Set of the selected states; empty means no state filter, so
+  // several can be combined (Running + Terminated, say).
   function filterSessions(sessions, q, status) {
     q = (q || "").trim().toLowerCase();
+    const sel = status && status.size ? status : null;
     return sessions.filter((s) => {
-      if (status && status !== "all") {
+      if (sel) {
         const st = sessionStatuses[s.id];
-        const alive = st === "running" || st === "idle" || st === "starting";
-        if (status === "running" && !(st === "running" || st === "starting")) return false;
-        if (status === "idle" && st !== "idle") return false;
-        if (status === "dead" && alive) return false;
+        const working = st === "running" || st === "starting" || st === "attention";
+        const alive = working || st === "idle";
+        const match =
+          (sel.has("running") && working) ||
+          (sel.has("idle") && st === "idle") ||
+          (sel.has("terminated") && !alive);
+        if (!match) return false;
       }
       if (!q) return true;
       return (s.title || "").toLowerCase().includes(q) || (s.short_id || s.id || "").toLowerCase().includes(q);
     });
+  }
+
+  // Rank for the "State" sort: working sessions first, then idle, then ended.
+  function sessionStateRank(s) {
+    const st = sessionStatuses[s.id];
+    if (st === "running" || st === "starting" || st === "attention") return 0;
+    if (st === "idle") return 1;
+    return 2;
+  }
+
+  function sortSessions(sessions, sort) {
+    const at = (s) => s.last_activity_at || 0;
+    const out = sessions.slice();
+    if (sort === "state") {
+      out.sort((a, b) => sessionStateRank(a) - sessionStateRank(b) || at(b) - at(a));
+    } else if (sort === "name") {
+      out.sort((a, b) => (a.title || a.short_id || a.id || "").localeCompare(b.title || b.short_id || b.id || ""));
+    } else {
+      out.sort((a, b) => at(b) - at(a));
+    }
+    return out;
   }
 
   // Groups sessions by workspace (workspace folders first) with collapsible
@@ -3206,7 +3646,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   function mountSessionList(container, opts) {
     opts = opts || {};
     container.innerHTML = "";
-    const state = { q: "", status: "all", grouping: "workspace" };
+    const state = { q: "", status: new Set(), grouping: "workspace", sort: "activity" };
     let searchFloater = null;
     let filterFloater = null;
     let refreshBtn = null;
@@ -3241,7 +3681,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       spacer.className = "session-tool-spacer";
       const newBtn = mkTool("new-session", "New session", (b) => openNewSessionMenu(b));
       const searchBtn = mkTool("search", "Search sessions", (b) => api.toggleSearch(b));
-      const filterBtn = mkTool("filter", "Filter sessions", (b) => api.toggleFilter(b));
+      const filterBtn = mkTool("list-filter", "Filter sessions", (b) => api.toggleFilter(b));
       toolbar.append(refreshBtn, titleLabel, spacer, newBtn, searchBtn, filterBtn);
       container.appendChild(toolbar);
     }
@@ -3258,7 +3698,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         bodyEl.innerHTML = '<div class="sessions-empty"><i class="codicon codicon-comment-discussion"></i><div>No chats yet.</div></div>';
         return;
       }
-      const filtered = filterSessions(lastSessions, state.q, state.status);
+      const filtered = sortSessions(filterSessions(lastSessions, state.q, state.status), state.sort);
       if (!filtered.length) { bodyEl.innerHTML = '<div class="sessions-empty-sm">No matching sessions</div>'; return; }
       if (state.grouping === "none") {
         filtered.forEach((s) => bodyEl.appendChild(sessionRow(s, lastActiveId)));
@@ -3304,10 +3744,41 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
             menu.appendChild(row);
           }
         };
-        group("Status", [["all", "All"], ["running", "Running"], ["idle", "Idle"], ["dead", "Ended"]], () => state.status, (v) => { state.status = v; });
-        const sep = document.createElement("div");
-        sep.className = "dv-menu-sep";
-        menu.appendChild(sep);
+        // Status is multi select: tick any combination, or All to clear them.
+        const multi = (title, options) => {
+          const label = document.createElement("div");
+          label.className = "dv-menu-label";
+          label.textContent = title;
+          menu.appendChild(label);
+          const none = state.status.size === 0;
+          for (const [val, lab] of options) {
+            const on = val === "all" ? none : state.status.has(val);
+            const row = document.createElement("button");
+            row.className = "dv-menu-item radio" + (on ? " checked" : "");
+            const chk = mkIcon(on ? "check" : "blank");
+            chk.classList.add("dv-menu-check");
+            row.appendChild(chk);
+            row.appendChild(Object.assign(document.createElement("span"), { textContent: lab }));
+            row.addEventListener("click", (e) => {
+              e.stopPropagation();
+              if (val === "all") state.status.clear();
+              else if (state.status.has(val)) state.status.delete(val);
+              else state.status.add(val);
+              build();
+              renderBody();
+            });
+            menu.appendChild(row);
+          }
+        };
+        const sep = () => {
+          const s = document.createElement("div");
+          s.className = "dv-menu-sep";
+          menu.appendChild(s);
+        };
+        multi("Status", [["all", "All"], ["running", "Running"], ["idle", "Idle"], ["terminated", "Terminated"]]);
+        sep();
+        group("Sort by", [["activity", "Last activity"], ["state", "State"], ["name", "Name"]], () => state.sort, (v) => { state.sort = v; });
+        sep();
         group("Group by", [["workspace", "Workspace"], ["date", "Date"], ["none", "None"]], () => state.grouping, (v) => { state.grouping = v; });
       };
       build();
@@ -3319,7 +3790,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       toggleSearch,
       toggleFilter,
       setQuery: (q) => { state.q = q; renderBody(); },
-      setStatus: (s) => { state.status = s; renderBody(); },
+      setStatus: (s) => { state.status = s instanceof Set ? s : new Set(s && s !== "all" ? [s] : []); renderBody(); },
+      setSort: (s) => { state.sort = s; renderBody(); },
       setGrouping: (g) => { state.grouping = g; renderBody(); }
     };
     renderBody();
@@ -3371,13 +3843,33 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // instantly later, and reset the live singletons for whatever renders next.
   function snapshotCurrent() {
     if (!curSessionId) return;
+    // Abandon any in-progress queued-message edit (releases the host's queue
+    // hold) so it does not carry over to the next session.
+    cancelQueuedEdit();
+    // Close the open block before snapshotting so a half-streamed thinking or
+    // message settles ("Thinking…" -> "Thought for Xs") instead of being frozen
+    // mid stream. The turn keeps running in the background; its continuation
+    // replays into a fresh block when we return.
+    finalizeBlock();
+    // The "Working…" line is part of the DOM we are about to retain, so drop it
+    // now (while it is still in the thread) rather than only untracking it.
+    // Otherwise a frozen one comes back on return and the next turn adds a
+    // second one beside it.
+    hideWorking();
     const frag = document.createDocumentFragment();
     while (el.thread.firstChild) frag.appendChild(el.thread.firstChild);
     views.set(curSessionId, {
       frag, turns, currentTurn, turnSeq, lastHead, lastHeadReliable,
       toolEls: new Map(toolEls), terminalCache: new Map(terminalCache),
-      commands: commands.slice(), title: currentTitle
+      commands: commands.slice(), title: currentTitle, lastUserText, draft: el.input.value
     });
+    // Per session: the next session must not inherit this one's last message
+    // (it backs ArrowUp recall and Retry) nor its unsent draft. Both are put
+    // back by restoreView when this session is reopened.
+    lastUserText = "";
+    el.input.value = "";
+    autosize();
+    updateSendState();
     // A session that was mid-run when we left it will keep changing, so its
     // snapshot is stale: force a reload when we come back.
     if (sessionStatuses[curSessionId] === "running") dirtyViews.add(curSessionId);
@@ -3386,25 +3878,28 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       const oldest = views.keys().next().value;
       if (oldest !== curSessionId) { views.delete(oldest); dirtyViews.delete(oldest); }
     }
-    if (block && block.timer) clearInterval(block.timer);
-    block = null;
     turns = [];
     currentTurn = null;
     toolEls.clear();
     terminalCache.clear();
     // Reset the transient per-session UI that is NOT part of the moved DOM, so
-    // the previous session's working-set deltas, context-usage ring, docked
-    // plan and "Working…" placeholder do not bleed into the next view. The host
-    // clears its change set on every switch, so an empty start is correct here.
-    workingEl = null;
+    // the previous session's working-set deltas, context-usage ring and docked
+    // plan do not bleed into the next view. The host clears its change set on
+    // every switch, so an empty start is correct here.
+    wsCounts.clear();
     wsCounts.clear();
     renderWorkingSet([]);
     lastUsage = null;
     el.usage.classList.add("hidden");
     el.usage.innerHTML = "";
     closeUsagePopup();
-    planUserToggled = false;
+    planCollapsePref = null;
+    wsCollapsePref = null;
     hideDockedPlan();
+    // The busy chrome (Stop button, working border) belongs to the session we
+    // just left. Clear it so it never bleeds into the next one: the host posts
+    // the real state for whichever session we open.
+    if (busy) setBusy(false);
   }
 
   // Re-mount a retained transcript (real nodes, listeners intact) without a
@@ -3424,6 +3919,11 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     terminalCache.clear();
     v.terminalCache.forEach((val, k) => terminalCache.set(k, val));
     commands = v.commands || [];
+    lastUserText = v.lastUserText || "";
+    // Put this session's own unsent draft back in the composer.
+    el.input.value = v.draft || "";
+    autosize();
+    updateSendState();
     currentTitle = v.title || currentTitle;
     el.chatTitle.textContent = currentTitle;
     views.delete(id);
@@ -3444,8 +3944,10 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     // (wake) while its transcript stays on screen, so there is no "Waking…"
     // spinner. Only a session we have never displayed here needs a full load.
     const status = sessionStatuses[id];
-    const running = status === "running";
-    const alive = status === "running" || status === "idle" || status === "starting";
+    // "attention" means the session is alive with a turn in flight, blocked on a
+    // permission/question, so treat it like running (re-attach, never wake).
+    const running = status === "running" || status === "attention";
+    const alive = running || status === "idle" || status === "starting";
     const haveView = views.has(id) && !dirtyViews.has(id);
     snapshotCurrent();
     curSessionId = id;
@@ -3470,6 +3972,10 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     } else {
       views.delete(id);
       dirtyViews.delete(id);
+      // Show the spinner immediately: a full load round-trips through the host
+      // (health check, spawning a fresh acp, replaying history), which can take a
+      // few seconds, and the host's own `clear{loading}` only lands after that.
+      showThreadLoading(!alive);
       vscode.postMessage({ type: "loadSession", id });
     }
   }
@@ -3523,12 +4029,18 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     const st = sessionStatuses[s.id];
     const dot = document.createElement("span");
     dot.className = "session-dot " +
-      (st === "running" ? "dot-running" : st === "starting" ? "dot-starting" : st === "idle" ? "dot-idle" : "dot-dead");
+      (st === "running" ? "dot-running"
+        : st === "attention" ? "dot-attention"
+        : st === "starting" ? "dot-starting"
+        : st === "idle" ? "dot-idle"
+        : "dot-dead");
     dot.title = st === "running" ? "Running"
+      : st === "attention" ? "Needs your input"
       : st === "starting" ? "Waking\u2026"
       : st === "idle" ? "Alive, waiting for you"
       : "Not running";
     title.insertBefore(dot, title.firstChild);
+    if (st === "attention") item.classList.add("needs-attention");
     const meta = document.createElement("div");
     meta.className = "session-meta";
     const time = document.createElement("span");
@@ -3639,8 +4151,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   function setBusy(value) {
     const wasBusy = busy;
     busy = value;
-    el.send.classList.toggle("hidden", value);
-    el.stop.classList.toggle("hidden", !value);
+    updateComposerButtons();
     // Copilot-style animated indicator on the input (gated by progressBorder).
     el.inputBox.classList.toggle("busy", value && caps.progressBorder);
     if (!value) {
@@ -3722,11 +4233,24 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
 
   function showThreadLoading(waking) {
     el.thread.innerHTML = "";
+    // Freeze auto-scroll and hide the streaming transcript behind the spinner
+    // until the replay settles (see `loadingSession`).
+    loadingSession = true;
+    el.thread.classList.add("loading-replay");
+    showLoadingBar();
     const d = document.createElement("div");
     d.className = "thread-loading";
-    const label = waking ? "Waking session\u2026" : "Loading session\u2026";
-    d.innerHTML = '<i class="codicon codicon-loading codicon-modifier-spin"></i><span>' + label + "</span>";
+    d.innerHTML = "<span></span>";
+    d.querySelector("span").textContent = waking ? "Waking session\u2026" : "Loading session\u2026";
     el.thread.appendChild(d);
+  }
+
+  // Reveal the transcript and re-enable auto-scroll after a load settles (or is
+  // abandoned). Safe to call when no load is in progress.
+  function stopThreadLoading() {
+    loadingSession = false;
+    el.thread.classList.remove("loading-replay");
+    hideLoadingBar();
   }
 
   function threadHasContent() {
@@ -3990,12 +4514,22 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         break;
       case "sessions":
         hideBoot();
+        hideLoadingBar();
         if (m.statuses) sessionStatuses = m.statuses;
         renderSessions(m.sessions, m.activeId, m.folders);
         updateTerminateBtn();
         break;
       case "sessionStatuses": applyStatuses(m.statuses, m.activeId); break;
       case "sessionActivity": if (m.id) dirtyViews.add(m.id); break;
+      case "openSession":
+        // Host-initiated open (e.g. the "needs your input" notification). Reuse
+        // the same path as a click so view restore / wake / load all apply.
+        if (m.id) {
+          setView("chat");
+          const s = (lastSessions || []).find((x) => x.id === m.id);
+          switchToSession(m.id, s && s.title);
+        }
+        break;
       case "lockConflict": showLockConflict(m); break;
       case "sessionReady":
         el.status.textContent = "";
@@ -4009,6 +4543,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       case "status": el.status.textContent = m.text || ""; break;
       case "clear":
         workingEl = null;
+        // Any prior load is over: drop the replay freeze before this clear
+        // rebuilds the thread (a new clear{loading} re-arms it just below).
+        stopThreadLoading();
         // A fresh session resets the header title and code badge instead of
         // keeping the previous session's.
         if (m.reset) {
@@ -4031,10 +4568,12 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         previewWaiters.clear();
         el.permissionTray.innerHTML = "";
         el.elicitationTray.innerHTML = "";
-        planUserToggled = false;
+        planCollapsePref = null;
+    wsCollapsePref = null;
         hideDockedPlan();
         wsCounts.clear();
         renderWorkingSet([]);
+        renderQueued([]);
         renderAttachments([]);
         toolEls.clear();
         if (block && block.timer) clearInterval(block.timer);
@@ -4053,13 +4592,20 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         // block stays open to catch a later stray chunk.
         finalizeBlock();
         { const l = el.thread.querySelector(".thread-loading"); if (l) l.remove(); }
+        // Reveal the transcript now the replay has settled, before we scroll.
+        stopThreadLoading();
         if (body === "thread" && !threadHasContent()) renderWelcome();
         // A freshly loaded transcript starts pinned at the bottom.
         forceScrollToBottom();
         break;
       case "sessionsLoading":
-        el.sessionsList.innerHTML = '<div class="list-loading"><i class="codicon codicon-loading codicon-modifier-spin"></i></div>';
-        listCtrl = null;
+        // Keep whatever is already listed on screen and just run the top loading
+        // bar, so returning to the list never blanks it while it revalidates.
+        showLoadingBar();
+        if (!lastSessions.length) {
+          el.sessionsList.innerHTML = "";
+          listCtrl = null;
+        }
         break;
       case "userMessage":
         if (currentTitle === "Chat") { currentTitle = m.text.slice(0, 40); el.chatTitle.textContent = currentTitle; }
@@ -4076,6 +4622,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       case "toolCallUpdate": upsertTool(m); break;
       case "fileChange": addFileChange(m); break;
       case "workingSet": renderWorkingSet(m.files); break;
+      case "queued": renderQueued(m.items); break;
       case "attachments": renderAttachments(m.items); break;
       case "implicitContext":
         implicit = m.file ? { path: m.file.path, name: m.file.name, line1: m.file.line1, line2: m.file.line2, enabled: m.enabled !== false } : null;

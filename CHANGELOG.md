@@ -7,6 +7,115 @@ All notable changes to **Devin for VS Code**, newest first.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
+## [0.7.0] - 2026-08-05
+
+A big round of chat quality fixes: a real message queue, background sessions that
+keep working and catch you up when you return, calmer scrolling, and better
+questions.
+
+### Highlights
+- You can now type while Devin is working. A message sent mid turn is queued
+  instead of lost, shown at the bottom of the transcript under a "Queued"
+  divider as dimmed request bubbles, and sent in order as the session frees up.
+  Each one can be edited in place (it keeps its position in the queue rather than
+  jumping to the end), sent immediately, or removed, and Stop interrupts only the
+  current turn and leaves the queue in place so it carries on after the interrupt.
+  While a turn runs, the Send button becomes a Queue button as soon as you type,
+  so you can click to queue instead of only pressing Enter.
+- Editing a queued message holds just that message. The ones ahead of it keep
+  sending, the queue pauses when the edited one reaches the front, and the ones
+  behind it wait, so a turn finishing mid edit never submits it from under you.
+- Drag and drop files, images and folders onto the chat to attach them as
+  context, with the same drop overlay VS Code uses. Images are attached inline so
+  the model can actually see them, a folder attaches as a listing, and dragging a
+  multiple selection attaches every file rather than just the first.
+- The Add context (+) button now offers folders as well as files, and attaching
+  an image through + or @ sends it as a real image.
+- Keyboard shortcuts match Copilot: Ctrl/Cmd+Esc stops the current turn,
+  Ctrl/Cmd+. opens the mode picker, Ctrl/Cmd+Alt+. opens the model picker, and
+  ArrowUp on an empty composer recalls your last message.
+- Background sessions really run in the background. A session you leave keeps
+  working, and reopening it replays everything it did while you were away, even
+  when the turn is still going, instead of showing the state from when you left.
+- When a background session needs your input it now tells you, with a
+  notification that has an Open button and a pulsing marker next to the session
+  in the list.
+- Questions are easier to answer. A question with more than one answer shows real
+  checkboxes, the Submit button stays disabled with a tooltip until every
+  question has an answer, and moving between questions now updates the question
+  text itself, not only the choices below it.
+- Opening a session is calmer. A loading indicator shows the moment you click,
+  and a large session no longer scrolls and reflows in front of you while it
+  loads: it appears once, already scrolled to the latest message.
+- Reading is no longer interrupted. Expanding a tool card or a chain of thought
+  while Devin streams no longer yanks you to the bottom, and a section you opened
+  by hand is never collapsed back on you. Your collapse choice for the plan and
+  the file changes list is remembered for the rest of the session.
+- Plan steps can be skipped. A step the agent decides to skip shows struck
+  through with a slashed circle.
+- Going back to the session list is instant. The listing is cached and painted
+  straight away, then revalidated behind you, instead of re-running `devin list`
+  and blanking the list every time.
+- Loading shows as a thin animated bar along the top edge, using the same accent
+  that travels around the composer while Devin works, rather than a spinner in
+  the middle of the panel.
+- The session list filter takes any combination of states rather than one at a
+  time, "Ended" is now called "Terminated", and a Sort by option orders the list
+  by last activity, by state (working sessions on top) or by name.
+- Switching session no longer carries the previous one's Stop button and working
+  border across to the new one.
+- Leaving a session mid thought no longer leaves it stuck on "Thinking…": the
+  section settles to "Thought for Xs" and the continuation picks up when you
+  return.
+- A folder attached as context shows a folder icon instead of a file icon.
+- An unsent draft now belongs to the session you typed it in. Switching away
+  parks it and switching back puts it in the composer, instead of following you
+  into the next session.
+- Leaving a session while it was working and coming back no longer leaves a
+  frozen "Working…" line behind, which used to sit next to the real one on the
+  next message.
+- The slash command list scrolls to follow the highlighted item as you arrow
+  through it.
+- Links in the chat open once, not twice.
+
+### Under the hood
+- A backgrounded session's stream is buffered on its runtime and replayed when
+  the session is reopened, so its progress is never dropped. A finished session
+  reloads its transcript on return instead.
+- The message queue lives on the session's runtime, so it survives switching away
+  to another session and back, and it drains itself turn by turn.
+- Auto scroll follows the stream only while you are at the bottom, and a manual
+  expand anchors the toggled section in place (VS Code's getAnchoredScrollTop)
+  rather than following, handing control back on your next scroll.
+- Manual collapse state is tracked per section so nothing auto collapses what you
+  opened, matching VS Code's userManuallyExpanded behaviour.
+- The `PlanEntry` type accepts skipped and cancelled statuses.
+- External links are left to VS Code's own webview link handling. Its preload
+  posts `did-click-link` for any anchor, so opening them ourselves as well was
+  what opened a second tab. Workspace paths still stop propagation so VS Code
+  does not also try to open a relative href.
+- Drops read `application/vnd.code.uri-list`, `ResourceURLs` and `CodeFiles`
+  before the standard `text/uri-list`, which VS Code truncates to the first
+  resource, so a multiple selection is no longer reduced to one file.
+- Attached images are capped at 30 MB, matching VS Code, instead of being sent
+  whole.
+- A queued turn is flushed before the revert head probe rather than after it, so
+  the next queued message goes out without waiting on an extra round trip.
+- The queue is republished after a reload as well as after an instant re-attach,
+  so messages waiting on a session survive every way of leaving and returning to
+  it (the list, the switcher, and the side panel).
+- Only the Refresh button forces a re-listing now. Returning to the list serves
+  the cached sessions at any age and revalidates in the background.
+- The drop overlay is cleared on dragend, drop and Escape, so a drag that ends
+  outside the panel cannot leave it stuck on screen.
+- A failed session load drops the cached listing before returning to the list,
+  so a session deleted elsewhere cannot be served back from the cache.
+- New regression tests cover the queue (bubbles, in place edit, send immediately,
+  the per message hold), drag and drop (overlay and multi file drops), the smooth
+  load, the attention marker, the skipped plan step, the plan collapse memory,
+  links deferring to VS Code, the question carousel text, and the keyboard
+  shortcuts.
+
 ## [0.6.93] - 2026-08-04
 
 Refreshes the Marketplace listing, which went out before the screenshots were
@@ -366,6 +475,7 @@ The foundation of the extension.
 - A jsdom based webview test harness with regression tests, and a browser preview
   harness for visual iteration.
 
+[0.7.0]: https://github.com/shayanline/devin-vscode/releases/tag/v0.7.0
 [0.6.93]: https://github.com/shayanline/devin-vscode/releases/tag/v0.6.93
 [0.6.92]: https://github.com/shayanline/devin-vscode/releases/tag/v0.6.92
 [0.6.63]: https://github.com/shayanline/devin-vscode/releases/tag/v0.6.63

@@ -84,7 +84,10 @@ export type ToolCallContent =
 export interface PlanEntry {
   content: string;
   priority?: "high" | "medium" | "low";
-  status?: "pending" | "in_progress" | "completed";
+  // ACP's core statuses are pending/in_progress/completed. The agent may also
+  // mark an entry it decided not to do as skipped (or cancelled); both render as
+  // a struck-through, dimmed row.
+  status?: "pending" | "in_progress" | "completed" | "skipped" | "cancelled";
 }
 
 export interface AvailableCommand {
