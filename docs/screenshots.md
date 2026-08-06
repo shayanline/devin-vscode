@@ -18,6 +18,12 @@ change without rebuilding the sample data from scratch.
 Each scenario uses a different model and task type on purpose, so the set shows
 the extension across a range of real work.
 
+`scripts/preview.js` also carries a `subagent` scenario with no image of its own,
+for working on the subagent block: two subagents in parallel, one finished and
+folded down to its report and one still running with its timeline mid flight.
+The image count has to stay even (see Size below), so it is a working scenario
+rather than a fifth screenshot.
+
 ## Size
 
 Every image is **620 by 860** pixels, with no exceptions. The README lays them

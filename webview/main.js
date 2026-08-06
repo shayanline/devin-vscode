@@ -1246,7 +1246,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // orphans it); true after a live turn completion or an instant restore.
   let lastHeadReliable = false;
   // Feature gates from the host (revert capability + settings).
-  let caps = { revert: false, editRequests: "inline", checkpoints: true, showFileChanges: true, confirmRemoval: true, verbose: true, progressBorder: true, contextUsage: true, inlineReferencesStyle: "box", thinkingStyle: "fixedScrolling", streamAnim: "rise" };
+  let caps = { revert: false, subagentControl: false, editRequests: "inline", checkpoints: true, showFileChanges: true, confirmRemoval: true, verbose: true, progressBorder: true, contextUsage: true, inlineReferencesStyle: "box", thinkingStyle: "fixedScrolling", streamAnim: "rise" };
   // Pending revert-preview requests keyed by token.
   const previewWaiters = new Map();
   let previewSeq = 0;
@@ -2417,6 +2417,238 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     return g;
   }
 
+  // --- Subagents -----------------------------------------------------------
+  // Work the agent delegates renders as one block per subagent, mirroring VS
+  // Code's chatSubagentContentPart: a collapsed row whose title shimmers while
+  // the subagent runs ("Explore: List the webview files \u2014 Read file", the
+  // suffix being the tool it is on), opening onto a timeline of its prompt, tool
+  // calls, streamed output and closing report. Parallel subagents are siblings,
+  // not a group. Keyed by the agentId the ACP `subagent_started` tag carries.
+  const subagentEls = new Map();
+
+  // VS Code's rotating-but-picked-once spinner labels (chatSubagentContentPart).
+  const SUBAGENT_WORKING = ["Processing", "Preparing", "Loading", "Analyzing", "Evaluating"];
+  const SUBAGENT_MAX_TITLE = 100;
+
+  function capitalise(s) {
+    return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
+  }
+
+  // Truncate on a word boundary, like VS Code's rcut for subagent titles.
+  function cutWords(text, max) {
+    const t = String(text || "").replace(/\s+/g, " ").trim();
+    if (t.length <= max) return t;
+    const cut = t.slice(0, max);
+    const sp = cut.lastIndexOf(" ");
+    return (sp > max / 2 ? cut.slice(0, sp) : cut) + "\u2026";
+  }
+
+  // Add a row to a subagent's timeline. Rows carry the rail and its icon; the
+  // prompt pins to the top and new work lands above the spinner and the report.
+  function insertSubagentItem(sub, contentNode, iconClass, extraClass, first) {
+    const row = document.createElement("div");
+    row.className = "subagent-item" + (extraClass ? " " + extraClass : "");
+    const icon = document.createElement("i");
+    icon.className = "codicon subagent-icon " + (iconClass || "");
+    row.appendChild(icon);
+    row.appendChild(contentNode);
+    const before = first ? sub.bodyEl.firstChild : sub.spinnerRow || sub.resultRow;
+    if (before) sub.bodyEl.insertBefore(row, before);
+    else sub.bodyEl.appendChild(row);
+    return { row, icon };
+  }
+
+  // The prompt and the report are collapsibles titled with their first line,
+  // opening onto the rest (VS Code's ChatCollapsibleMarkdownContentPart).
+  function subagentSection(text, fallbackTitle) {
+    const lines = String(text || "").split("\n");
+    let i = 0;
+    while (i < lines.length && !lines[i].trim()) i++;
+    const head = lines[i] ? lines[i].trim() : "";
+    const rest = lines.slice(i + 1).join("\n").trim();
+    const c = makeCollapsible("subagent-section", { startCollapsed: true });
+    const label = document.createElement("span");
+    label.className = "subagent-section-label";
+    label.textContent = cutWords(head || fallbackTitle, SUBAGENT_MAX_TITLE);
+    const chev = document.createElement("i");
+    chev.className = "codicon codicon-chevron-right subagent-section-chevron";
+    c.header.appendChild(label);
+    c.header.appendChild(chev);
+    if (rest) {
+      const body = document.createElement("div");
+      body.className = "subagent-section-body";
+      body.innerHTML = renderMarkdown(rest);
+      enhanceCodeBlocks(body);
+      enhanceAnchors(body);
+      c.body.appendChild(body);
+    } else {
+      c.root.classList.add("dv-nocollapse");
+    }
+    return c.root;
+  }
+
+  function updateSubagentTitle(sub) {
+    const d = sub.data;
+    const prefix = capitalise(d.profile || "Subagent");
+    sub.titleEl.textContent = prefix + ": " + d.title;
+    sub.detailEl.textContent = d.active && d.lastTool ? " \u2014 " + d.lastTool : "";
+    sub.header.setAttribute("aria-label", sub.titleEl.textContent + sub.detailEl.textContent);
+  }
+
+  // Foreground and background are switchable while the subagent runs (the CLI's
+  // Ctrl+B). The agent acknowledges nothing, so the button flips optimistically
+  // and only a failure is sent back.
+  function renderSubagentActions(sub, id) {
+    sub.actionsEl.innerHTML = "";
+    if (!caps.subagentControl || !sub.data.active) return;
+    const toBackground = !sub.data.background;
+    const b = document.createElement("button");
+    b.className = "subagent-action";
+    b.title = toBackground ? "Run in background" : "Bring to foreground";
+    b.setAttribute("aria-label", b.title);
+    const i = document.createElement("i");
+    i.className = "codicon " + (toBackground ? "codicon-clock" : "codicon-device-desktop");
+    b.appendChild(i);
+    b.addEventListener("click", (e) => {
+      e.stopPropagation();
+      sub.data.background = toBackground;
+      vscode.postMessage({ type: "subagentMode", id, background: toBackground });
+      renderSubagentActions(sub, id);
+    });
+    sub.actionsEl.appendChild(b);
+  }
+
+  function ensureSubagentSpinner(sub) {
+    if (sub.spinnerRow || !sub.data.active) return;
+    const label = document.createElement("span");
+    label.className = "subagent-spinner-label dv-shimmer";
+    label.textContent = SUBAGENT_WORKING[Math.floor(Math.random() * SUBAGENT_WORKING.length)];
+    sub.spinnerRow = insertSubagentItem(sub, label, "codicon-circle-filled", "subagent-spinner").row;
+  }
+
+  function startSubagent(m) {
+    let sub = subagentEls.get(m.id);
+    if (!sub) {
+      finalizeBlock();
+      hideWorking();
+      hideWelcome();
+      ensureTurn();
+      // A subagent is its own part, so it ends the surrounding run of tools.
+      breakToolGroup();
+      const c = makeCollapsible("subagent subagent-active", { startCollapsed: true });
+      // VS Code leaves the header glyph out, which reads fine there because the
+      // Agents window frames it. Standing alone in a transcript the row needs to
+      // say what it is, so it leads with the agent glyph the way a grouped tool
+      // run leads with codicon-tools.
+      const glyph = document.createElement("i");
+      glyph.className = "codicon codicon-agent subagent-glyph";
+      const title = document.createElement("span");
+      title.className = "subagent-title dv-shimmer";
+      const detail = document.createElement("span");
+      detail.className = "subagent-detail";
+      const actions = document.createElement("span");
+      actions.className = "subagent-actions";
+      const chev = document.createElement("i");
+      chev.className = "codicon codicon-chevron-right subagent-chevron";
+      c.header.appendChild(glyph);
+      c.header.appendChild(title);
+      c.header.appendChild(detail);
+      c.header.appendChild(actions);
+      c.header.appendChild(chev);
+      const bodyEl = document.createElement("div");
+      bodyEl.className = "subagent-body";
+      c.body.appendChild(bodyEl);
+      respTarget().appendChild(c.root);
+      sub = {
+        node: c.root, header: c.header, titleEl: title, detailEl: detail, actionsEl: actions,
+        bodyEl, collapse: c, spinnerRow: null, resultRow: null, prose: null, data: {}
+      };
+      subagentEls.set(m.id, sub);
+    }
+    Object.assign(sub.data, {
+      title: cutWords(m.title || "Running subagent", SUBAGENT_MAX_TITLE),
+      titleFromAgent: !!m.title,
+      profile: m.profile || "",
+      background: m.background === true,
+      active: true,
+      lastTool: ""
+    });
+    if (m.task && !sub.promptRow) {
+      sub.promptRow = insertSubagentItem(sub, subagentSection(m.task, "Prompt"), "codicon-comment", "subagent-prompt", true).row;
+    }
+    ensureSubagentSpinner(sub);
+    renderSubagentActions(sub, m.id);
+    updateSubagentTitle(sub);
+    scrollToBottom();
+  }
+
+  // The subagent's own narration and reasoning, streamed into the timeline. Each
+  // run of chunks is one row; a tool call closes it, so the order of what it
+  // said and what it did is preserved.
+  function appendSubagentChunk(m) {
+    const sub = subagentEls.get(m.parentId);
+    if (!sub || !m.text) return;
+    if (!sub.prose || sub.prose.stream !== m.stream) {
+      const content = document.createElement("div");
+      content.className = "subagent-prose-content";
+      const thought = m.stream === "thought";
+      insertSubagentItem(sub, content, thought ? "codicon-lightbulb" : "codicon-comment",
+        "subagent-prose" + (thought ? " subagent-thought" : ""));
+      sub.prose = { stream: m.stream, content, buffer: "" };
+    }
+    sub.prose.buffer += m.text;
+    sub.prose.content.innerHTML = renderMarkdown(sub.prose.buffer);
+    scrollToBottom();
+  }
+
+  // Also accepts a report for an already settled block: a background subagent
+  // outlives the turn that spawned it, so its report can arrive after the block
+  // has been folded away.
+  function endSubagent(m) {
+    const sub = subagentEls.get(m.id);
+    if (!sub || (!sub.data.active && !m.summary)) return;
+    sub.data.active = false;
+    sub.data.lastTool = "";
+    // With nothing of its own to show for it, say so the way the CLI does.
+    if (!sub.data.titleFromAgent) sub.data.title = "Ran subagent";
+    sub.node.classList.remove("subagent-active");
+    sub.node.classList.toggle("subagent-failed", m.success === false);
+    sub.prose = null;
+    if (sub.spinnerRow) {
+      sub.spinnerRow.remove();
+      sub.spinnerRow = null;
+    }
+    if (m.summary && !sub.resultRow) {
+      sub.resultRow = insertSubagentItem(
+        sub, subagentSection(m.summary, "Result"),
+        m.success === false ? "codicon-error" : "codicon-check", "subagent-result"
+      ).row;
+    }
+    renderSubagentActions(sub, m.id);
+    updateSubagentTitle(sub);
+    // A finished subagent folds away, unless the user opened it to watch.
+    if (!sub.collapse.userToggled()) sub.collapse.setCollapsed(true);
+  }
+
+  // The host only sends this to put the button back when a mode switch failed.
+  function setSubagentBackground(m) {
+    const sub = subagentEls.get(m.id);
+    if (!sub) return;
+    sub.data.background = m.background === true;
+    renderSubagentActions(sub, m.id);
+  }
+
+  // A turn can end without a report (interrupted, or the parent moved on), so
+  // no block is left shimmering. Mirrors VS Code finalising on response end.
+  // A background subagent is left alone: it keeps working after the turn that
+  // spawned it and reports later. `all` settles those too, for a replayed
+  // transcript where no report is ever coming.
+  function finalizeSubagents(all) {
+    subagentEls.forEach((sub, id) => {
+      if (sub.data.active && (all || !sub.data.background)) endSubagent({ id });
+    });
+  }
+
   function upsertTool(m) {
     hideWorking();
     let entry = toolEls.get(m.id);
@@ -2441,8 +2673,18 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       const bodyEl = document.createElement("div");
       bodyEl.className = "tool-body";
       c.body.appendChild(bodyEl);
-      const group = placeToolNode(node, m.id);
-      entry = { node, kindIcon, label, statEl, bodyEl, data: {}, collapse: c, group };
+      // A subagent's tool joins that subagent's timeline instead of the turn's
+      // tool run, and shows its icon on the rail rather than in its own header.
+      const sub = m.parentId ? subagentEls.get(m.parentId) : null;
+      let railIcon = null;
+      let group = null;
+      if (sub) {
+        sub.prose = null;
+        railIcon = insertSubagentItem(sub, node, "", "subagent-tool").icon;
+      } else {
+        group = placeToolNode(node, m.id);
+      }
+      entry = { node, kindIcon, label, statEl, bodyEl, data: {}, collapse: c, group, sub, railIcon };
       toolEls.set(m.id, entry);
     }
     // Merge incrementally: updates may carry only some fields.
@@ -2462,7 +2704,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     if (entry.group) updateToolGroup(entry.group);
     const info = toolInfo(d);
     const typeIcon = info && TOOL_TYPE_ICONS[info.type];
-    entry.kindIcon.className = "codicon tool-kind " + (typeIcon || TOOL_KIND_ICONS[d.kind] || TOOL_KIND_ICONS.other);
+    const kindIconClass = typeIcon || TOOL_KIND_ICONS[d.kind] || TOOL_KIND_ICONS.other;
+    entry.kindIcon.className = "codicon tool-kind " + kindIconClass;
+    if (entry.railIcon) entry.railIcon.className = "codicon subagent-icon " + kindIconClass;
     entry.statEl.className = "codicon tool-status " + statusIcon(d.status);
     setToolLabel(entry.label, d.title);
     renderToolBody(entry);
@@ -2473,6 +2717,16 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         if (l && l.path && !currentTurn.refs.has(l.path)) currentTurn.refs.set(l.path, { path: l.path, line: l.line });
       });
       renderUsedRefs(currentTurn);
+    }
+    // A subagent's work is reported in its own header, not the window's, so a
+    // background subagent cannot talk over the main agent's progress.
+    if (entry.sub) {
+      if (d.status === "in_progress" && d.title) {
+        entry.sub.data.lastTool = String(d.title).replace(/\s+/g, " ").trim();
+        updateSubagentTitle(entry.sub);
+      }
+      scrollToBottom();
+      return;
     }
     // Inline progress: reflect the running tool in the header status.
     if (d.status === "in_progress" && d.title) {
@@ -3929,7 +4183,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     while (el.thread.firstChild) frag.appendChild(el.thread.firstChild);
     views.set(curSessionId, {
       frag, turns, currentTurn, turnSeq, lastHead, lastHeadReliable,
-      toolEls: new Map(toolEls), terminalCache: new Map(terminalCache),
+      toolEls: new Map(toolEls), subagentEls: new Map(subagentEls), terminalCache: new Map(terminalCache),
       commands: commands.slice(), title: currentTitle, lastUserText, draft: el.input.value
     });
     // Per session: the next session must not inherit this one's last message
@@ -3950,6 +4204,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     turns = [];
     currentTurn = null;
     toolEls.clear();
+    subagentEls.clear();
     terminalCache.clear();
     // Reset the transient per-session UI that is NOT part of the moved DOM, so
     // the previous session's working-set deltas, context-usage ring and docked
@@ -3985,6 +4240,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     lastHeadReliable = !!v.lastHeadReliable;
     toolEls.clear();
     v.toolEls.forEach((val, k) => toolEls.set(k, val));
+    subagentEls.clear();
+    (v.subagentEls || new Map()).forEach((val, k) => subagentEls.set(k, val));
     terminalCache.clear();
     v.terminalCache.forEach((val, k) => terminalCache.set(k, val));
     commands = v.commands || [];
@@ -4231,6 +4488,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       }
       // Move the live plan into the transcript as history and undock it.
       if (wasBusy) commitPlanSnapshot();
+      finalizeSubagents();
     }
   }
 
@@ -4655,6 +4913,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         renderQueued([]);
         renderAttachments([]);
         toolEls.clear();
+        subagentEls.clear();
         if (block && block.timer) clearInterval(block.timer);
         block = null;
         el.usage.classList.add("hidden");
@@ -4668,8 +4927,11 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         break;
       case "loaded":
         // Settle the last replayed block so its mermaid diagrams render and no
-        // block stays open to catch a later stray chunk.
+        // block stays open to catch a later stray chunk. A replayed background
+        // subagent has no report to close it (the CLI does not keep one), so it
+        // has to be settled here too.
         finalizeBlock();
+        finalizeSubagents(true);
         { const l = el.thread.querySelector(".thread-loading"); if (l) l.remove(); }
         // Reveal the transcript now the replay has settled, before we scroll.
         stopThreadLoading();
@@ -4699,6 +4961,10 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       case "plan": renderPlan(m.entries); break;
       case "toolCall":
       case "toolCallUpdate": upsertTool(m); break;
+      case "subagentStart": startSubagent(m); break;
+      case "subagentChunk": appendSubagentChunk(m); break;
+      case "subagentEnd": endSubagent(m); break;
+      case "subagentMode": setSubagentBackground(m); break;
       case "fileChange": addFileChange(m); break;
       case "workingSet": renderWorkingSet(m.files); break;
       case "queued": renderQueued(m.items); break;
@@ -4724,6 +4990,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       case "capabilities":
         caps = Object.assign(caps, {
           revert: !!m.revert,
+          subagentControl: !!m.subagentControl,
           editRequests: m.editRequests || caps.editRequests,
           checkpoints: m.checkpoints !== undefined ? !!m.checkpoints : caps.checkpoints,
           showFileChanges: m.showFileChanges !== undefined ? !!m.showFileChanges : caps.showFileChanges,

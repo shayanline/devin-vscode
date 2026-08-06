@@ -185,6 +185,32 @@ const SCENARIOS = {
     { type: "busy", value: false },
     { type: "usage", used: 33750, size: 200000, cost: 0.07 }
   ],
+  // Two subagents running in parallel: one still working (shimmering title, its
+  // prompt, streamed output and nested tool calls on the timeline) and one that
+  // has finished and folded back down to its report.
+  subagent: [
+    { type: "ready" },
+    { type: "body", body: "thread" },
+    { type: "capabilities", revert: true, subagentControl: true, contextUsage: true },
+    options("claude-sonnet-4-5"),
+    { type: "userMessage", text: "Work out how sessions are persisted and how the status bar is wired up, in parallel." },
+    { type: "busy", value: true },
+    { type: "assistantStart" },
+    { type: "assistantChunk", text: "Two independent questions, so I'll send an explore subagent after each." },
+    { type: "subagentStart", id: "sa1", profile: "Explore", background: true, title: "Map session persistence",
+      task: "Work out how a session is persisted between reloads.\n\nStart at `src/session/sessionStore.ts` and `src/session/sessionList.ts`, then trace who calls them from `src/chat/`. Report the storage key, what is written, and when it is read back. Do not change anything." },
+    { type: "subagentChunk", parentId: "sa1", stream: "thought", text: "The store is the obvious entry point, so I will read it first and follow the callers from there." },
+    { type: "toolCall", id: "sa1-t1", parentId: "sa1", title: "Read src/session/sessionStore.ts", kind: "read", status: "completed", locations: [{ path: "src/session/sessionStore.ts" }] },
+    { type: "toolCall", id: "sa1-t2", parentId: "sa1", title: "Grep for sessionStore", kind: "search", status: "completed", rawInput: { query: "sessionStore" } },
+    { type: "subagentChunk", parentId: "sa1", stream: "message", text: "Sessions are kept in workspace state under a single key, written on every turn and read back when the panel boots." },
+    { type: "subagentEnd", id: "sa1", success: true, summary: "Sessions persist in VS Code workspace state, not on disk.\n\n`SessionStore` (`src/session/sessionStore.ts`) owns one `devin.sessions` key holding an id to metadata map. `ChatManager` writes through it whenever a turn completes, and reads the whole map back on activation to rebuild the session list." },
+    { type: "subagentStart", id: "sa2", profile: "Explore", background: false, title: "Trace the status bar wiring",
+      task: "Explain how the status bar item is created, updated, and disposed.\n\nRead `src/ui/statusBar.ts` and find every caller. Cover the click command, the hover tooltip, and which state changes trigger a re-render. Read only." },
+    { type: "toolCall", id: "sa2-t1", parentId: "sa2", title: "Read src/ui/statusBar.ts", kind: "read", status: "completed", locations: [{ path: "src/ui/statusBar.ts", line: 33 }] },
+    { type: "subagentChunk", parentId: "sa2", stream: "message", text: "One `StatusBarItem` is created on activation and re-rendered from a small state object." },
+    { type: "toolCall", id: "sa2-t2", parentId: "sa2", title: "Grep for showInfo", kind: "search", status: "in_progress", rawInput: { query: "devin.showInfo" } },
+    { type: "usage", used: 52400, size: 200000, cost: 0.12 }
+  ],
   // The session browser: two workspace folders, grouped, with every liveness
   // state (running / waiting / waking / not running) and varied ages.
   sessions: [
