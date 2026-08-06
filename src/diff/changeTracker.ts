@@ -8,6 +8,10 @@ interface Snapshot {
   // file, but the working set is per session: each chat shows what it changed,
   // and reopening one gets its own files back rather than the last chat's.
   sessions: Set<string>;
+  // Kept or undone: out of the working set, but the original text is still held
+  // so an open diff keeps rendering against it. Dropping it outright made the
+  // left hand side resolve to empty, which drew the whole file as newly added.
+  resolved?: boolean;
 }
 
 // Tracks agent file edits so the user can review them as native diffs and
@@ -57,11 +61,16 @@ export class ChangeTracker
     return vscode.Disposable.from(...disposables);
   }
 
-  // QuickDiffProvider: the "original" to diff the working file against.
+  // QuickDiffProvider: the "original" to diff the working file against. A file
+  // whose change has been kept or undone has nothing left to review, so it gets
+  // no gutter markers.
   provideOriginalResource(uri: vscode.Uri): vscode.Uri | undefined {
-    return this.snapshots.has(uri.fsPath) ? this.originalUri(uri.fsPath) : undefined;
+    const snap = this.snapshots.get(uri.fsPath);
+    return snap && !snap.resolved ? this.originalUri(uri.fsPath) : undefined;
   }
 
+  // The original text, including for a resolved file, so a diff the user still
+  // has open keeps rendering against what the file really was.
   provideTextDocumentContent(uri: vscode.Uri): string {
     const fsPath = uri.query || uri.fsPath;
     return this.snapshots.get(fsPath)?.original ?? "";
@@ -71,6 +80,9 @@ export class ChangeTracker
     const snap = this.snapshots.get(fsPath);
     if (snap) {
       snap.sessions.add(sessionId);
+      // Edited again after being kept or undone: back into the working set,
+      // still against the text the file had before Devin first touched it.
+      snap.resolved = false;
     } else {
       this.snapshots.set(fsPath, { original: oldText, sessions: new Set([sessionId]) });
     }
@@ -78,28 +90,33 @@ export class ChangeTracker
     this.refreshGroup();
   }
 
-  // Every tracked file, whichever chat changed it: what the Source Control view
-  // and "Open all" work on.
+  // Every file still awaiting review, whichever chat changed it: what the Source
+  // Control view and "Open all" work on.
   changedPaths(): string[] {
-    return [...this.snapshots.keys()];
+    return [...this.snapshots].filter(([, s]) => !s.resolved).map(([p]) => p);
   }
 
-  // What one chat changed, which is what its panel shows as the working set.
+  // What one chat changed and has not resolved, which is its working set.
   pathsFor(sessionId?: string): string[] {
     if (!sessionId) {
       return [];
     }
-    return [...this.snapshots].filter(([, s]) => s.sessions.has(sessionId)).map(([p]) => p);
+    return [...this.snapshots].filter(([, s]) => !s.resolved && s.sessions.has(sessionId)).map(([p]) => p);
   }
 
+  // Whether an original is held for this file, kept or undone included: a revert
+  // has to be able to put back a change the user had already accepted.
   hasChange(fsPath: string): boolean {
     return this.snapshots.has(fsPath);
   }
 
-  // Stop tracking one chat's files, leaving them on disk as they are (used after
-  // a revert, which has already put the files back itself).
+  // Forget one chat's files entirely, leaving them on disk as they are (used
+  // after a revert, which has already put the files back itself).
   clearFor(sessionId: string): void {
-    for (const p of this.pathsFor(sessionId)) {
+    for (const [p, snap] of [...this.snapshots]) {
+      if (!snap.sessions.has(sessionId)) {
+        continue;
+      }
       this.snapshots.delete(p);
       this.contentChanged.fire(this.originalUri(p));
     }
@@ -132,35 +149,36 @@ export class ChangeTracker
     }
   }
 
-  // Accept: keep the current content, stop tracking the file.
+  // Keep: leave the current content alone and drop the file from the working
+  // set. The original text stays held (see provideTextDocumentContent), and no
+  // content change is fired because nothing about the original changed.
   accept(fsPath?: string): void {
-    if (!fsPath) {
+    const snap = fsPath ? this.snapshots.get(fsPath) : undefined;
+    if (!snap) {
       return;
     }
-    this.snapshots.delete(fsPath);
-    this.contentChanged.fire(this.originalUri(fsPath));
+    snap.resolved = true;
     this.refreshGroup();
   }
 
-  // Reject: restore the original content (or delete the file if it was new).
+  // Undo: restore the original content (or delete the file if it was new), then
+  // drop it from the working set. The original stays held so an open diff renders
+  // against it, now showing no difference, rather than the whole file as added.
   async reject(fsPath?: string): Promise<void> {
-    if (!fsPath) {
+    const snap = fsPath ? this.snapshots.get(fsPath) : undefined;
+    if (!fsPath || !snap) {
       return;
     }
-    const snap = this.snapshots.get(fsPath);
-    if (snap) {
-      try {
-        if (snap.original === null) {
-          await fs.promises.rm(fsPath, { force: true });
-        } else {
-          await fs.promises.writeFile(fsPath, snap.original, "utf8");
-        }
-      } catch {
-        // ignore write failures; still drop from the working set
+    try {
+      if (snap.original === null) {
+        await fs.promises.rm(fsPath, { force: true });
+      } else {
+        await fs.promises.writeFile(fsPath, snap.original, "utf8");
       }
+    } catch {
+      // ignore write failures; still drop from the working set
     }
-    this.snapshots.delete(fsPath);
-    this.contentChanged.fire(this.originalUri(fsPath));
+    snap.resolved = true;
     this.refreshGroup();
   }
 

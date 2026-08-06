@@ -1796,3 +1796,95 @@ test("switching sessions keeps each one's plan and changed files", async () => {
   );
   assert.strictEqual(h.errors().length, 0, "switching threw: " + JSON.stringify(h.errors()));
 });
+
+test("the sessions panel side follows the setting, and moves the toggle with it", async () => {
+  const h = createHarness();
+  const chat = h.document.getElementById("chat");
+  // jsdom reports no layout, so say how wide the chat area is: wide enough for a
+  // docked panel to begin with.
+  let width = 1000;
+  Object.defineProperty(chat, "clientWidth", { get: () => width, configurable: true });
+
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "capabilities", revert: true, panelSide: "right" });
+  await h.settle(10);
+  const icon = () => h.document.querySelector("#panel-toggle .codicon").className;
+  assert.strictEqual(chat.dataset.panelSide, "right", "the layout is driven from one attribute");
+  assert.match(icon(), /layout-sidebar-right/, "the toggle points at the side it opens on");
+
+  h.post({ type: "capabilities", revert: true, panelSide: "left" });
+  await h.settle(10);
+  assert.strictEqual(chat.dataset.panelSide, "left");
+  assert.match(icon(), /layout-sidebar-left/);
+
+  // Too narrow for a docked panel: the same button becomes the session switcher,
+  // whichever side it sits on.
+  width = 420;
+  h.post({ type: "capabilities", revert: true, panelSide: "right" });
+  await h.settle(10);
+  assert.match(icon(), /list-tree/, "no room for a docked panel means the switcher");
+  assert.strictEqual(h.document.getElementById("panel-toggle").title, "Switch session");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("dragging the panel header to the other half moves and remembers the side", async () => {
+  const h = createHarness();
+  const chat = h.document.getElementById("chat");
+  // Wide enough for the docked panel, with a box so the drag knows its midpoint.
+  Object.defineProperty(chat, "clientWidth", { value: 1000, configurable: true });
+  chat.getBoundingClientRect = () => ({ left: 0, top: 0, right: 1000, bottom: 800, width: 1000, height: 800 });
+
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "capabilities", revert: true, panelSide: "right" });
+  h.post({ type: "sessions", sessions: [{ id: "A", short_id: "A", title: "A", working_directory: "/w" }], activeId: "A", statuses: { A: "idle" } });
+  await h.settle(10);
+  h.document.getElementById("panel-toggle").click();
+  await h.settle(10);
+
+  const toolbar = h.document.querySelector("#sessions-panel .session-toolbar");
+  assert.ok(toolbar, "the docked panel is mounted");
+  assert.ok(toolbar.classList.contains("session-toolbar-movable"), "and its header is the grab handle");
+
+  const down = (x) => toolbar.dispatchEvent(new h.window.MouseEvent("mousedown", { clientX: x, clientY: 20, bubbles: true, button: 0 }));
+  // The drag is tracked on the document, so that is where the rest is dispatched.
+  const at = (type, x) => h.document.dispatchEvent(new h.window.MouseEvent(type, { clientX: x, clientY: 20, bubbles: true, button: 0 }));
+
+  // A press with no movement is a click, not a move: the side must not change.
+  down(800);
+  at("mouseup", 800);
+  await h.settle(5);
+  assert.strictEqual(chat.dataset.panelSide, "right", "a click does not move the panel");
+  assert.ok(!h.posted.some((m) => m.type === "setConfig"), "and nothing is written to settings");
+
+  // Drag past the midpoint: the target edge is marked, then committed on release.
+  down(800);
+  at("mousemove", 700);
+  at("mousemove", 200);
+  assert.strictEqual(chat.dataset.dropSide, "left", "the edge it would land on is highlighted");
+  assert.ok(h.document.body.classList.contains("dv-panel-dragging"), "and the pointer shows a drag");
+  at("mouseup", 200);
+  await h.settle(10);
+
+  assert.strictEqual(chat.dataset.panelSide, "left", "the panel moves on release");
+  assert.strictEqual(chat.dataset.dropSide, undefined, "the drop marker is cleared");
+  assert.ok(!h.document.body.classList.contains("dv-panel-dragging"));
+  assert.ok(
+    h.posted.some((m) => m.type === "setConfig" && m.key === "sessionsPanel.side" && m.value === "left"),
+    "and the choice is remembered in settings"
+  );
+
+  // Dragging back to the same side it is already on is a no-op.
+  const writes = h.posted.filter((m) => m.type === "setConfig").length;
+  down(200);
+  at("mousemove", 100);
+  assert.strictEqual(chat.dataset.dropSide, "", "no marker when it would not move");
+  at("mouseup", 100);
+  await h.settle(5);
+  assert.strictEqual(h.posted.filter((m) => m.type === "setConfig").length, writes, "and nothing is rewritten");
+  assert.strictEqual(h.errors().length, 0);
+});
