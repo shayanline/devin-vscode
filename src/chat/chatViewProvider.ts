@@ -153,7 +153,7 @@ export class ChatController implements AcpHost {
     private readonly output: vscode.OutputChannel,
     private readonly kind: "view" | "editor" = "view"
   ) {
-    this.changeListSub = this.changes.onDidChangeList((paths) => this.postWorkingSet(paths));
+    this.changeListSub = this.changes.onDidChangeList(() => this.postWorkingSet());
     this.implicitEnabled = this.cfg().get<boolean>("implicitContext.enabled", true);
     // Keep the implicit "current file" pill in sync with the active editor and
     // its selection (the latter debounced, since selection changes fire often).
@@ -216,10 +216,13 @@ export class ChatController implements AcpHost {
     return [{ type: "resource_link", uri: uri.toString(), name: path.basename(uri.fsPath) }];
   }
 
-  private postWorkingSet(paths: string[]): void {
+  // The working set is what the visible session changed. Other sessions keep
+  // their own edits tracked (reopening one gets its files back), and the Source
+  // Control view still lists everything.
+  private postWorkingSet(): void {
     this.post({
       type: "workingSet",
-      files: paths.map((p) => ({ path: p, name: path.basename(p) }))
+      files: this.changes.pathsFor(this.activeId).map((p) => ({ path: p, name: path.basename(p) }))
     });
   }
 
@@ -912,7 +915,7 @@ export class ChatController implements AcpHost {
         this.store.add(rt.id, cwd);
         this.store.setActive(rt.id);
         this.postCapabilities();
-        this.publishOptions(res.configOptions, res.modes?.currentModeId);
+        this.publishOptions(rt, res.configOptions, res.modes?.currentModeId);
         await this.applyDefaults(rt, res);
         this.post({ type: "sessionReady", sessionId: rt.id });
         this.ensureIdleTimer();
@@ -1074,9 +1077,9 @@ export class ChatController implements AcpHost {
     if (!(await this.ensureReady())) {
       return;
     }
-    // The previous session (if any) is left alive in the background.
+    // The previous session (if any) is left alive in the background and keeps its
+    // own edits tracked; the clear below starts this chat with an empty one.
     this.activeId = undefined;
-    this.changes.clear();
     this.attachments = [];
     this.focus();
     this.post({ type: "body", body: "thread" });
@@ -1134,7 +1137,6 @@ export class ChatController implements AcpHost {
       return;
     }
     this.activeId = id;
-    this.changes.clear();
     this.attachments = [];
     // A full reload rebuilds the whole transcript, so any buffered background
     // stream for this runtime is superseded.
@@ -1143,6 +1145,9 @@ export class ChatController implements AcpHost {
     }
     // "Waking session…" while a fresh acp spins up; a live one loads instantly.
     this.post({ type: "clear", loading: true, waking: !already });
+    // The clear empties the working set, so re-send this session's own pending
+    // edits: a reload does not throw away what it changed before.
+    this.postWorkingSet();
     if (!already) {
       this.starting.add(id);
     }
@@ -1166,8 +1171,7 @@ export class ChatController implements AcpHost {
       this.store.add(id, cwd);
       this.store.setActive(id);
       if (res && (res.configOptions || res.modes)) {
-        rt.mode = res.modes?.currentModeId || rt.mode;
-        this.publishOptions(res.configOptions, res.modes?.currentModeId);
+        this.publishOptions(rt, res.configOptions, res.modes?.currentModeId);
       } else {
         void this.publishInitialOptions();
       }
@@ -1234,7 +1238,7 @@ export class ChatController implements AcpHost {
     }
     this.activeId = id;
     this.store.setActive(id);
-    this.changes.clear();
+    this.postWorkingSet();
     // Drop the previous session's pending composer attachments so they do not
     // bleed into this one (loadSession/wakeSession/newSession all do the same).
     this.attachments = [];
@@ -1300,7 +1304,7 @@ export class ChatController implements AcpHost {
 
   private async doWakeSession(id: string): Promise<void> {
     this.activeId = id;
-    this.changes.clear();
+    this.postWorkingSet();
     this.attachments = [];
     const cwd = this.store.cwds()[id] || this.resolveNewSessionCwd();
     const rt = this.spawnRuntime(cwd);
@@ -1320,8 +1324,7 @@ export class ChatController implements AcpHost {
       this.store.add(id, cwd);
       this.store.setActive(id);
       if (res && (res.configOptions || res.modes)) {
-        rt.mode = res.modes?.currentModeId || rt.mode;
-        this.publishOptions(res.configOptions, res.modes?.currentModeId);
+        this.publishOptions(rt, res.configOptions, res.modes?.currentModeId);
       } else {
         void this.publishInitialOptions();
       }
@@ -1523,12 +1526,19 @@ export class ChatController implements AcpHost {
 
   // --- Mode + model --------------------------------------------------------
 
-  private publishOptions(options: ConfigOption[] | undefined, currentModeId?: string): void {
+  // `rt` is the session the options came from: its mode and model are recorded
+  // on it so switching back to the session later restores the pickers to what
+  // that session is actually set to, rather than the last session's or a default.
+  private publishOptions(rt: Runtime | undefined, options: ConfigOption[] | undefined, currentModeId?: string): void {
     const byId = new Map((options || []).map((o) => [o.id, o]));
     const modeOpt = byId.get("mode");
     const modelOpt = byId.get("model");
     this.currentMode = modeOpt?.currentValue || currentModeId || this.currentMode;
     this.currentModel = modelOpt?.currentValue || this.currentModel;
+    if (rt) {
+      rt.mode = modeOpt?.currentValue || currentModeId || rt.mode;
+      rt.model = modelOpt?.currentValue || rt.model;
+    }
     this.statusBar?.set({ connected: this.isReady(), mode: this.currentMode, model: this.currentModel });
     this.postModelOptions(this.currentModel || "adaptive");
   }
@@ -1551,8 +1561,11 @@ export class ChatController implements AcpHost {
     if (!families.length) {
       void listModelFamilies(this.resolvedCli || "devin", this.env).then((f) => {
         if (f.length) {
-          this.post({ ...payload, models: f });
-          this.store.cacheOptions({ ...payload, models: f });
+          // Listing takes seconds, so re-read the mode: the visible session may
+          // have changed by now and this post must not put the old one back.
+          const late = { ...payload, models: f, currentMode: this.currentMode || payload.currentMode };
+          this.post(late);
+          this.store.cacheOptions(late);
         }
       });
     }
@@ -1570,11 +1583,8 @@ export class ChatController implements AcpHost {
 
   // Populate the dropdowns before any session exists so they are never empty.
   // Modes are fixed; models come from `devin models list` (no session needed,
-  // and the uids match what the ACP model option accepts). A live session's
-  // own options still override these once one is created.
+  // and the uids match what the ACP model option accepts).
   private async publishInitialOptions(): Promise<void> {
-    const cfgMode = this.cfg().get<string>("defaultMode", "accept-edits");
-    const cfgModel = this.cfg().get<string>("defaultModel", "");
     let families: ModelFamily[] = [];
     try {
       families = await listModelFamilies(this.resolvedCli || "devin", this.env);
@@ -1587,12 +1597,20 @@ export class ChatController implements AcpHost {
         ? cached.models
         : [{ id: "adaptive", name: "Adaptive", default: "adaptive", variants: [{ value: "adaptive", name: "Adaptive" }] }];
     }
+    // Listing the models spawns the CLI, so this often resolves after a session
+    // has already been opened. Read the state only now, and let the visible
+    // session's own mode and model win: posting the configured defaults over
+    // them would show (say) Bypass on a session the agent is still asking
+    // permission for.
+    const live = this.active();
+    const mode = live?.mode || this.currentMode || this.cfg().get<string>("defaultMode", "accept-edits");
+    const model = live?.model || this.currentModel || this.cfg().get<string>("defaultModel", "");
     const payload = {
       type: "options",
       modes: ChatController.STATIC_MODES,
-      currentMode: cfgMode || "accept-edits",
+      currentMode: mode || "accept-edits",
       models: families,
-      currentModel: cfgModel || "adaptive"
+      currentModel: model || "adaptive"
     };
     this.store.cacheOptions(payload);
     this.post(payload);
@@ -1602,6 +1620,12 @@ export class ChatController implements AcpHost {
     const mode = this.cfg().get<string>("defaultMode", "accept-edits");
     const model = this.cfg().get<string>("defaultModel", "");
     const currentMode = res.modes?.currentModeId;
+    // Record the session's own mode first. The `current_mode_update` that
+    // announces it arrives before session/new returns, so the runtime is not in
+    // the pool yet to receive it, and a session that already starts in the
+    // configured mode would otherwise have no mode recorded at all.
+    rt.mode = currentMode || rt.mode;
+    this.currentMode = rt.mode || this.currentMode;
     try {
       if (mode && mode !== currentMode) {
         await rt.client.setConfigOption(rt.id, "mode", mode);
@@ -1627,7 +1651,6 @@ export class ChatController implements AcpHost {
   }
 
   private async setMode(mode: string): Promise<void> {
-    await this.cfg().update("defaultMode", mode, vscode.ConfigurationTarget.Workspace);
     this.currentMode = mode;
     const rt = this.active();
     if (rt) {
@@ -1637,6 +1660,14 @@ export class ChatController implements AcpHost {
       } catch (err) {
         this.log(`[set-mode-failed] ${err instanceof Error ? err.message : String(err)}`);
       }
+    }
+    // Remember it for the next chat, after the session itself has it: a settings
+    // write can fail (e.g. no workspace open) and that must never be what stops
+    // the mode reaching the agent.
+    try {
+      await this.cfg().update("defaultMode", mode, vscode.ConfigurationTarget.Workspace);
+    } catch (err) {
+      this.log(`[set-mode-persist-failed] ${err instanceof Error ? err.message : String(err)}`);
     }
     this.statusBar?.set({ connected: this.isReady(), mode: this.currentMode, model: this.currentModel });
     this.post({ type: "mode", mode });
@@ -1660,7 +1691,6 @@ export class ChatController implements AcpHost {
   }
 
   private async setModel(model: string): Promise<void> {
-    await this.cfg().update("defaultModel", model, vscode.ConfigurationTarget.Workspace);
     this.currentModel = model;
     const rt = this.active();
     if (rt) {
@@ -1670,6 +1700,11 @@ export class ChatController implements AcpHost {
       } catch (err) {
         this.log(`[set-model-failed] ${err instanceof Error ? err.message : String(err)}`);
       }
+    }
+    try {
+      await this.cfg().update("defaultModel", model, vscode.ConfigurationTarget.Workspace);
+    } catch (err) {
+      this.log(`[set-model-persist-failed] ${err instanceof Error ? err.message : String(err)}`);
     }
     this.statusBar?.set({ connected: this.isReady(), mode: this.currentMode, model: this.currentModel });
     this.post({ type: "model", model });
@@ -2012,7 +2047,6 @@ export class ChatController implements AcpHost {
     // Starting a fresh chat leaves the previous session alive in the background.
     if (startNew) {
       this.activeId = undefined;
-      this.changes.clear();
       this.attachments = [];
       // `pendingSend` tells the webview not to show the welcome screen on this
       // clear, and we render the user's message right away, so a new chat
@@ -2196,6 +2230,11 @@ export class ChatController implements AcpHost {
     const buffered = rt.bgBuffer;
     rt.bgBuffer = [];
     for (const payload of buffered) {
+      // Reasoning that streamed while the session was in the background renders
+      // in one go now, so it is timed no more usefully than a replay is.
+      if (payload.type === "thoughtChunk") {
+        payload.replayed = true;
+      }
       this.post(payload);
     }
     // The turn-boundary markers (assistantStart/End) are only posted for the
@@ -2276,8 +2315,8 @@ export class ChatController implements AcpHost {
       const preview = await rt.client.revertPreview(rt.id, head).catch(() => undefined);
       await rt.client.revertExecute(rt.id, head);
       await this.applyRevertFileUndo(preview);
-      // The working set now matches the reverted state; drop it.
-      this.changes.clear();
+      // The working set now matches the reverted state; drop this session's.
+      this.changes.clearFor(rt.id);
       this.post({ type: "reverted", head });
     } catch (err) {
       this.post({ type: "error", text: err instanceof Error ? err.message : String(err) });
@@ -2514,7 +2553,19 @@ export class ChatController implements AcpHost {
       case "agent_thought_chunk":
         if (this.cfg().get<boolean>("showThinking", true)) {
           if (parentId) this.emit(rt, { type: "subagentChunk", parentId, stream: "thought", text: textOf(u.content) });
-          else this.emit(rt, { type: "thoughtChunk", text: textOf(u.content), messageId: u.messageId });
+          // A replayed thought is not being timed: it already happened, so the
+          // panel must not present the replay's own elapsed time as how long
+          // Devin thought for. `cognition.ai/timestamp` cannot stand in for the
+          // duration (it is per message node, so a thought and the tool call it
+          // led to carry the same one), but it does say when it happened, which
+          // the panel shows on hover instead.
+          else this.emit(rt, {
+            type: "thoughtChunk",
+            text: textOf(u.content),
+            messageId: u.messageId,
+            replayed: rt?.replaying === true,
+            at: metaTimestamp(u)
+          });
         }
         return;
       case "plan":
@@ -2649,10 +2700,10 @@ export class ChatController implements AcpHost {
   }
 
   private recordDiffs(u: any, rt?: Runtime): void {
-    // Historical diffs from a session/load replay are already resolved, and
-    // edits from a background session belong to a transcript we are not showing.
-    // Only the visible, live session feeds the actionable working set.
-    if (!rt || rt.replaying || this.activeId !== rt.id) {
+    // Historical diffs from a session/load replay are already resolved, so they
+    // are not part of an actionable working set. A background session's edits
+    // are tracked under that session and shown when it is next opened.
+    if (!rt || rt.replaying) {
       return;
     }
     const content = Array.isArray(u.content) ? u.content : [];
@@ -2661,8 +2712,8 @@ export class ChatController implements AcpHost {
         const s = diffStat(c.oldText, c.newText);
         // Post the per-file counts before recordDiff fires the working-set list,
         // so the list renders with the deltas already known.
-        this.post({ type: "fileChange", path: c.path, added: s.added, removed: s.removed, created: c.oldText == null || c.oldText === "" });
-        this.changes.recordDiff(c.path, c.oldText ?? null, c.newText ?? "");
+        this.emit(rt, { type: "fileChange", path: c.path, added: s.added, removed: s.removed, created: c.oldText == null || c.oldText === "" });
+        this.changes.recordDiff(c.path, c.oldText ?? null, c.newText ?? "", rt.id);
       }
     }
   }
@@ -2853,13 +2904,13 @@ export class ChatController implements AcpHost {
     }
     await fs.promises.mkdir(path.dirname(full), { recursive: true });
     await fs.promises.writeFile(full, params.content, "utf8");
-    // Only the visible session's edits feed the working set (a background
-    // session's edits belong to a transcript we are not showing).
+    // The edit is tracked against the session that made it, so a background
+    // session's working set is waiting for it when it is next opened.
     const rt = this.runtimeBySessionId(params.sessionId);
-    if (rt && this.activeId === rt.id) {
+    if (rt) {
       const s = diffStat(original, params.content);
-      this.post({ type: "fileChange", path: full, added: s.added, removed: s.removed, created: original == null });
-      this.changes.recordDiff(full, original, params.content);
+      this.emit(rt, { type: "fileChange", path: full, added: s.added, removed: s.removed, created: original == null });
+      this.changes.recordDiff(full, original, params.content, rt.id);
     }
     // The agent's fs/write_text_file expects an (empty) object result; returning
     // null makes it report a spurious "Parse error" even though the write landed.
@@ -3019,6 +3070,13 @@ function subagentStarted(u: any): SubagentStarted | undefined {
 function subagentCompleted(u: any): SubagentCompleted | undefined {
   const c = u?._meta?.["cognition.ai/subagent_completed"];
   return c && typeof c.agentId === "string" ? (c as SubagentCompleted) : undefined;
+}
+
+// When the agent produced this update, as the CLI records it on the message node
+// it belongs to. Only useful on a replay: live content is happening now.
+function metaTimestamp(u: any): string | undefined {
+  const at = u?._meta?.["cognition.ai/timestamp"];
+  return typeof at === "string" && at ? at : undefined;
 }
 
 function subagentParent(u: any): string | undefined {

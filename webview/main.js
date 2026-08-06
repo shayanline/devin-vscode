@@ -365,15 +365,19 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     newSessionFloater = makeFloater(anchor, menu, "center", () => { newSessionFloater = null; });
   }
   // A split button, like VS Code's own: the labelled half starts a session right
-  // here, the chevron beside it offers the other places to open one.
-  function buildNewSessionButton() {
+  // here, the chevron beside it offers the other places to open one. `compact`
+  // drops the label for the narrow toolbar in the sessions panel and switcher,
+  // where the same split behaviour still applies.
+  function buildNewSessionButton(opts) {
+    const compact = !!(opts && opts.compact);
     const wrap = document.createElement("div");
-    wrap.className = "new-session-split";
+    wrap.className = "new-session-split" + (compact ? " new-session-compact" : "");
     const main = document.createElement("button");
     main.className = "new-session-btn";
     main.title = "New session";
+    main.setAttribute("aria-label", "New session");
     main.appendChild(mkIcon("new-session"));
-    main.appendChild(Object.assign(document.createElement("span"), { textContent: "New Session" }));
+    if (!compact) main.appendChild(Object.assign(document.createElement("span"), { textContent: "New Session" }));
     main.addEventListener("click", (e) => { e.stopPropagation(); vscode.postMessage({ type: "newSessionAt", target: "view" }); });
     const more = document.createElement("button");
     more.className = "new-session-more";
@@ -448,8 +452,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     // Drop any open question/permission widget: a still-pending one is re-posted
     // by the host when the session is reopened, so keeping it here would leave a
     // stale copy and double up on return.
-    el.elicitationTray.innerHTML = "";
-    el.permissionTray.innerHTML = "";
+    cancelPrompts();
     planCollapsePref = null;
     wsCollapsePref = null;
     hideDockedPlan();
@@ -2032,8 +2035,11 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       // A streaming peek collapses to the header when done (unless the user
       // expanded/collapsed it themselves).
       if (block.peek && block.collapse && !block.collapse.userToggled()) block.collapse.setCollapsed(true);
-      const secs = Math.max(1, Math.round((Date.now() - block.start) / 1000));
-      if (block.label) block.label.textContent = `Thought for ${secs}s`;
+      if (block.label) {
+        block.label.textContent = block.replayed
+          ? "Thought"
+          : `Thought for ${Math.max(1, Math.round((Date.now() - block.start) / 1000))}s`;
+      }
     }
     block = null;
   }
@@ -2060,6 +2066,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
 
   function appendAssistant(text, mid) {
     hideWorking();
+    let opened = false;
     if (!(block && block.kind === "assistant" && sameMid(block.mid, mid))) {
       finalizeBlock();
       hideWelcome();
@@ -2069,9 +2076,15 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       bubble.className = "resp-text bubble";
       respTarget().appendChild(bubble);
       block = { kind: "assistant", mid, bubble, buffer: "" };
+      opened = true;
     }
     block.buffer += text;
-    scheduleRender();
+    // A block's first chunk renders straight away: on a history replay a whole
+    // message arrives as one chunk, and deferring it to the next frame leaves an
+    // empty bubble between the tool cards until then. Later chunks keep the
+    // throttle, which is what stops a long stream re-parsing itself per token.
+    if (opened) renderOpenBlock();
+    else scheduleRender();
   }
 
   // An image produced in an assistant response (e.g. a browser screenshot or a
@@ -2091,8 +2104,14 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     scrollToBottom();
   }
 
-  function appendThought(text, mid) {
+  // `replayed` marks reasoning that is being re-rendered rather than streamed
+  // (a session load, or a background turn catching up). Its real duration is not
+  // recorded anywhere, so the block is labelled "Thought" with no time: a "1s"
+  // measured from the replay would be made up. `at` is when it originally
+  // happened, which the CLI does record, shown on hover.
+  function appendThought(text, mid, replayed, at) {
     hideWorking();
+    let opened = false;
     if (!(block && block.kind === "thinking" && sameMid(block.mid, mid))) {
       finalizeBlock();
       hideWelcome();
@@ -2106,23 +2125,28 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       chev.className = "codicon codicon-chevron-right thinking-chevron";
       const label = document.createElement("span");
       label.className = "thinking-label";
-      label.textContent = "Thinking\u2026";
+      label.textContent = replayed ? "Thought" : "Thinking\u2026";
+      if (replayed && at && caps.verbose) label.title = "Thought at " + fmtTime(at);
       c.header.appendChild(chev);
       c.header.appendChild(label);
       const bodyEl = document.createElement("div");
       bodyEl.className = "thinking-body";
       c.body.appendChild(bodyEl);
       respTarget().appendChild(c.root);
-      block = { kind: "thinking", mid, details: c.root, body: bodyEl, label, buffer: "", start: Date.now(), timer: null, peek, collapse: c, scrollEl: c.body };
+      block = { kind: "thinking", mid, details: c.root, body: bodyEl, label, buffer: "", start: Date.now(), timer: null, peek, collapse: c, scrollEl: c.body, replayed: !!replayed };
       const tb = block;
-      tb.timer = setInterval(() => {
-        if (!tb.label) return;
-        const secs = Math.max(1, Math.round((Date.now() - tb.start) / 1000));
-        tb.label.textContent = `Thinking\u2026 ${secs}s`;
-      }, 1000);
+      if (!replayed) {
+        tb.timer = setInterval(() => {
+          if (!tb.label) return;
+          const secs = Math.max(1, Math.round((Date.now() - tb.start) / 1000));
+          tb.label.textContent = `Thinking\u2026 ${secs}s`;
+        }, 1000);
+      }
+      opened = true;
     }
     block.buffer += text;
-    scheduleRender();
+    if (opened) renderOpenBlock();
+    else scheduleRender();
   }
 
   // A user turn streamed during history replay (user_message_chunk): starts a
@@ -2207,6 +2231,10 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     return box;
   }
 
+  // What the docked plan is currently showing, retained per session so switching
+  // away and back keeps it (the host does not re-send a plan on reopen).
+  let dockedPlan = [];
+
   function renderPlan(entries) {
     hideWorking();
     hideWelcome();
@@ -2220,6 +2248,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // once work is under way (a task is active or done) unless the user toggled.
   function renderDockedPlan(entries) {
     if (!entries.length) { hideDockedPlan(); return; }
+    dockedPlan = entries;
     const done = entries.filter((e) => e.status === "completed").length;
     let ctrl = el.todoWidget._ctrl;
     if (!ctrl) {
@@ -2257,6 +2286,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   }
 
   function hideDockedPlan() {
+    dockedPlan = [];
     el.todoWidget.classList.add("hidden");
     el.todoWidget.innerHTML = "";
     el.todoWidget._ctrl = null;
@@ -3157,6 +3187,22 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     return r;
   }
 
+  // The host re-posts every still-outstanding request when a session is
+  // reopened, so a widget is keyed by its request id and replaces the one
+  // already on screen. Without this, switching away and back stacks a fresh
+  // copy of the same question each time until they cover the transcript.
+  function trayMount(tray, widget, requestId) {
+    if (requestId) {
+      widget.dataset.requestId = requestId;
+      const open = tray.querySelector('[data-request-id="' + cssEscape(requestId) + '"]');
+      if (open) open.remove();
+    }
+    tray.appendChild(widget);
+  }
+  function cssEscape(v) {
+    return window.CSS && CSS.escape ? CSS.escape(v) : String(v).replace(/["\\\]]/g, "\\$&");
+  }
+
   function showPermission(data) {
     const box = cwShell();
     cwTitle(box, data.title || "Devin wants to run a tool");
@@ -3168,7 +3214,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         box.remove();
       }));
     });
-    el.permissionTray.appendChild(box);
+    trayMount(el.permissionTray, box, data.requestId);
   }
 
   function showElicitation(data) {
@@ -3194,7 +3240,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       const row = cwButtons(box);
       row.appendChild(btn("Open", "primary", () => finish("accept")));
       row.appendChild(btn("Decline", "secondary", () => finish("decline")));
-      el.elicitationTray.appendChild(box);
+      trayMount(el.elicitationTray, box, data.requestId);
       return;
     }
 
@@ -3251,7 +3297,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     step.className = "qc-step";
     const spacer = document.createElement("span");
     spacer.className = "qc-spacer";
-    const submit = btn("Submit", "primary", () => {
+    function submitAll() {
       controls.forEach((c) => c.el.classList.remove("elicit-invalid"));
       const bad = controls.findIndex((c) => !c.valid());
       if (bad >= 0) {
@@ -3266,7 +3312,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         return { title: c.prompt || c.title, answer: c.answerText() };
       });
       finish("accept", content, recap);
-    });
+    }
+    const submit = btn("Submit", "primary", submitAll);
     footer.appendChild(nav);
     footer.appendChild(step);
     footer.appendChild(spacer);
@@ -3286,16 +3333,39 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     qc.addEventListener("change", updateSubmitState);
     qc.addEventListener("input", updateSubmitState);
 
-    // Left/Right arrows step between questions (captured so a radio group does
-    // not consume them), except while typing in a text field.
+    // Keyboard: Left/Right step between questions (captured so a radio group does
+    // not consume them), except while typing in a text field. Enter answers and
+    // moves on, so a carousel can be filled in without reaching for the mouse:
+    // it goes to the next question, and submits on the last one. A newline in a
+    // free text answer is Shift+Enter, or Ctrl/Cmd+Enter. A focused button keeps
+    // its own Enter, so Cancel still cancels.
     qc.addEventListener("keydown", (e) => {
-      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
       const t = e.target;
-      const typing = t && (t.tagName === "TEXTAREA" || (t.tagName === "INPUT" && (t.type === "text" || t.type === "number")));
-      if (typing) return;
+      const inButton = t && t.tagName === "BUTTON";
+      const inTextarea = t && t.tagName === "TEXTAREA";
+      const typing = inTextarea || (t && t.tagName === "INPUT" && (t.type === "text" || t.type === "number"));
+      if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+        if (typing) return;
+        e.preventDefault();
+        e.stopPropagation();
+        show(e.key === "ArrowLeft" ? idx - 1 : idx + 1);
+        return;
+      }
+      if (e.key !== "Enter" || inButton) return;
+      if (e.shiftKey || e.altKey) return; // Shift+Enter is the newline
       e.preventDefault();
       e.stopPropagation();
-      show(e.key === "ArrowLeft" ? idx - 1 : idx + 1);
+      if (inTextarea && (e.ctrlKey || e.metaKey)) {
+        const at = t.selectionStart;
+        t.value = t.value.slice(0, at) + "\n" + t.value.slice(t.selectionEnd);
+        t.selectionStart = t.selectionEnd = at + 1;
+        // Lets the answer's own input handler grow the box and re-check Submit.
+        t.dispatchEvent(new Event("input", { bubbles: true }));
+        return;
+      }
+      if (e.ctrlKey || e.metaKey) return;
+      if (idx < controls.length - 1) show(idx + 1);
+      else submitAll();
     }, true);
 
     let idx = 0;
@@ -3315,7 +3385,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     }
     show(0);
     updateSubmitState();
-    el.elicitationTray.appendChild(qc);
+    trayMount(el.elicitationTray, qc, data.requestId);
   }
 
   // Builds one question block for an elicitation form. Returns the element plus
@@ -3475,6 +3545,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // Latest per-file +added/-removed counts, accumulated from fileChange events,
   // so the working set can show per-file and total line deltas like VS Code.
   const wsCounts = new Map();
+  // The files the working set is currently listing, retained per session so a
+  // switch restores this session's own pending edits.
+  let wsFiles = [];
 
   function countBadges(target, added, removed) {
     if (added) {
@@ -3496,6 +3569,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // cached so its collapsed state survives the frequent re-renders during a turn.
   function renderWorkingSet(files) {
     if (!files || files.length === 0) { hideWorkingSet(); return; }
+    wsFiles = files;
     el.workingSet.classList.remove("hidden");
     let ctrl = el.workingSet._ctrl;
     if (!ctrl) {
@@ -3572,6 +3646,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   }
 
   function hideWorkingSet() {
+    wsFiles = [];
     el.workingSet.classList.add("hidden");
     el.workingSet.innerHTML = "";
     el.workingSet._ctrl = null;
@@ -4002,7 +4077,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       titleLabel.textContent = "Sessions";
       const spacer = document.createElement("span");
       spacer.className = "session-tool-spacer";
-      const newBtn = mkTool("new-session", "New session", (b) => openNewSessionMenu(b));
+      const newBtn = buildNewSessionButton({ compact: true });
       const searchBtn = mkTool("search", "Search sessions", (b) => api.toggleSearch(b));
       const filterBtn = mkTool("list-filter", "Filter sessions", (b) => api.toggleFilter(b));
       toolbar.append(refreshBtn, titleLabel, spacer, newBtn, searchBtn, filterBtn);
@@ -4179,12 +4254,24 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     // Otherwise a frozen one comes back on return and the next turn adds a
     // second one beside it.
     hideWorking();
+    // The open question/permission widgets belong to the session we are leaving,
+    // and the host re-posts the ones still outstanding when it is reopened. They
+    // live in the composer, not the thread, so this snapshot does not carry them:
+    // leaving them up would show one session's question over another's
+    // transcript, and double up on return.
+    cancelPrompts();
     const frag = document.createDocumentFragment();
     while (el.thread.firstChild) frag.appendChild(el.thread.firstChild);
     views.set(curSessionId, {
       frag, turns, currentTurn, turnSeq, lastHead, lastHeadReliable,
       toolEls: new Map(toolEls), subagentEls: new Map(subagentEls), terminalCache: new Map(terminalCache),
-      commands: commands.slice(), title: currentTitle, lastUserText, draft: el.input.value
+      commands: commands.slice(), title: currentTitle, lastUserText, draft: el.input.value,
+      // The composer widgets live outside the thread, so they are kept here by
+      // value and put back by restoreView: the plan Devin is working through, the
+      // files it has changed and their line counts, and the context ring.
+      plan: dockedPlan.slice(), planCollapsePref,
+      wsFiles: wsFiles.slice(), wsCounts: new Map(wsCounts), wsCollapsePref,
+      usage: lastUsage
     });
     // Per session: the next session must not inherit this one's last message
     // (it backs ArrowUp recall and Retry) nor its unsent draft. Both are put
@@ -4208,9 +4295,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     terminalCache.clear();
     // Reset the transient per-session UI that is NOT part of the moved DOM, so
     // the previous session's working-set deltas, context-usage ring and docked
-    // plan do not bleed into the next view. The host clears its change set on
-    // every switch, so an empty start is correct here.
-    wsCounts.clear();
+    // plan do not bleed into the next view. Each was retained above and comes
+    // back with the session, and the host posts the working set for whichever
+    // session is opened next.
     wsCounts.clear();
     renderWorkingSet([]);
     lastUsage = null;
@@ -4246,6 +4333,15 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     v.terminalCache.forEach((val, k) => terminalCache.set(k, val));
     commands = v.commands || [];
     lastUserText = v.lastUserText || "";
+    // Put the composer widgets back: this session's plan, its changed files with
+    // their line counts, and its context usage.
+    planCollapsePref = v.planCollapsePref === undefined ? null : v.planCollapsePref;
+    wsCollapsePref = v.wsCollapsePref === undefined ? null : v.wsCollapsePref;
+    renderDockedPlan(v.plan || []);
+    wsCounts.clear();
+    (v.wsCounts || new Map()).forEach((val, k) => wsCounts.set(k, val));
+    renderWorkingSet(v.wsFiles || []);
+    if (v.usage) renderUsage(v.usage);
     // Put this session's own unsent draft back in the composer.
     el.input.value = v.draft || "";
     autosize();
@@ -4738,7 +4834,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     lastUsage = m;
     const pct = Math.round((m.used / m.size) * 100);
     el.usage.innerHTML = ringSvg(pct) + `<span class="usage-pct">${pct}%</span>`;
-    el.usage.title = "Context used \u2014 click for details";
+    el.usage.title = "Context used, click for details";
     el.usage.classList.remove("hidden");
     refreshUsagePopup();
   }
@@ -4786,8 +4882,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       text += `\n[exited ${sig ? "signal " + sig : "code " + (code == null ? "?" : code)}]`;
     }
     terminalCache.set(m.terminalId, { output: text, exitStatus: m.exitStatus });
-    const sel = window.CSS && CSS.escape ? CSS.escape(m.terminalId) : m.terminalId.replace(/["\\\]]/g, "\\$&");
-    el.thread.querySelectorAll(`pre[data-terminal="${sel}"]`).forEach((pre) => {
+    el.thread.querySelectorAll(`pre[data-terminal="${cssEscape(m.terminalId)}"]`).forEach((pre) => {
       pre.textContent = text || "\u2026";
       scrollToBottom();
     });
@@ -4956,7 +5051,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       case "assistantStart": finalizeBlock(); showWorking(); break;
       case "assistantChunk": appendAssistant(m.text, m.messageId); break;
       case "assistantImage": appendAssistantImage(m.mime, m.data); break;
-      case "thoughtChunk": appendThought(m.text, m.messageId); break;
+      case "thoughtChunk": appendThought(m.text, m.messageId, m.replayed, m.at); break;
       case "assistantEnd": hideWorking(); finalizeBlock(); break;
       case "plan": renderPlan(m.entries); break;
       case "toolCall":

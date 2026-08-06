@@ -7,6 +7,75 @@ All notable changes to **Devin for VS Code**, newest first.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
+## [0.8.1] - 2026-08-06
+
+A round of fixes for moving between sessions while Devin is waiting on you, plus
+the questions it asks and the widgets docked above the composer.
+
+### Highlights
+- A question Devin is waiting on is no longer duplicated. Leaving a session for
+  the list, or switching straight to another session, and coming back stacked a
+  second copy of the same question, and going back and forth stacked one more
+  each time until they covered the transcript. The widget now belongs to its
+  request, so reopening a session shows the one question that is still open.
+- A question also stays with the session that asked it. It used to hang over the
+  next session's transcript when you switched between them.
+- With a question open the transcript no longer disappears. Several stacked
+  questions grew the composer until the thread had no room left, which is why the
+  replies only came back once the questions were answered. The question and
+  permission trays now cap their height and scroll.
+- A resumed session comes back with its replies in place. Each message used to be
+  rendered a frame after its bubble was added, so a reloaded transcript flashed as
+  tool calls separated by blank gaps before the text arrived.
+- The mode picker tells the truth about the session it is showing. Listing the
+  models spawns the CLI, and when that finished after a session had opened it put
+  the configured default back over the session's real mode. That is how a chat
+  could read Bypass while Devin was still asking permission for every command.
+  Each session's own mode and model are now recorded and restored with it.
+- Switching sessions keeps each one's plan and changed files. Both live above the
+  composer, outside the transcript that was being retained, so they were dropped
+  on the way out and never came back. Each chat's pending edits are now tracked
+  under that chat: reopening it gets its own files back, and another chat's never
+  appear next to them. The context usage ring comes back with them.
+- A reloaded transcript no longer claims "Thought for 1s" for every block. How
+  long Devin thought for is not recorded anywhere, and the panel was timing the
+  replay itself. A replayed block now reads "Thought", with the time it originally
+  happened on hover.
+- Answering a set of questions no longer needs the mouse. Enter moves to the next
+  question and submits on the last one, so you can answer, Enter, answer, Enter
+  through the whole set. In a free text or "Other" answer, a newline is
+  Shift+Enter or Ctrl+Enter.
+- The sessions panel and the session switcher get the same New Session split
+  button as the list header: the icon starts a chat here, the chevron beside it
+  offers an editor tab, a window, or a terminal. They only had a button that
+  opened the menu.
+- A collapsed section takes only the height of its header. The docked plan kept a
+  strip of empty space under its header, so "Plan" and its count sat high in the
+  box instead of centred. The same strip was under a collapsed reasoning block and
+  a collapsed subagent.
+
+### Under the hood
+- Mode and model changes reach the agent before the preference is written to
+  settings, so a settings write that fails (an empty window has no workspace to
+  write to) can no longer be what stops Bypass reaching the session.
+- File edits are tracked per session in `ChangeTracker`, so each panel lists what
+  its own chat changed while the Source Control view still lists everything. A
+  background session's edits are tracked and its line counts buffered, so they are
+  waiting for it when it is opened rather than being thrown away.
+- The CLI does put a `cognition.ai/timestamp` on replayed updates, but it belongs
+  to the message node, so a thought and the tool call it led to carry the same
+  one: across a 229 block transcript every thought to next event delta was zero,
+  and the only non zero interval (the gap from the previous node) includes that
+  node's tool actually running, up to 198s in that sample. It says when, not how
+  long, so it is used for the hover and not for a duration.
+- A session's mode is recorded from its `session/new` result, since the
+  `current_mode_update` that announces it arrives before the call returns, while
+  the runtime is not yet in the pool to receive it.
+- New regression tests cover a re-posted question and permission, the switcher's
+  split button, a replayed message rendering as it arrives, a replayed thought
+  carrying no invented duration, Enter stepping through the questions, and a
+  session keeping its plan and changed files across a switch.
+
 ## [0.8.0] - 2026-08-06
 
 A feature sized release, so this moves to 0.8.0: Devin's subagents are now shown

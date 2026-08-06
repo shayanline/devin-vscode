@@ -1454,3 +1454,345 @@ test("host-initiated openSession opens the session like a click", async () => {
   assert.ok(h.posted.some((m) => m.type === "loadSession" && m.id === "aaa"), "opens the session");
   assert.strictEqual(h.errors().length, 0);
 });
+
+test("a re-posted question replaces the open one instead of stacking", async () => {
+  // The host re-posts every outstanding request whenever a session is reopened,
+  // so going back and forth used to leave one copy of the same question per
+  // visit, until they covered the whole transcript.
+  const h = createHarness();
+  const question = {
+    type: "elicitation",
+    requestId: "e1",
+    mode: "form",
+    message: "Which branch?",
+    schema: {
+      type: "object",
+      required: ["q0"],
+      properties: {
+        q0: { type: "string", title: "Branch", description: "Branch", oneOf: [{ const: "main", title: "main" }] }
+      }
+    }
+  };
+  const tray = () => h.document.getElementById("elicitation-tray");
+  const sessions = (activeId) => ({
+    type: "sessions",
+    activeId,
+    statuses: { A: "attention", B: "idle" },
+    folders: [{ path: "/w", name: "w" }],
+    sessions: [
+      { id: "A", short_id: "A", title: "A", working_directory: "/w" },
+      { id: "B", short_id: "B", title: "B", working_directory: "/w" }
+    ]
+  });
+  const rowFor = (title) =>
+    [...h.document.querySelectorAll("#sessions-list .session-item")]
+      .find((r) => r.textContent.includes(title))
+      .querySelector(".session-main");
+
+  // Open B first so it has a cached transcript, then A, which asks a question.
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "capabilities", revert: true });
+  h.post({ type: "sessionReady", sessionId: "B" });
+  h.post({ type: "userChunk", text: "hello from B" });
+  h.post({ type: "assistantEnd" });
+  h.post({ type: "body", body: "list" });
+  h.post(sessions(null));
+  await h.settle(20);
+  rowFor("A").click();
+  await h.settle(10);
+  h.post({ type: "clear", loading: true });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "userChunk", text: "hello from A" });
+  h.post({ type: "loaded" });
+  h.post(question);
+  h.post(sessions("A"));
+  await h.settle(20);
+  assert.strictEqual(tray().querySelectorAll(".qc").length, 1, "A shows its question");
+
+  // Switch to B: the question belongs to A, so it must not hang over B's thread.
+  h.document.getElementById("history-btn").click();
+  h.post(sessions(null));
+  await h.settle(10);
+  rowFor("B").click();
+  await h.settle(10);
+  assert.strictEqual(tray().querySelectorAll(".qc").length, 0, "B does not show A's question");
+
+  // Go back to A twice; the host re-posts the same still-pending request each
+  // time and it must never stack.
+  for (let i = 0; i < 2; i++) {
+    h.document.getElementById("history-btn").click();
+    h.post(sessions(null));
+    await h.settle(10);
+    rowFor("A").click();
+    h.post(question);
+    await h.settle(10);
+    assert.strictEqual(tray().querySelectorAll(".qc").length, 1, "only ever one copy of the question");
+    h.document.getElementById("history-btn").click();
+    h.post(sessions(null));
+    await h.settle(10);
+    rowFor("B").click();
+    await h.settle(10);
+  }
+  assert.strictEqual(h.errors().length, 0, "switching threw: " + JSON.stringify(h.errors()));
+});
+
+test("a re-posted permission replaces the open one instead of stacking", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  const perm = {
+    type: "permission",
+    requestId: "p1",
+    title: "Devin wants to run: `git push`",
+    options: [{ optionId: "allow", name: "Allow", kind: "allow" }, { optionId: "reject", name: "Reject", kind: "reject" }]
+  };
+  h.post(perm);
+  h.post(perm);
+  h.post(perm);
+  await h.settle(10);
+  assert.strictEqual(
+    h.document.getElementById("permission-tray").querySelectorAll(".cw").length,
+    1,
+    "the same permission request renders once"
+  );
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a replayed message renders its text as soon as it arrives", async () => {
+  // On a session load a whole message arrives as one chunk. Waiting for the next
+  // frame to render it left an empty bubble between the tool cards, so the
+  // transcript came back as tool calls separated by blank gaps.
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear", loading: true });
+  h.post({ type: "capabilities", revert: true });
+  h.post({ type: "userChunk", text: "the original question" });
+  h.post({ type: "assistantChunk", text: "the first answer" });
+  h.post({ type: "toolCall", id: "t1", title: "Read src/a.ts", kind: "read", status: "completed" });
+  h.post({ type: "assistantChunk", text: "the second answer" });
+
+  // No settle: nothing has had a chance to run on a later frame yet.
+  assert.deepStrictEqual(h.respTexts(), ["the first answer", "the second answer"]);
+  h.post({ type: "loaded" });
+  await h.settle(20);
+  assert.deepStrictEqual(h.respTexts(), ["the first answer", "the second answer"]);
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("the sessions switcher offers the same New Session split button", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "sessions", sessions: [], activeId: null, statuses: {} });
+  await h.settle(10);
+
+  // Narrow surfaces (and jsdom, which has no layout) open the switcher menu
+  // rather than the docked panel; both mount the same list controls.
+  h.document.getElementById("panel-toggle").click();
+  await h.settle(10);
+  const split = h.document.querySelector("#title-menu .session-toolbar .new-session-split");
+  assert.ok(split, "the switcher toolbar has the split control");
+  split.querySelector(".new-session-btn").click();
+  await h.settle(5);
+  assert.ok(
+    h.posted.some((m) => m.type === "newSessionAt" && m.target === "view"),
+    "the icon half starts a session here"
+  );
+  assert.ok(!h.document.querySelector(".dv-menu"), "no menu is opened by the icon half");
+  split.querySelector(".new-session-more").click();
+  await h.settle(10);
+  assert.deepStrictEqual(
+    [...h.document.querySelectorAll(".dv-menu .dv-menu-item span")].map((s) => s.textContent),
+    ["New Session", "New Session (Editor)", "New Session (Window)", "New Devin CLI Session (Terminal)"]
+  );
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a replayed thought is labelled without a made up duration", async () => {
+  // Nothing records how long Devin thought for, so a reloaded transcript used to
+  // time the replay itself and claim "Thought for 1s" for every block.
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear", loading: true });
+  h.post({ type: "capabilities", revert: true });
+  h.post({ type: "userChunk", text: "a question" });
+  h.post({ type: "thoughtChunk", text: "old reasoning", replayed: true, at: "2026-08-05T16:21:07.110866+00:00" });
+  h.post({ type: "assistantChunk", text: "an answer" });
+  h.post({ type: "loaded" });
+  await h.settle(20);
+  const replayedLabel = h.document.querySelector(".thinking-label");
+  assert.strictEqual(replayedLabel.textContent, "Thought");
+  // The CLI does record when it happened, so that is offered on hover instead.
+  assert.match(replayedLabel.title, /^Thought at \d/, "the original time is shown on hover");
+
+  // A live turn still reports how long it took.
+  h.post({ type: "assistantStart" });
+  h.post({ type: "thoughtChunk", text: "live reasoning" });
+  await h.settle(20);
+  const live = [...h.document.querySelectorAll(".thinking-label")].pop();
+  assert.match(live.textContent, /^Thinking/, "a live thought is timed while it streams");
+  h.post({ type: "assistantEnd" });
+  await h.settle(10);
+  assert.match(live.textContent, /^Thought for \d+s$/, "and keeps its duration once settled");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("Enter steps through the questions and submits the last one", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({
+    type: "elicitation",
+    requestId: "e1",
+    mode: "form",
+    message: "Two questions",
+    allowOther: true,
+    schema: {
+      type: "object",
+      required: ["q0", "q1"],
+      properties: {
+        q0: { type: "string", title: "First", description: "First", oneOf: [{ const: "a", title: "A" }, { const: "b", title: "B" }] },
+        q1: { type: "string", title: "Second", description: "Second", oneOf: [{ const: "c", title: "C" }] }
+      }
+    }
+  });
+  await h.settle(20);
+  const qc = h.document.querySelector(".qc");
+  const step = qc.querySelector(".qc-step");
+  const enter = (target, init) =>
+    target.dispatchEvent(new h.window.KeyboardEvent("keydown", Object.assign({ key: "Enter", bubbles: true, cancelable: true }, init)));
+  const fields = [...qc.querySelectorAll(".elicit-field")];
+
+  // Answer the first question, then Enter moves on rather than submitting.
+  fields[0].querySelectorAll(".elicit-native")[0].click();
+  await h.settle(5);
+  assert.strictEqual(step.textContent, "1 / 2");
+  enter(qc);
+  await h.settle(5);
+  assert.strictEqual(step.textContent, "2 / 2", "Enter advances to the next question");
+  assert.ok(!h.posted.some((m) => m.type === "elicitationResponse"), "and does not submit early");
+
+  // Enter on the last question submits, once it has an answer.
+  enter(qc);
+  await h.settle(5);
+  assert.ok(!h.posted.some((m) => m.type === "elicitationResponse"), "an unanswered last question is not submitted");
+  fields[1].querySelectorAll(".elicit-native")[0].click();
+  await h.settle(5);
+  enter(qc);
+  await h.settle(10);
+  const res = h.posted.find((m) => m.type === "elicitationResponse");
+  assert.deepStrictEqual(res && res.content, { q0: "a", q1: "c" }, "Enter on the last question submits every answer");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("Shift+Enter and Ctrl+Enter write a newline in an Other answer", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({
+    type: "elicitation",
+    requestId: "e1",
+    mode: "form",
+    message: "One question",
+    allowOther: true,
+    schema: {
+      type: "object",
+      required: ["q0"],
+      properties: { q0: { type: "string", title: "Pick", description: "Pick", oneOf: [{ const: "a", title: "A" }] } }
+    }
+  });
+  await h.settle(20);
+  const other = h.document.querySelector(".elicit-other");
+  other.value = "line one";
+  other.selectionStart = other.selectionEnd = other.value.length;
+  const enter = (init) =>
+    other.dispatchEvent(new h.window.KeyboardEvent("keydown", Object.assign({ key: "Enter", bubbles: true, cancelable: true }, init)));
+
+  // Shift+Enter is the browser's own newline, so the widget must leave it alone.
+  const shift = enter({ shiftKey: true });
+  assert.strictEqual(shift, true, "Shift+Enter is not intercepted");
+  assert.ok(!h.posted.some((m) => m.type === "elicitationResponse"));
+
+  // Ctrl+Enter writes the newline itself (the browser does not).
+  enter({ ctrlKey: true });
+  await h.settle(5);
+  assert.strictEqual(other.value, "line one\n");
+  assert.ok(!h.posted.some((m) => m.type === "elicitationResponse"), "Ctrl+Enter never submits");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("switching sessions keeps each one's plan and changed files", async () => {
+  const h = createHarness();
+  const sessions = (activeId) => ({
+    type: "sessions",
+    activeId,
+    statuses: { A: "idle", B: "idle" },
+    folders: [{ path: "/w", name: "w" }],
+    sessions: [
+      { id: "A", short_id: "A", title: "A", working_directory: "/w" },
+      { id: "B", short_id: "B", title: "B", working_directory: "/w" }
+    ]
+  });
+  const rowFor = (title) =>
+    [...h.document.querySelectorAll("#sessions-list .session-item")]
+      .find((r) => r.textContent.includes(title))
+      .querySelector(".session-main");
+  const planRows = () => [...h.document.querySelectorAll("#todo-widget .plan-entry")].map((r) => r.textContent.trim());
+  const wsRows = () => [...h.document.querySelectorAll("#working-set .file-pill-name")].map((r) => r.textContent.trim());
+
+  // A is working through a plan and has changed a file.
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "capabilities", revert: true, showFileChanges: true });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "userMessage", text: "do the work" });
+  h.post({ type: "assistantStart" });
+  h.post({ type: "plan", entries: [{ content: "step one", status: "completed" }, { content: "step two", status: "in_progress" }] });
+  h.post({ type: "fileChange", path: "/w/a.ts", added: 3, removed: 1 });
+  h.post({ type: "workingSet", files: [{ path: "/w/a.ts", name: "a.ts" }] });
+  h.post(sessions("A"));
+  await h.settle(20);
+  assert.deepStrictEqual(planRows(), ["step one", "step two"]);
+  assert.deepStrictEqual(wsRows(), ["a.ts"]);
+
+  // Leave for the list and open B, which has neither.
+  h.document.getElementById("history-btn").click();
+  h.post(sessions(null));
+  await h.settle(10);
+  rowFor("B").click();
+  h.post({ type: "clear", loading: true });
+  h.post({ type: "sessionReady", sessionId: "B" });
+  h.post({ type: "userChunk", text: "hello from B" });
+  h.post({ type: "loaded" });
+  h.post({ type: "workingSet", files: [] });
+  await h.settle(20);
+  assert.deepStrictEqual(planRows(), [], "B does not inherit A's plan");
+  assert.deepStrictEqual(wsRows(), [], "nor A's changed files");
+
+  // Back to A: both come back, once each.
+  h.document.getElementById("history-btn").click();
+  h.post(sessions(null));
+  await h.settle(10);
+  rowFor("A").click();
+  h.post({ type: "workingSet", files: [{ path: "/w/a.ts", name: "a.ts" }] });
+  await h.settle(20);
+  assert.deepStrictEqual(planRows(), ["step one", "step two"], "A's plan is restored");
+  assert.deepStrictEqual(wsRows(), ["a.ts"], "A's changed files are restored, not doubled");
+  assert.strictEqual(
+    h.document.querySelectorAll("#todo-widget .plan-docked").length,
+    1,
+    "one docked plan widget, not one per visit"
+  );
+  assert.match(
+    h.document.querySelector("#working-set .file-change").textContent,
+    /\+3/,
+    "the line counts come back with the files"
+  );
+  assert.strictEqual(h.errors().length, 0, "switching threw: " + JSON.stringify(h.errors()));
+});

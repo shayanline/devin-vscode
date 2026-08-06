@@ -156,10 +156,21 @@
 .dv-collapsible-anim-inner {
   min-height: 0;
   overflow: hidden;
+  transition: padding 180ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+/* A collapsed section must take no more room than its header. The 0fr row above
+   zeroes the body's height but not the inner's own padding, which would leave a
+   dead strip under the header and make the header row read as sitting high
+   rather than centred. */
+.dv-collapsed > .dv-collapsible-anim > .dv-collapsible-anim-inner {
+  padding-top: 0;
+  padding-bottom: 0;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .dv-collapsible-anim {
+  .dv-collapsible-anim,
+  .dv-collapsible-anim-inner {
     transition: none !important;
   }
 }
@@ -2978,6 +2989,15 @@ body {
   align-self: center;
 }
 
+/* The question and permission trays sit above the composer and grow with what
+   the agent asks. Cap them and scroll instead, so several outstanding requests
+   can never squeeze the transcript out of the panel. */
+#elicitation-tray,
+#permission-tray {
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
 /* Confirmation widget (permissions, questions, edit-discard), mirroring VS
    Code's chat-confirmation-widget2: a bordered card with a bold title row, an
    optional message/body section with a subtle fill, and a right-aligned
@@ -4476,6 +4496,7 @@ body.dv-resizing #sessions-resizer {
   padding: 0 4px;
   border-left: 1px solid var(--vscode-panel-border);
 }
+
 .new-session-btn:hover,
 .new-session-more:hover {
   background: var(--vscode-button-secondaryHoverBackground, var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)));
@@ -4488,6 +4509,32 @@ body.dv-resizing #sessions-resizer {
 .new-session-more .codicon {
   font-size: 12px;
   opacity: 0.9;
+}
+
+/* Icon only variant for the narrow toolbar in the sessions panel and switcher:
+   the same split behaviour, but flat like the tool buttons it sits beside. */
+.new-session-compact {
+  height: 28px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--vscode-icon-foreground, var(--vscode-foreground));
+}
+
+.new-session-compact .new-session-btn {
+  padding: 0 4px;
+  border-radius: 5px 0 0 5px;
+}
+
+.new-session-compact .new-session-more {
+  padding: 0 2px;
+  border-left: none;
+  border-radius: 0 5px 5px 0;
+}
+
+.new-session-compact .new-session-btn:hover,
+.new-session-compact .new-session-more:hover {
+  background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
 }
 
 /* Floating popovers / menus anchored under a header button */

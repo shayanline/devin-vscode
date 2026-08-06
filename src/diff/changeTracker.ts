@@ -4,6 +4,10 @@ import * as path from "path";
 
 interface Snapshot {
   original: string | null; // null means the file did not exist before the session
+  // Sessions that have edited this file. The original content belongs to the
+  // file, but the working set is per session: each chat shows what it changed,
+  // and reopening one gets its own files back rather than the last chat's.
+  sessions: Set<string>;
 }
 
 // Tracks agent file edits so the user can review them as native diffs and
@@ -63,24 +67,42 @@ export class ChangeTracker
     return this.snapshots.get(fsPath)?.original ?? "";
   }
 
-  recordDiff(fsPath: string, oldText: string | null, _newText: string): void {
-    if (!this.snapshots.has(fsPath)) {
-      this.snapshots.set(fsPath, { original: oldText });
+  recordDiff(fsPath: string, oldText: string | null, _newText: string, sessionId: string): void {
+    const snap = this.snapshots.get(fsPath);
+    if (snap) {
+      snap.sessions.add(sessionId);
+    } else {
+      this.snapshots.set(fsPath, { original: oldText, sessions: new Set([sessionId]) });
     }
     this.contentChanged.fire(this.originalUri(fsPath));
     this.refreshGroup();
   }
 
+  // Every tracked file, whichever chat changed it: what the Source Control view
+  // and "Open all" work on.
   changedPaths(): string[] {
     return [...this.snapshots.keys()];
+  }
+
+  // What one chat changed, which is what its panel shows as the working set.
+  pathsFor(sessionId?: string): string[] {
+    if (!sessionId) {
+      return [];
+    }
+    return [...this.snapshots].filter(([, s]) => s.sessions.has(sessionId)).map(([p]) => p);
   }
 
   hasChange(fsPath: string): boolean {
     return this.snapshots.has(fsPath);
   }
 
-  clear(): void {
-    this.snapshots.clear();
+  // Stop tracking one chat's files, leaving them on disk as they are (used after
+  // a revert, which has already put the files back itself).
+  clearFor(sessionId: string): void {
+    for (const p of this.pathsFor(sessionId)) {
+      this.snapshots.delete(p);
+      this.contentChanged.fire(this.originalUri(p));
+    }
     this.refreshGroup();
   }
 
