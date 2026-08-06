@@ -647,6 +647,9 @@ export class ChatController implements AcpHost {
         case "attachDroppedText":
           this.attachDroppedText(msg.name, msg.text);
           return;
+        case "attachDroppedFolder":
+          this.attachDroppedFolder(msg.name, msg.entries);
+          return;
         case "removeAttachment":
           this.removeAttachment(String(msg.id || ""));
           return;
@@ -1832,6 +1835,21 @@ export class ChatController implements AcpHost {
       label,
       type: "directory",
       block: { type: "text", text: `Folder ${dirPath} contains:\n\n${lines.join("\n")}` }
+    });
+    this.postAttachments();
+  }
+
+  // A folder dropped from outside the workspace. An OS drag gives no path, so the
+  // webview reads the folder's top level and sends the names for us to attach,
+  // matching the listing a folder dragged in from the Explorer gets.
+  private attachDroppedFolder(name: unknown, entries: unknown): void {
+    const label = typeof name === "string" && name ? name : "folder";
+    const lines = (Array.isArray(entries) ? entries : []).filter((e): e is string => typeof e === "string");
+    this.attachments.push({
+      id: `att-${++this.attachSeq}`,
+      label,
+      type: "directory",
+      block: { type: "text", text: `Folder ${label} contains:\n\n${lines.join("\n")}` }
     });
     this.postAttachments();
   }

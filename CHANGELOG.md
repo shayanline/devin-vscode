@@ -7,6 +7,52 @@ All notable changes to **Devin for VS Code**, newest first.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
+## [0.7.1] - 2026-08-06
+
+A fix for drag and drop, which VS Code was quietly taking away from the panel.
+
+### Highlights
+- Dropping files onto the chat works again. A file dragged in from outside VS Code
+  used to flash the drop overlay for a moment and then open in an editor instead
+  of attaching, and a drag from the Explorer or an editor tab did nothing at all.
+- The whole panel takes a drop now, the sessions panel included, rather than only
+  the chat column.
+- A drag that starts inside VS Code (the Explorer, an editor tab) needs Shift held
+  as you drop, which is VS Code's own gesture for dropping into a webview. Since
+  VS Code makes the panel inert for the whole of such a drag, there is no event to
+  hint from while it happens, so the gesture is spelled out where it can be read
+  instead: on the empty chat screen, in the Add context (+) tooltip and in the
+  README.
+- A folder dragged in from outside VS Code attaches as a listing of what it holds,
+  the same as one dragged from the Explorer, instead of quietly attaching nothing.
+- Escape stops the turn while the composer has focus, not only Ctrl/Cmd+Esc, and
+  the Stop button's tooltip says so.
+- New Session in the sessions list is a real split button. The labelled half
+  starts a session in the panel straight away, and the chevron beside it opens the
+  menu for the editor, a window or the terminal, rather than the whole button
+  opening the menu.
+
+### Under the hood
+- VS Code drops pointer-events on a webview iframe the moment it sees a drag, so
+  that the editor can own the drop (webviewWindowDragMonitor): once on any
+  dragstart in the window, and again for every dragover its host script forwards
+  back out of the webview. Drag events are now claimed on the window in the
+  capture phase and stopped there, before they reach those host listeners, which
+  keeps the drag with the panel. A drag started inside VS Code is cut off before
+  any event reaches the webview at all, which is why Shift is the only way in for
+  those.
+- Claiming the events on the window also means a stray dragenter on the sessions
+  panel or a panel edge can no longer hand the whole drag away, and the overlay
+  anchors on the chat row so it covers the sessions panel too.
+- Drops are ignored while the boot and setup screens are up.
+- An OS drag carries no path, so a dropped folder used to be read as a file and
+  fail silently. Dropped items are now taken off the drag through the entries API
+  while the drop event is still on the stack, and a folder's top level is read
+  there and sent to be attached as a listing.
+- New tests assert that no drag event escapes to VS Code's host listeners, that a
+  drag over the sessions panel still offers the drop, that a dropped folder
+  attaches as a listing, and that Escape stops a turn only while one is running.
+
 ## [0.7.0] - 2026-08-05
 
 A big round of chat quality fixes: a real message queue, background sessions that
@@ -475,6 +521,7 @@ The foundation of the extension.
 - A jsdom based webview test harness with regression tests, and a browser preview
   harness for visual iteration.
 
+[0.7.1]: https://github.com/shayanline/devin-vscode/releases/tag/v0.7.1
 [0.7.0]: https://github.com/shayanline/devin-vscode/releases/tag/v0.7.0
 [0.6.93]: https://github.com/shayanline/devin-vscode/releases/tag/v0.6.93
 [0.6.92]: https://github.com/shayanline/devin-vscode/releases/tag/v0.6.92

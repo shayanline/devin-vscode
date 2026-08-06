@@ -41,6 +41,9 @@ PATH and helps you finish setup.
   plugins, MCP servers, hooks, permissions, and more, per machine or per
   workspace folder, with search.
 - `/` for Devin commands and skills, `@` to attach files, and image paste.
+- Files, folders and images dragged onto the chat attach as context. Hold Shift
+  while dragging from the Explorer or an editor tab, since VS Code otherwise
+  keeps that drag for itself.
 - Markdown replies with syntax highlighting and inline Mermaid diagrams.
 
 ## Screenshots
