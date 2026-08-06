@@ -13,6 +13,8 @@ import {
   RequestPermissionResult,
   RevertPreviewResult,
   SessionUpdateNotification,
+  SubagentCompleted,
+  SubagentStarted,
   TerminalExitStatus,
   TerminalRef,
   WriteTextFileParams
@@ -64,6 +66,12 @@ interface Runtime {
   // visible one. Replayed when the session is reopened so its progress is shown
   // even for a turn that is still running (capped so it can't grow unbounded).
   bgBuffer: Record<string, unknown>[];
+  // Subagent bookkeeping. A subagent is announced twice: first as the parent's
+  // `run_subagent` tool call (which owns the rendered block) and then under its
+  // own agentId, which is what all its later work is tagged with. These map one
+  // to the other so the webview only ever sees the block's id.
+  subagentSpawns: { id: string; title: string }[];
+  subagentIds: Map<string, string>;
 }
 
 // Cap on a backgrounded session's replay buffer (oldest dropped past this).
@@ -82,6 +90,10 @@ const IMAGE_MIME_BY_EXT: Record<string, string> = {
 
 // Match VS Code chat's cap on an attached image (it refuses larger ones).
 const MAX_IMAGE_BYTES = 30 * 1024 * 1024;
+
+// How much of an attached file's text is sent. A dropped file says so when it is
+// cut short, since its bytes are all the agent gets: it has no path to read more.
+const MAX_ATTACH_CHARS = 200000;
 
 // The dot shown next to a session in the list. "attention" means a backgrounded
 // session raised a permission/question and is now blocked waiting on the user.
@@ -391,7 +403,9 @@ export class ChatController implements AcpHost {
       lastActivityAt: Date.now(),
       pending: [],
       queued: [],
-      bgBuffer: []
+      bgBuffer: [],
+      subagentSpawns: [],
+      subagentIds: new Map()
     };
     ref = rt;
     client.setHost(this);
@@ -594,6 +608,9 @@ export class ChatController implements AcpHost {
           return;
         case "permission":
           this.resolvePermission(String(msg.requestId), msg.optionId);
+          return;
+        case "subagentMode":
+          await this.setSubagentMode(String(msg.id || ""), msg.background === true);
           return;
         case "openDiff":
           await this.changes.openDiff(String(msg.path || ""));
@@ -1625,6 +1642,23 @@ export class ChatController implements AcpHost {
     this.post({ type: "mode", mode });
   }
 
+  // Move a running subagent between foreground and background. The agent sends
+  // no confirmation, so the webview flips its own state optimistically and we
+  // only report a failure.
+  private async setSubagentMode(agentId: string, background: boolean): Promise<void> {
+    const rt = this.active();
+    if (!agentId || !rt) {
+      return;
+    }
+    try {
+      if (background) await rt.client.subagentBackground(rt.id, agentId);
+      else await rt.client.subagentForeground(rt.id, agentId);
+    } catch (err) {
+      this.log(`[subagent-mode-failed] ${err instanceof Error ? err.message : String(err)}`);
+      this.post({ type: "subagentMode", id: agentId, background: !background });
+    }
+  }
+
   private async setModel(model: string): Promise<void> {
     await this.cfg().update("defaultModel", model, vscode.ConfigurationTarget.Workspace);
     this.currentModel = model;
@@ -1804,7 +1838,7 @@ export class ChatController implements AcpHost {
         return;
       }
       const raw = await fs.promises.readFile(fsPath, "utf8");
-      const text = raw.length > 200000 ? raw.slice(0, 200000) : raw;
+      const text = raw.length > MAX_ATTACH_CHARS ? raw.slice(0, MAX_ATTACH_CHARS) : raw;
       this.attachments.push({
         id: `att-${++this.attachSeq}`,
         label: path.basename(fsPath),
@@ -1839,33 +1873,61 @@ export class ChatController implements AcpHost {
     this.postAttachments();
   }
 
-  // A folder dropped from outside the workspace. An OS drag gives no path, so the
-  // webview reads the folder's top level and sends the names for us to attach,
-  // matching the listing a folder dragged in from the Explorer gets.
+  // A folder dropped from outside VS Code. An OS drag carries no filesystem path,
+  // so the webview reads the folder's top level and sends the names instead. The
+  // block has to say so: worded like the path based listing above, a bare folder
+  // name reads as a path relative to the agent's cwd, and it goes hunting for a
+  // folder that is not there. The listing doubles as the fingerprint for finding
+  // the real one.
   private attachDroppedFolder(name: unknown, entries: unknown): void {
     const label = typeof name === "string" && name ? name : "folder";
     const lines = (Array.isArray(entries) ? entries : []).filter((e): e is string => typeof e === "string");
+    const text = [
+      `A folder named "${label}" was dropped into the chat from outside VS Code, so no filesystem`,
+      "path came with it and its location is unknown (it may or may not be inside the workspace).",
+      "Its top level, which can be used to identify it on disk, is:",
+      "",
+      lines.join("\n"),
+      "",
+      `To read inside it, find the folder that matches this listing (or ask which "${label}" is meant)`,
+      "rather than assuming a path."
+    ].join("\n");
     this.attachments.push({
       id: `att-${++this.attachSeq}`,
       label,
       type: "directory",
-      block: { type: "text", text: `Folder ${label} contains:\n\n${lines.join("\n")}` }
+      block: { type: "text", text }
     });
     this.postAttachments();
   }
 
-  // Attach the raw content of a file dropped from outside the workspace (an OS
-  // drag that gives us bytes but no path). Images arrive via attachImage instead.
+  // Attach the raw content of a file dropped from outside VS Code (an OS drag
+  // gives us bytes but no path). Images arrive via attachImage instead. Same
+  // caveat as a dropped folder: a bare name in the place a path usually goes
+  // invites the agent to treat a same named workspace file as this one, so the
+  // block says where it came from, and says when it was cut short.
   private attachDroppedText(name: unknown, text: unknown): void {
     if (typeof text !== "string" || !text.trim()) {
       return;
     }
     const label = typeof name === "string" && name ? name : "file";
+    const body = text.slice(0, MAX_ATTACH_CHARS);
+    const truncated = text.length > MAX_ATTACH_CHARS;
+    const blockText = [
+      `A file named "${label}" was dropped into the chat from outside VS Code, so no filesystem`,
+      "path came with it and its location is unknown (it may or may not be inside the workspace).",
+      truncated
+        ? `Its first ${MAX_ATTACH_CHARS} characters are below, so treat these as the file rather than a`
+        : "Its contents are below, so treat these as the file rather than a",
+      "same named one in the workspace:",
+      "",
+      body
+    ].join("\n");
     this.attachments.push({
       id: `att-${++this.attachSeq}`,
       label,
       type: "file",
-      block: { type: "text", text: `Attached file ${label}:\n\n${text.slice(0, 200000)}` }
+      block: { type: "text", text: blockText }
     });
     this.postAttachments();
   }
@@ -1886,7 +1948,7 @@ export class ChatController implements AcpHost {
     const label = hasSel
       ? `${path.basename(doc.uri.fsPath)}:${sel.start.line + 1}-${sel.end.line + 1}`
       : path.basename(doc.uri.fsPath);
-    const text = `From ${rel}${hasSel ? ` lines ${sel.start.line + 1}-${sel.end.line + 1}` : ""}:\n\n\`\`\`${doc.languageId}\n${body.slice(0, 200000)}\n\`\`\``;
+    const text = `From ${rel}${hasSel ? ` lines ${sel.start.line + 1}-${sel.end.line + 1}` : ""}:\n\n\`\`\`${doc.languageId}\n${body.slice(0, MAX_ATTACH_CHARS)}\n\`\`\``;
     this.attachments.push({
       id: `att-${++this.attachSeq}`,
       label,
@@ -2383,6 +2445,7 @@ export class ChatController implements AcpHost {
     this.post({
       type: "capabilities",
       revert: !!this.active()?.client.supportsRevert(),
+      subagentControl: !!this.active()?.client.supportsSubagentControl(),
       editRequests: this.cfg().get<string>("editRequests", "inline"),
       checkpoints: this.cfg().get<boolean>("checkpoints.enabled", true),
       showFileChanges: this.cfg().get<boolean>("checkpoints.showFileChanges", true),
@@ -2426,11 +2489,23 @@ export class ChatController implements AcpHost {
   private onUpdate(n: SessionUpdateNotification): void {
     const u = n.update as any;
     const rt = this.runtimeBySessionId(n.sessionId);
+    // Delegated work arrives on the same stream as the parent's, tagged in
+    // `_meta`. Lift the lifecycle out first, then hand the rest to the switch
+    // with the owning subagent attached so the webview can nest it.
+    if (this.onSubagentUpdate(u, rt)) {
+      return;
+    }
+    const parentId = rt ? this.subagentBlockId(rt, subagentParent(u)) : undefined;
     switch (u.sessionUpdate) {
       case "agent_message_chunk": {
         const img = imageOf(u.content);
-        if (img) this.emit(rt, { type: "assistantImage", mime: img.mimeType, data: img.data, messageId: u.messageId });
-        else this.emit(rt, { type: "assistantChunk", text: textOf(u.content), messageId: u.messageId });
+        if (parentId) {
+          this.emit(rt, { type: "subagentChunk", parentId, stream: "message", text: textOf(u.content) });
+        } else if (img) {
+          this.emit(rt, { type: "assistantImage", mime: img.mimeType, data: img.data, messageId: u.messageId });
+        } else {
+          this.emit(rt, { type: "assistantChunk", text: textOf(u.content), messageId: u.messageId });
+        }
         return;
       }
       case "user_message_chunk":
@@ -2438,7 +2513,8 @@ export class ChatController implements AcpHost {
         return;
       case "agent_thought_chunk":
         if (this.cfg().get<boolean>("showThinking", true)) {
-          this.emit(rt, { type: "thoughtChunk", text: textOf(u.content), messageId: u.messageId });
+          if (parentId) this.emit(rt, { type: "subagentChunk", parentId, stream: "thought", text: textOf(u.content) });
+          else this.emit(rt, { type: "thoughtChunk", text: textOf(u.content), messageId: u.messageId });
         }
         return;
       case "plan":
@@ -2448,6 +2524,7 @@ export class ChatController implements AcpHost {
         this.emit(rt, {
           type: "toolCall",
           id: u.toolCallId,
+          parentId,
           title: u.title,
           kind: u.kind,
           meta: toolMeta(u),
@@ -2462,6 +2539,7 @@ export class ChatController implements AcpHost {
         this.emit(rt, {
           type: "toolCallUpdate",
           id: u.toolCallId,
+          parentId,
           title: u.title,
           kind: u.kind,
           meta: toolMeta(u),
@@ -2489,6 +2567,85 @@ export class ChatController implements AcpHost {
       default:
         return;
     }
+  }
+
+  // Handle the subagent lifecycle, returning true when the update was one and
+  // needs no further rendering.
+  //
+  // The parent's `run_subagent` call is what owns the rendered block: it is the
+  // only part of a subagent a reloaded session is guaranteed to get back (the
+  // CLI replays a foreground subagent's whole transcript, but of a background one
+  // keeps just this row), and its `rawInput` already holds the task, the prompt
+  // and the mode. The `subagent_started` tag that follows carries the agentId
+  // everything else is tagged with, so it is bound to the block rather than
+  // rendered itself.
+  private onSubagentUpdate(u: any, rt?: Runtime): boolean {
+    if (!rt) {
+      return false;
+    }
+    const started = subagentStarted(u);
+    if (started) {
+      const spawn = takeSubagentSpawn(rt, started.title);
+      const id = spawn || started.agentId;
+      rt.subagentIds.set(started.agentId, id);
+      this.emit(rt, {
+        type: "subagentStart",
+        id,
+        title: started.title,
+        task: started.task,
+        profile: started.profile,
+        background: started.isBackground === true
+      });
+      return true;
+    }
+    const completed = subagentCompleted(u);
+    if (completed) {
+      this.emit(rt, {
+        type: "subagentEnd",
+        id: this.subagentBlockId(rt, completed.agentId),
+        success: completed.success !== false,
+        summary: completed.summary
+      });
+      return true;
+    }
+    if (u._meta?.["cognition.ai/inferenceToolName"] !== "run_subagent") {
+      return false;
+    }
+    const raw = u.rawInput;
+    if (raw && typeof raw === "object") {
+      rt.subagentSpawns.push({ id: u.toolCallId, title: String(raw.title || "") });
+      this.emit(rt, {
+        type: "subagentStart",
+        id: u.toolCallId,
+        title: raw.title,
+        task: raw.task,
+        profile: profileName(raw.profile),
+        background: raw.is_background === true
+      });
+      return true;
+    }
+    // A spawn that failed never produces a lifecycle of its own, so it has to
+    // close its own block or it would shimmer forever. Drop it from the waiting
+    // list too, or the next subagent to start could claim it as its own.
+    if (u.status === "failed" || u.status === "cancelled") {
+      rt.subagentSpawns = rt.subagentSpawns.filter((s) => s.id !== u.toolCallId);
+      this.emit(rt, {
+        type: "subagentEnd",
+        id: u.toolCallId,
+        success: false,
+        summary: textOf(firstContent(u.content))
+      });
+    }
+    return true;
+  }
+
+  // The block id a subagent's own agentId belongs to (itself, when the spawn
+  // that created it was never seen).
+  private subagentBlockId(rt: Runtime, agentId?: string): string | undefined {
+    if (!agentId) {
+      return undefined;
+    }
+    return rt.subagentIds.get(agentId) || agentId;
   }
 
   private recordDiffs(u: any, rt?: Runtime): void {
@@ -2848,6 +3005,49 @@ function toolMeta(u: any): { inferenceToolName?: string; toolName?: string; even
   if (typeof m["cognition.ai/toolName"] === "string") out.toolName = m["cognition.ai/toolName"];
   if (typeof m["cognition.ai/eventType"] === "string") out.eventType = m["cognition.ai/eventType"];
   return Object.keys(out).length ? out : undefined;
+}
+
+// --- Subagent tags on a session update -----------------------------------
+// A subagent announces itself on a tool_call_update whose toolCallId is its own
+// agentId, and finishes the same way carrying its report. Everything it does in
+// between is tagged with the agentId that produced it.
+function subagentStarted(u: any): SubagentStarted | undefined {
+  const s = u?._meta?.["cognition.ai/subagent_started"];
+  return s && typeof s.agentId === "string" ? (s as SubagentStarted) : undefined;
+}
+
+function subagentCompleted(u: any): SubagentCompleted | undefined {
+  const c = u?._meta?.["cognition.ai/subagent_completed"];
+  return c && typeof c.agentId === "string" ? (c as SubagentCompleted) : undefined;
+}
+
+function subagentParent(u: any): string | undefined {
+  const id = u?._meta?.["cognition.ai/subagent_context"]?.parentAgentId;
+  return typeof id === "string" && id ? id : undefined;
+}
+
+// Claim the spawn a starting subagent belongs to. Both sides carry the same
+// title, which is what tells parallel spawns apart; without a match take the
+// oldest still-unclaimed one.
+function takeSubagentSpawn(rt: Runtime, title?: string): string | undefined {
+  const i = rt.subagentSpawns.findIndex((s) => s.title === (title || ""));
+  const [spawn] = rt.subagentSpawns.splice(i >= 0 ? i : 0, 1);
+  return spawn?.id;
+}
+
+// "subagent_explore" is the profile as the tool takes it; the display name the
+// lifecycle reports for the same profile is "Explore".
+function profileName(profile: unknown): string | undefined {
+  if (typeof profile !== "string" || !profile) {
+    return undefined;
+  }
+  const name = profile.replace(/^subagent[_-]/, "").replace(/[_-]+/g, " ");
+  return name.charAt(0).toUpperCase() + name.slice(1);
+}
+
+function firstContent(content: any): any {
+  const first = Array.isArray(content) ? content[0] : undefined;
+  return first && first.type === "content" ? first.content : first;
 }
 
 function normalizeLocations(locations: any): { path: string; line?: number }[] {

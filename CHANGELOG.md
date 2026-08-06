@@ -7,6 +7,60 @@ All notable changes to **Devin for VS Code**, newest first.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
+## [0.8.0] - 2026-08-06
+
+A feature sized release, so this moves to 0.8.0: Devin's subagents are now shown
+in the panel, alongside a fix for how dropped files and folders are described.
+
+### Highlights
+- Subagents are rendered. When Devin hands a task to a subagent you now get one
+  collapsible block for it, the way VS Code's own chat shows a delegated task: a
+  single row whose title reads "Explore: map session persistence", shimmering
+  while it works and naming the tool it is on. Opening it shows the brief it was
+  given, everything it did and said in order, and the report it handed back.
+  Subagents working in parallel each get their own block.
+- A subagent's work is no longer mistaken for the main agent's. Its tool calls
+  used to land in the transcript alongside Devin's own, stuck at "pending"
+  forever because the updates that would have finished them never arrived.
+- A running subagent can be moved between the foreground and the background from
+  its header, which is the panel's equivalent of Ctrl+B in the CLI.
+- A folder dragged in from outside VS Code no longer sends Devin looking for a
+  folder that is not there. The attachment used to read "Folder chat contains:",
+  the same shape as a folder dragged from the Explorer, where that slot holds a
+  full path. A bare name in a path's place reads as a folder in the workspace, so
+  Devin went hunting for it. It now says plainly that the folder came from outside
+  VS Code with no path attached, that it may or may not be in the workspace, and
+  that its listing is what identifies it on disk, so Devin can find the real one
+  or ask which is meant.
+- A file dragged in from outside VS Code says the same, since its bare name could
+  just as easily be read as a file in the workspace. Its contents are still sent
+  in full, and when a very large one is cut short the block now says so rather
+  than passing the first part off as the whole file.
+
+### Under the hood
+- The CLI streams a subagent's tool calls, messages and reasoning tagged with the
+  subagent that produced them, but only to a client that asks: the extension now
+  advertises `cognition.ai/subagentSupport`, without which just the opening tool
+  call of each subagent leaks through and never resolves. Control comes from
+  `cognition.ai/subagentControl` and the `_cognition.ai/subagent/{background,
+  foreground}` methods. There is no method to cancel one, so the header offers
+  only the mode switch.
+- The parent's own `run_subagent` call is what owns the block rather than the
+  subagent's lifecycle, because it is the one part a reloaded session is sure to
+  get back. A foreground subagent's whole transcript is replayed on load, but of
+  a background one the CLI keeps only that row, so its block comes back with the
+  brief and no report. A background subagent also outlives the turn that spawned
+  it, so its block keeps running after the turn ends and accepts a report later.
+- `scripts/smoke-subagent.ts` drives a real session through the extension's own
+  client, spawning both kinds of subagent and exercising the mode switch.
+- An OS drag never carries a filesystem path: Chromium keeps local paths from web
+  content, and VS Code resolves them through an Electron preload API
+  (`webUtils.getPathForFile`) that exists in the workbench renderer but not in a
+  webview. That is why the terminal and the Explorer get a full path and the chat
+  panel cannot, and it applies to files as much as folders. Files are unaffected
+  because their bytes come through and are attached as content, while a folder has
+  no bytes to read, which is what left it needing a path.
+
 ## [0.7.1] - 2026-08-06
 
 A fix for drag and drop, which VS Code was quietly taking away from the panel.
@@ -521,6 +575,7 @@ The foundation of the extension.
 - A jsdom based webview test harness with regression tests, and a browser preview
   harness for visual iteration.
 
+[0.8.0]: https://github.com/shayanline/devin-vscode/releases/tag/v0.8.0
 [0.7.1]: https://github.com/shayanline/devin-vscode/releases/tag/v0.7.1
 [0.7.0]: https://github.com/shayanline/devin-vscode/releases/tag/v0.7.0
 [0.6.93]: https://github.com/shayanline/devin-vscode/releases/tag/v0.6.93

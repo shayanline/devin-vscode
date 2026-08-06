@@ -2607,6 +2607,260 @@ body {
   display: inline-flex;
 }
 
+/* Subagents, rendered as VS Code's chatSubagentContentPart: one collapsed row
+   per delegated task whose title shimmers while it runs, opening onto a chain of
+   thought timeline of its prompt, tool calls, streamed output and report. */
+.subagent {
+  color: var(--dv-dim);
+  font-size: var(--dv-fs-s);
+}
+
+.subagent > .dv-collapsible-header {
+  gap: var(--dv-space-2);
+  padding: 1px 0;
+}
+
+.subagent > .dv-collapsible-header:hover .subagent-title,
+.subagent:not(.dv-collapsed) > .dv-collapsible-header .subagent-title {
+  color: var(--vscode-foreground);
+}
+
+/* Leading glyph marking the row as delegated work. */
+.subagent-glyph {
+  flex: 0 0 auto;
+  font-size: 14px;
+  opacity: 0.8;
+}
+
+.subagent-failed > .dv-collapsible-header .subagent-glyph {
+  color: var(--vscode-testing-iconFailed, #f85149);
+  opacity: 1;
+}
+
+/* Title hugs its text so the chevron sits at the text's edge, and truncates
+   before the detail suffix does. */
+.subagent-title {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The tool the subagent is on, appended to the title while it runs. */
+.subagent-detail {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.7;
+}
+
+/* Only a running, folded subagent shimmers: opening it settles the title, since
+   the activity is then visible in the timeline itself. */
+.subagent:not(.subagent-active) .subagent-title,
+.subagent:not(.dv-collapsed) .subagent-title {
+  animation: none;
+  background: none;
+  -webkit-text-fill-color: currentcolor;
+}
+
+.subagent-chevron {
+  order: 3;
+  flex: 0 0 auto;
+  font-size: 13px;
+  opacity: 0;
+  transition: opacity 100ms ease-in-out, transform 180ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+.subagent > .dv-collapsible-header:hover .subagent-chevron,
+.subagent:not(.dv-collapsed) > .dv-collapsible-header .subagent-chevron {
+  opacity: 0.7;
+}
+
+.subagent:not(.dv-collapsed) > .dv-collapsible-header .subagent-chevron {
+  transform: rotate(90deg);
+}
+
+/* Foreground/background switch, revealed on hover like the chevron. */
+.subagent-actions {
+  order: 2;
+  flex: 0 0 auto;
+  display: inline-flex;
+  opacity: 0;
+  transition: opacity 100ms ease-in-out;
+}
+
+.subagent > .dv-collapsible-header:hover .subagent-actions,
+.subagent-actions:focus-within {
+  opacity: 1;
+}
+
+.subagent-action {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 3px;
+  border: none;
+  border-radius: var(--dv-radius-xs);
+  background: none;
+  color: inherit;
+  cursor: pointer;
+}
+
+.subagent-action:hover {
+  background: var(--vscode-toolbar-hoverBackground);
+  color: var(--vscode-foreground);
+}
+
+.subagent-action:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+.subagent-action .codicon {
+  font-size: 12px;
+}
+
+/* Headroom for the curved header->spine connector, as in the thinking box. */
+.subagent .dv-collapsible-anim-inner {
+  padding-top: var(--dv-space-5);
+}
+
+.subagent-body {
+  position: relative;
+  margin-left: var(--dv-space-3);
+}
+
+.subagent:not(.dv-collapsed) .subagent-body::before {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: -10px;
+  height: 16px;
+  width: 7.5px;
+  border-left: 1px solid var(--dv-border);
+  border-bottom: 1px solid var(--dv-border);
+  border-bottom-left-radius: 5px;
+}
+
+/* One entry on the timeline: prompt, a tool call, streamed output, the working
+   spinner, or the report. Same masked connector as the thinking chain. */
+.subagent-item {
+  position: relative;
+  padding: var(--dv-space-3) var(--dv-space-6) var(--dv-space-3) 24px;
+}
+
+.subagent-item::before {
+  content: "";
+  position: absolute;
+  left: 10.5px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background-color: var(--dv-border);
+  mask-image: linear-gradient(to bottom, #000 0 5px, transparent 5px 25px, #000 24px 100%);
+  -webkit-mask-image: linear-gradient(to bottom, #000 0 5px, transparent 5px 25px, #000 24px 100%);
+}
+
+.subagent-item:first-child::before {
+  mask-image: linear-gradient(to bottom, transparent 0 25px, #000 25px 100%);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0 25px, #000 25px 100%);
+}
+
+.subagent-item:last-child::before {
+  mask-image: linear-gradient(to bottom, #000 0 5px, transparent 5px 100%);
+  -webkit-mask-image: linear-gradient(to bottom, #000 0 5px, transparent 5px 100%);
+}
+
+.subagent-item:only-child::before {
+  background: none;
+  mask-image: none;
+  -webkit-mask-image: none;
+}
+
+.subagent-icon {
+  position: absolute;
+  left: 5px;
+  top: 9px;
+  width: 12px;
+  height: 12px;
+  font-size: 12px;
+  line-height: 12px;
+  text-align: center;
+  color: var(--dv-dim);
+  opacity: 1;
+}
+
+.subagent-failed .subagent-result .subagent-icon {
+  color: var(--vscode-testing-iconFailed, #f85149);
+}
+
+/* A nested tool keeps its own row and body but wears the rail's icon, so the
+   timeline reads as one column of glyphs (VS Code hides the inner icon too). */
+.subagent-tool .tool-kind {
+  display: none;
+}
+
+.subagent-tool .tool-body {
+  padding-left: 0;
+}
+
+/* The prompt and the report: a titled disclosure over the rest of the text. */
+.subagent-section-label {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subagent-section-chevron {
+  order: 2;
+  flex: 0 0 auto;
+  font-size: 13px;
+  opacity: 0;
+  transition: opacity 100ms ease-in-out, transform 180ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+.subagent-section > .dv-collapsible-header:hover .subagent-section-chevron,
+.subagent-section:not(.dv-collapsed) > .dv-collapsible-header .subagent-section-chevron {
+  opacity: 0.7;
+}
+
+.subagent-section:not(.dv-collapsed) > .dv-collapsible-header .subagent-section-chevron {
+  transform: rotate(90deg);
+}
+
+.subagent-section.dv-nocollapse > .dv-collapsible-header {
+  cursor: default;
+}
+
+.subagent-section.dv-nocollapse .subagent-section-chevron {
+  display: none;
+}
+
+.subagent-section-body {
+  padding-top: var(--dv-space-2);
+}
+
+.subagent-section-body > :first-child,
+.subagent-prose-content > :first-child {
+  margin-top: 0;
+}
+
+.subagent-section-body > :last-child,
+.subagent-prose-content > :last-child {
+  margin-bottom: 0;
+}
+
+/* The subagent's own narration. Reasoning reads back a shade quieter than what
+   it chose to say, the same split as the main thread's thinking box. */
+.subagent-thought .subagent-prose-content {
+  opacity: 0.8;
+  font-style: italic;
+}
+
 /* An edited-file row: a completion status icon followed by the file pill,
    mirroring VS Code's code-block edit pill. */
 .edit-pill {

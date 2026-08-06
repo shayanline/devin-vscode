@@ -62,19 +62,55 @@ export interface PromptResult {
 }
 
 // session/update notification payloads (discriminated by `sessionUpdate`).
+// `_meta` carries Devin's extensions, including the subagent tags below.
 export type SessionUpdate =
-  | { sessionUpdate: "agent_message_chunk"; messageId?: string; content: ContentBlock }
-  | { sessionUpdate: "agent_thought_chunk"; messageId?: string; content: ContentBlock }
+  | { sessionUpdate: "agent_message_chunk"; messageId?: string; content: ContentBlock; _meta?: UpdateMeta }
+  | { sessionUpdate: "agent_thought_chunk"; messageId?: string; content: ContentBlock; _meta?: UpdateMeta }
   | { sessionUpdate: "user_message_chunk"; messageId?: string; content: ContentBlock }
   | { sessionUpdate: "plan"; entries: PlanEntry[] }
-  | { sessionUpdate: "tool_call"; toolCallId: string; title?: string; kind?: string; status?: ToolCallStatus; content?: ToolCallContent[]; rawInput?: unknown; locations?: { path: string; line?: number }[] }
-  | { sessionUpdate: "tool_call_update"; toolCallId: string; title?: string; kind?: string; status?: ToolCallStatus; content?: ToolCallContent[]; rawInput?: unknown; locations?: { path: string; line?: number }[] }
+  | { sessionUpdate: "tool_call"; toolCallId: string; title?: string; kind?: string; status?: ToolCallStatus; content?: ToolCallContent[]; rawInput?: unknown; locations?: { path: string; line?: number }[]; _meta?: UpdateMeta }
+  | { sessionUpdate: "tool_call_update"; toolCallId: string; title?: string; kind?: string; status?: ToolCallStatus; content?: ToolCallContent[]; rawInput?: unknown; locations?: { path: string; line?: number }[]; _meta?: UpdateMeta }
   | { sessionUpdate: "usage_update"; used: number; size: number; cost?: { amount: number; currency: string } }
   | { sessionUpdate: "available_commands_update"; availableCommands: AvailableCommand[] }
   | { sessionUpdate: "current_mode_update"; currentModeId: string }
   | { sessionUpdate: string; [k: string]: unknown };
 
 export type ToolCallStatus = "pending" | "in_progress" | "completed" | "failed" | "cancelled";
+
+// Devin's `_meta` on a session update. `inferenceToolName`/`toolName`/`eventType`
+// identify the real tool behind the coarse ACP `kind`; the subagent keys track
+// delegated work (unlocked by clientCapabilities._meta["cognition.ai/subagentSupport"],
+// without which only the subagent's opening tool_call leaks through, never its
+// updates, leaving those rows stuck at pending).
+export interface UpdateMeta {
+  "cognition.ai/inferenceToolName"?: string;
+  "cognition.ai/toolName"?: string;
+  "cognition.ai/eventType"?: string;
+  // On a tool_call_update whose toolCallId is the subagent's own agentId.
+  "cognition.ai/subagent_started"?: SubagentStarted;
+  "cognition.ai/subagent_completed"?: SubagentCompleted;
+  // On every update the subagent itself produces (tool calls, message and
+  // thought chunks), naming the subagent that produced it.
+  "cognition.ai/subagent_context"?: { parentAgentId?: string };
+  [k: string]: unknown;
+}
+
+export interface SubagentStarted {
+  agentId: string;
+  title?: string;
+  task?: string;
+  // Display name of the profile, e.g. "Explore".
+  profile?: string;
+  depth?: number;
+  isBackground?: boolean;
+}
+
+export interface SubagentCompleted {
+  agentId: string;
+  success?: boolean;
+  // The subagent's final report, which the parent reads to continue.
+  summary?: string;
+}
 
 export type ToolCallContent =
   | { type: "content"; content: ContentBlock }

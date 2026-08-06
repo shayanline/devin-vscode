@@ -464,6 +464,110 @@ test("consecutive tool calls collapse into a grouped disclosure", async () => {
   assert.strictEqual(h.errors().length, 0, "grouping threw: " + JSON.stringify(h.errors()));
 });
 
+test("a subagent nests its prompt, tools, output and report on one timeline", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "capabilities", revert: true, subagentControl: true });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "userMessage", text: "delegate this" });
+  h.post({ type: "assistantStart" });
+
+  h.post({ type: "subagentStart", id: "sa1", profile: "Explore", background: true,
+    title: "Map session persistence", task: "Work out how sessions persist.\n\nStart at sessionStore.ts." });
+  h.post({ type: "subagentChunk", parentId: "sa1", stream: "thought", text: "Reading the store first." });
+  h.post({ type: "toolCall", id: "sa1-t1", parentId: "sa1", title: "Read src/session/sessionStore.ts", kind: "read", status: "pending" });
+  h.post({ type: "toolCallUpdate", id: "sa1-t1", parentId: "sa1", status: "in_progress" });
+  await h.settle(15);
+
+  const sub = h.document.querySelector("#thread .subagent");
+  assert.ok(sub, "the subagent block renders");
+  assert.ok(sub.classList.contains("subagent-active"), "a running subagent is marked active");
+  assert.ok(sub.classList.contains("dv-collapsed"), "it starts collapsed, like VS Code");
+  assert.strictEqual(sub.querySelector(".subagent-title").textContent, "Explore: Map session persistence",
+    "the header is the capitalised profile then the task");
+  assert.ok(sub.querySelector(".dv-collapsible-header > .subagent-glyph.codicon-agent"),
+    "the row leads with the agent glyph");
+  assert.strictEqual(sub.querySelector(".subagent-detail").textContent, " \u2014 Read src/session/sessionStore.ts",
+    "the running tool is appended to the header");
+  assert.ok(sub.querySelector(".subagent-item.subagent-prompt"), "the prompt opens the timeline");
+  assert.ok(sub.querySelector(".subagent-item.subagent-thought"), "its reasoning is on the timeline");
+  assert.ok(sub.querySelector(".subagent-item.subagent-tool > .tool"), "its tool call nests as a row");
+  assert.ok(sub.querySelector(".subagent-item.subagent-spinner"), "a working row shows while it runs");
+  assert.strictEqual(h.document.querySelectorAll("#thread > .turn .tool-group").length, 0,
+    "a subagent's tools do not join the turn's tool run");
+
+  // The control flips optimistically and tells the host.
+  sub.querySelector(".subagent-action").dispatchEvent(new h.window.MouseEvent("click", { bubbles: true }));
+  await h.settle(5);
+  assert.ok(h.posted.some((m) => m.type === "subagentMode" && m.id === "sa1" && m.background === false),
+    "the action asks the host to bring it to the foreground");
+  assert.ok(sub.classList.contains("dv-collapsed"), "using the control does not toggle the disclosure");
+
+  h.post({ type: "subagentEnd", id: "sa1", success: true, summary: "Sessions live in workspace state.\n\nUnder a single key." });
+  await h.settle(15);
+
+  assert.ok(!sub.classList.contains("subagent-active"), "a finished subagent is no longer active");
+  assert.strictEqual(sub.querySelector(".subagent-detail").textContent, "", "the tool suffix is dropped when done");
+  assert.ok(!sub.querySelector(".subagent-spinner"), "the working row is removed");
+  const result = sub.querySelector(".subagent-item.subagent-result");
+  assert.ok(result, "the report closes the timeline");
+  assert.strictEqual(result.querySelector(".subagent-section-label").textContent, "Sessions live in workspace state.",
+    "the report is titled with its first line");
+  assert.ok(!sub.querySelector(".subagent-action"), "the controls go once it is no longer running");
+  assert.strictEqual(h.errors().length, 0, "subagent rendering threw: " + JSON.stringify(h.errors()));
+});
+
+test("a turn ending settles a foreground subagent but leaves a background one running", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "capabilities", revert: true });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "userMessage", text: "delegate" });
+  h.post({ type: "busy", value: true });
+  h.post({ type: "subagentStart", id: "fg", profile: "Explore", title: "Look around", background: false });
+  h.post({ type: "subagentStart", id: "bg", profile: "Explore", title: "Keep digging", background: true });
+  await h.settle(10);
+  h.post({ type: "busy", value: false });
+  await h.settle(10);
+
+  const subs = [...h.document.querySelectorAll("#thread .subagent")];
+  const fg = subs.find((s) => /Look around/.test(s.textContent));
+  const bg = subs.find((s) => /Keep digging/.test(s.textContent));
+  assert.ok(fg && !fg.classList.contains("subagent-active"), "an interrupted foreground subagent stops shimmering");
+  assert.ok(!fg.querySelector(".subagent-spinner"), "and drops its working row");
+  assert.ok(bg.classList.contains("subagent-active"), "a background subagent keeps working past the turn");
+
+  // Its report can land long after the turn that spawned it ended.
+  h.post({ type: "subagentEnd", id: "bg", success: true, summary: "Found it.\n\nIn the store." });
+  await h.settle(10);
+  assert.ok(!bg.classList.contains("subagent-active"), "the late report settles it");
+  assert.ok(bg.querySelector(".subagent-result"), "and is still rendered");
+  assert.strictEqual(h.errors().length, 0, "finalising threw: " + JSON.stringify(h.errors()));
+});
+
+test("a subagent tool with no known parent still renders in the thread", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "capabilities", revert: true });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "userMessage", text: "replay" });
+  h.post({ type: "assistantStart" });
+  // A history replay can carry the tagged tool without the lifecycle that made
+  // it, so the tool must fall back to the top level rather than vanish.
+  h.post({ type: "toolCall", id: "orphan", parentId: "gone", title: "Read src/a.ts", kind: "read", status: "completed" });
+  await h.settle(10);
+
+  const tool = h.document.querySelector("#thread .tool");
+  assert.ok(tool && !tool.closest(".subagent"), "an orphaned subagent tool renders at the top level");
+  assert.strictEqual(h.errors().length, 0, "orphan rendering threw: " + JSON.stringify(h.errors()));
+});
+
 test("terminating the open session uses the kill glyph and asks to return to the list", async () => {
   const h = createHarness();
   h.post({ type: "ready" });

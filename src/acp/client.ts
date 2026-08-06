@@ -150,7 +150,16 @@ export class AcpClient extends EventEmitter {
         elicitation: { form: {}, url: {} },
         // Unlocks the _cognition.ai/revert/* methods (conversation rewind +
         // file undo). Verified against devin acp.
-        _meta: { "cognition.ai/revert": true }
+        _meta: {
+          "cognition.ai/revert": true,
+          // Streams a subagent's own tool calls, messages and thoughts tagged
+          // with `subagent_context`, plus the `subagent_started` /
+          // `subagent_completed` lifecycle. Without it only the subagent's
+          // opening tool_call arrives, so its rows never leave pending.
+          "cognition.ai/subagentSupport": true,
+          // Unlocks _cognition.ai/subagent/{background,foreground}.
+          "cognition.ai/subagentControl": true
+        }
       }
     });
     this.initializeResult = result;
@@ -159,8 +168,17 @@ export class AcpClient extends EventEmitter {
 
   // True when the agent acknowledged the revert capability.
   supportsRevert(): boolean {
+    return this.agentCapability("cognition.ai/revert");
+  }
+
+  // True when the agent accepts _cognition.ai/subagent/{background,foreground}.
+  supportsSubagentControl(): boolean {
+    return this.agentCapability("cognition.ai/subagentControl");
+  }
+
+  private agentCapability(key: string): boolean {
     const meta = this.initializeResult?.agentCapabilities?._meta as Record<string, unknown> | undefined;
-    return meta?.["cognition.ai/revert"] === true;
+    return meta?.[key] === true;
   }
 
   authenticate(methodId: string): Promise<unknown> {
@@ -213,6 +231,18 @@ export class AcpClient extends EventEmitter {
   // custom method: { sessionId, configId, value }.
   setConfigOption(sessionId: string, configId: string, value: string): Promise<unknown> {
     return this.rpc("session/set_config_option", { sessionId, configId, value });
+  }
+
+  // --- Subagents -----------------------------------------------------------
+  // Move a running subagent between foreground (the parent waits, and tool
+  // calls prompt for approval) and background (the parent carries on, and
+  // unapproved tools are denied). There is no ACP method to cancel one.
+  subagentBackground(sessionId: string, agentId: string): Promise<unknown> {
+    return this.rpc("_cognition.ai/subagent/background", { sessionId, agentId });
+  }
+
+  subagentForeground(sessionId: string, agentId: string): Promise<unknown> {
+    return this.rpc("_cognition.ai/subagent/foreground", { sessionId, agentId });
   }
 
   // --- Revert (conversation rewind + file undo) ---------------------------

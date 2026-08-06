@@ -29,6 +29,9 @@ PATH and helps you finish setup.
 ## What you get
 
 - Streaming replies, with Devin's reasoning shown as it works.
+- Work Devin hands to a subagent shown as its own collapsible block: the brief it
+  was given, what it did and said, and the report it came back with. Move a
+  running one between the foreground and the background from its header.
 - Every file edit shown as a native VS Code diff, kept or undone per file.
 - Approve or decline the tools Devin runs, and answer its questions, inline in
   the chat.
@@ -37,9 +40,10 @@ PATH and helps you finish setup.
 - Sessions saved per workspace that survive restarts, listed in a built in panel
   grouped by workspace, with search and a status filter.
 - The Devin model and mode (code, ask, plan, or bypass) picked from the composer.
-- The Devin CLI's own configuration edited from the gear: instructions, skills,
-  plugins, MCP servers, hooks, permissions, and more, per machine or per
-  workspace folder, with search.
+- The Devin CLI's own settings edited natively in a built in editor, no config
+  files by hand: instructions, skills, plugins, MCP servers, hooks, permissions,
+  and more, per machine or per workspace folder, with search. It writes the CLI's
+  real config, so the `devin` command in your terminal picks up the same changes.
 - `/` for Devin commands and skills, `@` to attach files, and image paste.
 - Files, folders and images dragged onto the chat attach as context. Hold Shift
   while dragging from the Explorer or an editor tab, since VS Code otherwise
@@ -58,19 +62,6 @@ PATH and helps you finish setup.
     <td width="50%"><img src="https://raw.githubusercontent.com/shayanline/devin-vscode/main/docs/screenshots/04-research-and-diagram.png" width="100%" alt="A research turn on GPT-5: web search, fetch and MCP tool cards, and a Mermaid diagram rendered inline" /></td>
   </tr>
 </table>
-
-## Settings
-
-Settings live in whichever place owns them, and each links to the other:
-
-- **This extension** (session mode, the model new chats start with, the thinking
-  display, checkpoints, edit requests, `devin.cliPath`) lives in the **Devin**
-  section of VS Code settings. If `devin` is not on your PATH, point
-  `devin.cliPath` at it.
-- **The Devin CLI** (instructions, skills, plugins, MCP servers, hooks,
-  permissions, proxy, sandbox) lives in **Devin: Open Settings**, the gear in the
-  chat panel, which edits the CLI's own config files. Pick Global or a workspace
-  folder at the top.
 
 ## Contributing
 
