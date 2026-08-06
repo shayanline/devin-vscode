@@ -129,11 +129,24 @@ descriptions, code comments, and any other prose in the repo.
 
 ## Changelog
 
-`CHANGELOG.md` keeps one entry per released version, newest first. Each entry
-leads with **Highlights** (what a user notices) and, where it applies, a short
-**Under the hood** section (internal and technical changes). Add a new entry for
-every release, and add its release link at the bottom only when the git tag
-actually exists.
+`CHANGELOG.md` is a list you can scan, not a write up. One entry per released
+version, newest first, and a new entry for every release.
+
+- **One line per change.** Each bullet is a single line of at most 80 columns,
+  including the `- `. If it does not fit, cut words until it does. Never wrap a
+  bullet onto a second line and never write a paragraph.
+- **Say what changed, from the reader's side.** No cause, no mechanism, no
+  before and after story, no reasoning, no measurements. The commit message is
+  where to be thorough, and it is the place for all of that.
+- **Highlights** is what a user notices. **Under the hood** is optional, at most
+  four lines, only for what they cannot see but should know: shutdown, security,
+  the protocol, test infrastructure.
+- An optional one line summary may sit under the version heading, and only when
+  the release has a single theme worth naming.
+- Add the release link at the bottom only when the git tag actually exists.
+
+A good bullet: `- Drag the panel by its header to move it to the other side.`
+Not: three lines on what the panel used to do and why that was wrong.
 
 ## Git and commits
 
