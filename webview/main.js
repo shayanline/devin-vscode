@@ -572,6 +572,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     }
     vscode.postMessage({ type: "send", text, newSession: startNew });
     el.input.value = "";
+    savedDraft = "";
     closeAutocomplete();
     autosize();
     updateSendState();
@@ -589,6 +590,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // the request was cancelled). They must not linger or be submittable after
   // the turn is stopped.
   function cancelPrompts() {
+    // Let an open question hand its half given answers to the host before it goes,
+    // so reopening the session brings them back.
+    el.elicitationTray.querySelectorAll(".qc").forEach((w) => w.dispatchEvent(new Event("dv-teardown")));
     el.elicitationTray.innerHTML = "";
     el.permissionTray.innerHTML = "";
   }
@@ -620,7 +624,47 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
   });
 
-  el.input.addEventListener("input", () => { autosize(); updateAutocomplete(); updateSendState(); });
+  el.input.addEventListener("input", () => { autosize(); updateAutocomplete(); updateSendState(); scheduleDraftSave(); });
+  // Clicking away is a natural point to stop debouncing and store it.
+  el.input.addEventListener("blur", () => saveDraft());
+
+  // Unsent text is remembered by the host, per session (and for the "new chat"
+  // box in the list), so leaving a chat, reloading it or closing the window keeps
+  // the prompt you were part way through. Editing a queued or an already sent
+  // message borrows the same box, so those keep out of the draft.
+  let draftTimer = null;
+  let savedDraft = null;
+  function draftKey() { return curSessionId || null; }
+  function saveDraft() {
+    if (draftTimer) { clearTimeout(draftTimer); draftTimer = null; }
+    if (editingQueuedId || editingTurn) return;
+    const text = el.input.value;
+    if (text === savedDraft) return;
+    savedDraft = text;
+    vscode.postMessage({ type: "draft", id: draftKey(), text });
+  }
+  function scheduleDraftSave() {
+    if (draftTimer) clearTimeout(draftTimer);
+    draftTimer = setTimeout(saveDraft, 400);
+  }
+  // Put the stored draft back after something else has borrowed the composer
+  // (editing a queued or an already sent message).
+  function restoreDraft() {
+    if (!savedDraft || el.input.value) return;
+    el.input.value = savedDraft;
+  }
+  // The stored draft fills the composer only when it is empty: a transcript
+  // restored in the panel already carries the fresher text, and a message for a
+  // session that has since been left is ignored.
+  function applyDraft(m) {
+    const id = m.id || null;
+    if (id !== draftKey() || editingQueuedId || editingTurn) return;
+    savedDraft = m.text || "";
+    if (el.input.value || !m.text) return;
+    el.input.value = m.text;
+    autosize();
+    updateSendState();
+  }
 
   // VS Code cancels an in-progress request edit when you click another row or
   // outside the editor (finishedEditing on onDidFocusOutside). Mirror that:
@@ -1827,6 +1871,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     el.inputBox.classList.remove("editing-request");
     removeEditingBanner();
     el.input.value = "";
+    restoreDraft();
     autosize();
     updateSendState();
   }
@@ -3390,6 +3435,26 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     qc.addEventListener("change", updateSubmitState);
     qc.addEventListener("input", updateSubmitState);
 
+    // Answers in progress are remembered against the request, so leaving the
+    // session and coming back does not lose the ones already given (or the free
+    // text half typed into "Other"). The host holds them on the pending request
+    // and hands them back when it re-shows the question.
+    let answerTimer = null;
+    function saveAnswers() {
+      if (answerTimer) { clearTimeout(answerTimer); answerTimer = null; }
+      const state = { at: idx, by: {} };
+      controls.forEach((c) => { state.by[c.key] = c.exportState(); });
+      vscode.postMessage({ type: "answerDraft", requestId: data.requestId, state });
+    }
+    function scheduleSaveAnswers() {
+      if (answerTimer) clearTimeout(answerTimer);
+      answerTimer = setTimeout(saveAnswers, 300);
+    }
+    qc.addEventListener("change", scheduleSaveAnswers);
+    qc.addEventListener("input", scheduleSaveAnswers);
+    // Leaving the session tears the widget down, so flush what is in it now.
+    qc.addEventListener("dv-teardown", saveAnswers);
+
     // Keyboard: Left/Right step between questions (captured so a radio group does
     // not consume them), except while typing in a text field. Enter answers and
     // moves on, so a carousel can be filled in without reaching for the mouse:
@@ -3440,7 +3505,13 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       validation.classList.add("hidden");
       updateSubmitState();
     }
-    show(0);
+    // Put back any answers given before the session was left, and reopen on the
+    // question that was on screen.
+    const saved = data.answers;
+    if (saved && saved.by) {
+      controls.forEach((c) => c.importState(saved.by[c.key]));
+    }
+    show(saved && typeof saved.at === "number" ? saved.at : 0);
     updateSubmitState();
     trayMount(el.elicitationTray, qc, data.requestId);
   }
@@ -3492,7 +3563,14 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         // "Answered" gates the Submit button: a boolean always has a state; text
         // and number need a value.
         answered: () => (isCheckbox ? true : String(input.value).trim() !== ""),
-        answerText: () => (isCheckbox ? (input.checked ? "Yes" : "No") : String(input.value))
+        answerText: () => (isCheckbox ? (input.checked ? "Yes" : "No") : String(input.value)),
+        // Enough to put a half finished answer back after a session switch.
+        exportState: () => (isCheckbox ? { checked: input.checked } : { text: input.value }),
+        importState: (st) => {
+          if (!st) return;
+          if (isCheckbox) input.checked = !!st.checked;
+          else if (typeof st.text === "string") input.value = st.text;
+        }
       };
     }
 
@@ -3567,7 +3645,19 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       valid: () => (isMulti ? selectedValues().length >= minItems : (!opts.required || selectedValues().length >= 1)),
       // Submit is gated on every question having at least one option selected.
       answered: () => selectedValues().length >= 1,
-      answerText: () => selectedLabels().join(", ")
+      answerText: () => selectedLabels().join(", "),
+      exportState: () => ({
+        picked: choices.filter((c) => c.input.checked).map((c) => c.val),
+        other: otherText ? otherText.value : "",
+        otherPicked: !!(otherRadio && otherRadio.checked)
+      }),
+      importState: (st) => {
+        if (!st) return;
+        const picked = Array.isArray(st.picked) ? st.picked : [];
+        choices.forEach((c) => { c.input.checked = picked.includes(c.val); });
+        if (otherText && typeof st.other === "string") otherText.value = st.other;
+        if (otherRadio) otherRadio.checked = !!st.otherPicked;
+      }
     };
   }
 
@@ -3852,6 +3942,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   function finishQueuedEdit() {
     clearQueuedEditState();
     el.input.value = "";
+    // Editing borrowed the composer, so give the draft it was holding back.
+    restoreDraft();
     closeAutocomplete();
     autosize();
     updateSendState();
@@ -4327,6 +4419,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     // leaving them up would show one session's question over another's
     // transcript, and double up on return.
     cancelPrompts();
+    // Persist the unsent text against the session being left, before the composer
+    // is handed to the next one.
+    saveDraft();
     const frag = document.createDocumentFragment();
     while (el.thread.firstChild) frag.appendChild(el.thread.firstChild);
     views.set(curSessionId, {
@@ -5132,6 +5227,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       case "workingSet": renderWorkingSet(m.files); break;
       case "queued": renderQueued(m.items); break;
       case "attachments": renderAttachments(m.items); break;
+      case "draft": applyDraft(m); break;
       case "implicitContext":
         implicit = m.file ? { path: m.file.path, name: m.file.name, line1: m.file.line1, line2: m.file.line2, enabled: m.enabled !== false } : null;
         renderComposerContext();

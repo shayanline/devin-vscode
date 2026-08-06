@@ -222,6 +222,27 @@ export class ChatController implements AcpHost {
     return [{ type: "resource_link", uri: uri.toString(), name: path.basename(uri.fsPath) }];
   }
 
+  // Hand the webview the unsent text stored for whichever composer it is showing
+  // (a session's own, or the "new chat" box when there is none). The id travels
+  // with it so a late arrival for a session already left is ignored.
+  private postDraft(): void {
+    this.post({ type: "draft", id: this.activeId || null, text: this.store.draft(this.activeId) });
+  }
+
+  // Part way through answering a question, remembered against the request so it
+  // survives leaving the session and coming back. It lives on the pending payload
+  // the host re-posts, so it is restored by the same path that re-shows the
+  // question, and is dropped with it once the question is answered.
+  private saveAnswerDraft(requestId: string, state: unknown): void {
+    for (const rt of this.runtimes.values()) {
+      const p = rt.pending.find((x) => x.requestId === requestId);
+      if (p) {
+        p.payload.answers = state;
+        return;
+      }
+    }
+  }
+
   // The working set is what the visible session changed. Other sessions keep
   // their own edits tracked (reopening one gets its files back), and the Source
   // Control view still lists everything.
@@ -701,6 +722,12 @@ export class ChatController implements AcpHost {
         case "setConfig":
           await this.setConfig(msg.key, msg.value);
           return;
+        case "draft":
+          this.store.setDraft(typeof msg.id === "string" && msg.id ? msg.id : undefined, String(msg.text ?? ""));
+          return;
+        case "answerDraft":
+          this.saveAnswerDraft(String(msg.requestId || ""), msg.state);
+          return;
         case "finishSetup":
           this.post({ type: "ready" });
           return;
@@ -717,6 +744,8 @@ export class ChatController implements AcpHost {
   private async onWebviewReady(): Promise<void> {
     this.post({ type: "workspace", name: this.workspaceName() });
     this.postImplicitContext();
+    // A prompt left half written before the window closed is put straight back.
+    this.postDraft();
     // The CLI health check spawns a login shell and calls the CLI, which can
     // take several seconds. Paint the chat shell immediately using the last
     // known readiness so the sidebar is never blank while it runs; the check
@@ -923,6 +952,9 @@ export class ChatController implements AcpHost {
         this.postCapabilities();
         this.publishOptions(rt, res.configOptions, res.modes?.currentModeId);
         await this.applyDefaults(rt, res);
+        // Whatever was in the "new chat" box has been carried into this session,
+        // so it is no longer waiting in the list.
+        this.store.setDraft(undefined, "");
         this.post({ type: "sessionReady", sessionId: rt.id });
         this.ensureIdleTimer();
         this.broadcastStatuses();
@@ -1012,6 +1044,8 @@ export class ChatController implements AcpHost {
   private leaveToList(): void {
     this.activeId = undefined;
     this.clearAttachments();
+    // The composer is a "new chat" box again, so it gets that draft back.
+    this.postDraft();
   }
 
   // Terminate a session's live process (kill its acp + terminals), freeing its
@@ -1151,9 +1185,10 @@ export class ChatController implements AcpHost {
     }
     // "Waking session…" while a fresh acp spins up; a live one loads instantly.
     this.post({ type: "clear", loading: true, waking: !already });
-    // The clear empties the working set, so re-send this session's own pending
-    // edits: a reload does not throw away what it changed before.
+    // The clear empties the working set and the composer, so re-send this
+    // session's own pending edits and unsent text: a reload throws neither away.
     this.postWorkingSet();
+    this.postDraft();
     if (!already) {
       this.starting.add(id);
     }
@@ -1249,6 +1284,7 @@ export class ChatController implements AcpHost {
     // bleed into this one (loadSession/wakeSession/newSession all do the same).
     this.attachments = [];
     this.postAttachments();
+    this.postDraft();
     this.currentMode = rt.mode;
     this.currentModel = rt.model;
     this.postCapabilities();
@@ -1311,6 +1347,7 @@ export class ChatController implements AcpHost {
   private async doWakeSession(id: string): Promise<void> {
     this.activeId = id;
     this.postWorkingSet();
+    this.postDraft();
     this.attachments = [];
     const cwd = this.store.cwds()[id] || this.resolveNewSessionCwd();
     const rt = this.spawnRuntime(cwd);
@@ -2039,6 +2076,8 @@ export class ChatController implements AcpHost {
     if (!text.trim()) {
       return;
     }
+    // The text has left the composer, so it is no longer a draft.
+    this.store.setDraft(startNew ? undefined : this.activeId, "");
     if (!(await this.ensureReady())) {
       return;
     }
