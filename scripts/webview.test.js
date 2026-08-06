@@ -837,8 +837,24 @@ test("keyboard shortcuts: Ctrl/Cmd+Esc stops, ArrowUp recalls, Ctrl/Cmd+. opens 
   h.document.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Escape", metaKey: true, bubbles: true }));
   await h.settle(5);
   assert.ok(h.posted.some((m) => m.type === "cancel"), "Ctrl/Cmd+Esc asks the host to cancel");
+
+  // A bare Escape from the composer stops it too, with nothing else open to close.
+  h.posted.length = 0;
+  h.document.getElementById("input").dispatchEvent(
+    new h.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true })
+  );
+  await h.settle(5);
+  assert.ok(h.posted.some((m) => m.type === "cancel"), "Escape in the composer asks the host to cancel");
   h.post({ type: "busy", value: false });
   await h.settle(5);
+
+  // Idle, Escape is not a stop: it must not fire a stray cancel.
+  h.posted.length = 0;
+  h.document.getElementById("input").dispatchEvent(
+    new h.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true })
+  );
+  await h.settle(5);
+  assert.deepStrictEqual(h.posted.filter((m) => m.type === "cancel"), [], "Escape while idle cancels nothing");
 
   // ArrowUp on an empty composer recalls the last message.
   const input = h.document.getElementById("input");
@@ -966,6 +982,40 @@ test("the status filter is multi select, offers Terminated, and can sort by stat
   assert.strictEqual(h.errors().length, 0);
 });
 
+test("New Session is a split button: the label starts one, the chevron picks where", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "sessions", sessions: [], activeId: null, statuses: {} });
+  await h.settle(20);
+
+  const split = h.document.querySelector("#new-session-dd .new-session-split");
+  assert.ok(split, "the control is a split button");
+  const main = split.querySelector(".new-session-btn");
+  const more = split.querySelector(".new-session-more");
+  assert.strictEqual(main.textContent.trim(), "New Session");
+
+  // The labelled half starts a session here, with no menu in the way.
+  main.click();
+  await h.settle(10);
+  assert.ok(
+    h.posted.some((m) => m.type === "newSessionAt" && m.target === "view"),
+    "clicking the label starts a session in the panel"
+  );
+  assert.ok(!h.document.querySelector(".dv-menu"), "no menu is opened by the label");
+
+  // The chevron opens the menu with the other places to open one.
+  more.click();
+  await h.settle(10);
+  const labels = [...h.document.querySelectorAll(".dv-menu .dv-menu-item span")].map((s) => s.textContent);
+  assert.deepStrictEqual(labels, [
+    "New Session",
+    "New Session (Editor)",
+    "New Session (Window)",
+    "New Devin CLI Session (Terminal)"
+  ]);
+  assert.strictEqual(h.errors().length, 0);
+});
+
 test("returning to the list keeps the cached rows and shows the top loading bar", async () => {
   const h = createHarness();
   h.post({ type: "ready" });
@@ -1025,8 +1075,15 @@ test("dragging shows the attach overlay and dropping a file URI attaches it", as
   await h.settle(10);
 
   const chatMain = h.document.getElementById("chat-main");
-  const overlay = chatMain.querySelector(".chat-dnd-overlay");
+  const overlay = h.document.getElementById("chat").querySelector(".chat-dnd-overlay");
   assert.ok(overlay, "the drop overlay exists");
+
+  // VS Code's own host script listens on the webview window and takes the drag
+  // away the moment it sees one, so nothing may reach the window listeners.
+  const host = [];
+  for (const type of ["dragenter", "dragover", "drop"]) {
+    h.window.addEventListener(type, (e) => host.push(e.type));
+  }
 
   // Dragging a file over the chat reveals the overlay.
   const enter = new h.window.Event("dragenter", { bubbles: true, cancelable: true });
@@ -1050,6 +1107,62 @@ test("dragging shows the attach overlay and dropping a file URI attaches it", as
     h.posted.some((m) => m.type === "addMention" && m.path === "/Users/me/src/app one.ts"),
     "the dropped file is attached by its decoded path"
   );
+  assert.deepStrictEqual(host, [], "no drag event escapes to VS Code's host listeners");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a folder dropped from outside VS Code attaches as a listing, not silently nothing", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  await h.settle(10);
+
+  // An OS drag gives no path for a folder, only an entry, so the top level is read
+  // through the entries API. readEntries hands back one batch, then an empty one.
+  let batches = [[{ name: "api.ts", isDirectory: false }, { name: "models", isDirectory: true }, { name: ".env", isDirectory: false }], []];
+  const dir = {
+    name: "orders",
+    isDirectory: true,
+    createReader: () => ({ readEntries: (cb) => cb(batches.shift() || []) })
+  };
+  const drop = new h.window.Event("drop", { bubbles: true, cancelable: true });
+  Object.defineProperty(drop, "dataTransfer", {
+    value: {
+      types: ["Files"],
+      files: [{ name: "orders" }],
+      items: [{ kind: "file", webkitGetAsEntry: () => dir, getAsFile: () => ({ name: "orders" }) }],
+      getData: () => ""
+    }
+  });
+  h.document.getElementById("chat-main").dispatchEvent(drop);
+  await h.settle(10);
+
+  const folder = h.posted.find((m) => m.type === "attachDroppedFolder");
+  assert.ok(folder, "the folder is attached rather than read as a file");
+  assert.strictEqual(folder.name, "orders");
+  assert.deepStrictEqual(folder.entries, ["api.ts", "models/"], "the listing marks folders and skips dotfiles");
+  assert.ok(!h.posted.some((m) => m.type === "attachDroppedText"), "the folder is not also attached as text");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a drag anywhere in the panel, not just the chat column, is a drop target", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  await h.settle(10);
+
+  const overlay = h.document.getElementById("chat").querySelector(".chat-dnd-overlay");
+  const enter = new h.window.Event("dragenter", { bubbles: true, cancelable: true });
+  Object.defineProperty(enter, "dataTransfer", { value: { types: ["Files"] } });
+  h.document.getElementById("sessions-panel").dispatchEvent(enter);
+  assert.ok(overlay.classList.contains("visible"), "dragging over the sessions panel still offers the drop");
+
+  const leave = new h.window.Event("dragleave", { bubbles: true, cancelable: true });
+  Object.defineProperty(leave, "dataTransfer", { value: { types: ["Files"] } });
+  h.document.getElementById("sessions-panel").dispatchEvent(leave);
+  assert.ok(!overlay.classList.contains("visible"), "leaving hides the overlay again");
   assert.strictEqual(h.errors().length, 0);
 });
 

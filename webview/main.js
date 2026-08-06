@@ -364,15 +364,25 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     }
     newSessionFloater = makeFloater(anchor, menu, "center", () => { newSessionFloater = null; });
   }
+  // A split button, like VS Code's own: the labelled half starts a session right
+  // here, the chevron beside it offers the other places to open one.
   function buildNewSessionButton() {
-    const b = document.createElement("button");
-    b.className = "new-session-btn";
-    b.title = "New session";
-    b.appendChild(mkIcon("new-session"));
-    b.appendChild(Object.assign(document.createElement("span"), { textContent: "New Session" }));
-    b.appendChild(mkIcon("chevron-down"));
-    b.addEventListener("click", (e) => { e.stopPropagation(); openNewSessionMenu(b); });
-    return b;
+    const wrap = document.createElement("div");
+    wrap.className = "new-session-split";
+    const main = document.createElement("button");
+    main.className = "new-session-btn";
+    main.title = "New session";
+    main.appendChild(mkIcon("new-session"));
+    main.appendChild(Object.assign(document.createElement("span"), { textContent: "New Session" }));
+    main.addEventListener("click", (e) => { e.stopPropagation(); vscode.postMessage({ type: "newSessionAt", target: "view" }); });
+    const more = document.createElement("button");
+    more.className = "new-session-more";
+    more.title = "New session in\u2026";
+    more.setAttribute("aria-haspopup", "true");
+    more.appendChild(mkIcon("chevron-down"));
+    more.addEventListener("click", (e) => { e.stopPropagation(); openNewSessionMenu(wrap); });
+    wrap.append(main, more);
+    return wrap;
   }
   el.newSessionDd.appendChild(buildNewSessionButton());
 
@@ -508,9 +518,12 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   }
 
   el.send.addEventListener("click", send);
-  el.stop.addEventListener("click", () => { vscode.postMessage({ type: "cancel" }); cancelPrompts(); });
-  const isMacLike = /Mac|iP(hone|ad|od)/.test((navigator.platform || navigator.userAgent || ""));
-  el.stop.title = "Stop (" + (isMacLike ? "\u2318" : "Ctrl") + "+Esc)";
+  function stopTurn() {
+    vscode.postMessage({ type: "cancel" });
+    cancelPrompts();
+  }
+  el.stop.addEventListener("click", stopTurn);
+  el.stop.title = "Stop (Esc)";
 
   // Close any open question/permission widgets (on Stop, or when the host says
   // the request was cancelled). They must not linger or be submittable after
@@ -530,6 +543,10 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     }
     if (e.key === "Escape" && editingQueuedId) { e.preventDefault(); cancelQueuedEdit(); return; }
     if (e.key === "Escape" && editingTurn) { e.preventDefault(); cancelInputEditing(); return; }
+    // With nothing open to close, Escape from the composer stops the turn. VS Code
+    // binds only Ctrl/Cmd+Esc (still handled below, from anywhere in the panel),
+    // but a bare Escape is the reflex when the composer has focus.
+    if (e.key === "Escape" && busy) { e.preventDefault(); stopTurn(); return; }
     // ArrowUp on an empty composer recalls your last message (VS Code's input
     // history), so it is quick to resend or tweak it.
     if (e.key === "ArrowUp" && !e.shiftKey && !e.metaKey && !e.ctrlKey && !editingTurn && !editingQueuedId && el.input.value === "" && lastUserText) {
@@ -566,7 +583,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   document.addEventListener("keydown", (e) => {
     if (!(e.metaKey || e.ctrlKey)) return;
     if (e.key === "Escape") {
-      if (busy) { e.preventDefault(); vscode.postMessage({ type: "cancel" }); cancelPrompts(); }
+      if (busy) { e.preventDefault(); stopTurn(); }
       return;
     }
     if (e.code === "Period" && body === "thread") {
@@ -813,7 +830,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   const dndOverlay = document.createElement("div");
   dndOverlay.className = "chat-dnd-overlay";
   dndOverlay.innerHTML = '<span class="attach-context-overlay-text"><i class="codicon codicon-attach"></i><span class="overlay-text">Attach as Context</span></span>';
-  el.chatMain.appendChild(dndOverlay);
+  el.chat.appendChild(dndOverlay);
 
   // The drag payloads we can turn into context. VS Code's internal drags carry
   // every dragged resource in `application/vnd.code.uri-list` (or ResourceURLs /
@@ -822,6 +839,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   const DND_URI_TYPES = ["application/vnd.code.uri-list", "ResourceURLs", "CodeFiles", "text/uri-list"];
 
   function dndSupported(e) {
+    if (el.chat.classList.contains("hidden")) return false; // boot / setup screen
     const t = (e.dataTransfer && e.dataTransfer.types) || [];
     const has = (x) => Array.prototype.indexOf.call(t, x) !== -1;
     return has("Files") || DND_URI_TYPES.some(has);
@@ -858,26 +876,41 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     }
     return out;
   }
+  // VS Code hands any drag that reaches a webview back to the workbench, so the
+  // editor can own the drop: its host script watches the webview window for drag
+  // events and drops pointer-events on our iframe as soon as it sees one
+  // (webviewWindowDragMonitor). That is what made the overlay flash and vanish,
+  // and the file open in an editor instead of attaching. So every drag event is
+  // claimed in the capture phase and stopped there, before it reaches the window
+  // listeners the host installed, which keeps the drag ours. Claiming them on the
+  // window rather than the chat also covers the sessions panel and the edges,
+  // where a stray dragenter would otherwise hand the whole drag away.
+  //
+  // A drag that starts inside VS Code (Explorer, editor tabs) is blocked from its
+  // very first dragstart, before any event reaches us, so those only arrive while
+  // Shift is held: that is VS Code's own gesture for dropping into a webview.
   let dndDepth = 0;
-  el.chatMain.addEventListener("dragenter", (e) => {
-    if (!dndSupported(e)) return;
-    e.preventDefault();
+  function onDnd(type, handler) {
+    window.addEventListener(type, (e) => {
+      if (!dndSupported(e)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      handler(e);
+    }, true);
+  }
+  onDnd("dragenter", () => {
     dndDepth++;
     dndOverlay.classList.add("visible");
   });
-  el.chatMain.addEventListener("dragover", (e) => {
-    if (!dndSupported(e)) return;
-    e.preventDefault();
+  onDnd("dragover", (e) => {
     if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
   });
-  el.chatMain.addEventListener("dragleave", () => {
+  onDnd("dragleave", () => {
     dndDepth = Math.max(0, dndDepth - 1);
     if (dndDepth === 0) dndOverlay.classList.remove("visible");
   });
-  el.chatMain.addEventListener("drop", (e) => {
+  onDnd("drop", (e) => {
     hideDndOverlay();
-    if (!e.dataTransfer || !dndSupported(e)) return;
-    e.preventDefault();
     handleDrop(e.dataTransfer);
   });
   function hideDndOverlay() {
@@ -899,21 +932,57 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       return;
     }
     // Otherwise we have raw files (an OS/app drop with no path): images inline,
-    // everything else as its text content.
-    const files = dt.files ? Array.prototype.slice.call(dt.files) : [];
-    files.forEach((f) => {
+    // everything else as its text content. A folder cannot be read as either, so
+    // it is picked out through the entries API, which is also the only way to see
+    // that one was dropped at all. Both have to be taken off the items list while
+    // the drop event is still on the stack, before any of the reading below.
+    const dropped = [];
+    Array.prototype.forEach.call(dt.items || [], (it) => {
+      if (it.kind !== "file") return;
+      dropped.push({ dir: it.webkitGetAsEntry ? it.webkitGetAsEntry() : null, file: it.getAsFile() });
+    });
+    if (!dropped.length) {
+      Array.prototype.forEach.call(dt.files || [], (f) => dropped.push({ dir: null, file: f }));
+    }
+    dropped.forEach(({ dir, file }) => {
+      if (dir && dir.isDirectory) {
+        attachDroppedFolder(dir);
+        return;
+      }
+      if (!file) return;
       const reader = new FileReader();
-      if (f.type && f.type.indexOf("image/") === 0) {
+      if (file.type && file.type.indexOf("image/") === 0) {
         reader.onload = () => {
           const result = String(reader.result || "");
-          vscode.postMessage({ type: "attachImage", name: f.name || "image", mime: f.type, data: result.slice(result.indexOf(",") + 1) });
+          vscode.postMessage({ type: "attachImage", name: file.name || "image", mime: file.type, data: result.slice(result.indexOf(",") + 1) });
         };
-        reader.readAsDataURL(f);
+        reader.readAsDataURL(file);
       } else {
-        reader.onload = () => vscode.postMessage({ type: "attachDroppedText", name: f.name || "file", text: String(reader.result || "") });
-        reader.readAsText(f);
+        reader.onload = () => vscode.postMessage({ type: "attachDroppedText", name: file.name || "file", text: String(reader.result || "") });
+        reader.readAsText(file);
       }
     });
+  }
+
+  // A folder dropped from outside VS Code. The OS drag carries no path, so the
+  // host cannot list it the way it lists a folder dragged from the Explorer: read
+  // its top level here instead and attach that as the listing. readEntries hands
+  // back a batch at a time and an empty batch means the end.
+  function attachDroppedFolder(dir) {
+    const reader = dir.createReader();
+    const names = [];
+    const done = () => vscode.postMessage({ type: "attachDroppedFolder", name: dir.name, entries: names.sort() });
+    const read = () => reader.readEntries((batch) => {
+      if (!batch.length || names.length >= 500) {
+        done();
+        return;
+      }
+      batch.forEach((en) => {
+        if (!en.name.startsWith(".")) names.push(en.isDirectory ? en.name + "/" : en.name);
+      });
+      read();
+    }, done);
+    read();
   }
 
   // --- Dropdown component (VS Code style) ----------------------------------
@@ -4221,6 +4290,16 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       chips.appendChild(chip);
     });
     box.appendChild(chips);
+    // The only place the Shift gesture can be taught. VS Code makes a webview
+    // inert for the whole of a drag that starts inside it, so a drag from the
+    // Explorer reaches us only while Shift is held, and until it does we get no
+    // event to hint from.
+    const hint = document.createElement("div");
+    hint.className = "welcome-hint muted";
+    hint.innerHTML =
+      '<i class="codicon codicon-attach"></i> Drag files and folders in to attach them, ' +
+      "holding <kbd>Shift</kbd> when the drag starts inside VS Code.";
+    box.appendChild(hint);
     el.thread.appendChild(box);
   }
 
