@@ -4669,3 +4669,18 @@ body.dv-resizing #sessions-resizer {
 }
 
 
+
+/* A chat moved between the side panel and an editor tab keeps its own divider,
+   dimmer than a restored checkpoint since nothing was rewound. */
+.moved-row .restored-label {
+  color: var(--dv-dim);
+  font-style: italic;
+}
+
+/* A session another chat surface is running, marked in the list. */
+.session-elsewhere {
+  margin-left: 6px;
+  font-size: 11px;
+  opacity: 0.6;
+  vertical-align: middle;
+}

@@ -39,6 +39,23 @@ panel can now dock on either side.
 - Answers to a question survive leaving the session. The options you had ticked and
   the free text half typed into "Other" come back with the question, on the
   question you were on, rather than starting from nothing.
+- A chat can be moved between the side panel and an editor tab, and back, from the
+  control beside terminate. The live agent goes with it: the same process, holding
+  the same session lock, with its MCP servers still connected and a turn in flight
+  never interrupted. Only the transcript is repainted, which takes about a second
+  even for a very long chat, because a transcript cannot cross between webviews.
+  A chat mid turn cannot be repainted over its live channel, so it picks up where
+  it is and says "Continued from the side panel" instead.
+- A chat runs in one place at a time, so a session already open on another surface
+  is marked in the list, and picking it offers to show it where it is or move it
+  here rather than fighting over the session lock.
+- Closing an editor tab no longer quietly ends a chat that is still running. Since
+  VS Code cannot ask before an editor closes, it asks straight after: keep it open
+  where it was, move it to the side panel, or stop it.
+- Reloading the window puts you back in the chat you were reading. The panel used
+  to come back empty until you went to the list and opened the session again,
+  because a reload builds a fresh webview with no transcript and only a chat whose
+  turn had been interrupted was reopened.
 - A question Devin is waiting on is no longer duplicated. Leaving a session for
   the list, or switching straight to another session, and coming back stacked a
   second copy of the same question, and going back and forth stacked one more
@@ -103,6 +120,18 @@ panel can now dock on either side.
   means a checkpoint restore can still put back a change you had kept.
 - The panel side is one attribute on the chat root, so the layout, the resizer
   direction and the header order are all CSS. The DOM order never changes.
+- Moving a chat hands the whole `Runtime` from one controller to the other: the
+  `AcpClient`'s listeners are re-bound, its `TerminalManager` re-targeted, and the
+  permission and elicitation resolvers it is waiting on travel with it, so an open
+  question is still answerable on the other side. Request ids are now allocated
+  from a shared counter so they stay unique once they move. The CLI's session lock
+  belongs to the process, which never restarts, so no take over is involved.
+- `ChatManager` is the `SurfaceHost`: it owns which surface has which session,
+  reveals one on request, and titles a detached tab after its chat.
+- The side panel records the session it is showing (`devin.viewingSession.v1`),
+  which is what the restore after a reload reads. `ready` no longer resets the body
+  to the list when a thread is already on screen, so a re-announced readiness (a
+  health recheck, or a surface being handed a chat) cannot blank it.
 - Drafts live in `workspaceState` (`devin.drafts.v1`), keyed by session, pruned
   with the tracked id list, and capped so a pasted file cannot become one. The
   panel keeps its own copy for the session it is showing, and the stored one only
