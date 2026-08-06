@@ -7,12 +7,29 @@ All notable changes to **Devin for VS Code**, newest first.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
-## [0.8.1] - 2026-08-06
+## [0.8.2] - 2026-08-06
 
 A round of fixes for moving between sessions while Devin is waiting on you, plus
-the questions it asks and the widgets docked above the composer.
+the questions it asks and the widgets docked above the composer. The sessions
+panel can now dock on either side.
 
 ### Highlights
+- The sessions panel docks on the right by default, and can be moved to the left
+  from **Devin: Sessions Panel: Side**. Its toggle travels with it: on the right
+  the header reads `[terminate] | [panel]`, and when there is no room for a docked
+  panel that same button becomes the session switcher, still on that side.
+- The panel can also be dragged to the other side by the empty space in its own
+  header, the way a view moves between VS Code's sidebars. The pointer shows a
+  drag, the edge it would land on lights up, and a press without a drag is still
+  just a click. Where you drop it is remembered.
+- Keeping a change no longer breaks its diff. Devin's diff was correct until you
+  pressed Keep, at which point the left hand side turned up empty and the file
+  read as though every line had just been added, while the transcript still showed
+  the real counts. Keep and Undo now hold on to the original text, so a diff you
+  have open keeps rendering against it: after Keep it shows what was accepted,
+  after Undo it shows no difference.
+- Panel settings apply as soon as you change them, instead of waiting for the next
+  session event.
 - A question Devin is waiting on is no longer duplicated. Leaving a session for
   the list, or switching straight to another session, and coming back stacked a
   second copy of the same question, and going back and forth stacked one more
@@ -71,10 +88,20 @@ the questions it asks and the widgets docked above the composer.
 - A session's mode is recorded from its `session/new` result, since the
   `current_mode_update` that announces it arrives before the call returns, while
   the runtime is not yet in the pool to receive it.
+- A kept or undone file keeps its snapshot, marked resolved, rather than being
+  deleted: it leaves the working set and the gutter markers, but the content
+  provider can still answer for it, which is what the open diff reads. It also
+  means a checkpoint restore can still put back a change you had kept.
+- The panel side is one attribute on the chat root, so the layout, the resizer
+  direction and the header order are all CSS. The DOM order never changes.
 - New regression tests cover a re-posted question and permission, the switcher's
   split button, a replayed message rendering as it arrives, a replayed thought
-  carrying no invented duration, Enter stepping through the questions, and a
-  session keeping its plan and changed files across a switch.
+  carrying no invented duration, Enter stepping through the questions, a session
+  keeping its plan and changed files across a switch, and the panel side setting
+  and its drag.
+- `scripts/changes.test.js` covers the working set directly, loading
+  `ChangeTracker` outside VS Code through a small `vscode` stub, so what Keep and
+  Undo do to a real file on disk is asserted rather than assumed.
 
 ## [0.8.0] - 2026-08-06
 

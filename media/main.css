@@ -3408,6 +3408,57 @@ body {
   border-right: 1px solid var(--vscode-panel-border);
   background: var(--vscode-sideBar-background, var(--vscode-editor-background));
 }
+
+/* The panel side (devin.sessionsPanel.side, default right) is driven entirely
+   from this attribute, so the DOM order never changes: flex order moves the
+   panel and its resizer past the chat, and the dividing border swaps edges. */
+#chat[data-panel-side="right"] #chat-main {
+  order: 1;
+}
+
+#chat[data-panel-side="right"] #sessions-resizer {
+  order: 2;
+}
+
+#chat[data-panel-side="right"] #sessions-panel {
+  order: 3;
+  border-right: none;
+  border-left: 1px solid var(--vscode-panel-border);
+}
+
+/* Moving the panel: its own header is the grab handle, and the edge it would
+   land on lights up while the pointer is over that half. */
+.session-toolbar-movable {
+  cursor: grab;
+}
+
+body.dv-panel-dragging,
+body.dv-panel-dragging * {
+  cursor: grabbing !important;
+}
+
+body.dv-panel-dragging {
+  user-select: none;
+}
+
+#chat[data-drop-side]::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--vscode-focusBorder);
+  z-index: 40;
+  pointer-events: none;
+}
+
+#chat[data-drop-side="left"]::after {
+  left: 0;
+}
+
+#chat[data-drop-side="right"]::after {
+  right: 0;
+}
 /* Drag handle between the sessions sidebar and the chat content. */
 #sessions-resizer {
   flex: 0 0 5px;
@@ -4458,6 +4509,17 @@ body.dv-resizing #sessions-resizer {
   align-self: stretch;
   margin: 5px 4px;
   background: var(--vscode-panel-border);
+}
+
+/* With the panel on the right, its toggle belongs at the far end of the header,
+   past the terminate button: [terminate] | [panel]. Everything else is order 0,
+   so these two are the only ones that need moving. */
+#chat[data-panel-side="right"] #header-divider {
+  order: 1;
+}
+
+#chat[data-panel-side="right"] #panel-toggle {
+  order: 2;
 }
 .icon-btn.active {
   color: var(--vscode-focusBorder);

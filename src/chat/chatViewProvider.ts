@@ -162,6 +162,12 @@ export class ChatController implements AcpHost {
       vscode.window.onDidChangeActiveTextEditor(() => this.postImplicitContext()),
       vscode.window.onDidChangeTextEditorSelection((e) => {
         if (e.textEditor === vscode.window.activeTextEditor) this.scheduleImplicitPost();
+      }),
+      // Every panel preference rides on the capabilities message, so a setting
+      // changed in the Settings editor applies to an open chat straight away
+      // instead of waiting for the next session event.
+      vscode.workspace.onDidChangeConfiguration((e) => {
+        if (e.affectsConfiguration("devin")) this.postCapabilities();
       })
     );
   }
@@ -859,7 +865,7 @@ export class ChatController implements AcpHost {
 
   // Persist a UI preference the webview toggled (e.g. a "don't ask again"
   // checkbox). Allowlisted so the webview cannot write arbitrary settings.
-  private static readonly WRITABLE_KEYS = new Set(["editing.confirmEditRequestRemoval"]);
+  private static readonly WRITABLE_KEYS = new Set(["editing.confirmEditRequestRemoval", "sessionsPanel.side"]);
   private async setConfig(key: unknown, value: unknown): Promise<void> {
     if (typeof key !== "string" || !ChatController.WRITABLE_KEYS.has(key)) return;
     await this.cfg().update(key, value, vscode.ConfigurationTarget.Global);
@@ -2494,7 +2500,8 @@ export class ChatController implements AcpHost {
       contextUsage: this.cfg().get<boolean>("contextUsage.enabled", true),
       inlineReferencesStyle: this.cfg().get<string>("inlineReferences.style", "box"),
       thinkingStyle: this.cfg().get<string>("thinking.style", "fixedScrolling"),
-      streamAnim: this.cfg().get<string>("incrementalRendering.animationStyle", "rise")
+      streamAnim: this.cfg().get<string>("incrementalRendering.animationStyle", "rise"),
+      panelSide: this.cfg().get<string>("sessionsPanel.side", "right")
     });
   }
 

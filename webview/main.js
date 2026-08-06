@@ -253,11 +253,34 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   function hasRoomForPanel() {
     return el.chat.clientWidth >= SIDE_BY_SIDE_MIN;
   }
+
+  // Which side the docked panel sits on (devin.sessionsPanel.side, default
+  // right). The whole layout is driven off the attribute, in CSS, so the DOM
+  // order never changes: the panel and its resizer are reordered, and the toggle
+  // moves to the far end of the header, past the terminate button.
+  function panelSide() {
+    return caps.panelSide === "left" ? "left" : "right";
+  }
+  function applyPanelSide() {
+    el.chat.dataset.panelSide = panelSide();
+    if (body === "thread") updatePanelToggle();
+  }
+  // Persist a side chosen by dragging, and apply it now rather than waiting for
+  // the host to echo the setting back.
+  function setPanelSide(side) {
+    if (side !== "left" && side !== "right") return;
+    if (panelSide() === side) return;
+    caps.panelSide = side;
+    applyPanelSide();
+    vscode.postMessage({ type: "setConfig", key: "sessionsPanel.side", value: side });
+  }
   function updatePanelToggle() {
     if (body !== "thread") return;
     el.panelToggle.classList.remove("hidden");
     if (hasRoomForPanel()) {
-      setBtnIcon(el.panelToggle, sessionsPanelOpen ? "layout-sidebar-left-off" : "layout-sidebar-left");
+      const side = panelSide();
+      const icon = "layout-sidebar-" + side + (sessionsPanelOpen ? "-off" : "");
+      setBtnIcon(el.panelToggle, icon);
       el.panelToggle.title = sessionsPanelOpen ? "Hide sessions" : "Show sessions";
       el.panelToggle.classList.toggle("active", sessionsPanelOpen);
     } else {
@@ -276,7 +299,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     el.sessionsResizer.classList.remove("hidden");
     el.chat.classList.add("panel-open");
     if (!panelCtrl) {
-      panelCtrl = mountSessionList(el.sessionsPanel, { controls: "panel" });
+      panelCtrl = mountSessionList(el.sessionsPanel, { controls: "panel", movable: true });
     } else {
       panelCtrl.refresh();
     }
@@ -391,15 +414,17 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   el.newSessionDd.appendChild(buildNewSessionButton());
 
   // Drag the divider between the sessions sidebar and the chat content to
-  // resize the panel freely.
+  // resize the panel freely. On the right the drag direction is mirrored: moving
+  // left grows the panel.
   el.sessionsResizer.addEventListener("mousedown", (e) => {
     e.preventDefault();
     const startX = e.clientX;
     const startW = el.sessionsPanel.getBoundingClientRect().width;
+    const dir = panelSide() === "right" ? -1 : 1;
     document.body.style.cursor = "col-resize";
     document.body.classList.add("dv-resizing");
     const onMove = (ev) => {
-      let w = startW + (ev.clientX - startX);
+      let w = startW + dir * (ev.clientX - startX);
       const maxW = Math.max(240, el.chat.clientWidth - 320);
       w = Math.max(220, Math.min(w, maxW));
       el.sessionsPanel.style.width = w + "px";
@@ -413,6 +438,38 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     document.addEventListener("mousemove", onMove);
     document.addEventListener("mouseup", onUp);
   });
+
+  // Drag the panel by the empty space in its own header to move it to the other
+  // side, the way VS Code lets you drag a view between sidebars. A drop past the
+  // midpoint of the chat area moves it; anything shorter is treated as a click
+  // and leaves it be. Live preview while dragging would fight the pointer, so
+  // the side is only committed on release, with the target edge highlighted.
+  function startPanelDrag(e) {
+    if (e.button !== 0) return;
+    const startX = e.clientX;
+    let armed = false;
+    let target = panelSide();
+    const chatBox = () => el.chat.getBoundingClientRect();
+    const onMove = (ev) => {
+      if (!armed && Math.abs(ev.clientX - startX) < 4) return;
+      if (!armed) {
+        armed = true;
+        document.body.classList.add("dv-panel-dragging");
+      }
+      const box = chatBox();
+      target = ev.clientX < box.left + box.width / 2 ? "left" : "right";
+      el.chat.dataset.dropSide = target === panelSide() ? "" : target;
+    };
+    const onUp = () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      document.body.classList.remove("dv-panel-dragging");
+      delete el.chat.dataset.dropSide;
+      if (armed) setPanelSide(target);
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }
 
   // Header button wiring.
   el.panelToggle.addEventListener("click", (e) => {
@@ -1249,7 +1306,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // orphans it); true after a live turn completion or an instant restore.
   let lastHeadReliable = false;
   // Feature gates from the host (revert capability + settings).
-  let caps = { revert: false, subagentControl: false, editRequests: "inline", checkpoints: true, showFileChanges: true, confirmRemoval: true, verbose: true, progressBorder: true, contextUsage: true, inlineReferencesStyle: "box", thinkingStyle: "fixedScrolling", streamAnim: "rise" };
+  let caps = { revert: false, subagentControl: false, editRequests: "inline", checkpoints: true, showFileChanges: true, confirmRemoval: true, verbose: true, progressBorder: true, contextUsage: true, inlineReferencesStyle: "box", thinkingStyle: "fixedScrolling", streamAnim: "rise", panelSide: "right" };
   // Pending revert-preview requests keyed by token.
   const previewWaiters = new Map();
   let previewSeq = 0;
@@ -4064,6 +4121,16 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       };
       const toolbar = document.createElement("div");
       toolbar.className = "session-toolbar";
+      // The docked panel can be dragged to the other side by its own header. Only
+      // the empty space does it, so the tool buttons keep their clicks.
+      if (opts.movable) {
+        toolbar.classList.add("session-toolbar-movable");
+        toolbar.title = "Drag to move the panel to the other side";
+        toolbar.addEventListener("mousedown", (e) => {
+          if (e.target.closest("button")) return;
+          startPanelDrag(e);
+        });
+      }
       // Spin until the refreshed list actually arrives (devin list can take a
       // few seconds), with a safety stop so it never spins forever.
       refreshBtn = mkTool("refresh", "Refresh sessions", () => {
@@ -4598,6 +4665,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     }
     // Drive the streaming entrance animation from the setting.
     el.thread.dataset.anim = caps.streamAnim || "rise";
+    applyPanelSide();
   }
 
   // --- Welcome / empty state ----------------------------------------------
@@ -5095,7 +5163,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
           contextUsage: m.contextUsage !== undefined ? !!m.contextUsage : caps.contextUsage,
           inlineReferencesStyle: m.inlineReferencesStyle || caps.inlineReferencesStyle,
           thinkingStyle: m.thinkingStyle || caps.thinkingStyle,
-          streamAnim: m.streamAnim || caps.streamAnim
+          streamAnim: m.streamAnim || caps.streamAnim,
+          panelSide: m.panelSide || caps.panelSide
         });
         applyCapPrefs();
         refreshTurnChrome();
