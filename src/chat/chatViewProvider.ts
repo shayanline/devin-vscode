@@ -536,6 +536,9 @@ export class ChatController implements AcpHost {
       await this.doLoadSession(rt.id);
       this.post({ type: "moved", from: transfer.from });
     }
+    // A brand new surface announces its own readiness while this is running, so
+    // say once more where it should be: showing the chat, not its session list.
+    this.post({ type: "body", body: "thread" });
     this.focus();
   }
 
