@@ -6,6 +6,7 @@ import * as vscode from "vscode";
 export class SessionStore {
   private static readonly IDS_KEY = "devin.sessionIds.v1";
   private static readonly ACTIVE_KEY = "devin.activeSession.v1";
+  private static readonly VIEWING_KEY = "devin.viewingSession.v1";
   private static readonly TITLES_KEY = "devin.sessionTitles.v1";
   private static readonly OPTIONS_KEY = "devin.options.v1";
   private static readonly CWDS_KEY = "devin.sessionCwd.v1";
@@ -198,5 +199,20 @@ export class SessionStore {
 
   setActive(id: string | undefined): void {
     void this.state.update(SessionStore.ACTIVE_KEY, id);
+  }
+
+  // The session the panel was last showing, as opposed to the last one used:
+  // undefined means it was on the sessions list. A window reload builds a brand
+  // new webview with an empty transcript, so this is what puts the reader back
+  // where they were instead of dropping them on the list.
+  viewing(): string | undefined {
+    return this.state.get<string | undefined>(SessionStore.VIEWING_KEY, undefined);
+  }
+
+  setViewing(id: string | undefined): void {
+    if (this.viewing() === id) {
+      return;
+    }
+    void this.state.update(SessionStore.VIEWING_KEY, id);
   }
 }

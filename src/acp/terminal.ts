@@ -40,9 +40,20 @@ export class TerminalManager {
   constructor(
     private readonly baseEnv: NodeJS.ProcessEnv,
     private readonly defaultCwd: string,
-    private readonly onOutput?: (terminalId: string, output: string, exitStatus: TerminalExitStatus | null) => void,
-    private readonly log?: (line: string) => void
+    private onOutput?: (terminalId: string, output: string, exitStatus: TerminalExitStatus | null) => void,
+    private log?: (line: string) => void
   ) {}
+
+  // Re-point the listeners when the session this manager belongs to moves to
+  // another chat surface: the running commands keep going, their output just
+  // needs to reach the panel now showing them.
+  retarget(
+    onOutput?: (terminalId: string, output: string, exitStatus: TerminalExitStatus | null) => void,
+    log?: (line: string) => void
+  ): void {
+    this.onOutput = onOutput;
+    this.log = log;
+  }
 
   create(params: CreateTerminalParams): { terminalId: string } {
     const terminalId = `term-${++this.seq}`;

@@ -2059,3 +2059,91 @@ test("answers given before leaving a session come back with the question", async
   assert.strictEqual(h.document.querySelector(".qc .qc-step").textContent, "2 / 2", "reopening on the question we were on");
   assert.strictEqual(h.errors().length, 0);
 });
+
+test("the header offers detach in the panel and attach in an editor tab", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "capabilities", revert: true, surface: "view", panelSide: "right" });
+  h.post({ type: "sessionStatuses", statuses: { A: "idle" }, activeId: "A" });
+  await h.settle(10);
+  const btn = h.document.getElementById("detach-btn");
+  const header = [...h.document.getElementById("chat-header").children].map((c) => c.id);
+
+  assert.ok(!btn.classList.contains("hidden"), "the control shows inside a session");
+  assert.ok(header.indexOf("detach-btn") > header.indexOf("terminate-btn"), "it sits beside terminate, on its right");
+  assert.match(btn.querySelector(".codicon").className, /link-external/);
+  assert.strictEqual(btn.title, "Open this chat in an editor tab");
+  btn.click();
+  await h.settle(5);
+  assert.ok(h.posted.some((m) => m.type === "detachSession" && m.id === "A"), "the panel asks to detach");
+
+  // The same control moves the chat back when it is the editor surface.
+  h.post({ type: "capabilities", revert: true, surface: "editor", panelSide: "left" });
+  await h.settle(10);
+  assert.match(btn.querySelector(".codicon").className, /layout-sidebar-left-dock/, "the icon follows the panel side");
+  assert.strictEqual(btn.title, "Move this chat to the side panel");
+  btn.click();
+  await h.settle(5);
+  assert.ok(h.posted.some((m) => m.type === "attachSession" && m.id === "A"), "the tab asks to attach");
+
+  // No session, no control.
+  h.document.getElementById("history-btn").click();
+  await h.settle(10);
+  assert.ok(btn.classList.contains("hidden"), "the list has nothing to move");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a session running on another surface is marked in the list", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({
+    type: "sessions",
+    activeId: null,
+    statuses: { A: "idle", B: "running" },
+    elsewhere: ["B"],
+    sessions: [
+      { id: "A", short_id: "A", title: "Here", working_directory: "/w" },
+      { id: "B", short_id: "B", title: "In a tab", working_directory: "/w" }
+    ]
+  });
+  await h.settle(10);
+  const rows = [...h.document.querySelectorAll("#sessions-list .session-item")];
+  const badged = rows.filter((r) => r.querySelector(".session-elsewhere")).map((r) => r.textContent);
+  assert.strictEqual(badged.length, 1, "only the one held elsewhere is marked");
+  assert.match(badged[0], /In a tab/);
+
+  // The marker follows a status tick, without a full list refresh.
+  h.post({ type: "sessionStatuses", statuses: { A: "idle", B: "running" }, activeId: null, elsewhere: [] });
+  await h.settle(10);
+  assert.strictEqual(
+    h.document.querySelectorAll("#sessions-list .session-elsewhere").length,
+    0,
+    "and clears when the session comes back"
+  );
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a chat moved from another surface says so in the transcript", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "userChunk", text: "carried over" });
+  h.post({ type: "loaded" });
+  h.post({ type: "moved", from: "the side panel" });
+  await h.settle(10);
+  const row = h.thread().querySelector(".moved-row");
+  assert.ok(row, "a divider marks where it was picked up");
+  assert.match(row.textContent, /Continued from the side panel/);
+  assert.deepStrictEqual(h.reqTexts(), ["carried over"], "the transcript it was handed is intact");
+
+  // Moving again replaces the divider rather than stacking them.
+  h.post({ type: "moved", from: "an editor tab" });
+  await h.settle(10);
+  assert.strictEqual(h.thread().querySelectorAll(".moved-row").length, 1);
+  assert.strictEqual(h.errors().length, 0);
+});

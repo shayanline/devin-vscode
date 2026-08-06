@@ -29,6 +29,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     listRefreshBtn: $("list-refresh-btn"),
     settingsBtn: $("settings-btn"),
     terminateBtn: $("terminate-btn"),
+    detachBtn: $("detach-btn"),
     status: $("status"),
     usage: $("usage"),
     sessionsList: $("sessions-list"),
@@ -69,6 +70,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // Per-session liveness for the status dots: id -> "running" | "idle" |
   // "starting". Absent means dead (gray). Sent by the host.
   let sessionStatuses = {};
+  // Sessions another chat surface is running (an editor tab, or the side panel).
+  let elsewhereIds = [];
   // Retained transcripts so switching back to an idle session is instant (no
   // reload): id -> { frag, turns, ... }. A dirty id changed in the background
   // and must be reloaded instead of restored. curSessionId is the session whose
@@ -263,7 +266,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   }
   function applyPanelSide() {
     el.chat.dataset.panelSide = panelSide();
-    if (body === "thread") updatePanelToggle();
+    if (body === "thread") { updatePanelToggle(); updateDetachBtn(); }
   }
   // Persist a side chosen by dragging, and apply it now rather than waiting for
   // the host to echo the setting back.
@@ -523,11 +526,29 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   function updateTerminateBtn() {
     const show = body === "thread" && !!curSessionId && isAliveStatus(sessionStatuses[curSessionId]);
     el.terminateBtn.classList.toggle("hidden", !show);
+    updateDetachBtn();
   }
   el.terminateBtn.innerHTML = KILL_GLYPH;
   el.terminateBtn.addEventListener("click", () => {
     // Terminating from inside a session returns to the list once confirmed.
     if (curSessionId) vscode.postMessage({ type: "terminateSession", id: curSessionId, title: currentTitle, returnToList: true });
+  });
+
+  // Move this chat between the side panel and an editor tab. The live agent goes
+  // with it, so the direction is the only thing that changes: the side panel
+  // offers "open in an editor tab", an editor tab offers "move to the side panel".
+  function updateDetachBtn() {
+    const show = body === "thread" && !!curSessionId;
+    el.detachBtn.classList.toggle("hidden", !show);
+    if (!show) return;
+    const inEditor = caps.surface === "editor";
+    setBtnIcon(el.detachBtn, inEditor ? "layout-sidebar-" + panelSide() + "-dock" : "link-external");
+    el.detachBtn.title = inEditor ? "Move this chat to the side panel" : "Open this chat in an editor tab";
+    el.detachBtn.setAttribute("aria-label", el.detachBtn.title);
+  }
+  el.detachBtn.addEventListener("click", () => {
+    if (!curSessionId) return;
+    vscode.postMessage({ type: caps.surface === "editor" ? "attachSession" : "detachSession", id: curSessionId });
   });
 
   el.historyBtn.addEventListener("click", () => {
@@ -1350,7 +1371,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // orphans it); true after a live turn completion or an instant restore.
   let lastHeadReliable = false;
   // Feature gates from the host (revert capability + settings).
-  let caps = { revert: false, subagentControl: false, editRequests: "inline", checkpoints: true, showFileChanges: true, confirmRemoval: true, verbose: true, progressBorder: true, contextUsage: true, inlineReferencesStyle: "box", thinkingStyle: "fixedScrolling", streamAnim: "rise", panelSide: "right" };
+  let caps = { revert: false, subagentControl: false, editRequests: "inline", checkpoints: true, showFileChanges: true, confirmRemoval: true, verbose: true, progressBorder: true, contextUsage: true, inlineReferencesStyle: "box", thinkingStyle: "fixedScrolling", streamAnim: "rise", panelSide: "right", surface: "view" };
   // Pending revert-preview requests keyed by token.
   const previewWaiters = new Map();
   let previewSeq = 0;
@@ -1725,6 +1746,23 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     row.appendChild(right);
     el.thread.appendChild(row);
     scrollToBottom();
+  }
+
+  // A chat that has just been moved here from another surface, carrying its live
+  // agent with it. Uses the same divider as a restored checkpoint.
+  function renderMovedRow(from) {
+    const prev = el.thread.querySelector(".moved-row");
+    if (prev) prev.remove();
+    const row = document.createElement("div");
+    row.className = "restored-row moved-row";
+    const label = document.createElement("span");
+    label.className = "restored-label";
+    label.textContent = "Continued from " + (from || "another surface");
+    row.appendChild(Object.assign(document.createElement("span"), { className: "restored-line" }));
+    row.appendChild(label);
+    row.appendChild(Object.assign(document.createElement("span"), { className: "restored-line" }));
+    el.thread.appendChild(row);
+    forceScrollToBottom();
   }
 
   // Ask the host to preview the revert; returns true if it would discard edits
@@ -4570,11 +4608,12 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // churning the DOM and dropping row focus. A genuine change always yields a
   // different signature, so no update is ever missed.
   let lastStatusSig = "";
-  function applyStatuses(statuses, activeId) {
+  function applyStatuses(statuses, activeId, elsewhere) {
     const next = statuses || {};
     sessionStatuses = next;
     if (activeId !== undefined) lastActiveId = activeId;
-    const sig = Object.keys(next).sort().map((k) => k + ":" + next[k]).join(",") + "|" + (lastActiveId || "");
+    if (Array.isArray(elsewhere)) elsewhereIds = elsewhere;
+    const sig = Object.keys(next).sort().map((k) => k + ":" + next[k]).join(",") + "|" + (lastActiveId || "") + "|" + elsewhereIds.join(",");
     if (sig === lastStatusSig) return;
     lastStatusSig = sig;
     if (listCtrl) listCtrl.refresh();
@@ -4625,6 +4664,14 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       : "Not running";
     title.insertBefore(dot, title.firstChild);
     if (st === "attention") item.classList.add("needs-attention");
+    // Running on another surface: say so before it is clicked, since a chat runs
+    // in one place at a time.
+    if (elsewhereIds.includes(s.id)) {
+      const badge = document.createElement("i");
+      badge.className = "codicon codicon-link-external session-elsewhere";
+      badge.title = "Open in another chat surface";
+      title.appendChild(badge);
+    }
     const meta = document.createElement("div");
     meta.className = "session-meta";
     const time = document.createElement("span");
@@ -4761,6 +4808,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     // Drive the streaming entrance animation from the setting.
     el.thread.dataset.anim = caps.streamAnim || "rise";
     applyPanelSide();
+    updateDetachBtn();
   }
 
   // --- Welcome / empty state ----------------------------------------------
@@ -5082,7 +5130,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   function handleMessage(m) {
     switch (m.type) {
       case "setup": hideBoot(); renderSetup(m.health || {}); break;
-      case "ready": setView("chat"); setBody("list"); break;
+      // Readiness can be re-announced (a health recheck, a surface being handed a
+      // session), so it must not throw away a thread that is already on screen.
+      case "ready": setView("chat"); if (body !== "thread" || !curSessionId) setBody("list"); break;
       case "body":
         setView("chat");
         if (m.body === "list") {
@@ -5111,10 +5161,11 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         hideBoot();
         hideLoadingBar();
         if (m.statuses) sessionStatuses = m.statuses;
+        if (Array.isArray(m.elsewhere)) elsewhereIds = m.elsewhere;
         renderSessions(m.sessions, m.activeId, m.folders);
         updateTerminateBtn();
         break;
-      case "sessionStatuses": applyStatuses(m.statuses, m.activeId); break;
+      case "sessionStatuses": applyStatuses(m.statuses, m.activeId, m.elsewhere); break;
       case "sessionActivity": if (m.id) dirtyViews.add(m.id); break;
       case "openSession":
         // Host-initiated open (e.g. the "needs your input" notification). Reuse
@@ -5228,6 +5279,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       case "queued": renderQueued(m.items); break;
       case "attachments": renderAttachments(m.items); break;
       case "draft": applyDraft(m); break;
+      case "moved": renderMovedRow(m.from); break;
       case "implicitContext":
         implicit = m.file ? { path: m.file.path, name: m.file.name, line1: m.file.line1, line2: m.file.line2, enabled: m.enabled !== false } : null;
         renderComposerContext();
@@ -5260,7 +5312,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
           inlineReferencesStyle: m.inlineReferencesStyle || caps.inlineReferencesStyle,
           thinkingStyle: m.thinkingStyle || caps.thinkingStyle,
           streamAnim: m.streamAnim || caps.streamAnim,
-          panelSide: m.panelSide || caps.panelSide
+          panelSide: m.panelSide || caps.panelSide,
+          surface: m.surface || caps.surface
         });
         applyCapPrefs();
         refreshTurnChrome();
