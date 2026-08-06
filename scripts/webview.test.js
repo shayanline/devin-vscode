@@ -2147,3 +2147,38 @@ test("a chat moved from another surface says so in the transcript", async () => 
   assert.strictEqual(h.thread().querySelectorAll(".moved-row").length, 1);
   assert.strictEqual(h.errors().length, 0);
 });
+
+test("a chat being handed to a new surface is not sent back to the list", async () => {
+  // A freshly created surface announces its readiness twice while the chat it is
+  // being handed paints into it. That used to land mid load, before the session id
+  // arrived, and reset the panel to its session list: the detached tab opened on
+  // the list and the chat had to be clicked again.
+  const h = createHarness();
+  h.post({ type: "ready" });
+  await h.settle(5);
+  assert.ok(!h.document.getElementById("sessions-list").classList.contains("hidden"), "a new surface starts on the list");
+
+  // The host starts handing over a chat.
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear", loading: true, waking: false });
+  h.post({ type: "capabilities", revert: true, surface: "editor" });
+  h.post({ type: "userChunk", text: "the chat that was handed over" });
+
+  // Its readiness lands mid load, before the session id has arrived.
+  h.post({ type: "ready" });
+  await h.settle(5);
+  assert.ok(h.document.getElementById("sessions-list").classList.contains("hidden"), "the list does not take over");
+  assert.ok(!h.thread().classList.contains("hidden"), "the thread stays on screen");
+
+  h.post({ type: "assistantChunk", text: "with its reply" });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "loaded" });
+  h.post({ type: "moved", from: "the side panel" });
+  h.post({ type: "body", body: "thread" });
+  await h.settle(20);
+
+  assert.deepStrictEqual(h.reqTexts(), ["the chat that was handed over"]);
+  assert.deepStrictEqual(h.respTexts(), ["with its reply"]);
+  assert.ok(h.thread().querySelector(".moved-row"), "and it says where it came from");
+  assert.strictEqual(h.errors().length, 0);
+});

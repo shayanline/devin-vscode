@@ -5132,7 +5132,10 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       case "setup": hideBoot(); renderSetup(m.health || {}); break;
       // Readiness can be re-announced (a health recheck, a surface being handed a
       // session), so it must not throw away a thread that is already on screen.
-      case "ready": setView("chat"); if (body !== "thread" || !curSessionId) setBody("list"); break;
+      // Readiness is announced more than once (the cached fast path, then the real
+      // health check) and can land while a chat is being painted into this
+      // surface, so it must never send a thread back to the list.
+      case "ready": setView("chat"); if (body !== "thread") setBody("list"); break;
       case "body":
         setView("chat");
         if (m.body === "list") {
