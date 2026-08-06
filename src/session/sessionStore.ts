@@ -10,6 +10,12 @@ export class SessionStore {
   private static readonly OPTIONS_KEY = "devin.options.v1";
   private static readonly CWDS_KEY = "devin.sessionCwd.v1";
   private static readonly INTERRUPTED_KEY = "devin.interrupted.v1";
+  private static readonly DRAFTS_KEY = "devin.drafts.v1";
+  // The composer in the sessions list is a "new chat" box with no session of its
+  // own, so its unsent text is stored under this key.
+  private static readonly NEW_DRAFT = "__new__";
+  // A draft is a prompt someone is writing, not a place to keep a pasted file.
+  private static readonly MAX_DRAFT = 100000;
 
   constructor(private readonly state: vscode.Memento) {}
 
@@ -69,6 +75,33 @@ export class SessionStore {
     }
   }
 
+  // Unsent composer text, kept per session so leaving a chat, reloading it, or
+  // closing the window keeps the prompt you were part way through writing. It
+  // outlives the agent on purpose: come back tomorrow, finish the sentence, and
+  // sending it wakes the session up.
+  draft(id?: string): string {
+    return this.drafts()[id || SessionStore.NEW_DRAFT] || "";
+  }
+
+  setDraft(id: string | undefined, text: string): void {
+    const key = id || SessionStore.NEW_DRAFT;
+    const next = (text || "").slice(0, SessionStore.MAX_DRAFT);
+    const map = this.drafts();
+    if ((map[key] || "") === next) {
+      return;
+    }
+    if (next) {
+      map[key] = next;
+    } else {
+      delete map[key];
+    }
+    void this.state.update(SessionStore.DRAFTS_KEY, map);
+  }
+
+  private drafts(): Record<string, string> {
+    return this.state.get<Record<string, string>>(SessionStore.DRAFTS_KEY, {});
+  }
+
   ids(): string[] {
     return this.state.get<string[]>(SessionStore.IDS_KEY, []);
   }
@@ -103,11 +136,13 @@ export class SessionStore {
     if (cwd) {
       this.setCwd(id, cwd);
     }
-    // Keep the cwd map bounded to the capped id list, so it doesn't grow
-    // without limit as old sessions fall off the end. (Titles are deliberately
-    // left untouched: they are also cached for external sessions that are not
-    // in the tracked id list, and are used to fill names in the list.)
+    // Keep the cwd and draft maps bounded to the capped id list, so they don't
+    // grow without limit as old sessions fall off the end. (Titles are
+    // deliberately left untouched: they are also cached for external sessions
+    // that are not in the tracked id list, and are used to fill names in the
+    // list.)
     this.pruneCwds(capped);
+    this.pruneDrafts(capped);
   }
 
   private pruneCwds(ids: string[]): void {
@@ -125,6 +160,21 @@ export class SessionStore {
     }
   }
 
+  private pruneDrafts(ids: string[]): void {
+    const keep = new Set([...ids, SessionStore.NEW_DRAFT]);
+    const drafts = this.drafts();
+    let changed = false;
+    for (const key of Object.keys(drafts)) {
+      if (!keep.has(key)) {
+        delete drafts[key];
+        changed = true;
+      }
+    }
+    if (changed) {
+      void this.state.update(SessionStore.DRAFTS_KEY, drafts);
+    }
+  }
+
   remove(id: string): void {
     void this.state.update(SessionStore.IDS_KEY, this.ids().filter((x) => x !== id));
     const cwds = this.cwds();
@@ -132,6 +182,7 @@ export class SessionStore {
       delete cwds[id];
       void this.state.update(SessionStore.CWDS_KEY, cwds);
     }
+    this.setDraft(id, "");
     if (this.activeId() === id) {
       this.setActive(undefined);
     }

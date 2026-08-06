@@ -1888,3 +1888,174 @@ test("dragging the panel header to the other half moves and remembers the side",
   assert.strictEqual(h.posted.filter((m) => m.type === "setConfig").length, writes, "and nothing is rewritten");
   assert.strictEqual(h.errors().length, 0);
 });
+
+test("unsent text is saved as a draft and restored from the host", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  await h.settle(10);
+  const input = h.document.getElementById("input");
+
+  // Typing is saved against the session, debounced.
+  input.value = "half a prompt";
+  input.dispatchEvent(new h.window.Event("input", { bubbles: true }));
+  await h.settle(600);
+  const saved = h.posted.filter((m) => m.type === "draft");
+  assert.deepStrictEqual(saved[saved.length - 1], { type: "draft", id: "A", text: "half a prompt" });
+
+  // Leaving flushes immediately, without waiting for the debounce.
+  input.value = "half a prompt, plus more";
+  h.document.getElementById("history-btn").click();
+  await h.settle(10);
+  const onLeave = h.posted.filter((m) => m.type === "draft").pop();
+  assert.deepStrictEqual(onLeave, { type: "draft", id: "A", text: "half a prompt, plus more" });
+  assert.strictEqual(input.value, "", "the list gets a clean new chat box");
+
+  // The host puts a stored draft back into an empty composer.
+  h.post({ type: "draft", id: null, text: "a new chat I started earlier" });
+  await h.settle(10);
+  assert.strictEqual(input.value, "a new chat I started earlier");
+
+  // A draft for a session we are no longer in is ignored.
+  h.post({ type: "draft", id: "B", text: "belongs to another session" });
+  await h.settle(10);
+  assert.strictEqual(input.value, "a new chat I started earlier");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a restored transcript keeps its own fresher draft over the stored one", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "userMessage", text: "hello" });
+  h.post({ type: "assistantEnd" });
+  await h.settle(10);
+  const input = h.document.getElementById("input");
+  input.value = "the freshest text";
+  h.document.getElementById("history-btn").click();
+  h.post({
+    type: "sessions",
+    sessions: [{ id: "A", short_id: "A", title: "A", working_directory: "/w" }],
+    activeId: null,
+    statuses: { A: "idle" }
+  });
+  await h.settle(10);
+  h.document.querySelector("#sessions-list .session-main").click();
+  await h.settle(10);
+  assert.strictEqual(input.value, "the freshest text", "the retained transcript brings its draft back");
+
+  // The host's copy lands late and must not overwrite it.
+  h.post({ type: "draft", id: "A", text: "an older copy" });
+  await h.settle(10);
+  assert.strictEqual(input.value, "the freshest text");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("sending clears the draft, and editing a queued message gives it back", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "capabilities", revert: true });
+  h.post({ type: "busy", value: true });
+  h.post({ type: "queued", items: [{ id: "q1", text: "queued message" }] });
+  await h.settle(10);
+  const input = h.document.getElementById("input");
+
+  input.value = "my draft";
+  input.dispatchEvent(new h.window.Event("input", { bubbles: true }));
+  await h.settle(600);
+
+  // Editing a queued message borrows the composer; the draft must not be
+  // overwritten while it does, and comes back when the edit ends.
+  const row = h.document.querySelector("#thread .queued-item");
+  assert.ok(row, "the queued row renders");
+  const before = h.posted.filter((m) => m.type === "draft").length;
+  const editBtn = [...row.querySelectorAll(".queued-actions button")].find((b) => /edit/i.test(b.title || ""));
+  assert.ok(editBtn, "the queued row offers an edit action");
+  editBtn.click();
+  await h.settle(10);
+  assert.strictEqual(input.value, "queued message", "the composer shows the queued text");
+  input.dispatchEvent(new h.window.Event("input", { bubbles: true }));
+  await h.settle(600);
+  assert.strictEqual(
+    h.posted.filter((m) => m.type === "draft").length,
+    before,
+    "an edit in progress is never stored as the draft"
+  );
+
+  input.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  await h.settle(10);
+  assert.strictEqual(input.value, "my draft", "cancelling the edit hands the draft back");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("answers given before leaving a session come back with the question", async () => {
+  const h = createHarness();
+  const question = (answers) => ({
+    type: "elicitation",
+    requestId: "e1",
+    mode: "form",
+    message: "Two questions",
+    allowOther: true,
+    answers,
+    schema: {
+      type: "object",
+      required: ["q0", "q1"],
+      properties: {
+        q0: { type: "string", title: "First", description: "First", oneOf: [{ const: "a", title: "A" }, { const: "b", title: "B" }] },
+        q1: { type: "string", title: "Second", description: "Second", oneOf: [{ const: "c", title: "C" }] }
+      }
+    }
+  });
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post(question());
+  await h.settle(20);
+
+  // Answer the first question and half type an Other answer on the second.
+  const fields = () => [...h.document.querySelectorAll(".qc .elicit-field")];
+  fields()[0].querySelectorAll(".elicit-native")[0].click();
+  h.document.querySelector(".qc").dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+  await h.settle(10);
+  assert.strictEqual(h.document.querySelector(".qc .qc-step").textContent, "2 / 2");
+  const other = fields()[1].querySelector(".elicit-other");
+  other.value = "something of my own";
+  other.dispatchEvent(new h.window.Event("input", { bubbles: true }));
+  await h.settle(400);
+
+  const state = h.posted.filter((m) => m.type === "answerDraft").pop();
+  assert.ok(state, "the answers so far are sent to the host");
+  assert.deepStrictEqual(state.state.by.q0.picked, ["a"], "the chosen option is recorded");
+  assert.strictEqual(state.state.by.q1.other, "something of my own", "so is the free text");
+
+  // Leaving flushes, and the host re-posts the question with those answers.
+  h.document.getElementById("history-btn").click();
+  await h.settle(10);
+  assert.strictEqual(h.document.querySelectorAll(".qc").length, 0, "the widget goes with the session");
+  const flushed = h.posted.filter((m) => m.type === "answerDraft").pop();
+  h.post({ type: "body", body: "thread" });
+  h.post(question(flushed.state));
+  await h.settle(20);
+
+  assert.strictEqual(h.document.querySelectorAll(".qc").length, 1);
+  assert.strictEqual(
+    fields()[0].querySelectorAll(".elicit-native")[0].checked,
+    true,
+    "the option chosen before is still chosen"
+  );
+  assert.strictEqual(
+    fields()[1].querySelector(".elicit-other").value,
+    "something of my own",
+    "and the half typed answer is still there"
+  );
+  assert.strictEqual(h.document.querySelector(".qc .qc-step").textContent, "2 / 2", "reopening on the question we were on");
+  assert.strictEqual(h.errors().length, 0);
+});

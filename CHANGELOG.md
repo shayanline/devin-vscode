@@ -30,6 +30,15 @@ panel can now dock on either side.
   after Undo it shows no difference.
 - Panel settings apply as soon as you change them, instead of waiting for the next
   session event.
+- A prompt you are part way through writing is kept. Unsent text is stored per
+  chat, so leaving for the list, switching sessions, reloading one, or closing the
+  window and coming back tomorrow all keep it. Finish the sentence and send it, and
+  sending wakes the session up. The sessions list keeps its own "new chat" draft
+  the same way, and editing a queued or an already sent message borrows the
+  composer without eating the draft: it is handed back when the edit ends.
+- Answers to a question survive leaving the session. The options you had ticked and
+  the free text half typed into "Other" come back with the question, on the
+  question you were on, rather than starting from nothing.
 - A question Devin is waiting on is no longer duplicated. Leaving a session for
   the list, or switching straight to another session, and coming back stacked a
   second copy of the same question, and going back and forth stacked one more
@@ -94,6 +103,12 @@ panel can now dock on either side.
   means a checkpoint restore can still put back a change you had kept.
 - The panel side is one attribute on the chat root, so the layout, the resizer
   direction and the header order are all CSS. The DOM order never changes.
+- Drafts live in `workspaceState` (`devin.drafts.v1`), keyed by session, pruned
+  with the tracked id list, and capped so a pasted file cannot become one. The
+  panel keeps its own copy for the session it is showing, and the stored one only
+  fills a composer that is empty, so the fresher text always wins. Answers in
+  progress ride on the pending request the host already re-posts, so they are
+  restored by the same path that re-shows the question and are dropped with it.
 - New regression tests cover a re-posted question and permission, the switcher's
   split button, a replayed message rendering as it arrives, a replayed thought
   carrying no invented duration, Enter stepping through the questions, a session
