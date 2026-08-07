@@ -2992,9 +2992,13 @@ body {
 /* The question and permission trays sit above the composer and grow with what
    the agent asks. Cap them and scroll instead, so several outstanding requests
    can never squeeze the transcript out of the panel. */
-#elicitation-tray,
-#permission-tray {
+#elicitation-tray {
   max-height: 40vh;
+  overflow-y: auto;
+}
+
+#permission-tray {
+  max-height: 25vh;
   overflow-y: auto;
 }
 
@@ -3058,7 +3062,9 @@ body {
   border-radius: var(--dv-radius-lg);
   margin-bottom: var(--dv-space-4);
   overflow: hidden;
-  max-height: min(420px, 45vh);
+  /* Must fit inside #elicitation-tray (40vh) including its own margin, or the
+     footer holding Submit is pushed below the fold. */
+  max-height: min(420px, calc(40vh - 12px));
   background: var(--vscode-panel-background, transparent);
 }
 
@@ -3476,7 +3482,7 @@ body.dv-resizing #sessions-resizer {
   padding: 4px;
 }
 
-/* Session-list toolbar (search, filter, refresh) — matches #chat-header
+/* Session-list toolbar (search, filter, refresh), matching #chat-header
    metrics so every bar has the same height, spacing, and border. */
 .session-toolbar {
   position: sticky;

@@ -16,9 +16,12 @@ export class ChatManager implements vscode.WebviewViewProvider, vscode.WebviewPa
 
   private sidebar?: ChatController;
   private readonly panels = new Map<ChatController, vscode.WebviewPanel>();
-  // A session being moved between surfaces, so the tab it is leaving does not
-  // treat its own closure as the user abandoning the chat.
-  private moving?: string;
+  // Controllers whose tab has closed and whose fate the user is being asked about.
+  // They are out of `panels` by then, so shutdown has to find them here.
+  private readonly deciding = new Set<ChatController>();
+  // Sessions being moved between surfaces, so a tab that is closed as part of a
+  // move does not treat its own closure as the user abandoning the chat.
+  private readonly moving = new Set<string>();
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -60,17 +63,16 @@ export class ChatManager implements vscode.WebviewViewProvider, vscode.WebviewPa
   }
 
   elsewhere(except: ChatController): string[] {
-    const ids: string[] = [];
+    const ids = new Set<string>();
     for (const c of this.controllers()) {
       if (c === except) {
         continue;
       }
-      const id = c.visibleSession();
-      if (id) {
-        ids.push(id);
+      for (const id of c.liveSessions()) {
+        ids.add(id);
       }
     }
-    return ids;
+    return [...ids];
   }
 
   // Move a session into a brand new editor tab, beside the current one.
@@ -105,8 +107,10 @@ export class ChatManager implements vscode.WebviewViewProvider, vscode.WebviewPa
       return;
     }
     await this.move(from, to, id);
-    // The tab it came from has nothing left to show.
-    this.closePanelFor(from);
+    // Close the tab it came from only when that was all it was running.
+    if (!from.liveSessions().length) {
+      this.closePanelFor(from);
+    }
   }
 
   async moveHere(to: ChatController, id: string): Promise<void> {
@@ -116,7 +120,7 @@ export class ChatManager implements vscode.WebviewViewProvider, vscode.WebviewPa
       return;
     }
     await this.move(from, to, id);
-    if (from !== this.sidebar) {
+    if (from !== this.sidebar && !from.liveSessions().length) {
       this.closePanelFor(from);
     }
   }
@@ -124,18 +128,30 @@ export class ChatManager implements vscode.WebviewViewProvider, vscode.WebviewPa
   // The handover itself: the live agent, its terminals and anything it is waiting
   // on leave one surface and are adopted by the other. Nothing restarts.
   private async move(from: ChatController, to: ChatController, id: string): Promise<void> {
+    // Wait for the destination first: export and import then run back to back with
+    // nothing in between, so the agent is never left with no listener, no host and
+    // no owner while a webview loads.
+    await to.whenReady();
     const transfer = from.exportRuntime(id);
     if (!transfer) {
       await to.openSession(id);
       return;
     }
-    this.moving = id;
+    this.moving.add(id);
     try {
-      await to.whenReady();
       await to.importRuntime(transfer);
       this.titlePanel(to, id);
+    } catch (err) {
+      // The destination could not take it: hand it back rather than leave a live
+      // agent owned by nobody, holding the session lock until the window closes.
+      try {
+        await from.importRuntime(transfer);
+      } catch {
+        // Both surfaces refused it; the runtime exit handler cleans up.
+      }
+      throw err;
     } finally {
-      this.moving = undefined;
+      this.moving.delete(id);
     }
   }
 
@@ -158,7 +174,7 @@ export class ChatManager implements vscode.WebviewViewProvider, vscode.WebviewPa
   }
 
   private controllers(): ChatController[] {
-    return [this.sidebar, ...this.panels.keys()].filter(Boolean) as ChatController[];
+    return [this.sidebar, ...this.panels.keys(), ...this.deciding].filter(Boolean) as ChatController[];
   }
 
   private closePanelFor(controller: ChatController): void {
@@ -238,12 +254,15 @@ export class ChatManager implements vscode.WebviewViewProvider, vscode.WebviewPa
     this.panels.set(controller, panel);
     controller.bind(panel.webview, () => panel.reveal());
     panel.onDidDispose(() => {
-      const live = controller.visibleSession();
+      // Every chat this tab was running, not just the one on screen: it keeps its
+      // own session list, so others can be working in the background.
+      const live = controller.liveSessions().filter((id) => !this.moving.has(id));
       this.panels.delete(controller);
       // Closing a tab must never quietly kill a session that is still working.
       // VS Code cannot veto an editor closing, so the choice is offered after the
       // fact, and "Keep it open" reopens the tab it was just in.
-      if (live && !this.stopped && this.moving !== live) {
+      if (live.length && !this.stopped) {
+        this.deciding.add(controller);
         void this.decideClosedTab(controller, live);
         return;
       }
@@ -251,35 +270,41 @@ export class ChatManager implements vscode.WebviewViewProvider, vscode.WebviewPa
     });
   }
 
-  // A detached chat's tab was closed while its session was still alive.
-  private async decideClosedTab(controller: ChatController, id: string): Promise<void> {
-    const title = this.store.titles()[id] || id;
-    const choice = await vscode.window.showWarningMessage(
-      `The chat "${title}" is still running.`,
-      { modal: true, detail: "Its tab has closed. Keep it open where it was, move it into the side panel, or stop it." },
-      "Keep it open",
-      "Move to side panel",
-      "Terminate"
-    );
-    if (choice === "Move to side panel") {
-      await vscode.commands.executeCommand("devin.chatView.focus");
-      if (this.sidebar) {
-        await this.move(controller, this.sidebar, id);
+  // A detached chat's tab was closed while its sessions were still alive.
+  private async decideClosedTab(controller: ChatController, ids: string[]): Promise<void> {
+    const titles = this.store.titles();
+    const named = ids.map((id) => titles[id] || id);
+    const subject = ids.length === 1 ? `The chat "${named[0]}" is` : `${ids.length} chats are`;
+    const detail = ids.length === 1
+      ? "Its tab has closed. Reopen it, move it into the side panel, or stop it."
+      : `Their tab has closed: ${named.join(", ")}. Reopen them, move them into the side panel, or stop them.`;
+    try {
+      const choice = await vscode.window.showWarningMessage(
+        `${subject} still running.`,
+        { modal: true, detail },
+        "Reopen",
+        "Move to side panel",
+        "Terminate"
+      );
+      if (choice === "Move to side panel") {
+        const to = await this.ensureSidebar();
+        for (const id of to ? ids : []) {
+          await this.move(controller, to!, id);
+        }
+      } else if (choice === "Reopen") {
+        // Back into a fresh tab: the agent never stopped, so this only costs the
+        // transcript being repainted.
+        const to = this.openPanel(vscode.ViewColumn.Active, false);
+        for (const id of ids) {
+          await this.move(controller, to, id);
+        }
       }
+      // Anything else (Terminate, or dismissing the dialog) stops them, which is
+      // what closing the tab used to do unconditionally.
+    } finally {
+      this.deciding.delete(controller);
       controller.dispose();
-      return;
     }
-    if (choice === "Keep it open") {
-      // Put it back in a fresh tab: the agent never stopped, so this only costs
-      // the transcript being repainted.
-      const panel = this.openPanel(vscode.ViewColumn.Active, false);
-      await this.move(controller, panel, id);
-      controller.dispose();
-      return;
-    }
-    // Anything else (Terminate, or dismissing the dialog) stops it, which is what
-    // closing the tab used to do unconditionally.
-    controller.dispose();
   }
 
   // Restore editor/window chats after a reload. We reopen the surface (it lands

@@ -461,17 +461,28 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       }
       const box = chatBox();
       target = ev.clientX < box.left + box.width / 2 ? "left" : "right";
-      el.chat.dataset.dropSide = target === panelSide() ? "" : target;
+      if (target === panelSide()) delete el.chat.dataset.dropSide;
+      else el.chat.dataset.dropSide = target;
     };
-    const onUp = () => {
+    const stop = () => {
       document.removeEventListener("mousemove", onMove);
       document.removeEventListener("mouseup", onUp);
+      window.removeEventListener("blur", cancel);
       document.body.classList.remove("dv-panel-dragging");
       delete el.chat.dataset.dropSide;
-      if (armed) setPanelSide(target);
     };
+    const onUp = () => {
+      const move = armed;
+      stop();
+      if (move) setPanelSide(target);
+    };
+    // Losing the pointer (released outside the window, or focus taken away) ends
+    // the drag without moving anything, rather than leaving it armed for the next
+    // click anywhere in the panel.
+    const cancel = () => stop();
     document.addEventListener("mousemove", onMove);
     document.addEventListener("mouseup", onUp);
+    window.addEventListener("blur", cancel);
   }
 
   // Header button wiring.
@@ -1730,7 +1741,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // restored-checkpoint row (fading lines + label). Note: there is no redo, as
   // re-running from a rewind is non-deterministic and ACP exposes no fork.
   function renderRestoredRow() {
-    const prev = el.thread.querySelector(".restored-row");
+    const prev = el.thread.querySelector(".restored-row:not(.moved-row)");
     if (prev) prev.remove();
     const row = document.createElement("div");
     row.className = "restored-row";
@@ -3542,6 +3553,12 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       next.disabled = idx === controls.length - 1;
       validation.classList.add("hidden");
       updateSubmitState();
+      // Hiding the previous question takes the focused control out of the page, so
+      // move focus into this one: otherwise Enter and the arrows stop reaching the
+      // widget after the first step. Only when the user is already inside the
+      // widget, so a question arriving never steals the composer's focus.
+      const focusable = cur && cur.el.querySelector("input, textarea");
+      if (focusable && qc.contains(document.activeElement)) focusable.focus({ preventScroll: true });
     }
     // Put back any answers given before the session was left, and reopen on the
     // question that was on screen.
@@ -5182,6 +5199,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       case "lockConflict": showLockConflict(m); break;
       case "sessionReady":
         el.status.textContent = "";
+        if (m.title) { currentTitle = m.title; el.chatTitle.textContent = currentTitle; }
         // The thread now shows this session; retire any retained snapshot for it.
         if (m.sessionId) { curSessionId = m.sessionId; views.delete(m.sessionId); dirtyViews.delete(m.sessionId); }
         // Refresh the header so the title and code badge reflect the session now
@@ -5202,6 +5220,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
           curSessionId = null;
           closeTitleMenu();
           renderHeader();
+          updateTerminateBtn();
         }
         // A freshly cleared thread starts pinned at the bottom.
         stickToBottom = true;

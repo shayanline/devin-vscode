@@ -104,10 +104,13 @@ export class ChangeTracker
     return [...this.snapshots].filter(([, s]) => !s.resolved && s.sessions.has(sessionId)).map(([p]) => p);
   }
 
-  // Whether an original is held for this file, kept or undone included: a revert
-  // has to be able to put back a change the user had already accepted.
-  hasChange(fsPath: string): boolean {
-    return this.snapshots.has(fsPath);
+  // Whether this file is still awaiting review. A kept or undone one is excluded:
+  // its snapshot holds the text from before Devin first touched the file, which is
+  // older than any checkpoint taken since, so a revert must use the agent's own
+  // plan for it rather than winding the file all the way back.
+  hasUnresolvedChange(fsPath: string): boolean {
+    const snap = this.snapshots.get(fsPath);
+    return !!snap && !snap.resolved;
   }
 
   // Forget one chat's files entirely, leaving them on disk as they are (used
