@@ -340,6 +340,12 @@ export class AcpClient extends EventEmitter {
     await this.waitForExit(150);
   }
 
+  // Whether the agent process has already gone. A surface being handed a session
+  // has to ask: the exit it missed is never emitted again.
+  hasExited(): boolean {
+    return this.exited;
+  }
+
   // Resolves true once the process has closed, false if `ms` runs out first.
   private waitForExit(ms: number): Promise<boolean> {
     if (this.exited) {

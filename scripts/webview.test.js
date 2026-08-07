@@ -2457,3 +2457,118 @@ test("the header no longer narrates the running tool", async () => {
   assert.strictEqual(h.document.getElementById("chat-title").textContent, "Chat", "and the title is left alone");
   assert.strictEqual(h.errors().length, 0);
 });
+
+test("a chat never opens holding text typed somewhere else", async () => {
+  // A surface fills its new chat box before it is handed a session, so the
+  // composer could open a moved chat with the sessions list's unsent text in it.
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "draft", id: null, text: "half typed in the new chat box" });
+  await h.settle(10);
+  const input = h.document.getElementById("input");
+  assert.strictEqual(input.value, "half typed in the new chat box");
+
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "draft", id: "A", text: "this chat's own prompt" });
+  await h.settle(10);
+  assert.strictEqual(input.value, "this chat's own prompt", "the chat's own draft wins");
+
+  // Text the user has actually typed into this chat is never replaced.
+  input.value = "mine, typed here";
+  input.dispatchEvent(new h.window.Event("input", { bubbles: true }));
+  await h.settle(500);
+  h.post({ type: "draft", id: "A", text: "a stale copy from the host" });
+  await h.settle(10);
+  assert.strictEqual(input.value, "mine, typed here");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("the header divider never stands on its own", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "capabilities", revert: true, panelSide: "right", surface: "view" });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "sessionStatuses", statuses: { A: "idle" }, activeId: "A" });
+  await h.settle(10);
+  const divider = h.document.getElementById("header-divider");
+  assert.ok(!divider.classList.contains("hidden"), "it separates the controls from the toggle");
+
+  // A chat with nothing to terminate or move leaves nothing to separate.
+  h.post({ type: "clear", reset: true });
+  await h.settle(10);
+  assert.ok(divider.classList.contains("hidden"), "so it goes");
+
+  // On the left the toggle leads the header, so the divider always belongs.
+  h.post({ type: "capabilities", revert: true, panelSide: "left", surface: "view" });
+  await h.settle(10);
+  assert.ok(!divider.classList.contains("hidden"));
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("Enter answers the option it is on before moving to the next question", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({
+    type: "elicitation",
+    requestId: "e2",
+    mode: "form",
+    message: "Two questions",
+    schema: {
+      type: "object",
+      required: ["q0", "q1"],
+      properties: {
+        q0: { type: "string", title: "One", description: "One", oneOf: [{ const: "a", title: "A" }, { const: "b", title: "B" }] },
+        q1: { type: "string", title: "Two", description: "Two", oneOf: [{ const: "c", title: "C" }] }
+      }
+    }
+  });
+  await h.settle(20);
+  const qc = h.document.querySelector(".qc");
+  const first = qc.querySelector(".elicit-field .elicit-native");
+  first.focus();
+  first.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+  await h.settle(10);
+  assert.ok(first.checked, "the focused option is answered, not skipped");
+  assert.strictEqual(qc.querySelector(".qc-step").textContent, "2 / 2", "and it still moves on");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a chat that arrives mid turn says its earlier messages are elsewhere", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "moved", from: "the side panel", partial: true });
+  h.post({ type: "busy", value: true });
+  await h.settle(10);
+  assert.strictEqual(h.thread().querySelector(".moved-row .restored-label").textContent,
+    "Continued from the side panel, earlier messages not shown");
+  // The welcome screen must not paint under the divider.
+  assert.ok(!h.document.querySelector("#welcome:not(.hidden)"), "no starter prompts over a live chat");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("tool output carries a copy action, and JSON is pretty printed", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  // A plain tool, not an MCP one: JSON is JSON whoever returned it.
+  h.post({ type: "toolCall", id: "j1", title: "Read config", kind: "read", status: "pending" });
+  h.post({ type: "toolCallUpdate", id: "j1", status: "completed",
+    content: [{ type: "text", text: '{"name":"devin","nested":{"on":true}}' }] });
+  await h.settle(20);
+  const card = [...h.document.querySelectorAll("#thread .tool")].find((t) => /Read config/.test(t.textContent));
+  const pre = card.querySelector(".tool-block .tool-pre");
+  assert.ok(pre.classList.contains("hljs"), "highlighted");
+  assert.match(pre.textContent, /^\{\n  "name": "devin",/, "and pretty printed");
+  const copy = card.querySelector(".tool-block .tool-toolbar .dv-copy");
+  assert.ok(copy, "with a copy action");
+  copy.click();
+  await h.settle(10);
+  const posted = h.posted.filter((m) => m.type === "copyText").pop();
+  assert.match(posted.text, /"nested": \{/, "which copies the formatted text");
+  assert.strictEqual(h.errors().length, 0);
+});

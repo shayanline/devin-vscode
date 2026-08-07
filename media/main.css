@@ -2497,6 +2497,25 @@ body {
   font-weight: 600;
 }
 
+.tool-block {
+  position: relative;
+}
+
+.tool-toolbar {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 0.1s ease-in-out;
+}
+
+.tool-block:hover .tool-toolbar,
+.tool-toolbar:focus-within {
+  opacity: 1;
+}
+
 .tool-pre {
   margin: 0;
   padding: 6px 8px;
@@ -2519,7 +2538,9 @@ body {
    terminal command style, instead of the raw argument JSON. */
 .tool-command {
   display: flex;
-  align-items: center;
+  /* A wrapped command grows downwards, so the prompt and the run action stay on
+     its first line rather than drifting to the middle of the block. */
+  align-items: flex-start;
   gap: 6px;
   padding: 6px 8px;
   border-radius: var(--dv-radius-sm);
