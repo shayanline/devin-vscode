@@ -2628,13 +2628,74 @@ body {
   opacity: 1;
 }
 
-/* Nested tool rows indent under the group behind a hairline rail. */
+/* The rows of a run are chained the way the reasoning chain is: one line
+   threading through the row icons with a gap at each node, rather than a rule
+   running alongside them. Every row leads with a glyph at the same offset, so the
+   line can pass behind them all. */
 .tool-group-body {
+  position: relative;
   margin-left: 6px;
   padding-left: 10px;
-  border-left: 1px solid var(--dv-border);
   display: flex;
   flex-direction: column;
+}
+
+/* Where the node sits within its row, which is the middle of its leading glyph.
+   A row carrying a file chip is taller, so its node sits lower. */
+.tool-group-body > * {
+  position: relative;
+  --node-y: 9.5px;
+}
+
+.tool-group-body > .edit-pill {
+  --node-y: 14px;
+}
+
+.tool-group-body > *::before {
+  content: "";
+  position: absolute;
+  left: 7px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background-color: var(--dv-border);
+  mask-image: linear-gradient(to bottom, #000 0 calc(var(--node-y) - 8px), transparent calc(var(--node-y) - 8px) calc(var(--node-y) + 8px), #000 calc(var(--node-y) + 8px) 100%);
+  -webkit-mask-image: linear-gradient(to bottom, #000 0 calc(var(--node-y) - 8px), transparent calc(var(--node-y) - 8px) calc(var(--node-y) + 8px), #000 calc(var(--node-y) + 8px) 100%);
+}
+
+/* The chain starts at the first node and ends at the last, so it never hangs
+   past either end of the run. */
+.tool-group-body > *:first-child::before {
+  mask-image: linear-gradient(to bottom, transparent 0 calc(var(--node-y) + 8px), #000 calc(var(--node-y) + 8px) 100%);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0 calc(var(--node-y) + 8px), #000 calc(var(--node-y) + 8px) 100%);
+}
+
+.tool-group-body > *:last-child::before {
+  mask-image: linear-gradient(to bottom, #000 0 calc(var(--node-y) - 8px), transparent calc(var(--node-y) - 8px) 100%);
+  -webkit-mask-image: linear-gradient(to bottom, #000 0 calc(var(--node-y) - 8px), transparent calc(var(--node-y) - 8px) 100%);
+}
+
+.tool-group-body > *:only-child::before {
+  background: none;
+}
+
+/* Curved connector dropping out of the group header into the first node, the
+   same corner the reasoning chain and a subagent's timeline use. */
+.tool-group:not(.dv-collapsed) .tool-group-body::before {
+  content: "";
+  position: absolute;
+  left: 9.5px;
+  top: -9px;
+  height: 15px;
+  width: 7.5px;
+  border-left: 1px solid var(--dv-border);
+  border-bottom: 1px solid var(--dv-border);
+  border-bottom-left-radius: 5px;
+}
+
+/* Headroom so the curved connector is not clipped by the collapse wrapper. */
+.tool-group .dv-collapsible-anim-inner {
+  padding-top: var(--dv-space-4);
 }
 
 .tool-body {
