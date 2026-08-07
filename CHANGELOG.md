@@ -37,6 +37,7 @@ Moving between sessions and surfaces, and keeping what you had typed.
 - A setting picks which of the two Enter does.
 - A run of tools says what it did, not "Used N tools", in two clauses.
 - The rows of a run are chained, like the steps of a chain of thought.
+- Reasoning inside a run reads as text on that chain, with nothing to open.
 - A reopened command no longer repeats its input as its output.
 - Settings lists Windsurf's MCP servers, and manages them in place.
 - "Used N references" folds like every other section, chevron and all.
