@@ -1356,7 +1356,11 @@ test("while busy, Send becomes a split button: queue it, or stop and send", asyn
   assert.ok(!send.classList.contains("hidden"), "Send appears once there is something to send");
   assert.ok(!more.classList.contains("hidden"), "with the chevron beside it");
   assert.ok(h.document.getElementById("send-group").classList.contains("split"), "joined as one control");
-  assert.match(send.querySelector("i").className, /codicon-add/, "the default half queues it");
+  // Stop is the filled action while a turn runs, and the send control stays at the
+  // far end after it, which is the order VS Code's chat uses.
+  const order = [...h.document.querySelector(".toolbar-right").children].map((c) => c.id);
+  assert.ok(order.indexOf("stop") < order.indexOf("send-group"), "Stop comes first, Send last");
+  assert.match(send.querySelector("i").className, /codicon-newline/, "the default half queues it");
   assert.strictEqual(send.title, "Send to Queue (Enter)");
   assert.ok(!stop.classList.contains("hidden"), "Stop stays available alongside it");
 
@@ -1418,7 +1422,7 @@ test("the split button's default follows the setting, and Alt shows the other", 
   h.document.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Alt", altKey: true, bubbles: true }));
   await h.settle(10);
   assert.strictEqual(send.title, "Send to Queue (Alt+Enter)");
-  assert.match(send.querySelector("i").className, /codicon-add/);
+  assert.match(send.querySelector("i").className, /codicon-newline/);
   send.click();
   await h.settle(5);
   assert.ok(h.posted.some((m) => m.type === "send" && m.text === "and this after"));

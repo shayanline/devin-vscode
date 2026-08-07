@@ -695,15 +695,18 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // steering, and its agents support it), so the second option ends the turn and
   // sends straight after it. Same split button as Copilot's: the primary half is
   // the default action, Alt flips it, and the chevron offers the other.
+  // Both are a send, so both keep the send glyph: the queue is the plain one, and
+  // taking over the turn carries the restart arrow. A plus would read as the attach
+  // button sitting at the other end of the same toolbar.
   const SEND_ACTIONS = {
     queue: {
-      icon: "codicon-add",
+      icon: "codicon-newline",
       label: "Send to Queue",
       detail: "Send this after the current request finishes",
       post: (text) => ({ type: "send", text })
     },
     stopAndSend: {
-      icon: "codicon-newline",
+      icon: "codicon-debug-restart",
       label: "Stop and Send",
       detail: "Stop what Devin is doing, then send this",
       post: (text) => ({ type: "stopAndSend", text })
