@@ -1790,7 +1790,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     const label = document.createElement("span");
     label.className = "restored-label";
     label.textContent = "Continued from " + (from || "another surface")
-      + (partial ? ", earlier messages not shown" : "");
+      + (partial ? ", earlier messages load when this turn ends" : "");
     row.appendChild(Object.assign(document.createElement("span"), { className: "restored-line" }));
     row.appendChild(label);
     row.appendChild(Object.assign(document.createElement("span"), { className: "restored-line" }));
