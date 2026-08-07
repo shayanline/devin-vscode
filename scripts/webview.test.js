@@ -1882,7 +1882,7 @@ test("dragging the panel header to the other half moves and remembers the side",
   const writes = h.posted.filter((m) => m.type === "setConfig").length;
   down(200);
   at("mousemove", 100);
-  assert.strictEqual(chat.dataset.dropSide, "", "no marker when it would not move");
+  assert.strictEqual(chat.dataset.dropSide, undefined, "no marker at all when it would not move");
   at("mouseup", 100);
   await h.settle(5);
   assert.strictEqual(h.posted.filter((m) => m.type === "setConfig").length, writes, "and nothing is rewritten");
@@ -2180,5 +2180,158 @@ test("a chat being handed to a new surface is not sent back to the list", async 
   assert.deepStrictEqual(h.reqTexts(), ["the chat that was handed over"]);
   assert.deepStrictEqual(h.respTexts(), ["with its reply"]);
   assert.ok(h.thread().querySelector(".moved-row"), "and it says where it came from");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a chat handed to a surface mid turn still knows which session it is", async () => {
+  // The busy handover re-points the surface instead of reloading, so the host has
+  // to name the session: without it the tab had no session id, which hid the move
+  // back and terminate controls and sent its draft to the "new chat" key.
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "moved", from: "the side panel" });
+  h.post({ type: "capabilities", revert: true, surface: "editor" });
+  h.post({ type: "busy", value: true });
+  h.post({ type: "sessionReady", sessionId: "A", title: "A moved chat" });
+  h.post({ type: "sessionStatuses", statuses: { A: "running" }, activeId: "A" });
+  await h.settle(10);
+
+  assert.strictEqual(h.document.getElementById("chat-title").textContent, "A moved chat", "the header names it");
+  const detach = h.document.getElementById("detach-btn");
+  assert.ok(!detach.classList.contains("hidden"), "the move back control is offered");
+  detach.click();
+  await h.settle(5);
+  assert.ok(
+    h.posted.some((m) => m.type === "attachSession" && m.id === "A"),
+    "and it acts on the session that was handed over"
+  );
+
+  // Its draft is stored against the chat, not the new chat box.
+  const input = h.document.getElementById("input");
+  input.value = "typed after the move";
+  input.dispatchEvent(new h.window.Event("input", { bubbles: true }));
+  await h.settle(600);
+  assert.deepStrictEqual(h.posted.filter((m) => m.type === "draft").pop(), {
+    type: "draft",
+    id: "A",
+    text: "typed after the move"
+  });
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("the drop marker only shows when the panel would actually move", async () => {
+  const h = createHarness();
+  const chat = h.document.getElementById("chat");
+  Object.defineProperty(chat, "clientWidth", { value: 1000, configurable: true });
+  chat.getBoundingClientRect = () => ({ left: 0, top: 0, right: 1000, bottom: 800, width: 1000, height: 800 });
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "capabilities", revert: true, panelSide: "right" });
+  h.post({ type: "sessions", sessions: [{ id: "A", short_id: "A", title: "A", working_directory: "/w" }], activeId: "A", statuses: { A: "idle" } });
+  await h.settle(10);
+  h.document.getElementById("panel-toggle").click();
+  await h.settle(10);
+  const toolbar = h.document.querySelector("#sessions-panel .session-toolbar");
+  const at = (type, x) => h.document.dispatchEvent(new h.window.MouseEvent(type, { clientX: x, clientY: 20, bubbles: true, button: 0 }));
+
+  toolbar.dispatchEvent(new h.window.MouseEvent("mousedown", { clientX: 800, clientY: 20, bubbles: true, button: 0 }));
+  at("mousemove", 700);
+  // Still in the half it is already docked in: no marker at all, since an empty
+  // attribute still matched the selector and drew it on the left edge.
+  assert.strictEqual(chat.dataset.dropSide, undefined, "no marker while the drop is a no-op");
+  at("mousemove", 200);
+  assert.strictEqual(chat.dataset.dropSide, "left", "and the target edge once it would move");
+
+  // Losing the pointer ends the drag without moving anything.
+  h.window.dispatchEvent(new h.window.Event("blur"));
+  await h.settle(5);
+  assert.strictEqual(chat.dataset.dropSide, undefined, "the marker is cleared");
+  assert.ok(!h.document.body.classList.contains("dv-panel-dragging"), "and the drag cursor with it");
+  at("mouseup", 200);
+  await h.settle(5);
+  assert.strictEqual(chat.dataset.panelSide, "right", "an interrupted drag never moves the panel");
+  assert.ok(!h.posted.some((m) => m.type === "setConfig"), "nor writes a side to settings");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("stepping a question carousel moves focus, so Enter keeps working", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({
+    type: "elicitation",
+    requestId: "e1",
+    mode: "form",
+    message: "Three questions",
+    schema: {
+      type: "object",
+      required: ["q0", "q1", "q2"],
+      properties: {
+        q0: { type: "string", title: "One", description: "One", oneOf: [{ const: "a", title: "A" }] },
+        q1: { type: "string", title: "Two", description: "Two", oneOf: [{ const: "b", title: "B" }] },
+        q2: { type: "string", title: "Three", description: "Three", oneOf: [{ const: "c", title: "C" }] }
+      }
+    }
+  });
+  await h.settle(20);
+  const qc = h.document.querySelector(".qc");
+  const fields = [...qc.querySelectorAll(".elicit-field")];
+  const step = () => qc.querySelector(".qc-step").textContent;
+
+  // A question arriving must not steal focus from the composer.
+  assert.ok(!qc.contains(h.document.activeElement), "the widget does not grab focus on arrival");
+  // Once the user is inside it (clicking an option focuses the native radio), Enter
+  // is handled on the widget, so focus has to stay inside it as it steps.
+  fields[0].querySelector(".elicit-native").focus();
+  const enter = () => h.document.activeElement.dispatchEvent(
+    new h.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true })
+  );
+  enter();
+  await h.settle(5);
+  assert.strictEqual(step(), "2 / 3");
+  assert.ok(fields[1].contains(h.document.activeElement), "focus follows to the question now shown");
+  enter();
+  await h.settle(5);
+  assert.strictEqual(step(), "3 / 3", "so a second Enter still reaches the widget");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a checkpoint restore keeps the divider that says where the chat came from", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "userChunk", text: "carried over" });
+  h.post({ type: "loaded" });
+  h.post({ type: "moved", from: "the side panel" });
+  await h.settle(10);
+  assert.ok(h.thread().querySelector(".moved-row"), "the divider is there");
+
+  h.post({ type: "reverted", head: 3 });
+  await h.settle(10);
+  assert.ok(h.thread().querySelector(".moved-row"), "and survives a restore, which has its own divider");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("starting a new chat clears the previous chat's thread controls", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "capabilities", revert: true, surface: "view" });
+  h.post({ type: "sessionStatuses", statuses: { A: "idle" }, activeId: "A" });
+  await h.settle(10);
+  assert.ok(!h.document.getElementById("detach-btn").classList.contains("hidden"));
+
+  // A fresh chat has no session yet, so neither control can act.
+  h.post({ type: "clear", reset: true });
+  await h.settle(10);
+  assert.ok(h.document.getElementById("detach-btn").classList.contains("hidden"), "move is withdrawn");
+  assert.ok(h.document.getElementById("terminate-btn").classList.contains("hidden"), "terminate is withdrawn");
   assert.strictEqual(h.errors().length, 0);
 });

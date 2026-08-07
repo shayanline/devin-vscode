@@ -123,18 +123,22 @@ test("each session gets its own working set, and a revert forgets only its own",
   tracker.clearFor("A");
   assert.deepStrictEqual(tracker.pathsFor("A"), []);
   assert.deepStrictEqual(tracker.pathsFor("B"), [theirs], "B keeps its own");
-  assert.strictEqual(tracker.hasChange(mine), false, "and nothing of A's is held any more");
+  assert.strictEqual(tracker.hasUnresolvedChange(mine), false, "and nothing of A's is held any more");
 });
 
-test("a kept file can still be put back by a checkpoint restore", async () => {
+test("a kept file is no longer offered for review, but can still be put back", async () => {
   const tracker = new ChangeTracker();
   tracker.register();
   const file = write("checkpoint.ts", "after\n");
 
   tracker.recordDiff(file, "before\n", "after\n", "A");
   tracker.accept(file);
-  assert.strictEqual(tracker.hasChange(file), true, "the original is still held after Keep");
+  // A revert asks this before winding a file back itself. A kept file must answer
+  // no: its snapshot is the text from before Devin first touched it, which is older
+  // than any checkpoint taken since, so the agent's own plan is the accurate one.
+  assert.strictEqual(tracker.hasUnresolvedChange(file), false, "Keep settles the review");
 
+  // The original text is still held, so an explicit undo still restores it.
   await tracker.reject(file);
-  assert.strictEqual(fs.readFileSync(file, "utf8"), "before\n", "so a restore can undo a change you had kept");
+  assert.strictEqual(fs.readFileSync(file, "utf8"), "before\n", "and an undo still restores it");
 });

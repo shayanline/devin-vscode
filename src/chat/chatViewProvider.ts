@@ -6,6 +6,7 @@ import { AcpClient, AcpHost } from "../acp/client";
 import {
   ConfigOption,
   ContentBlock,
+  PromptResult,
   CreateTerminalParams,
   NewSessionResult,
   ReadTextFileParams,
@@ -58,6 +59,9 @@ interface Runtime {
   // attention episode, so we don't fire one per tool call. Reset when the
   // session is opened or its requests are all answered.
   attentionNotified?: boolean;
+  // The prompt in flight, if any. A session can change surface mid turn, and the
+  // surface it lands on has to be the one that ends it.
+  turn?: Promise<PromptResult>;
   // Messages the user submitted while a turn was in flight. The blocks (implicit
   // context + attachments + text) are snapshotted at queue time; the host sends
   // them in order as the session frees up (VS Code's chat queue).
@@ -292,8 +296,10 @@ export class ChatController implements AcpHost {
   bind(webview: vscode.Webview, reveal?: () => void): void {
     this.webview = webview;
     this.reveal = reveal;
-    // A re-bind is a brand new page with an empty transcript.
+    // A re-bind is a brand new page with an empty transcript, and nothing painted
+    // into it yet.
     this.webviewReady = false;
+    this.painted = false;
     webview.options = {
       enableScripts: true,
       localResourceRoots: [this.context.extensionUri]
@@ -305,6 +311,10 @@ export class ChatController implements AcpHost {
   // Resolves once the webview is listening, so a session handed to a freshly
   // created surface is not posted into a page that cannot hear it yet.
   private webviewReady = false;
+  // Whether a chat has been painted into the current page. The readiness chain
+  // restores the last chat only when nothing has, so a session handed to this
+  // surface is not immediately reloaded on top of itself.
+  private painted = false;
   private readyWaiters: (() => void)[] = [];
   whenReady(): Promise<void> {
     if (this.webviewReady) {
@@ -454,6 +464,11 @@ export class ChatController implements AcpHost {
   visibleSession(): string | undefined {
     return this.activeId;
   }
+  // Every session this surface is running, including ones working in the
+  // background while its list or another chat is on screen.
+  liveSessions(): string[] {
+    return [...this.runtimes.keys()].filter(Boolean);
+  }
 
   // Hand a live session out: it leaves this surface's pool with its process, its
   // terminals and anything it is still waiting on, and this surface stops showing
@@ -483,6 +498,13 @@ export class ChatController implements AcpHost {
       elicitations: take(this.elicitationResolvers),
       from: this.kind === "view" ? "the side panel" : "an editor tab"
     };
+    // A lock takeover question belongs to a load this surface is abandoning, and
+    // its widget goes with the transcript, so settle it rather than leave the load
+    // waiting on an answer that can never arrive.
+    for (const [rid, resolve] of [...this.takeoverResolvers]) {
+      this.takeoverResolvers.delete(rid);
+      resolve("cancel");
+    }
     if (this.activeId === id) {
       // This surface has nothing to show any more, so it goes back to its list
       // (without stealing focus: the surface being handed the chat takes that).
@@ -527,6 +549,10 @@ export class ChatController implements AcpHost {
     this.store.add(rt.id, rt.cwd);
     this.markVisible(rt.id);
     this.ensureIdleTimer();
+    // A turn that was already running is finished by this surface from now on.
+    if (rt.busy && rt.turn) {
+      this.adoptTurn(rt, rt.turn);
+    }
     this.post({ type: "body", body: "thread" });
     if (rt.busy) {
       this.post({ type: "clear" });
@@ -970,11 +996,11 @@ export class ChatController implements AcpHost {
       // Another surface may already be running it (an editor tab that outlived a
       // reload), in which case it belongs there and this panel stays on the list.
       const heldElsewhere = !!last && !!this.surfaces?.owner(last, this);
-      if (this.kind === "view" && !this.autoNewSession && resume && last && !heldElsewhere) {
+      if (this.kind === "view" && !this.autoNewSession && resume && last && !heldElsewhere && !this.painted) {
         this.post({ type: "body", body: "thread" });
         await this.loadSession(last);
       }
-    } else {
+    } else if (this.runtimes.size === 0) {
       this.post({ type: "setup", health: this.publicHealth() });
     }
   }
@@ -1127,6 +1153,7 @@ export class ChatController implements AcpHost {
         this.currentModel = undefined;
         this.store.add(rt.id, cwd);
         this.markVisible(rt.id);
+        this.painted = true;
         this.postCapabilities();
         this.publishOptions(rt, res.configOptions, res.modes?.currentModeId);
         await this.applyDefaults(rt, res);
@@ -1369,6 +1396,10 @@ export class ChatController implements AcpHost {
     }
     // "Waking session…" while a fresh acp spins up; a live one loads instantly.
     this.post({ type: "clear", loading: true, waking: !already });
+    // Name the session before anything keyed on it: the stored draft is only
+    // accepted for the session the composer belongs to.
+    this.painted = true;
+    this.post({ type: "sessionReady", sessionId: id, title: this.store.titles()[id] });
     // The clear empties the working set and the composer, so re-send this
     // session's own pending edits and unsent text: a reload throws neither away.
     this.postWorkingSet();
@@ -1480,6 +1511,10 @@ export class ChatController implements AcpHost {
       this.post({ type: "model", model: rt.model });
     }
     this.post({ type: "busy", value: rt.busy });
+    // Name the session: a surface handed a chat never called into `switchToSession`,
+    // so without this its header, terminate and move controls have no session.
+    this.painted = true;
+    this.post({ type: "sessionReady", sessionId: id, title: this.store.titles()[id] });
     // Replay anything the turn streamed while this session was in the background
     // (including a turn still running), so the restored transcript catches up
     // instead of showing the stale state from when the user left.
@@ -1517,10 +1552,14 @@ export class ChatController implements AcpHost {
     );
     if (choice === "Move it here") {
       await this.surfaces!.moveHere(this, id);
-    } else if (choice) {
+      return true;
+    }
+    if (choice) {
       this.surfaces!.reveal(owner);
     }
-    // Nothing was opened here either way, so the list stays put.
+    // The webview switched to the thread the moment it was clicked, so send it
+    // back to the list: nothing is going to be loaded into it here.
+    this.post({ type: "body", body: "list" });
     void this.refreshSessions();
     return true;
   }
@@ -1653,7 +1692,8 @@ export class ChatController implements AcpHost {
         // starting): a freshly created session is not in `devin list` until its
         // first turn persists, and pruning it here would make it vanish.
         for (const id of prunedIds) {
-          if (!this.runtimes.has(id) && !this.starting.has(id)) {
+          const held = this.runtimes.has(id) || this.starting.has(id) || !!this.surfaces?.owner(id);
+          if (!held) {
             this.store.remove(id);
           }
         }
@@ -2366,8 +2406,10 @@ export class ChatController implements AcpHost {
     if (this.activeId === rt.id) {
       this.post({ type: "assistantStart" });
     }
+    const turn = rt.client.prompt(rt.id, blocks);
+    rt.turn = turn;
     try {
-      const result = await rt.client.prompt(rt.id, blocks);
+      const result = await turn;
       // Only render the completion if this session is still the visible one.
       if (this.activeId === rt.id) {
         this.post({ type: "assistantEnd", stopReason: result.stopReason });
@@ -2377,19 +2419,53 @@ export class ChatController implements AcpHost {
         this.post({ type: "error", text: err instanceof Error ? err.message : String(err) });
       }
     } finally {
-      this.setRuntimeBusy(rt, false);
-      // Send the next queued message first: the revert-head probe below is an
-      // extra round trip on the same channel, and awaiting it here is what used
-      // to leave a visible gap before a queued message went out.
-      this.flushQueue(rt);
-      void this.refreshSessions();
-      // A live completion's head is on the current expansion: a reliable revert
-      // target. Only read it when the session actually went idle, so it never
-      // contends with a queued turn we just started.
-      if (!rt.busy && this.activeId === rt.id) {
-        void this.postTurnHead(true);
+      if (rt.turn === turn) {
+        rt.turn = undefined;
       }
+      this.endTurn(rt);
     }
+  }
+
+  // Close out a finished turn, but only for the surface that still holds the
+  // session: one that moved away mid turn is finished by its new surface (see
+  // `adoptTurn`), which owns the webview the result belongs to and its queue.
+  private endTurn(rt: Runtime): void {
+    if (this.runtimes.get(rt.id) !== rt) {
+      rt.busy = false;
+      return;
+    }
+    this.setRuntimeBusy(rt, false);
+    // Send the next queued message first: the revert-head probe below is an
+    // extra round trip on the same channel, and awaiting it here is what used
+    // to leave a visible gap before a queued message went out.
+    this.flushQueue(rt);
+    void this.refreshSessions();
+    // A live completion's head is on the current expansion: a reliable revert
+    // target. Only read it when the session actually went idle, so it never
+    // contends with a queued turn we just started.
+    if (!rt.busy && this.activeId === rt.id) {
+      void this.postTurnHead(true);
+    }
+  }
+
+  // Take over a turn that was already running when the session arrived here, so
+  // it ends on this surface: the reply settles, the working state clears, and the
+  // queue drains here rather than on the surface it left.
+  private adoptTurn(rt: Runtime, turn: Promise<PromptResult>): void {
+    void turn
+      .then(
+        (result) => {
+          if (this.activeId === rt.id) {
+            this.post({ type: "assistantEnd", stopReason: result.stopReason });
+          }
+        },
+        (err) => {
+          if (this.activeId === rt.id) {
+            this.post({ type: "error", text: err instanceof Error ? err.message : String(err) });
+          }
+        }
+      )
+      .then(() => this.endTurn(rt));
   }
 
   private queueSeq = 0;
@@ -2603,7 +2679,7 @@ export class ChatController implements AcpHost {
       if (!p) {
         continue;
       }
-      if (this.changes.hasChange(p)) {
+      if (this.changes.hasUnresolvedChange(p)) {
         await this.changes.reject(p); // restores original, or deletes if created
         continue;
       }
