@@ -44,6 +44,7 @@ Moving between sessions and surfaces, and keeping what you had typed.
 - A command shows the output it is producing, not just its exit code.
 - An expanded command is the command and its output, without the captions.
 - The command on a row sits in its own chip, as VS Code's chat sets it.
+- A long command is cut short on the row, and left unhighlighted there.
 - Action icons are plain: colour is for a state or a count, not an edit.
 - A search keeps the files it found, grouped by folder, instead of losing them.
 - A search row says what it looked for and how many it found.

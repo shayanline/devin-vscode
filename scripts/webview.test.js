@@ -1590,6 +1590,26 @@ test("a request keeps what was attached to it, above the message", async () => {
   assert.strictEqual(h.errors().length, 0);
 });
 
+test("a long chain of commands is cut to a scannable length", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  const long = 'pkill -f "http.server 8899"; cd /Users/shayan/VSCode/devin-vscode && ' +
+    "playwright-cli close >/dev/null 2>&1; rm -rf .playwright-cli /tmp/tg.png";
+  h.post({ type: "toolCall", id: "c9", kind: "execute", status: "completed", rawInput: { command: long } });
+  await h.settle(20);
+
+  // VS Code stops at 80 characters in code rather than letting the panel decide,
+  // so the row cannot run away however long the command is.
+  const label = h.thread().querySelector(".tool .tool-label-code");
+  assert.strictEqual(label.textContent.length, 80);
+  assert.ok(label.textContent.endsWith("..."));
+  assert.ok(long.startsWith(label.textContent.slice(0, 77)), "it is the start of the command");
+  assert.strictEqual(h.thread().querySelector(".tool .dv-collapsible-header").title, long, "all of it on hover");
+  assert.strictEqual(h.errors().length, 0);
+});
+
 test("a listing is grouped by folder, not a wall of pills", async () => {
   const h = createHarness();
   h.post({ type: "ready" });
@@ -1656,8 +1676,9 @@ test("a command spanning many lines still takes one row", async () => {
   await h.settle(20);
 
   const label = h.thread().querySelector(".tool .tool-label-code");
-  assert.strictEqual(label.textContent, "python3 - <<'PY'\u2026", "the row shows the first line and says there is more");
-  assert.ok(!label.textContent.includes("import re"), "the rest does not grow the row");
+  // VS Code's buildCommandDisplayText: one line, newlines collapsed to spaces.
+  assert.strictEqual(label.textContent, "python3 - <<'PY' import re print(re) PY");
+  assert.ok(!label.querySelector("span"), "and plain, not highlighted: on the row a command is a label");
   assert.strictEqual(
     h.thread().querySelector(".tool .dv-collapsible-header").title,
     heredoc,
