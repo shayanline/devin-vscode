@@ -1527,7 +1527,7 @@ test("a tool that came back with a picture shows it, open or shut", async () => 
   assert.strictEqual(h.errors().length, 0);
 });
 
-test("an executed command reads as Input and Output", async () => {
+test("an executed command is the command and what it printed, uncaptioned", async () => {
   const h = createHarness();
   h.post({ type: "ready" });
   h.post({ type: "body", body: "thread" });
@@ -1542,8 +1542,10 @@ test("an executed command reads as Input and Output", async () => {
     content: [{ type: "text", text: "2 passing" }]
   });
   await h.settle(20);
+  // VS Code's chat captions neither: a command followed by its output needs no
+  // telling apart, and the captions were pure chrome on the most common row there is.
   const titles = [...h.thread().querySelectorAll(".tool-section-title")].map((t) => t.textContent);
-  assert.deepStrictEqual(titles, ["Input", "Output"], "the command and what it printed, labelled as a pair");
+  assert.deepStrictEqual(titles, [], "no Input and Output captions on a command");
   assert.strictEqual(h.thread().querySelector(".tool-command code").textContent, "npm test");
   // The row is titled by the command itself, highlighted, not by a sentence.
   assert.strictEqual(h.thread().querySelector(".tool .tool-label-code").textContent, "npm test");
@@ -1740,8 +1742,8 @@ test("a command shows the output it is producing, not just its exit code", async
   const live = h.thread().querySelector('pre[data-terminal="term-1"]');
   assert.match(live.textContent, /all passed/);
   assert.match(live.textContent, /exited code 0/);
-  const outputs = [...h.thread().querySelectorAll(".tool-section-title")].filter((t) => t.textContent === "Output");
-  assert.strictEqual(outputs.length, 1, "one Output block, not two saying the same thing");
+  const blocks = h.thread().querySelectorAll(".tool-body pre");
+  assert.strictEqual(blocks.length, 1, "one output block, not two saying the same thing");
   assert.strictEqual(h.errors().length, 0);
 });
 

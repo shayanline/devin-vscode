@@ -3639,7 +3639,10 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       else if (typeof raw === "string" && raw.trim()) { body.appendChild(toolArgsSection(raw)); inputShown = true; hasContent = true; }
     } else if (d.kind === "execute") {
       const cmd = toolCommandStr(raw);
-      if (cmd) { body.appendChild(toolCommandBlock(cmd)); inputShown = true; hasContent = true; }
+      // A command and what it printed need no captions: VS Code's chat shows the
+      // command, then its output under it, and nothing else. "Input" and "Output"
+      // are for a tool whose arguments and result are not self evident.
+      if (cmd) { body.appendChild(toolCommandBlock(cmd, false)); inputShown = true; hasContent = true; }
     } else if (d.kind === "search") {
       const q = toolField(isObj ? raw : null, ["query", "pattern", "search", "regex", "q", "text"]);
       if (q != null) { body.appendChild(toolSummaryLine("Search", String(q))); inputShown = true; hasContent = true; }
@@ -3667,8 +3670,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       } else {
         // A tool that returns JSON gets it pretty printed and highlighted,
         // whichever tool it is: MCP servers are the common case, not the only one.
-        // "Output" to pair with the "Input" above it, as VS Code's chat labels them.
-        body.appendChild(toolSection("Output", text).sec);
+        // "Output" pairs with the "Input" above it, as VS Code's chat labels them,
+        // except under a command, where both are self evident.
+        body.appendChild(toolSection(d.kind === "execute" ? "" : "Output", text).sec);
       }
     }
 
@@ -3682,7 +3686,10 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       hasContent = true;
       termItems.forEach((c) => {
         const cached = terminalCache.get(c.terminalId);
-        const { sec, pre } = toolSection("Output", (cached && cached.output) || "\u2026", { cls: "terminal-pre", json: false });
+        // Uncaptioned under a command, for the same reason the command is: the
+        // output of a command is obviously the output of a command.
+        const title = d.kind === "execute" ? "" : "Output";
+        const { sec, pre } = toolSection(title, (cached && cached.output) || "\u2026", { cls: "terminal-pre", json: false });
         pre.setAttribute("data-terminal", c.terminalId);
         body.appendChild(sec);
       });
