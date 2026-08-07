@@ -594,6 +594,10 @@ export class ChatController implements AcpHost {
       } else {
         this.post({ type: "clear" });
       }
+      this.log(
+        `[move] ${rt.id} arrived from ${transfer.from} mid turn: rebuilt ${rt.log.length} ` +
+        `transcript ${rt.log.length === 1 ? "part" : "parts"}${rt.logFull ? "" : " (partial, the rest follows this turn)"}`
+      );
       // Only what the record could not hold is worth asking the CLI for later.
       rt.needsReplay = !rt.logFull;
       this.post({ type: "moved", from: transfer.from, partial: !rt.logFull });
@@ -601,6 +605,7 @@ export class ChatController implements AcpHost {
     } else {
       await this.doLoadSession(rt.id);
       this.post({ type: "moved", from: transfer.from });
+      this.log(`[move] ${rt.id} arrived from ${transfer.from} idle: reloaded from the agent`);
     }
     if (transfer.attachments.length) {
       this.attachments = transfer.attachments;
