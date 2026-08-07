@@ -2245,9 +2245,19 @@ body {
   opacity: 1;
 }
 
+/* Trailing and quiet, like every other disclosure in the transcript: the row is
+   the summary, and the chevron shows when it is about to be used. */
 .used-refs-chevron {
+  order: 2;
+  flex: 0 0 auto;
   font-size: 13px;
+  opacity: 0;
   transition: opacity 100ms ease-in-out, transform 180ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+.used-refs > .dv-collapsible-header:hover .used-refs-chevron,
+.used-refs:not(.dv-collapsed) > .dv-collapsible-header .used-refs-chevron {
+  opacity: 0.7;
 }
 
 .used-refs:not(.dv-collapsed) > .dv-collapsible-header .used-refs-chevron {

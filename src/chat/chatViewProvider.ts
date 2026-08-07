@@ -3727,7 +3727,6 @@ export class ChatController implements AcpHost {
   }
 }
 
-
 interface ToolContentItem {
   type: string;
   text?: string;
