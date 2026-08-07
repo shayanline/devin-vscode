@@ -487,7 +487,7 @@ test("a subagent nests its prompt, tools, output and report on one timeline", as
   assert.ok(sub.classList.contains("dv-collapsed"), "it starts collapsed, like VS Code");
   assert.strictEqual(sub.querySelector(".subagent-title").textContent, "Explore: Map session persistence",
     "the header is the capitalised profile then the task");
-  assert.ok(sub.querySelector(".dv-collapsible-header > .subagent-glyph.codicon-agent"),
+  assert.ok(sub.querySelector(".dv-collapsible-header > .subagent-glyph.codicon-hubot"),
     "the row leads with the agent glyph");
   assert.strictEqual(sub.querySelector(".subagent-detail").textContent, " \u2014 Read src/session/sessionStore.ts",
     "the running tool is appended to the header");
@@ -2073,7 +2073,8 @@ test("the header offers detach in the panel and attach in an editor tab", async 
   const header = [...h.document.getElementById("chat-header").children].map((c) => c.id);
 
   assert.ok(!btn.classList.contains("hidden"), "the control shows inside a session");
-  assert.ok(header.indexOf("detach-btn") > header.indexOf("terminate-btn"), "it sits beside terminate, on its right");
+  // Moving the chat reads before stopping it, so terminate stays at the far end.
+  assert.ok(header.indexOf("detach-btn") < header.indexOf("terminate-btn"), "it sits beside terminate, on its left");
   assert.match(btn.querySelector(".codicon").className, /link-external/);
   assert.strictEqual(btn.title, "Open this chat in an editor tab");
   btn.click();
@@ -2333,5 +2334,126 @@ test("starting a new chat clears the previous chat's thread controls", async () 
   await h.settle(10);
   assert.ok(h.document.getElementById("detach-btn").classList.contains("hidden"), "move is withdrawn");
   assert.ok(h.document.getElementById("terminate-btn").classList.contains("hidden"), "terminate is withdrawn");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a permission prompt says what it would run", async () => {
+  // Devin asks about a command without a title, carrying the command in _meta,
+  // so a prompt that only repeats "a tool" cannot be answered.
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({
+    type: "permission",
+    requestId: "p1",
+    title: "Devin wants to run a command",
+    command: "pwd && whoami && date",
+    toolCallId: "t1",
+    options: [
+      { optionId: "allow_once", name: "Allow", kind: "allow_once" },
+      { optionId: "reject_once", name: "Reject", kind: "reject_once" }
+    ]
+  });
+  await h.settle(10);
+  const box = h.document.querySelector("#permission-tray .cw");
+  assert.match(box.querySelector(".cw-title").textContent, /run a command/);
+  assert.strictEqual(box.querySelector(".tool-command code").textContent, "pwd && whoami && date",
+    "the command it wants to run is shown");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a permission prompt with only a tool call names that tool", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "toolCall", id: "t9", status: "in_progress", title: "Edit src/auth/token.ts", kind: "edit" });
+  h.post({
+    type: "permission",
+    requestId: "p2",
+    title: "Devin wants to run a tool",
+    toolCallId: "t9",
+    options: [{ optionId: "allow_once", name: "Allow", kind: "allow_once" }]
+  });
+  await h.settle(10);
+  const box = h.document.querySelector("#permission-tray .cw");
+  assert.strictEqual(box.querySelector(".cw-detail .cw-message").textContent, "Edit src/auth/token.ts",
+    "it falls back to the tool line already in the transcript");
+
+  // A file it names is shown as a pill.
+  h.post({
+    type: "permission",
+    requestId: "p3",
+    title: "Devin wants to run a tool",
+    locations: [{ path: "/w/src/auth/token.ts" }],
+    options: [{ optionId: "allow_once", name: "Allow", kind: "allow_once" }]
+  });
+  await h.settle(10);
+  const p3 = h.document.querySelector('#permission-tray [data-request-id="p3"]');
+  assert.strictEqual(p3.querySelector(".file-change .file-pill-name").textContent, "token.ts",
+    "and names the file it would touch");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("waiting on a subagent reads as agent work, not a tool dump", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({
+    type: "toolCall",
+    id: "r1",
+    status: "in_progress",
+    title: "Checked on subagent",
+    kind: "other",
+    meta: { inferenceToolName: "read_subagent" },
+    rawInput: { agent_id: "78cc5558", block: true, timeout: 600 }
+  });
+  await h.settle(20);
+  const card = [...h.document.querySelectorAll("#thread .tool")].find((t) => /Checked on subagent/.test(t.textContent));
+  assert.match(card.querySelector(".tool-kind").className, /codicon-copilot-in-progress/,
+    "it is drawn as an agent in progress");
+  const pairs = [...card.querySelectorAll(".tool-summary")].map((r) => [
+    r.querySelector(".tool-summary-label").textContent,
+    r.querySelector(".tool-summary-value").textContent
+  ]);
+  assert.deepStrictEqual(pairs, [
+    ["Agent", "78cc5558"],
+    ["Waiting", "until it responds, up to 10 min"]
+  ]);
+  assert.strictEqual(card.querySelector(".tool-section-title"), null, "and never dumps its arguments");
+
+  h.post({ type: "toolCallUpdate", id: "r1", status: "completed", meta: { inferenceToolName: "read_subagent" } });
+  await h.settle(20);
+  assert.match(card.querySelector(".tool-kind").className, /codicon-copilot-success/,
+    "and becomes a tick when the agent reports back");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a reasoning block leads with the thinking glyph", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "assistantStart" });
+  h.post({ type: "thoughtChunk", text: "Weighing two options", mid: "m1" });
+  await h.settle(10);
+  const header = h.thread().querySelector(".thinking > .dv-collapsible-header");
+  assert.ok(header.querySelector(".thinking-glyph.codicon-thinking"), "the glyph is there");
+  assert.ok(
+    [...header.children].indexOf(header.querySelector(".thinking-glyph")) <
+      [...header.children].indexOf(header.querySelector(".thinking-label")),
+    "before the label"
+  );
+  h.post({ type: "assistantEnd" });
+  await h.settle(10);
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("the header no longer narrates the running tool", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "toolCall", id: "t1", status: "in_progress", title: "Ran npm test", kind: "execute" });
+  await h.settle(10);
+  assert.strictEqual(h.document.getElementById("status"), null, "the widget is gone");
+  assert.strictEqual(h.document.getElementById("chat-title").textContent, "Chat", "and the title is left alone");
   assert.strictEqual(h.errors().length, 0);
 });

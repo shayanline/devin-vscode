@@ -111,13 +111,17 @@ const SCENARIOS = {
     { type: "toolCall", id: "t1", title: "Read src/auth/token.ts", kind: "read", status: "completed", locations: [{ path: "src/auth/token.ts", line: 42 }] },
     { type: "toolCall", id: "t2", title: "Edit src/auth/token-service.ts", kind: "edit", status: "completed", rawInput: { path: "src/auth/token-service.ts" }, content: [{ type: "diff", path: "src/auth/token-service.ts", added: 34, removed: 6 }] },
     { type: "toolCall", id: "t3", title: "Run npm test", kind: "execute", status: "completed", rawInput: { command: "npm test" }, content: [{ type: "text", text: "PASS  auth.test.ts\n  \u2713 issues a token (12 ms)\n  \u2713 rejects an expired token (4 ms)\n\nTests: 2 passed, 2 total" }] },
+    { type: "toolCall", id: "t4", title: "Checked on subagent", kind: "other", status: "completed",
+      meta: { inferenceToolName: "read_subagent" }, rawInput: { agent_id: "78cc5558", block: true, timeout: 600 },
+      content: [{ type: "text", text: "The explore agent mapped every session write path." }] },
     { type: "fileChange", path: "src/auth/token-service.ts", added: 34, removed: 6 },
     { type: "assistantChunk", text: "All tests pass. Token handling now lives in [src/auth/token-service.ts](src/auth/token-service.ts), and the callers were updated to use it. Anything else you'd like adjusted?" },
     { type: "assistantEnd" },
     { type: "busy", value: false },
     { type: "usage", used: 41200, size: 200000, cost: 0.09 },
-    { type: "permission", requestId: "p1", title: "Devin wants to run: `git push origin main`", options: [
+    { type: "permission", requestId: "p1", title: "Devin wants to run a command", command: "git push origin main", options: [
       { optionId: "allow", name: "Allow", kind: "allow" },
+      { optionId: "allow_session", name: "Yes, allow `git` commands (this session)", kind: "allow_always" },
       { optionId: "reject", name: "Reject", kind: "reject" }
     ] },
     { type: "elicitation", requestId: "e1", mode: "form", message: "A couple of quick questions", allowOther: true, schema: {

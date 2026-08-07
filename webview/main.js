@@ -2274,11 +2274,14 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       const c = makeCollapsible("thinking thinking-active" + (peek ? " thinking-peek" : ""), { startCollapsed: !peek });
       const chev = document.createElement("i");
       chev.className = "codicon codicon-chevron-right thinking-chevron";
+      const glyph = document.createElement("i");
+      glyph.className = "codicon codicon-thinking thinking-glyph";
       const label = document.createElement("span");
       label.className = "thinking-label";
       label.textContent = replayed ? "Thought" : "Thinking\u2026";
       if (replayed && at && caps.verbose) label.title = "Thought at " + fmtTime(at);
       c.header.appendChild(chev);
+      c.header.appendChild(glyph);
       c.header.appendChild(label);
       const bodyEl = document.createElement("div");
       bodyEl.className = "thinking-body";
@@ -2483,6 +2486,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // Devin's `_meta` and is more specific than the coarse ACP `kind`. MCP tools use
   // VS Code's MCP glyph (codicon-mcp), the same icon VS Code brands MCP with.
   const TOOL_TYPE_ICONS = {
+    // Waiting on a subagent is agent work, not tool work. It becomes a tick once
+    // the agent reports back (ACP tells us the call completed).
+    subagent_check: "codicon-copilot-in-progress",
     web_search: "codicon-globe",
     webfetch: "codicon-globe",
     mcp: "codicon-mcp",
@@ -2501,6 +2507,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       const tool = parts.length > 2 ? parts.slice(2).join("__") : "";
       return { type: "mcp", server, tool };
     }
+    if (meta.inferenceToolName === "read_subagent") return { type: "subagent_check" };
     if (meta.inferenceToolName === "mcp_list_tools") return { type: "mcp_list" };
     if (meta.inferenceToolName === "web_search") return { type: "web_search" };
     if (meta.inferenceToolName === "webfetch") return { type: "webfetch" };
@@ -2722,7 +2729,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       // say what it is, so it leads with the agent glyph the way a grouped tool
       // run leads with codicon-tools.
       const glyph = document.createElement("i");
-      glyph.className = "codicon codicon-agent subagent-glyph";
+      glyph.className = "codicon codicon-hubot subagent-glyph";
       const title = document.createElement("span");
       title.className = "subagent-title dv-shimmer";
       const detail = document.createElement("span");
@@ -2884,7 +2891,11 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     entry.node.classList.add(d.status || "pending");
     if (entry.group) updateToolGroup(entry.group);
     const info = toolInfo(d);
-    const typeIcon = info && TOOL_TYPE_ICONS[info.type];
+    let typeIcon = info && TOOL_TYPE_ICONS[info.type];
+    if (info && info.type === "subagent_check") {
+      if (d.status === "completed") typeIcon = "codicon-copilot-success";
+      else if (d.status === "failed" || d.status === "cancelled") typeIcon = "codicon-copilot-error";
+    }
     const kindIconClass = typeIcon || TOOL_KIND_ICONS[d.kind] || TOOL_KIND_ICONS.other;
     entry.kindIcon.className = "codicon tool-kind " + kindIconClass;
     if (entry.railIcon) entry.railIcon.className = "codicon subagent-icon " + kindIconClass;
@@ -2908,12 +2919,6 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       }
       scrollToBottom();
       return;
-    }
-    // Inline progress: reflect the running tool in the header status.
-    if (d.status === "in_progress" && d.title) {
-      el.status.textContent = d.title;
-    } else if (d.status === "completed" || d.status === "failed") {
-      el.status.textContent = "";
     }
     scrollToBottom();
   }
@@ -3076,6 +3081,19 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     } else if (info && info.type === "webfetch") {
       const u = toolField(isObj ? raw : null, ["url", "uri", "href"]);
       if (u != null) { body.appendChild(toolSummaryLine("Fetch", String(u), String(u))); inputShown = true; hasContent = true; }
+    } else if (info && info.type === "subagent_check") {
+      // The raw arguments are plumbing (agent id, block, timeout), so read them
+      // out as what the agent is actually doing.
+      const agent = toolField(isObj ? raw : null, ["agent_id", "agentId", "id"]);
+      if (agent != null) { body.appendChild(toolSummaryLine("Agent", String(agent))); hasContent = true; }
+      const blocking = isObj && (raw.block === true || raw.block === "true");
+      const secs = isObj ? Number(raw.timeout) : NaN;
+      if (blocking) {
+        const cap = secs > 0 ? (secs >= 120 ? `${Math.round(secs / 60)} min` : `${secs}s`) : "";
+        body.appendChild(toolSummaryLine("Waiting", cap ? `until it responds, up to ${cap}` : "until it responds"));
+        hasContent = true;
+      }
+      inputShown = true;
     } else if (info && (info.type === "mcp" || info.type === "mcp_list")) {
       if (isObj && Object.keys(raw).length) { body.appendChild(toolArgsSection(raw)); inputShown = true; hasContent = true; }
       else if (typeof raw === "string" && raw.trim()) { body.appendChild(toolArgsSection(raw)); inputShown = true; hasContent = true; }
@@ -3357,6 +3375,10 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   function showPermission(data) {
     const box = cwShell();
     cwTitle(box, data.title || "Devin wants to run a tool");
+    // Say what is being asked about. Devin sends the command in `command` and no
+    // title, so without this the prompt is unanswerable.
+    const detail = permissionDetail(data);
+    if (detail) cwBody(box).appendChild(detail);
     const row = cwButtons(box);
     (data.options || []).forEach((opt) => {
       const reject = /reject/.test(opt.kind || "");
@@ -3366,6 +3388,41 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       }));
     });
     trayMount(el.permissionTray, box, data.requestId);
+  }
+
+  // What the agent is asking permission for: the command it wants to run, the
+  // files it names, or failing both the tool line already in the transcript.
+  function permissionDetail(data) {
+    const wrap = document.createElement("div");
+    wrap.className = "cw-detail";
+    if (data.command) {
+      wrap.appendChild(toolCommandBlock(data.command));
+    }
+    const paths = [
+      ...(data.content || []).filter((c) => c && c.type === "diff" && c.path).map((c) => c.path),
+      ...(data.locations || []).filter((l) => l && l.path).map((l) => l.path)
+    ];
+    [...new Set(paths)].slice(0, 6).forEach((path) => wrap.appendChild(filePill({ path })));
+    const texts = (data.content || []).filter((c) => c && c.type === "text" && c.text).map((c) => c.text);
+    if (!wrap.childElementCount && texts.length) {
+      const pre = document.createElement("pre");
+      pre.className = "tool-pre";
+      pre.textContent = texts.join("\n");
+      wrap.appendChild(pre);
+    }
+    // Nothing came with the request: name the tool call it belongs to, which is
+    // already rendered in the transcript just above.
+    if (!wrap.childElementCount && data.toolCallId) {
+      const entry = toolEls.get(data.toolCallId);
+      const label = entry && entry.label && entry.label.textContent;
+      if (label) {
+        const line = document.createElement("div");
+        line.className = "cw-message muted";
+        line.textContent = label;
+        wrap.appendChild(line);
+      }
+    }
+    return wrap.childElementCount ? wrap : null;
   }
 
   function showElicitation(data) {
@@ -4803,7 +4860,6 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     // Copilot-style animated indicator on the input (gated by progressBorder).
     el.inputBox.classList.toggle("busy", value && caps.progressBorder);
     if (!value) {
-      el.status.textContent = "";
       // Stamp the just-finished turn's completion time (live turns only).
       if (wasBusy && currentTurn && !currentTurn.replayed && !currentTurn.completedAt) {
         currentTurn.completedAt = Date.now();
@@ -5198,7 +5254,6 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         break;
       case "lockConflict": showLockConflict(m); break;
       case "sessionReady":
-        el.status.textContent = "";
         if (m.title) { currentTitle = m.title; el.chatTitle.textContent = currentTitle; }
         // The thread now shows this session; retire any retained snapshot for it.
         if (m.sessionId) { curSessionId = m.sessionId; views.delete(m.sessionId); dirtyViews.delete(m.sessionId); }
@@ -5207,7 +5262,6 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         renderHeader();
         updateTerminateBtn();
         break;
-      case "status": el.status.textContent = m.text || ""; break;
       case "clear":
         workingEl = null;
         // Any prior load is over: drop the replay freeze before this clear

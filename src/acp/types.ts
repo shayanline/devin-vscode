@@ -146,6 +146,9 @@ export interface RequestPermissionParams {
     kind?: string;
     content?: ToolCallContent[];
     locations?: { path: string; line?: number }[];
+    // Devin sends no title for a command it wants to run, only the command
+    // itself, under `cognition.ai/editableCommand`.
+    _meta?: Record<string, unknown>;
   };
   options: PermissionOption[];
 }
