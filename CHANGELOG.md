@@ -35,7 +35,7 @@ Moving between sessions and surfaces, and keeping what you had typed.
 - It sits after Stop at the far end, flat, and keeps the send glyph.
 - Alt+Enter takes the other action, and the chevron says what each one does.
 - A setting picks which of the two Enter does.
-- A run of tools says what it did, not "Used N tools".
+- A run of tools says what it did, not "Used N tools", in two clauses.
 - "Used N references" folds like every other section, chevron and all.
 - A folded plan names the item being worked on, not just how many are done.
 - An MCP server that will not start is named in the chat, and can be dismissed.
