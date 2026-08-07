@@ -2208,6 +2208,47 @@ body {
   font-size: var(--dv-fs-s);
 }
 
+/* Reasoning inside a run is the text itself, hanging off the run's chain like
+   every other step, with no header and nothing to open. */
+.thinking-plain > .dv-collapsible-header {
+  display: none;
+}
+
+.thinking-plain > .dv-collapsible-anim,
+.thinking-plain > .dv-collapsible-anim-inner {
+  max-height: none;
+  overflow: visible;
+  opacity: 1;
+}
+
+/* Its own inner spine would be a chain within a chain, so the run's line carries
+   it and each step keeps only its node. */
+.thinking-plain .thinking-body {
+  margin-left: 0;
+}
+
+.thinking-plain .thinking-body::before,
+.thinking-plain .thinking-item::before {
+  display: none;
+}
+
+/* Its node and its text line up with the rows around it, so the run reads as one
+   column. VS Code pulls the icon to the edge the same way. */
+.thinking-plain .thinking-item {
+  padding-top: 0;
+  padding-bottom: var(--dv-space-3);
+  padding-left: 20px;
+}
+
+.thinking-plain .thinking-item:last-child {
+  padding-bottom: 0;
+}
+
+.thinking-plain .thinking-icon {
+  left: 0;
+  top: 3px;
+}
+
 /* One reasoning step. The node icon is pinned to the connector line and the
    content is inset to clear it. */
 .thinking-item {

@@ -1610,6 +1610,38 @@ test("a long chain of commands is cut to a scannable length", async () => {
   assert.strictEqual(h.errors().length, 0);
 });
 
+test("reasoning inside a run is text on the chain, not a section to open", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "toolCall", id: "t1", kind: "read", status: "completed", rawInput: { path: "/w/a.ts" } });
+  h.post({ type: "thoughtChunk", text: "The callers still import the old helpers." });
+  h.post({ type: "toolCall", id: "t2", kind: "edit", status: "completed", rawInput: { path: "/w/b.ts" } });
+  await h.settle(30);
+
+  const think = h.thread().querySelector(".thinking");
+  assert.ok(think.classList.contains("thinking-plain"), "no header, nothing to open");
+  assert.ok(think.closest(".tool-group-body"), "and it sits on the run's chain with the work it led to");
+  assert.match(think.textContent, /The callers still import the old helpers/, "the reasoning reads as itself");
+
+  // Asking for the folded style still gets a folded section.
+  const h2 = createHarness();
+  h2.post({ type: "ready" });
+  h2.post({ type: "body", body: "thread" });
+  h2.post({ type: "clear" });
+  h2.post({ type: "capabilities", thinkingStyle: "collapsed" });
+  h2.post({ type: "thoughtChunk", text: "Weighing two options." });
+  // Settle the block: a live one keeps its "Thinking… Ns" ticker running.
+  h2.post({ type: "assistantChunk", text: "Going with the first." });
+  h2.post({ type: "assistantEnd" });
+  await h2.settle(30);
+  const folded = h2.thread().querySelector(".thinking");
+  assert.ok(!folded.classList.contains("thinking-plain"));
+  assert.ok(folded.querySelector(".thinking-label"), "which keeps its header");
+  assert.strictEqual(h.errors().length + h2.errors().length, 0);
+});
+
 test("a reloaded command does not report its own input as its output", async () => {
   const h = createHarness();
   h.post({ type: "ready" });

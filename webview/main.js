@@ -2486,9 +2486,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         block.details.classList.remove("thinking-active");
         block.details.classList.remove("thinking-peek");
       }
-      // A streaming peek collapses to the header when done (unless the user
-      // expanded/collapsed it themselves).
-      if (block.peek && block.collapse && !block.collapse.userToggled()) block.collapse.setCollapsed(true);
+      // Settled reasoning is left open: inside a run it is one of the steps, not
+      // a section to go and find, which is how VS Code's chat leaves it too
+      // (chat-thinking-collapsible is max-height:none, overflow:visible).
       if (block.label) {
         block.label.textContent = block.replayed
           ? "Thought"
@@ -2586,7 +2586,16 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       // fixedScrolling shows a live, fixed-height peek while streaming (VS
       // Code's chat.agent.thinkingStyle); collapsed starts folded.
       const peek = caps.thinkingStyle === "fixedScrolling";
-      const c = makeCollapsible("thinking thinking-active" + (peek ? " thinking-peek" : ""), { startCollapsed: !peek });
+      // Inside a run, reasoning is one of the steps rather than a section: it
+      // reads as the text it is, on the same chain as the work it led to, with no
+      // header and nothing to open. VS Code's chat does the same, hiding the
+      // label and leaving the list at max-height:none. "collapsed" is the one
+      // style that asks for a folded section, so that one keeps its header.
+      const plain = caps.thinkingStyle !== "collapsed";
+      const c = makeCollapsible(
+        "thinking thinking-active" + (peek ? " thinking-peek" : "") + (plain ? " thinking-plain" : ""),
+        { startCollapsed: !peek && !plain }
+      );
       const chev = document.createElement("i");
       chev.className = "codicon codicon-chevron-right thinking-chevron";
       const glyph = document.createElement("i");
