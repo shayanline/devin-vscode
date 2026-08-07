@@ -37,6 +37,8 @@ PATH and helps you finish setup.
   the chat.
 - Open a chat in the sidebar, the editor area, a new window, or a terminal, from
   the `+` split button.
+- Move a chat between the side panel and an editor tab, live agent and all: an
+  editor tab is that one chat, named after it, and renamed from its tab menu.
 - Sessions saved per workspace that survive restarts, listed in a built in panel
   grouped by workspace, with search and a status filter.
 - The Devin model and mode (code, ask, plan, or bypass) picked from the composer.

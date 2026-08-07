@@ -14,8 +14,15 @@ function dataHome(): string {
   return process.env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share");
 }
 
+// Where the CLI keeps its own state, including `sessions.db`, the store every
+// session lives in. Writing to it is the only outward sign the CLI gives that the
+// session list has changed, from any process.
+export function cliDataDir(): string {
+  return path.join(dataHome(), "devin", "cli");
+}
+
 export function sessionLocksDir(): string {
-  return path.join(dataHome(), "devin", "cli", "session_locks");
+  return path.join(cliDataDir(), "session_locks");
 }
 
 export function lockPath(sessionId: string): string {

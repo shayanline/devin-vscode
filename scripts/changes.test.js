@@ -99,7 +99,9 @@ test("editing a kept file again puts it back in the working set", async () => {
 
   tracker.recordDiff(file, "v2\n", "v3\n", "A");
   assert.deepStrictEqual(tracker.pathsFor("A"), [file], "the next edit is reviewable again");
-  assert.strictEqual(original(tracker, file), "v1\n", "still against what the file was before Devin touched it");
+  // Reviewing the next edit means reviewing THAT edit: keeping the older text made
+  // its diff show every change of the session again, including the kept ones.
+  assert.strictEqual(original(tracker, file), "v2\n", "against what was kept, not the whole session");
 });
 
 test("each session gets its own working set, and a revert forgets only its own", async () => {

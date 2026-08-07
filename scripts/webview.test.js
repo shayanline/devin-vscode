@@ -359,8 +359,12 @@ test("renders response images and inline keep/undo on edits", async () => {
   h.post({ type: "assistantEnd" });
   await h.settle(20);
 
-  const img = h.document.querySelector("#thread .resp-image");
+  const img = h.document.querySelector("#thread .dv-thumb");
   assert.ok(img && img.src.startsWith("data:image/png;base64,"), "response image renders");
+  // A picture opens to full size in place, rather than only ever being a thumbnail.
+  img.click();
+  await h.settle(5);
+  assert.ok(img.classList.contains("expanded"), "and can be opened up");
 
   const pill = h.document.querySelector("#thread .edit-pill");
   assert.ok(pill, "edit pill renders");
@@ -449,7 +453,7 @@ test("consecutive tool calls collapse into a grouped disclosure", async () => {
     3,
     "all three tools nest inside the group"
   );
-  assert.ok(/Used 3 tools/.test(groups[0].textContent), "the group summarises the count");
+  assert.ok(/^Read 3 files/.test(groups[0].textContent), "the group says what the run did");
   assert.ok(!groups[0].classList.contains("running"), "a finished group is not marked running");
 
   // Assistant text ends the run; a following tool starts fresh and ungrouped.
@@ -1107,16 +1111,43 @@ test("New Session is a split button: the label starts one, the chevron picks whe
   );
   assert.ok(!h.document.querySelector(".dv-menu"), "no menu is opened by the label");
 
-  // The chevron opens the menu with the other places to open one.
+  // The chevron opens the menu with the other places to open one, and only those:
+  // the labelled half is already "here".
   more.click();
   await h.settle(10);
   const labels = [...h.document.querySelectorAll(".dv-menu .dv-menu-item span")].map((s) => s.textContent);
   assert.deepStrictEqual(labels, [
-    "New Session",
     "New Session (Editor)",
     "New Session (Window)",
     "New Devin CLI Session (Terminal)"
   ]);
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("the session list keeps itself live, with nothing to refresh by hand", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({
+    type: "sessions",
+    sessions: [{ id: "aaa", short_id: "aaa", title: "One", working_directory: "/w" }],
+    activeId: null,
+    statuses: {}
+  });
+  await h.settle(10);
+  assert.strictEqual(h.document.getElementById("list-refresh-btn"), null, "no refresh button in the header");
+  assert.ok(h.posted.some((m) => m.type === "listVisible" && m.value === true), "it says the list is on screen");
+
+  // The switcher's own toolbar has no refresh either.
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "sessionReady", sessionId: "aaa" });
+  await h.settle(10);
+  const left = h.posted.filter((m) => m.type === "listVisible").pop();
+  assert.strictEqual(left.value, false, "and says when it is not, so nothing is listed for no one");
+  h.document.getElementById("panel-toggle").click();
+  await h.settle(10);
+  const tools = [...h.document.querySelectorAll("#title-menu .session-toolbar button")].map((b) => b.title);
+  assert.deepStrictEqual(tools, ["New session", "New session in\u2026", "Search sessions", "Filter sessions"]);
+  assert.strictEqual(h.posted.filter((m) => m.type === "listVisible").pop().value, true, "the switcher counts too");
   assert.strictEqual(h.errors().length, 0);
 });
 
@@ -1299,11 +1330,12 @@ test("an internal multi file drag attaches every file, not just the first", asyn
   assert.strictEqual(h.errors().length, 0);
 });
 
-test("while busy, typing turns Send into a Queue button next to Stop", async () => {
+test("while busy, Send becomes a split button: queue it, or stop and send", async () => {
   const h = createHarness();
   h.post({ type: "ready" });
   h.post({ type: "body", body: "thread" });
   h.post({ type: "clear" });
+  h.post({ type: "sessionReady", sessionId: "A" });
   h.post({ type: "capabilities", revert: true });
   h.post({ type: "userMessage", text: "go" });
   h.post({ type: "assistantStart" });
@@ -1311,17 +1343,258 @@ test("while busy, typing turns Send into a Queue button next to Stop", async () 
   await h.settle(10);
 
   const send = h.document.getElementById("send");
+  const more = h.document.getElementById("send-more");
   const stop = h.document.getElementById("stop");
   assert.ok(!stop.classList.contains("hidden"), "Stop is shown while busy");
   assert.ok(send.classList.contains("hidden"), "Send is hidden while busy with an empty composer");
+  assert.ok(more.classList.contains("hidden"), "and so is the chevron, with nothing to send");
 
   const input = h.document.getElementById("input");
   input.value = "a follow up";
   input.dispatchEvent(new h.window.Event("input", { bubbles: true }));
   await h.settle(10);
-  assert.ok(!send.classList.contains("hidden"), "Send appears once there is text to queue");
-  assert.ok(send.classList.contains("queueing"), "it is in Queue mode while busy");
+  assert.ok(!send.classList.contains("hidden"), "Send appears once there is something to send");
+  assert.ok(!more.classList.contains("hidden"), "with the chevron beside it");
+  assert.ok(h.document.getElementById("send-group").classList.contains("split"), "joined as one control");
+  assert.match(send.querySelector("i").className, /codicon-add/, "the default half queues it");
+  assert.strictEqual(send.title, "Send to Queue (Enter)");
   assert.ok(!stop.classList.contains("hidden"), "Stop stays available alongside it");
+
+  // The chevron offers both, each saying what it does and on which key.
+  more.click();
+  await h.settle(10);
+  const rows = [...h.document.querySelectorAll(".dv-menu .dv-menu-item")];
+  assert.deepStrictEqual(rows.map((r) => r.querySelector(".dv-menu-text span").textContent),
+    ["Send to Queue", "Stop and Send"]);
+  assert.deepStrictEqual(rows.map((r) => r.querySelector(".dv-menu-keys").textContent), ["Enter", "Alt+Enter"]);
+  assert.match(rows[1].querySelector(".dv-menu-detail").textContent, /Stop what Devin is doing/);
+
+  rows[1].click();
+  await h.settle(10);
+  assert.ok(
+    h.posted.some((m) => m.type === "stopAndSend" && m.text === "a follow up"),
+    "the second one ends the turn and sends"
+  );
+  assert.strictEqual(input.value, "", "and the composer is cleared either way");
+
+  // Enter queues, Alt+Enter stops and sends.
+  input.value = "another";
+  input.dispatchEvent(new h.window.Event("input", { bubbles: true }));
+  await h.settle(5);
+  input.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  await h.settle(5);
+  assert.ok(h.posted.some((m) => m.type === "send" && m.text === "another"), "Enter queues it");
+  input.value = "urgent";
+  input.dispatchEvent(new h.window.Event("input", { bubbles: true }));
+  await h.settle(5);
+  input.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Enter", altKey: true, bubbles: true }));
+  await h.settle(5);
+  assert.ok(h.posted.some((m) => m.type === "stopAndSend" && m.text === "urgent"), "Alt+Enter takes over");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("the split button's default follows the setting, and Alt shows the other", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "capabilities", revert: true, sendWhileWorking: "stopAndSend" });
+  h.post({ type: "busy", value: true });
+  const input = h.document.getElementById("input");
+  input.value = "take over";
+  input.dispatchEvent(new h.window.Event("input", { bubbles: true }));
+  await h.settle(10);
+
+  const send = h.document.getElementById("send");
+  assert.strictEqual(send.title, "Stop and Send (Enter)", "the setting decides what Enter does");
+  send.click();
+  await h.settle(5);
+  assert.ok(h.posted.some((m) => m.type === "stopAndSend" && m.text === "take over"));
+
+  // Holding Alt flips the primary half, so it never claims the wrong thing.
+  input.value = "and this after";
+  input.dispatchEvent(new h.window.Event("input", { bubbles: true }));
+  h.document.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Alt", altKey: true, bubbles: true }));
+  await h.settle(10);
+  assert.strictEqual(send.title, "Send to Queue (Alt+Enter)");
+  assert.match(send.querySelector("i").className, /codicon-add/);
+  send.click();
+  await h.settle(5);
+  assert.ok(h.posted.some((m) => m.type === "send" && m.text === "and this after"));
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a run of tools says what it did, not how many tools it used", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "toolCall", id: "t1", title: "Read src/a.ts", kind: "read", status: "completed", locations: [{ path: "/w/src/a.ts" }] });
+  h.post({ type: "toolCall", id: "t2", title: "Read src/b.ts", kind: "read", status: "completed", locations: [{ path: "/w/src/b.ts" }] });
+  await h.settle(15);
+  const label = () => h.thread().querySelector(".tool-group-label").textContent;
+  assert.strictEqual(label(), "Read a.ts and b.ts", "two files are named");
+  assert.strictEqual(
+    h.thread().querySelector(".tool-group-label .tool-verb").textContent,
+    "Read",
+    "the verb leads, the rest is dimmed, like every other row"
+  );
+  assert.strictEqual(h.thread().querySelectorAll(".tool-group .codicon-tools").length, 0, "no icon of its own");
+
+  // Past a couple of files it counts them, and other work adds its own clause.
+  h.post({ type: "toolCall", id: "t3", title: "Read src/c.ts", kind: "read", status: "completed", locations: [{ path: "/w/src/c.ts" }] });
+  h.post({ type: "toolCall", id: "t4", title: "Run npm test", kind: "execute", status: "completed", rawInput: { command: "npm test" } });
+  await h.settle(15);
+  assert.strictEqual(label(), "Read 3 files and ran npm test");
+
+  h.post({ type: "toolCall", id: "t5", title: "Grep for auth", kind: "search", status: "completed", rawInput: { pattern: "auth", path: "/w/src" } });
+  await h.settle(15);
+  assert.strictEqual(label(), "Read 3 files, searched for auth in w/src and ran npm test");
+
+  // A clause that already names two things carries its own "and", so the clauses
+  // are separated by commas instead.
+  h.post({ type: "assistantChunk", text: "now the other run" });
+  h.post({ type: "toolCall", id: "u1", title: "Read one.ts", kind: "read", status: "completed", locations: [{ path: "/w/one.ts" }] });
+  h.post({ type: "toolCall", id: "u2", title: "Read two.ts", kind: "read", status: "completed", locations: [{ path: "/w/two.ts" }] });
+  h.post({ type: "toolCall", id: "u3", title: "Run npm run build", kind: "execute", status: "completed", rawInput: { command: "npm run build" } });
+  await h.settle(15);
+  const labels = [...h.thread().querySelectorAll(".tool-group-label")].map((l) => l.textContent);
+  assert.strictEqual(labels[1], "Read one.ts and two.ts, ran npm run build");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a run holds its reasoning and its edits together, under one summary", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "userChunk", text: "build the thing" });
+  h.post({ type: "toolCall", id: "t1", title: "Read plan.ts", kind: "read", status: "completed", locations: [{ path: "/w/plan.ts" }] });
+  h.post({ type: "fileChange", path: "/w/new.ts", added: 20, removed: 0, created: true });
+  // Reasoning part way through the work used to split the run in two.
+  h.post({ type: "thoughtChunk", text: "Now the callers need updating too.", messageId: "th1" });
+  h.post({ type: "fileChange", path: "/w/shared.ts", added: 4, removed: 2 });
+  await h.settle(30);
+
+  const groups = [...h.thread().querySelectorAll(".tool-group")];
+  assert.strictEqual(groups.length, 1, "one run, not one per interruption");
+  const body = groups[0].querySelector(".tool-group-body");
+  assert.strictEqual(body.querySelectorAll(".tool").length, 1, "the tool call is in it");
+  assert.strictEqual(body.querySelectorAll(".edit-pill").length, 2, "so are both edits");
+  assert.strictEqual(body.querySelectorAll(".thinking").length, 1, "and the reasoning between them");
+  assert.strictEqual(
+    groups[0].querySelector(".tool-group-label").textContent,
+    "Created new.ts, updated shared.ts and read plan.ts",
+    "the summary names what it did to each file, and reads like VS Code's"
+  );
+
+  // The reply itself ends the run, and stays outside it.
+  h.post({ type: "assistantChunk", text: "All done." });
+  h.post({ type: "toolCall", id: "t2", title: "Read after.ts", kind: "read", status: "completed", locations: [{ path: "/w/after.ts" }] });
+  await h.settle(20);
+  assert.strictEqual(h.thread().querySelectorAll(".tool-group").length, 1, "the answer closed the run");
+  const reply = h.thread().querySelector(".resp-text");
+  assert.ok(reply && !reply.closest(".tool-group"), "and the answer is not inside it");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a tool that came back with a picture shows it, open or shut", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  const px = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+  h.post({
+    type: "toolCall",
+    id: "s1",
+    title: "Capture browser screenshot",
+    kind: "other",
+    status: "completed",
+    content: [{ type: "image", mime: "image/png", data: px }]
+  });
+  await h.settle(20);
+  const tool = h.thread().querySelector(".tool");
+  const shot = tool.querySelector(".tool-media .dv-thumb");
+  assert.ok(shot, "the picture is the result, so it is shown");
+  assert.ok(shot.src.startsWith("data:image/png;base64,"));
+  assert.ok(tool.classList.contains("dv-collapsed"), "and it does not need the row opened");
+  assert.ok(!tool.querySelector(".tool-body .dv-thumb"), "it is not buried inside the body");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("an executed command reads as Input and Output", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({
+    type: "toolCall",
+    id: "c1",
+    title: "Run npm test",
+    kind: "execute",
+    status: "completed",
+    rawInput: { command: "npm test" },
+    content: [{ type: "text", text: "2 passing" }]
+  });
+  await h.settle(20);
+  const titles = [...h.thread().querySelectorAll(".tool-section-title")].map((t) => t.textContent);
+  assert.deepStrictEqual(titles, ["Input", "Output"], "the command and what it printed, labelled as a pair");
+  assert.strictEqual(h.thread().querySelector(".tool-command code").textContent, "npm test");
+  // The row is titled by the command itself, highlighted, not by a sentence.
+  assert.strictEqual(h.thread().querySelector(".tool .tool-label-code").textContent, "npm test");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a command's output opens itself only while it is still running", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({
+    type: "toolCall",
+    id: "c1",
+    title: "Run npm test",
+    kind: "execute",
+    status: "in_progress",
+    rawInput: { command: "npm test" },
+    content: [{ type: "terminal", terminalId: "term-1" }]
+  });
+  await h.settle(20);
+  const tool = () => h.thread().querySelector(".tool");
+  assert.ok(tool().classList.contains("dv-collapsed"), "a command that may finish at once stays shut");
+
+  // Still going a moment later: the output is worth watching, so it opens.
+  await h.settle(2200);
+  assert.ok(!tool().classList.contains("dv-collapsed"), "a long running one opens itself");
+
+  // Finished well: what was only opened to watch it closes again.
+  h.post({ type: "toolCallUpdate", id: "c1", status: "completed" });
+  await h.settle(20);
+  assert.ok(tool().classList.contains("dv-collapsed"), "and closes when it succeeds");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a search says what it looked for and where, in one line", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({
+    type: "toolCall",
+    id: "s1",
+    title: "Grep for showInfo",
+    kind: "search",
+    status: "completed",
+    rawInput: { pattern: "devin.showInfo", path: "/w/src/ui" },
+    content: [{ type: "text", text: "3 matches" }]
+  });
+  await h.settle(20);
+  const tool = h.thread().querySelector(".tool");
+  assert.strictEqual(tool.querySelector(".tool-verb").textContent, "Grep");
+  assert.strictEqual(tool.querySelector(".tool-detail").textContent, " devin.showInfo in src/ui");
+  assert.ok(tool.classList.contains("dv-nocollapse"), "there is nothing left to expand");
+  assert.strictEqual(tool.querySelector(".tool-body").childElementCount, 0);
   assert.strictEqual(h.errors().length, 0);
 });
 
@@ -1607,7 +1880,8 @@ test("the sessions switcher offers the same New Session split button", async () 
   await h.settle(10);
   assert.deepStrictEqual(
     [...h.document.querySelectorAll(".dv-menu .dv-menu-item span")].map((s) => s.textContent),
-    ["New Session", "New Session (Editor)", "New Session (Window)", "New Devin CLI Session (Terminal)"]
+    ["New Session (Editor)", "New Session (Window)", "New Devin CLI Session (Terminal)"],
+    "the menu offers the other places, not the one the button already does"
   );
   assert.strictEqual(h.errors().length, 0);
 });
@@ -2081,19 +2355,149 @@ test("the header offers detach in the panel and attach in an editor tab", async 
   await h.settle(5);
   assert.ok(h.posted.some((m) => m.type === "detachSession" && m.id === "A"), "the panel asks to detach");
 
-  // The same control moves the chat back when it is the editor surface.
-  h.post({ type: "capabilities", revert: true, surface: "editor", panelSide: "left" });
-  await h.settle(10);
-  assert.match(btn.querySelector(".codicon").className, /layout-sidebar-left-dock/, "the icon follows the panel side");
-  assert.strictEqual(btn.title, "Move this chat to the side panel");
-  btn.click();
-  await h.settle(5);
-  assert.ok(h.posted.some((m) => m.type === "attachSession" && m.id === "A"), "the tab asks to attach");
-
   // No session, no control.
   h.document.getElementById("history-btn").click();
   await h.settle(10);
   assert.ok(btn.classList.contains("hidden"), "the list has nothing to move");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("an editor tab is one chat: no list, no back, no terminate", async () => {
+  const h = createHarness({ surface: "editor" });
+  h.post({ type: "ready" });
+  h.post({ type: "clear" });
+  h.post({ type: "sessionReady", sessionId: "A", title: "Detached chat" });
+  h.post({ type: "capabilities", revert: true, surface: "editor", panelSide: "left" });
+  h.post({ type: "sessionStatuses", statuses: { A: "running" }, activeId: "A" });
+  await h.settle(10);
+
+  const shown = (id) => !h.document.getElementById(id).classList.contains("hidden");
+  assert.ok(!shown("history-btn"), "no way back to a list it does not have");
+  assert.ok(!shown("panel-toggle"), "and no sessions panel");
+  assert.ok(!shown("terminate-btn"), "closing the tab is what stops the chat");
+  assert.ok(!shown("header-divider"), "the divider has nothing left to divide");
+  assert.ok(shown("detach-btn"), "moving it back to the side panel is the one control");
+  assert.strictEqual(h.document.getElementById("detach-btn").title, "Move this chat to the side panel");
+  assert.match(
+    h.document.getElementById("detach-btn").querySelector(".codicon").className,
+    /layout-sidebar-left-dock/,
+    "the icon follows the panel side"
+  );
+  assert.ok(h.document.getElementById("title-btn").classList.contains("as-heading"), "the title is a name, not a control");
+  h.document.getElementById("title-btn").click();
+  await h.settle(5);
+  assert.ok(!h.posted.some((m) => m.type === "renameSession"), "the tab renames from its own context menu");
+
+  // Which chat the tab holds is remembered, so a window reload restores it.
+  assert.strictEqual(h.state().sessionId, "A");
+
+  // Even asked to, it never falls back to a session list.
+  h.post({ type: "body", body: "list" });
+  await h.settle(10);
+  assert.ok(h.document.getElementById("sessions-list").classList.contains("hidden"), "it stays on its chat");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a chat open on the other surface says so instead of showing a stale copy", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({
+    type: "sessions",
+    activeId: null,
+    statuses: {},
+    elsewhere: ["B"],
+    sessions: [{ id: "B", short_id: "B", title: "In a tab", working_directory: "/w" }]
+  });
+  await h.settle(10);
+  // The row is honest about it before it is even clicked.
+  const row = h.document.querySelector("#sessions-list .session-item");
+  assert.ok(row.querySelector(".session-dot").className.includes("dot-idle"), "it is alive, just not here");
+  assert.strictEqual(row.querySelector(".session-elsewhere").title, "Open in an editor tab");
+
+  row.querySelector(".session-main").click();
+  await h.settle(10);
+  assert.ok(h.posted.some((m) => m.type === "loadSession" && m.id === "B"), "the host still gets the final say");
+  h.post({ type: "elsewhere", id: "B", where: "an editor tab", here: "the side panel", title: "In a tab" });
+  await h.settle(10);
+
+  assert.match(h.thread().querySelector(".welcome-title").textContent, /open in an editor tab/);
+  assert.ok(h.document.getElementById("composer").classList.contains("hidden"), "and cannot be typed into");
+  const actions = [...h.thread().querySelectorAll(".welcome-actions .btn")];
+  assert.deepStrictEqual(actions.map((b) => b.textContent), [
+    "Continue in the side panel",
+    "Show it in an editor tab"
+  ]);
+  actions[0].click();
+  await h.settle(5);
+  assert.ok(h.posted.some((m) => m.type === "moveHere" && m.id === "B"), "the first brings it here, agent and all");
+  actions[1].click();
+  await h.settle(5);
+  assert.ok(h.posted.some((m) => m.type === "revealSession" && m.id === "B"), "the second goes to it");
+
+  // Once it is actually loaded here, the placeholder and the lock go.
+  h.post({ type: "clear", loading: true });
+  h.post({ type: "sessionReady", sessionId: "B", title: "In a tab" });
+  h.post({ type: "loaded" });
+  await h.settle(10);
+  assert.ok(!h.document.getElementById("composer").classList.contains("hidden"));
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a chat leaving a surface writes back its draft and its half given answers", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({
+    type: "elicitation",
+    requestId: "r1",
+    questions: [{ id: "q1", question: "Which one?", options: [{ id: "o1", label: "First" }] }]
+  });
+  await h.settle(10);
+  const input = h.document.getElementById("input");
+  input.value = "half written prompt";
+  input.dispatchEvent(new h.window.Event("input"));
+  const opt = h.document.querySelector(".qc .elicit-native");
+  if (opt) { opt.checked = true; opt.dispatchEvent(new h.window.Event("change", { bubbles: true })); }
+
+  // The handover is instant, so the host asks for both before the chat leaves and
+  // waits for the reply: a debounce would lose them.
+  h.posted.length = 0;
+  h.post({ type: "flushState" });
+  await h.settle(5);
+
+  const draft = h.posted.find((m) => m.type === "draft");
+  assert.ok(draft && draft.text === "half written prompt", "the prompt goes back with its session");
+  assert.ok(h.posted.some((m) => m.type === "answerDraft" && m.requestId === "r1"), "so do the answers so far");
+  const order = h.posted.map((m) => m.type);
+  assert.ok(
+    order.indexOf("stateFlushed") === order.length - 1,
+    "and the all clear comes last, so nothing is still in flight"
+  );
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a chat whose agent stopped says so in a tab, and can be started again", async () => {
+  const h = createHarness({ surface: "editor" });
+  h.post({ type: "ready" });
+  h.post({ type: "clear" });
+  h.post({ type: "capabilities", surface: "editor" });
+  h.post({ type: "sessionReady", sessionId: "A", title: "Stopped chat" });
+  h.post({ type: "userChunk", text: "still here" });
+  h.post({ type: "loaded" });
+  h.post({ type: "sessionEnded" });
+  await h.settle(10);
+
+  const row = h.thread().querySelector(".ended-row");
+  assert.ok(row, "the tab has no list to say it in, so the chat says it");
+  assert.match(row.textContent, /Send a message to start it again/);
+  assert.deepStrictEqual(h.reqTexts(), ["still here"], "the conversation is left alone");
+
+  // Said once, not once per exit event.
+  h.post({ type: "sessionEnded" });
+  await h.settle(10);
+  assert.strictEqual(h.thread().querySelectorAll(".ended-row").length, 1);
   assert.strictEqual(h.errors().length, 0);
 });
 
@@ -2127,7 +2531,9 @@ test("a session running on another surface is marked in the list", async () => {
   assert.strictEqual(h.errors().length, 0);
 });
 
-test("a chat moved from another surface says so in the transcript", async () => {
+test("a chat moved from another surface arrives with nothing said about it", async () => {
+  // Moving a chat is not an event in the conversation, so the transcript carries
+  // no note about it: it just carries on where it left off.
   const h = createHarness();
   h.post({ type: "ready" });
   h.post({ type: "body", body: "thread" });
@@ -2135,17 +2541,9 @@ test("a chat moved from another surface says so in the transcript", async () => 
   h.post({ type: "sessionReady", sessionId: "A" });
   h.post({ type: "userChunk", text: "carried over" });
   h.post({ type: "loaded" });
-  h.post({ type: "moved", from: "the side panel" });
   await h.settle(10);
-  const row = h.thread().querySelector(".moved-row");
-  assert.ok(row, "a divider marks where it was picked up");
-  assert.match(row.textContent, /Continued from the side panel/);
   assert.deepStrictEqual(h.reqTexts(), ["carried over"], "the transcript it was handed is intact");
-
-  // Moving again replaces the divider rather than stacking them.
-  h.post({ type: "moved", from: "an editor tab" });
-  await h.settle(10);
-  assert.strictEqual(h.thread().querySelectorAll(".moved-row").length, 1);
+  assert.strictEqual(h.thread().querySelectorAll(".restored-row").length, 0, "and nothing is announced");
   assert.strictEqual(h.errors().length, 0);
 });
 
@@ -2174,13 +2572,11 @@ test("a chat being handed to a new surface is not sent back to the list", async 
   h.post({ type: "assistantChunk", text: "with its reply" });
   h.post({ type: "sessionReady", sessionId: "A" });
   h.post({ type: "loaded" });
-  h.post({ type: "moved", from: "the side panel" });
   h.post({ type: "body", body: "thread" });
   await h.settle(20);
 
   assert.deepStrictEqual(h.reqTexts(), ["the chat that was handed over"]);
   assert.deepStrictEqual(h.respTexts(), ["with its reply"]);
-  assert.ok(h.thread().querySelector(".moved-row"), "and it says where it came from");
   assert.strictEqual(h.errors().length, 0);
 });
 
@@ -2192,7 +2588,6 @@ test("a chat handed to a surface mid turn still knows which session it is", asyn
   h.post({ type: "ready" });
   h.post({ type: "body", body: "thread" });
   h.post({ type: "clear" });
-  h.post({ type: "moved", from: "the side panel" });
   h.post({ type: "capabilities", revert: true, surface: "editor" });
   h.post({ type: "busy", value: true });
   h.post({ type: "sessionReady", sessionId: "A", title: "A moved chat" });
@@ -2300,21 +2695,22 @@ test("stepping a question carousel moves focus, so Enter keeps working", async (
   assert.strictEqual(h.errors().length, 0);
 });
 
-test("a checkpoint restore keeps the divider that says where the chat came from", async () => {
-  const h = createHarness();
+test("a checkpoint restore keeps the notice that the agent stopped", async () => {
+  const h = createHarness({ surface: "editor" });
   h.post({ type: "ready" });
-  h.post({ type: "body", body: "thread" });
   h.post({ type: "clear" });
+  h.post({ type: "capabilities", surface: "editor" });
   h.post({ type: "sessionReady", sessionId: "A" });
   h.post({ type: "userChunk", text: "carried over" });
   h.post({ type: "loaded" });
-  h.post({ type: "moved", from: "the side panel" });
+  h.post({ type: "sessionEnded" });
   await h.settle(10);
-  assert.ok(h.thread().querySelector(".moved-row"), "the divider is there");
+  assert.ok(h.thread().querySelector(".ended-row"), "the notice is there");
 
   h.post({ type: "reverted", head: 3 });
   await h.settle(10);
-  assert.ok(h.thread().querySelector(".moved-row"), "and survives a restore, which has its own divider");
+  assert.ok(h.thread().querySelector(".ended-row"), "and survives a restore, which has its own divider");
+  assert.deepStrictEqual(h.reqTexts(), ["carried over"], "and so does the conversation");
   assert.strictEqual(h.errors().length, 0);
 });
 
@@ -2359,6 +2755,86 @@ test("a permission prompt says what it would run", async () => {
   assert.match(box.querySelector(".cw-title").textContent, /run a command/);
   assert.strictEqual(box.querySelector(".tool-command code").textContent, "pwd && whoami && date",
     "the command it wants to run is shown");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("an edit looks the same however it arrives, and reads as one line", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "userChunk", text: "change two files" });
+  // A run of tools, with an edit in the middle of it: the edit is its own row, not
+  // a tool section inside the group with the file folded away.
+  h.post({ type: "toolCall", id: "t1", title: "Read src/a.ts", kind: "read", status: "completed", locations: [{ path: "/w/src/a.ts" }] });
+  h.post({ type: "toolCall", id: "t2", title: "Edit src/a.ts", kind: "edit", status: "in_progress", rawInput: { path: "/w/src/a.ts" } });
+  h.post({
+    type: "toolCall",
+    id: "t2",
+    status: "completed",
+    content: [{ type: "diff", path: "/w/src/a.ts", added: 12, removed: 3 }]
+  });
+  await h.settle(20);
+
+  const rows = [...h.thread().querySelectorAll(".edit-pill")];
+  assert.strictEqual(rows.length, 1, "one row for the file, not one per update");
+  assert.match(rows[0].textContent, /Edited/);
+  assert.match(rows[0].querySelector(".file-pill-name").textContent, /^a\.ts$/, "named, not a full path");
+  assert.match(rows[0].querySelector(".edit-pill-status").className, /codicon-edit/, "the same pencil everywhere");
+  assert.strictEqual(rows[0].querySelector(".label-added").textContent, "+12");
+  assert.strictEqual(
+    [...h.thread().querySelectorAll(".tool .tool-verb")].map((v) => v.textContent).join(","),
+    "Read",
+    "the edit is not also a tool section"
+  );
+
+  // The same edit arriving as a live change event gains Keep and Undo, and stays
+  // one row.
+  h.post({ type: "fileChange", path: "/w/src/a.ts", added: 12, removed: 3 });
+  await h.settle(10);
+  const live = [...h.thread().querySelectorAll(".edit-pill")];
+  assert.strictEqual(live.length, 1, "still one row");
+  assert.strictEqual(live[0].querySelectorAll(".edit-pill-actions button").length, 2, "now it can be kept or undone");
+
+  // A created file says so, with the same pencil.
+  h.post({ type: "fileChange", path: "/w/src/new.ts", added: 40, removed: 0, created: true });
+  await h.settle(10);
+  const created = [...h.thread().querySelectorAll(".edit-pill")].pop();
+  assert.match(created.textContent, /Created/);
+  assert.match(created.querySelector(".edit-pill-status").className, /codicon-edit/);
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a file the agent read is one line that opens it", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({
+    type: "toolCall",
+    id: "r1",
+    title: "Read /outside/the/workspace/notes.md",
+    kind: "read",
+    status: "completed",
+    locations: [{ path: "/outside/the/workspace/notes.md", line: 12 }],
+    content: [{ type: "text", text: "the whole file, which belongs in an editor" }]
+  });
+  await h.settle(20);
+
+  const tool = h.thread().querySelector(".tool");
+  assert.strictEqual(tool.querySelector(".tool-verb").textContent, "Read");
+  assert.strictEqual(tool.querySelector(".tool-detail").textContent, " notes.md", "the file, not its path");
+  assert.ok(tool.classList.contains("dv-nocollapse"), "there is nothing to expand");
+  assert.strictEqual(tool.querySelector(".tool-body").childElementCount, 0, "the file is not dumped in the chat");
+  const head = tool.querySelector(".dv-collapsible-header");
+  assert.strictEqual(head.title, "/outside/the/workspace/notes.md");
+  head.click();
+  await h.settle(5);
+  assert.deepStrictEqual(
+    h.posted.filter((m) => m.type === "openFile"),
+    [{ type: "openFile", path: "/outside/the/workspace/notes.md", line: 12 }],
+    "clicking opens the real file, wherever it lives"
+  );
   assert.strictEqual(h.errors().length, 0);
 });
 
@@ -2536,20 +3012,7 @@ test("Enter answers the option it is on before moving to the next question", asy
   assert.strictEqual(h.errors().length, 0);
 });
 
-test("a chat that arrives mid turn says its history is coming", async () => {
-  const h = createHarness();
-  h.post({ type: "ready" });
-  h.post({ type: "body", body: "thread" });
-  h.post({ type: "clear" });
-  h.post({ type: "moved", from: "the side panel", partial: true });
-  h.post({ type: "busy", value: true });
-  await h.settle(10);
-  assert.strictEqual(h.thread().querySelector(".moved-row .restored-label").textContent,
-    "Continued from the side panel, earlier messages load when this turn ends");
-  // The welcome screen must not paint under the divider.
-  assert.ok(!h.document.querySelector("#welcome:not(.hidden)"), "no starter prompts over a live chat");
-  assert.strictEqual(h.errors().length, 0);
-});
+
 
 test("tool output carries a copy action, and JSON is pretty printed", async () => {
   const h = createHarness();

@@ -92,6 +92,10 @@ interface Runtime {
 // Cap on a backgrounded session's replay buffer (oldest dropped past this).
 const BG_BUFFER_MAX = 6000;
 
+// Shown in place of a transcript that could not be opened. The reason itself goes
+// to the output channel, which the notification points at.
+const OPEN_FAILED = "Couldn't open this chat. See the Devin output for details.";
+
 // A live session handed from one chat surface to another (the side panel to an
 // editor tab, or back). The `devin acp` process, its terminals and any request it
 // is still waiting on all travel together, so the agent never restarts, keeps the
@@ -102,7 +106,7 @@ export interface RuntimeTransfer {
   attachments: { id: string; label: string; type: string; block: ContentBlock }[];
   permissions: [string, { resolve: (res: RequestPermissionResult) => void; rid: string }][];
   elicitations: [string, { resolve: (res: unknown) => void; rid: string }][];
-  from: string; // where it came from, for the divider in the new surface
+  from: string; // where it came from, for the log line the handover leaves
 }
 
 // What a controller needs from the surface that owns it: which other surface has
@@ -121,6 +125,12 @@ export interface SurfaceHost {
   elsewhere(except: ChatController): string[];
   // Half given answers for a request that has moved to another surface.
   saveAnswerDraft(requestId: string, state: unknown, except: ChatController): void;
+  // One surface's set of live sessions changed, so every other surface's list,
+  // status dots and "running elsewhere" badges are now out of date.
+  sessionsChanged(except: ChatController): void;
+  // A session was renamed, or the CLI finally reported its name, so any editor
+  // tab showing it needs its own title updating.
+  titlesChanged(): void;
 }
 
 // Image file extensions we attach inline (as base64), matching VS Code chat's
@@ -156,6 +166,9 @@ export class ChatController implements AcpHost {
   // When set (a freshly created editor/window surface), start a new session as
   // soon as the webview is ready instead of showing the session list.
   autoNewSession = false;
+  // The chat an editor tab was holding before a window reload, reopened as soon as
+  // the restored page is ready so the tab comes back to it rather than empty.
+  openOnReady?: string;
   private readonly ownDisposables: vscode.Disposable[] = [];
 
   // Live runtimes keyed by session id. Absent = dead (gray) history.
@@ -335,6 +348,9 @@ export class ChatController implements AcpHost {
   // Resolves once the webview is listening, so a session handed to a freshly
   // created surface is not posted into a page that cannot hear it yet.
   private webviewReady = false;
+  // Set when the page this controller was bound to has gone for good (its editor
+  // tab closed), so nothing waits on a reply that can never come.
+  private webviewGone = false;
   // Whether a chat has been painted into the current page. The readiness chain
   // restores the last chat only when nothing has, so a session handed to this
   // surface is not immediately reloaded on top of itself.
@@ -345,6 +361,41 @@ export class ChatController implements AcpHost {
       return Promise.resolve();
     }
     return new Promise<void>((resolve) => this.readyWaiters.push(resolve));
+  }
+
+  markClosed(): void {
+    this.webviewGone = true;
+  }
+
+  // What the composer holds is only known to the page: the draft is debounced and
+  // a question's answers are half given. A handover is instant, so the page is
+  // asked to write both back BEFORE the chat leaves, and waited on, or a prompt
+  // someone was part way through writing arrives on the new surface empty.
+  private flushWaiters: (() => void)[] = [];
+  async flushSurfaceState(): Promise<void> {
+    if (!this.webviewReady || this.webviewGone) {
+      return;
+    }
+    this.post({ type: "flushState" });
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        this.flushWaiters = this.flushWaiters.filter((w) => w !== done);
+        resolve();
+      }, 250);
+      const done = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      this.flushWaiters.push(done);
+    });
+  }
+
+  private onStateFlushed(): void {
+    const waiters = this.flushWaiters;
+    this.flushWaiters = [];
+    for (const w of waiters) {
+      w();
+    }
   }
 
   // Open a session on this surface (used when a move has nothing live to carry).
@@ -457,8 +508,8 @@ export class ChatController implements AcpHost {
       e.resolve({ action: "cancel" });
     }
     this.elicitationResolvers.clear();
-    for (const [, resolve] of this.takeoverResolvers) {
-      resolve("cancel");
+    for (const [, e] of this.takeoverResolvers) {
+      e.resolve("cancel");
     }
     this.takeoverResolvers.clear();
     this.loading.clear();
@@ -494,6 +545,19 @@ export class ChatController implements AcpHost {
     return [...this.runtimes.keys()].filter(Boolean);
   }
 
+  // The chat is being opened on another surface and has no live agent to hand
+  // over, so this surface simply stops showing it.
+  releaseSession(id: string): void {
+    if (this.activeId !== id) {
+      return;
+    }
+    this.activeId = undefined;
+    if (this.kind === "view") {
+      this.store.setViewing(undefined);
+      this.post({ type: "body", body: "list" });
+    }
+  }
+
   // Hand a live session out: it leaves this surface's pool with its process, its
   // terminals and anything it is still waiting on, and this surface stops showing
   // it. The agent is untouched, so nothing restarts and no lock changes hands.
@@ -516,30 +580,37 @@ export class ChatController implements AcpHost {
       }
       return taken;
     };
+    // The composer's staged files belong to whichever chat is on screen, so they
+    // only travel when that is the chat being handed over.
+    const visible = this.activeId === id;
     const transfer: RuntimeTransfer = {
       rt,
-      attachments: this.attachments,
+      attachments: visible ? this.attachments : [],
       permissions: take(this.permissionResolvers),
       elicitations: take(this.elicitationResolvers),
       from: this.kind === "view" ? "the side panel" : "an editor tab"
     };
-    this.attachments = [];
+    if (visible) {
+      this.attachments = [];
+    }
     // A lock takeover question belongs to a load this surface is abandoning, and
     // its widget goes with the transcript, so settle it rather than leave the load
     // waiting on an answer that can never arrive.
-    for (const [rid, resolve] of [...this.takeoverResolvers]) {
-      this.takeoverResolvers.delete(rid);
-      resolve("cancel");
+    for (const [rid, entry] of [...this.takeoverResolvers]) {
+      if (entry.rid === id) {
+        this.takeoverResolvers.delete(rid);
+        entry.resolve("cancel");
+      }
     }
-    if (this.activeId === id) {
-      // This surface has nothing to show any more, so it goes back to its list
-      // (without stealing focus: the surface being handed the chat takes that).
+    if (visible) {
+      // This surface has nothing to show any more, so it goes back to its list.
+      // An editor tab has no list: it is one chat, and the manager closes it.
       this.activeId = undefined;
       if (this.kind === "view") {
         this.store.setViewing(undefined);
+        this.post({ type: "busy", value: false });
+        this.post({ type: "body", body: "list" });
       }
-      this.post({ type: "busy", value: false });
-      this.post({ type: "body", body: "list" });
     }
     this.broadcastStatuses();
     void this.refreshSessions();
@@ -600,11 +671,9 @@ export class ChatController implements AcpHost {
       );
       // Only what the record could not hold is worth asking the CLI for later.
       rt.needsReplay = !rt.logFull;
-      this.post({ type: "moved", from: transfer.from, partial: !rt.logFull });
       await this.activateSession(rt.id);
     } else {
       await this.doLoadSession(rt.id);
-      this.post({ type: "moved", from: transfer.from });
       this.log(`[move] ${rt.id} arrived from ${transfer.from} idle: reloaded from the agent`);
     }
     if (transfer.attachments.length) {
@@ -697,6 +766,11 @@ export class ChatController implements AcpHost {
     if (this.activeId === rt.id) {
       this.setBusy(false);
       this.statusBar?.set({ connected: false });
+      // The side panel says this in its list (the dot goes gray). An editor tab
+      // has no list, so the chat itself has to explain why it went quiet.
+      if (this.kind === "editor") {
+        this.post({ type: "sessionEnded" });
+      }
     }
     this.broadcastStatuses();
   }
@@ -712,8 +786,19 @@ export class ChatController implements AcpHost {
 
   // --- Status dots ---------------------------------------------------------
 
+  // What this surface is running, and which of them it is showing. Every other
+  // surface lists these too (grayed, badged as running elsewhere), so a change
+  // here has to reach them: without it a chat started in a tab is missing from
+  // the side panel's list until it is refreshed by hand.
+  private ownership = "";
+
   private broadcastStatuses(): void {
     this.post({ type: "sessionStatuses", statuses: this.statusMap(), activeId: this.activeId, elsewhere: this.elsewhere() });
+    const owned = `${[...this.runtimes.keys()].sort().join(",")}|${this.activeId || ""}`;
+    if (owned !== this.ownership) {
+      this.ownership = owned;
+      this.surfaces?.sessionsChanged(this);
+    }
     this.statusBar?.set({ connected: this.isReady(), mode: this.currentMode, model: this.currentModel });
   }
 
@@ -795,6 +880,9 @@ export class ChatController implements AcpHost {
         case "send":
           await this.handleSend(String(msg.text || ""), !!msg.newSession);
           return;
+        case "stopAndSend":
+          this.stopAndSend(String(msg.text || ""));
+          return;
         case "removeQueued":
           this.removeQueued(String(msg.id || ""));
           return;
@@ -862,11 +950,23 @@ export class ChatController implements AcpHost {
         case "leaveToList":
           this.leaveToList();
           return;
+        case "listVisible":
+          this.listVisible = msg.value === true;
+          return;
         case "detachSession":
           await this.surfaces?.detach(String(msg.id || this.activeId || ""));
           return;
         case "attachSession":
           await this.surfaces?.attach(String(msg.id || this.activeId || ""));
+          return;
+        case "moveHere":
+          await this.surfaces?.moveHere(this, String(msg.id || ""));
+          return;
+        case "revealSession":
+          this.revealOwner(String(msg.id || ""));
+          return;
+        case "stateFlushed":
+          this.onStateFlushed();
           return;
         case "terminateSession":
           await this.terminateSession(String(msg.id || ""), msg.title, !!msg.returnToList);
@@ -993,6 +1093,10 @@ export class ChatController implements AcpHost {
       w();
     }
     this.post({ type: "workspace", name: this.workspaceName() });
+    // Which surface this is decides the whole chrome (an editor tab is one chat,
+    // with no session list and no back button), so it is settled before anything
+    // is drawn rather than waiting for the first session to load.
+    this.postCapabilities();
     this.postImplicitContext();
     // A prompt left half written before the window closed is put straight back.
     this.postDraft();
@@ -1007,12 +1111,20 @@ export class ChatController implements AcpHost {
     }
     await this.runHealthCheck();
     await this.pushReadiness();
+    if (!this.isReady() || this.activeId) {
+      return;
+    }
     // A freshly opened editor/window surface starts a new session immediately
-    // instead of landing on the session list.
-    if (this.autoNewSession && this.isReady() && !this.activeId) {
+    // instead of landing on the session list, and one restored after a reload
+    // reopens the chat it was holding.
+    if (this.autoNewSession) {
       this.autoNewSession = false;
       this.post({ type: "body", body: "thread" });
       await this.newSession();
+    } else if (this.openOnReady) {
+      const id = this.openOnReady;
+      this.openOnReady = undefined;
+      await this.openSession(id);
     }
   }
 
@@ -1209,8 +1321,11 @@ export class ChatController implements AcpHost {
         this.publishOptions(rt, res.configOptions, res.modes?.currentModeId);
         await this.applyDefaults(rt, res);
         // Whatever was in the "new chat" box has been carried into this session,
-        // so it is no longer waiting in the list.
+        // so it is no longer waiting in the list: the text, and the files staged
+        // with it, belong to this chat now.
         this.store.setDraft(undefined, "");
+        await this.dropStaged(undefined);
+        this.postAttachments();
         this.post({ type: "sessionReady", sessionId: rt.id });
         this.ensureIdleTimer();
         this.broadcastStatuses();
@@ -1259,20 +1374,22 @@ export class ChatController implements AcpHost {
   }
 
   // Ask the webview whether to force take-over a session held by a live process.
-  private readonly takeoverResolvers = new Map<string, (d: "takeover" | "cancel") => void>();
+  // `rid` is the session the question belongs to, so a chat that moves surface
+  // takes only its own with it.
+  private readonly takeoverResolvers = new Map<string, { resolve: (d: "takeover" | "cancel") => void; rid: string }>();
   private takeoverSeq = 0;
   private askTakeover(id: string, pid?: number): Promise<"takeover" | "cancel"> {
     const requestId = `lock-${++this.takeoverSeq}`;
     this.post({ type: "lockConflict", requestId, id, pid });
-    return new Promise((resolve) => this.takeoverResolvers.set(requestId, resolve));
+    return new Promise((resolve) => this.takeoverResolvers.set(requestId, { resolve, rid: id }));
   }
   private resolveTakeover(requestId: string, decision: string): void {
-    const resolve = this.takeoverResolvers.get(requestId);
-    if (!resolve) {
+    const entry = this.takeoverResolvers.get(requestId);
+    if (!entry) {
       return;
     }
     this.takeoverResolvers.delete(requestId);
-    resolve(decision === "takeover" ? "takeover" : "cancel");
+    entry.resolve(decision === "takeover" ? "takeover" : "cancel");
   }
 
   // Borrow an initialized client for a session-agnostic call (rename/delete),
@@ -1302,8 +1419,9 @@ export class ChatController implements AcpHost {
     if (this.kind === "view") {
       this.store.setViewing(undefined);
     }
-    this.clearAttachments();
-    // The composer is a "new chat" box again, so it gets that draft back.
+    // The composer is a "new chat" box again, so it gets that box's own draft and
+    // staged files back, rather than being emptied.
+    void this.useAttachmentsOf(undefined);
     this.postDraft();
   }
 
@@ -1340,17 +1458,25 @@ export class ChatController implements AcpHost {
     this.broadcastStatuses();
     // Terminating the open session returns to the list; otherwise just refresh.
     if (returnToList || wasActive) {
-      await this.showSessionsView();
+      await this.closeOutSession();
     } else {
       void this.refreshSessions();
     }
   }
 
-  private clearAttachments(): void {
-    if (this.attachments.length) {
-      this.attachments = [];
+  // Nothing left to show for the chat this surface was on. The side panel falls
+  // back to its session list. An editor tab is one chat, so it stays on it: the
+  // transcript remains, a send wakes the agent again, and a chat that could not
+  // be opened at all says so in place of the transcript.
+  private async closeOutSession(reason?: string): Promise<void> {
+    if (this.kind === "view") {
+      await this.showSessionsView();
+      return;
     }
-    this.postAttachments();
+    if (reason) {
+      this.post({ type: "loaded" });
+      this.post({ type: "error", text: reason });
+    }
   }
 
   // Start a new session in a chosen location. "view" is this surface; the
@@ -1377,9 +1503,10 @@ export class ChatController implements AcpHost {
       return;
     }
     // The previous session (if any) is left alive in the background and keeps its
-    // own edits tracked; the clear below starts this chat with an empty one.
+    // own edits tracked; the clear below starts this chat with an empty one. What
+    // was staged in the "new chat" box comes with it: that is what it was for.
     this.activeId = undefined;
-    this.attachments = [];
+    await this.useAttachmentsOf(undefined);
     this.focus();
     this.post({ type: "body", body: "thread" });
     // `reset` tells the webview this is a fresh session so it clears the title
@@ -1410,7 +1537,7 @@ export class ChatController implements AcpHost {
     if (!id || !(await this.ensureReady())) {
       return;
     }
-    if (await this.openedElsewhere(id)) {
+    if (this.openedElsewhere(id)) {
       return;
     }
     const inflight = this.loading.get(id);
@@ -1439,7 +1566,6 @@ export class ChatController implements AcpHost {
       return;
     }
     this.activeId = id;
-    this.attachments = [];
     // A full reload rebuilds the whole transcript, so any buffered background
     // stream for this runtime is superseded, as is any replay it was owed.
     if (already) {
@@ -1457,9 +1583,11 @@ export class ChatController implements AcpHost {
     this.painted = true;
     this.post({ type: "sessionReady", sessionId: id, title: this.store.titles()[id] });
     // The clear empties the working set and the composer, so re-send this
-    // session's own pending edits and unsent text: a reload throws neither away.
+    // session's own pending edits, unsent text and staged files: a reload throws
+    // none of them away.
     this.postWorkingSet();
     this.postDraft();
+    await this.useAttachmentsOf(id);
     if (!already) {
       this.starting.add(id);
     }
@@ -1513,7 +1641,7 @@ export class ChatController implements AcpHost {
         // from the cache and clicked again.
         this.sessionsCache = undefined;
         this.broadcastStatuses();
-        await this.showSessionsView();
+        await this.closeOutSession(OPEN_FAILED);
         this.reportLoadFailure(loadFailed);
       } else {
         this.post({ type: "loaded" });
@@ -1533,6 +1661,10 @@ export class ChatController implements AcpHost {
           // reappear after a reload, not just after an instant re-attach.
           this.postQueued(opened);
         }
+        // Anything typed while it was opening has been waiting for the channel.
+        if (opened) {
+          this.flushQueue(opened);
+        }
         void this.refreshSessions();
       }
     }
@@ -1551,10 +1683,9 @@ export class ChatController implements AcpHost {
     this.activeId = id;
     this.markVisible(id);
     this.postWorkingSet();
-    // Drop the previous session's pending composer attachments so they do not
-    // bleed into this one (loadSession/wakeSession/newSession all do the same).
-    this.attachments = [];
-    this.postAttachments();
+    // The composer belongs to this chat now, so it shows this chat's own unsent
+    // text and staged files, not the ones from wherever we just were.
+    await this.useAttachmentsOf(id);
     this.postDraft();
     this.currentMode = rt.mode;
     this.currentModel = rt.model;
@@ -1592,32 +1723,31 @@ export class ChatController implements AcpHost {
   }
 
   // A session is already running on another surface. Two panels cannot share one
-  // agent, so offer the two things that make sense: go to where it is, or bring it
-  // here. Returns true when this surface should not open it itself.
-  private async openedElsewhere(id: string): Promise<boolean> {
+  // agent, so the chat opens as a placeholder saying where it is, with a button
+  // that brings it here. Returns true when this surface should not open it itself.
+  private openedElsewhere(id: string): boolean {
     const owner = this.surfaces?.owner(id, this);
     if (!owner) {
       return false;
     }
-    const where = this.surfaces!.label(owner);
-    const choice = await vscode.window.showInformationMessage(
-      `This chat is already open in ${where}.`,
-      { modal: true, detail: "A chat runs in one place at a time, so it can be shown where it is or moved here." },
-      `Show it in ${where}`,
-      "Move it here"
-    );
-    if (choice === "Move it here") {
-      await this.surfaces!.moveHere(this, id);
-      return true;
-    }
-    if (choice) {
-      this.surfaces!.reveal(owner);
-    }
-    // The webview switched to the thread the moment it was clicked, so send it
-    // back to the list: nothing is going to be loaded into it here.
-    this.post({ type: "body", body: "list" });
+    this.post({
+      type: "elsewhere",
+      id,
+      where: this.surfaces!.label(owner),
+      here: this.kind === "view" ? "the side panel" : "this tab",
+      title: this.store.titles()[id]
+    });
     void this.refreshSessions();
     return true;
+  }
+
+  // Bring the surface running a chat to the front, for the placeholder's second
+  // action ("show it where it is").
+  private revealOwner(id: string): void {
+    const owner = id ? this.surfaces?.owner(id, this) : undefined;
+    if (owner) {
+      this.surfaces!.reveal(owner);
+    }
   }
 
   // Seamlessly bring a dead (terminated / idle-exited) session back to life when
@@ -1629,7 +1759,7 @@ export class ChatController implements AcpHost {
     if (!id || !(await this.ensureReady())) {
       return;
     }
-    if (await this.openedElsewhere(id)) {
+    if (this.openedElsewhere(id)) {
       return;
     }
     if (this.runtimes.has(id)) {
@@ -1655,7 +1785,7 @@ export class ChatController implements AcpHost {
     this.activeId = id;
     this.postWorkingSet();
     this.postDraft();
-    this.attachments = [];
+    await this.useAttachmentsOf(id);
     const cwd = this.store.cwds()[id] || this.resolveNewSessionCwd();
     const rt = this.spawnRuntime(cwd);
     rt.id = id;
@@ -1702,7 +1832,7 @@ export class ChatController implements AcpHost {
       if (wakeFailed) {
         // The agent could not reload this session: return to the list rather
         // than leaving a stale, non-interactive transcript on screen.
-        await this.showSessionsView();
+        await this.closeOutSession(OPEN_FAILED);
         this.reportLoadFailure(wakeFailed);
       } else if (this.activeId === id) {
         await this.postTurnHead(false);
@@ -1760,13 +1890,15 @@ export class ChatController implements AcpHost {
         sessions = this.sessionsCache?.sessions ?? [];
       }
     }
-    // Surface sessions we own a live runtime for even when `devin list` has not
-    // caught up yet (a brand-new session appears there only after its first turn
-    // persists), so a chat started from the list shows up immediately.
+    // List every live session even when `devin list` has not caught up yet (a
+    // brand-new session appears there only after its first turn persists), so a
+    // chat started from the list shows up immediately. Sessions running on
+    // another surface count: a chat started in an editor tab belongs in this list
+    // too, badged as running elsewhere.
     const known = new Set(sessions.map((s) => s.id));
     const cwds = this.store.cwds();
     const titles = this.store.titles();
-    const liveIds = new Set<string>([...this.starting, ...this.runtimes.keys()]);
+    const liveIds = new Set<string>([...this.starting, ...this.runtimes.keys(), ...this.elsewhere()]);
     const synthesized: DevinSession[] = [];
     for (const id of liveIds) {
       if (known.has(id)) {
@@ -1786,17 +1918,25 @@ export class ChatController implements AcpHost {
       sessions = [...synthesized, ...sessions];
     }
     // Persist titles, and fill any tracked session whose title we only know
-    // from the cache (e.g. its directory is not currently listed).
+    // from the cache (e.g. its directory is not currently listed). A name we set
+    // ourselves wins until the listing catches up with it, so a rename is not
+    // undone a moment later by a `devin list` taken before it landed.
     const cached = this.store.titles();
+    const pinned = this.store.pinnedTitles();
     const freshTitles: Record<string, string> = {};
     for (const s of sessions) {
       if (s.title) {
         freshTitles[s.id] = s.title;
-      } else if (cached[s.id]) {
-        s.title = cached[s.id];
+      }
+      const own = pinned[s.id] || (s.title ? undefined : cached[s.id]);
+      if (own) {
+        s.title = own;
       }
     }
     this.store.cacheTitles(freshTitles);
+    // An editor tab is named after the chat it holds, so a name the CLI has just
+    // reported (or one that was changed) retitles the tab.
+    this.surfaces?.titlesChanged();
     this.post({
       type: "sessions",
       sessions,
@@ -1810,6 +1950,30 @@ export class ChatController implements AcpHost {
 
   private elsewhere(): string[] {
     return this.surfaces?.elsewhere(this) || [];
+  }
+
+  // Another surface started, moved or stopped a chat: re-list, so this surface's
+  // rows, dots and "running elsewhere" badges say what is actually true.
+  surfacesChanged(): void {
+    this.post({ type: "sessionStatuses", statuses: this.statusMap(), activeId: this.activeId, elsewhere: this.elsewhere() });
+    void this.refreshSessions();
+  }
+
+  // Whether a session list is on screen here (the full list, the docked panel, or
+  // the switcher) and this surface is actually showing. Only then is it worth
+  // re-listing on every change to the CLI's store: a list nobody can see is re-read
+  // when it comes back, and every listing runs `devin list`.
+  private listVisible = false;
+  private surfaceVisible = true;
+
+  setSurfaceVisible(visible: boolean): void {
+    this.surfaceVisible = visible;
+  }
+
+  relistIfWatched(): void {
+    if (this.listVisible && this.surfaceVisible) {
+      void this.refreshSessions(true);
+    }
   }
 
   private statusMap(): Record<string, SessionStatus> {
@@ -1827,24 +1991,59 @@ export class ChatController implements AcpHost {
     return statuses;
   }
 
+  // Rename the chat this surface is showing (the editor tab's context menu, and
+  // the side panel's header title).
+  async renameVisibleSession(): Promise<void> {
+    const id = this.activeId;
+    if (id) {
+      await this.renameSession(id, this.store.titles()[id]);
+    }
+  }
+
   private async renameSession(id: string, currentTitle?: string): Promise<void> {
     if (!id || !(await this.ensureReady())) {
       return;
     }
-    const title = await vscode.window.showInputBox({
+    const input = await vscode.window.showInputBox({
       title: "Rename session",
       value: currentTitle || "",
       prompt: "New session title"
     });
-    if (title === undefined || title.trim() === "") {
+    const title = (input || "").trim();
+    if (!title) {
       return;
     }
     try {
-      await this.withClient((client) => client.renameSession(id, title.trim()));
+      // The agent holding this session has its own copy of the name, so it is the
+      // one that has to be told: renaming through any other agent leaves the
+      // holder with the old name, which it writes back a moment later.
+      const holder = this.runtimes.has(id) ? this : this.surfaces?.owner(id, this);
+      await (holder ? holder.renameOwned(id, title) : this.withClient((c) => c.renameSession(id, title)));
     } catch (err) {
-      this.log(`[rename-failed] ${err instanceof Error ? err.message : String(err)}`);
+      const message = err instanceof Error ? err.message : String(err);
+      this.log(`[rename-failed] ${message}`);
+      // A rename that failed must not look like one that worked.
+      void vscode.window.showErrorMessage(`Couldn't rename this session: ${message}`);
+      return;
     }
+    // Name it here rather than waiting for the CLI's next listing, so the header,
+    // the lists and the editor tab all follow straight away.
+    this.store.setTitle(id, title);
+    if (this.activeId === id) {
+      this.post({ type: "sessionReady", sessionId: id, title });
+    }
+    this.surfaces?.titlesChanged();
+    this.surfaces?.sessionsChanged(this);
     await this.refreshSessions(true);
+  }
+
+  // Rename through the agent this surface holds the session in, so its own copy of
+  // the name goes with it. Falls back to a throwaway agent if it has since gone.
+  async renameOwned(id: string, title: string): Promise<void> {
+    const rt = this.runtimes.get(id);
+    await (rt?.initialized
+      ? rt.client.renameSession(id, title)
+      : this.withClient((c) => c.renameSession(id, title)));
   }
 
   private async deleteSession(id: string, title?: string): Promise<void> {
@@ -2069,7 +2268,7 @@ export class ChatController implements AcpHost {
 
   // --- Context attachments -------------------------------------------------
 
-  private postAttachments(): void {
+  private postAttachments(save = true): void {
     this.post({
       type: "attachments",
       items: this.attachments.map((a) => {
@@ -2081,6 +2280,77 @@ export class ChatController implements AcpHost {
         return item;
       })
     });
+    if (save) {
+      void this.saveAttachments();
+    }
+  }
+
+  // Files and images staged in the composer belong to the chat they were staged
+  // for, and to a prompt that has not been sent yet, so they outlive leaving the
+  // chat, moving it, and reloading the window. They live on disk rather than in
+  // workspace state: an image is inlined as base64, which has no business in a
+  // settings blob. A pasted screenshot has no file to point back to, so the block
+  // itself is what has to be kept.
+  private static readonly NEW_CHAT_ATTACHMENTS = "__new__";
+  // Past this the staged files are kept for the session only: writing tens of
+  // megabytes of base64 on every attach is not worth it.
+  private static readonly MAX_ATTACHMENT_BYTES = 24 * 1024 * 1024;
+
+  private attachmentsFile(id?: string): vscode.Uri | undefined {
+    const root = this.context.storageUri || this.context.globalStorageUri;
+    const key = (id || ChatController.NEW_CHAT_ATTACHMENTS).replace(/[^A-Za-z0-9._-]/g, "_");
+    return root ? vscode.Uri.joinPath(root, "attachments", `${key}.json`) : undefined;
+  }
+
+  private async saveAttachments(): Promise<void> {
+    const file = this.attachmentsFile(this.activeId);
+    if (!file) {
+      return;
+    }
+    try {
+      if (!this.attachments.length) {
+        await vscode.workspace.fs.delete(file);
+        return;
+      }
+      const body = Buffer.from(JSON.stringify(this.attachments), "utf8");
+      if (body.byteLength > ChatController.MAX_ATTACHMENT_BYTES) {
+        this.log(`[attachments] ${body.byteLength} bytes staged, too much to keep past this window`);
+        return;
+      }
+      await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(file, ".."));
+      await vscode.workspace.fs.writeFile(file, body);
+    } catch {
+      // Nothing staged to delete, or the storage is not writable: the composer is
+      // still correct, it just will not survive a reload.
+    }
+  }
+
+  // Forget what was staged for a chat (or for the "new chat" box) without touching
+  // what the composer is holding now.
+  private async dropStaged(id?: string): Promise<void> {
+    const file = this.attachmentsFile(id);
+    if (file) {
+      await vscode.workspace.fs.delete(file).then(undefined, () => {});
+    }
+  }
+
+  // Show the composer whatever is staged for a chat, including anything left from
+  // before the window was reloaded.
+  private async useAttachmentsOf(id?: string): Promise<void> {
+    const file = this.attachmentsFile(id);
+    this.attachments = [];
+    if (file) {
+      try {
+        const raw = Buffer.from(await vscode.workspace.fs.readFile(file)).toString("utf8");
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          this.attachments = parsed.filter((a) => a && a.id && a.block);
+        }
+      } catch {
+        // Nothing staged for this chat.
+      }
+    }
+    this.postAttachments(false);
   }
 
   private removeAttachment(id: string): void {
@@ -2150,8 +2420,9 @@ export class ChatController implements AcpHost {
     if (!path.isAbsolute(fsPath)) {
       fsPath = path.join(this.active()?.cwd || this.cwd(), fsPath);
     }
+    const uri = vscode.Uri.file(fsPath);
     try {
-      const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(fsPath));
+      const doc = await vscode.workspace.openTextDocument(uri);
       const options: vscode.TextDocumentShowOptions = {};
       if (typeof line === "number" && line > 0) {
         const pos = new vscode.Position(line - 1, 0);
@@ -2159,7 +2430,13 @@ export class ChatController implements AcpHost {
       }
       await vscode.window.showTextDocument(doc, options);
     } catch (err) {
-      this.log(`[open-file-failed] ${err instanceof Error ? err.message : String(err)}`);
+      // Not openable as text (an image, a PDF, a binary): let VS Code pick the
+      // editor for it rather than refusing to open a file the user clicked.
+      try {
+        await vscode.commands.executeCommand("vscode.open", uri);
+      } catch {
+        this.log(`[open-file-failed] ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
   }
 
@@ -2402,11 +2679,21 @@ export class ChatController implements AcpHost {
       if (waking) {
         await waking;
       }
+      // A session still opening has its channel busy replaying its history, and a
+      // prompt sent into that is swallowed. Queue it: the load drains the queue
+      // when it finishes, and it shows as pending in the meantime instead of
+      // seeming to vanish.
+      const rt = this.runtimes.get(this.activeId);
+      if (rt && (rt.replaying || this.loading.has(this.activeId))) {
+        this.enqueueMessage(rt, text);
+        return;
+      }
     }
     // Starting a fresh chat leaves the previous session alive in the background.
+    // Whatever is staged in the composer was staged for THIS message, so it goes
+    // with it: clearing here dropped a screenshot attached in the sessions list.
     if (startNew) {
       this.activeId = undefined;
-      this.attachments = [];
       // `pendingSend` tells the webview not to show the welcome screen on this
       // clear, and we render the user's message right away, so a new chat
       // started from the list never flashes the welcome while the ACP session
@@ -2541,12 +2828,36 @@ export class ChatController implements AcpHost {
 
   // Snapshot a message (implicit context + attachments + text) and add it to the
   // runtime's queue, then reflect the queue in the composer.
-  private enqueueMessage(rt: Runtime, text: string): void {
+  private enqueueMessage(rt: Runtime, text: string, first = false): void {
     const blocks: ContentBlock[] = [...this.buildImplicitBlocks(), ...this.attachments.map((a) => a.block), { type: "text", text }];
-    rt.queued.push({ id: `q-${++this.queueSeq}`, text, blocks });
+    const message = { id: `q-${++this.queueSeq}`, text, blocks };
+    if (first) {
+      rt.queued.unshift(message);
+    } else {
+      rt.queued.push(message);
+    }
     this.attachments = [];
     this.postAttachments();
     this.postQueued(rt);
+  }
+
+  // Send a message into a turn that is already running. ACP has no way to hand one
+  // to a live prompt (what VS Code calls steering, and what its own agents support
+  // through their SDKs), so the nearest honest thing is to put it at the head of
+  // the queue and end the turn: the queue drains the moment it settles, so this is
+  // the next thing the agent sees, and nothing is lost that the turn had done.
+  private stopAndSend(text: string): void {
+    if (!text.trim()) {
+      return;
+    }
+    const rt = this.active();
+    if (!rt || !rt.busy) {
+      void this.handleSend(text, false);
+      return;
+    }
+    this.store.setDraft(this.activeId, "");
+    this.enqueueMessage(rt, text, true);
+    rt.client.cancel(rt.id);
   }
 
   // Send the next queued message once a runtime is free. Runs one at a time:
@@ -2881,6 +3192,9 @@ export class ChatController implements AcpHost {
     rt.busy = value;
     if (!value) {
       rt.lastActivityAt = Date.now();
+      // A finished turn is when the CLI names a new chat, so this is what puts
+      // that name in the header and the lists without anyone asking for it.
+      void this.refreshSessions(true);
     }
     if (this.activeId === rt.id) {
       this.post({ type: "busy", value });
@@ -2919,6 +3233,7 @@ export class ChatController implements AcpHost {
       thinkingStyle: this.cfg().get<string>("thinking.style", "fixedScrolling"),
       streamAnim: this.cfg().get<string>("incrementalRendering.animationStyle", "rise"),
       panelSide: this.cfg().get<string>("sessionsPanel.side", "right"),
+      sendWhileWorking: this.cfg().get<string>("sendWhileWorking", "queue"),
       surface: this.kind
     });
   }
@@ -3396,7 +3711,7 @@ export class ChatController implements AcpHost {
   <link href="${styleUri}" rel="stylesheet" />
   <title>Devin</title>
 </head>
-<body data-logo="${logoUri}" data-model-icons="${modelIcons}" data-mermaid-src="${mermaidUri}" data-nonce="${nonce}">
+<body data-logo="${logoUri}" data-model-icons="${modelIcons}" data-mermaid-src="${mermaidUri}" data-nonce="${nonce}" data-surface="${this.kind}">
   ${appBody}
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
@@ -3436,8 +3751,11 @@ interface ToolContentItem {
   terminalId?: string;
   added?: number;
   removed?: number;
+  created?: boolean;
   mime?: string;
   data?: string;
+  // A file a tool pointed at rather than quoted: rendered as a pill that opens it.
+  link?: boolean;
 }
 
 // Flatten ACP tool-call content into renderable items for the webview.
@@ -3452,13 +3770,28 @@ function normalizeToolContent(content: any): ToolContentItem[] {
     }
     if (c.type === "diff" && typeof c.path === "string") {
       const s = diffStat(c.oldText, c.newText);
-      out.push({ type: "diff", path: c.path, added: s.added, removed: s.removed });
+      // `created` so a reloaded transcript can say Created rather than Edited: it
+      // has only the tool call to go on, never the live change event.
+      out.push({
+        type: "diff",
+        path: c.path,
+        added: s.added,
+        removed: s.removed,
+        created: c.oldText == null || c.oldText === ""
+      });
     } else if (c.type === "terminal" && typeof c.terminalId === "string") {
       out.push({ type: "terminal", terminalId: c.terminalId });
     } else if (c.type === "content") {
       const img = imageOf(c.content);
+      const link = c.content && c.content.type === "resource_link" && typeof c.content.uri === "string"
+        ? { uri: c.content.uri as string, name: c.content.name as string | undefined }
+        : undefined;
       if (img) {
         out.push({ type: "image", mime: img.mimeType, data: img.data });
+      } else if (link) {
+        // A file the tool is pointing at (a search hit, a listing). Dropped before
+        // now, because only text and images were read out of a content block.
+        out.push({ type: "link", path: fileFromUri(link.uri), text: link.name });
       } else {
         const text = textOf(c.content);
         if (text) {
@@ -3564,7 +3897,20 @@ function textOf(content: any): string {
   if (content.type === "text") {
     return content.text || "";
   }
+  // An embedded resource carries its own text (a file a tool is quoting back).
+  if (content.type === "resource" && content.resource && typeof content.resource.text === "string") {
+    return content.resource.text;
+  }
   return "";
+}
+
+// The path inside a file URI, for a resource a tool points at.
+function fileFromUri(uri: string): string {
+  try {
+    return uri.startsWith("file:") ? vscode.Uri.parse(uri).fsPath : uri;
+  } catch {
+    return uri;
+  }
 }
 
 // Quote a binary path for the user's shell before it is sent to a VS Code

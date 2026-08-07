@@ -26,7 +26,6 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     sessionsResizer: $("sessions-resizer"),
     listSearchBtn: $("list-search-btn"),
     listFilterBtn: $("list-filter-btn"),
-    listRefreshBtn: $("list-refresh-btn"),
     settingsBtn: $("settings-btn"),
     terminateBtn: $("terminate-btn"),
     detachBtn: $("detach-btn"),
@@ -39,6 +38,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     thread: $("thread"),
     input: $("input"),
     send: $("send"),
+    sendGroup: $("send-group"),
+    sendMore: $("send-more"),
     stop: $("stop"),
     attach: $("attach"),
     modeDD: $("mode-dd"),
@@ -186,8 +187,10 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   setTimeout(hideBoot, 15000);
 
   function setBody(b) {
-    body = b;
-    const list = b === "list";
+    clearElsewhere();
+    // A tab is its one chat, so there is nowhere else for it to go.
+    body = inEditor() ? "thread" : b;
+    const list = body === "list";
     el.sessionsList.classList.toggle("hidden", !list);
     el.thread.classList.toggle("hidden", list);
     // The composer lives outside the body panels, so mark the list view so its
@@ -199,7 +202,21 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     updateComposerDock();
     updateTerminateBtn();
     updateScrollDownButton();
+    reportListVisible();
   }
+
+  // Whether a session list is on screen anywhere here: the full list, the docked
+  // panel, or the title switcher. The host keeps the list live only while someone
+  // is looking at one, since every re-listing runs `devin list`.
+  let listShown = null;
+  function reportListVisible() {
+    const shown = body === "list" || sessionsPanelOpen || !!menuCtrl;
+    if (shown === listShown) return;
+    listShown = shown;
+    vscode.postMessage({ type: "listVisible", value: shown });
+  }
+
+
 
   // --- Custom webview title bar --------------------------------------------
   // We drive all controls from the webview header (VS Code's own view/title
@@ -222,19 +239,23 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
 
   function renderHeader() {
     const list = body === "list";
-    // List-mode cluster: refresh sits in front of the title, the rest on the right.
-    el.listRefreshBtn.classList.toggle("hidden", !list);
+    // List-mode cluster, all on the right of the "Sessions" title. The list keeps
+    // itself up to date, so there is nothing to refresh by hand.
     el.newSessionDd.classList.toggle("hidden", !list);
     el.listSearchBtn.classList.toggle("hidden", !list);
     el.listFilterBtn.classList.toggle("hidden", !list);
     el.settingsBtn.classList.toggle("hidden", !list);
-    // Thread-mode clusters.
-    el.historyBtn.classList.toggle("hidden", list);
+    // Thread-mode clusters. A tab has no list to go back to.
+    el.historyBtn.classList.toggle("hidden", list || inEditor());
     updateHeaderDivider();
-    el.titleBtn.classList.toggle("as-heading", list);
-    el.chatTitle.textContent = list ? "Sessions" : currentTitle;
+    // In a tab the title is the tab's own name, not a control, so it reads as a
+    // heading there too.
+    el.titleBtn.classList.toggle("as-heading", list || inEditor());
     // In a session, the session code shows as a badge to the left of the title.
     const meta = list ? null : currentSessionMeta();
+    // Follow a name the host has since learned (the CLI's own title, or a rename).
+    if (meta && meta.title) currentTitle = meta.title;
+    el.chatTitle.textContent = list ? "Sessions" : currentTitle;
     if (!list && meta && meta.short_id) {
       el.titleCode.textContent = meta.short_id;
       el.titleCode.classList.remove("hidden");
@@ -279,6 +300,11 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   }
   function updatePanelToggle() {
     if (body !== "thread") return;
+    // A tab has no sessions panel: it is one chat.
+    if (inEditor()) {
+      el.panelToggle.classList.add("hidden");
+      return;
+    }
     el.panelToggle.classList.remove("hidden");
     if (hasRoomForPanel()) {
       const side = panelSide();
@@ -296,7 +322,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   }
 
   function openSessionsPanel() {
-    if (!hasRoomForPanel()) { toggleTitleMenu(); return; }
+    if (!hasRoomForPanel() || inEditor()) { toggleTitleMenu(); return; }
     sessionsPanelOpen = true;
     el.sessionsPanel.classList.remove("hidden");
     el.sessionsResizer.classList.remove("hidden");
@@ -308,6 +334,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     }
     vscode.postMessage({ type: "refreshSessions" });
     updatePanelToggle();
+    reportListVisible();
   }
   function closeSessionsPanel() {
     sessionsPanelOpen = false;
@@ -315,6 +342,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     el.sessionsResizer.classList.add("hidden");
     el.chat.classList.remove("panel-open");
     if (body === "thread") updatePanelToggle();
+    reportListVisible();
   }
   function toggleSessionsPanel() {
     if (sessionsPanelOpen) closeSessionsPanel();
@@ -374,8 +402,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     if (newSessionFloater) { newSessionFloater.close(); return; }
     const menu = document.createElement("div");
     menu.className = "dv-menu";
+    // The button itself starts one here, so the menu only offers the other places.
     const items = [
-      { icon: "new-session", label: "New Session", target: "view" },
       { icon: "split-horizontal", label: "New Session (Editor)", target: "editor" },
       { icon: "multiple-windows", label: "New Session (Window)", target: "window" },
       { icon: "terminal", label: "New Devin CLI Session (Terminal)", target: "terminal" }
@@ -493,10 +521,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   });
   el.listSearchBtn.addEventListener("click", (e) => { e.stopPropagation(); if (listCtrl) listCtrl.toggleSearch(el.listSearchBtn); });
   el.listFilterBtn.addEventListener("click", (e) => { e.stopPropagation(); if (listCtrl) listCtrl.toggleFilter(el.listFilterBtn); });
-  el.listRefreshBtn.addEventListener("click", () => { spinBtn(el.listRefreshBtn); vscode.postMessage({ type: "refreshSessions", force: true }); });
   el.settingsBtn.addEventListener("click", () => vscode.postMessage({ type: "openSettings" }));
-
-  function spinBtn(btn) { btn.classList.add("spin"); setTimeout(() => btn.classList.remove("spin"), 600); }
 
   // Indeterminate loading bar along the top edge of the body, using the same
   // travelling accent as the composer's working border. Replaces the spinners
@@ -533,9 +558,10 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
 
   function isAliveStatus(st) { return st === "running" || st === "idle" || st === "starting" || st === "attention"; }
 
-  // The header terminate control is shown only inside a live session's thread.
+  // The header terminate control is shown only inside a live session's thread, and
+  // never in a tab: there, closing the tab is what stops the chat.
   function updateTerminateBtn() {
-    const show = body === "thread" && !!curSessionId && isAliveStatus(sessionStatuses[curSessionId]);
+    const show = body === "thread" && !inEditor() && !!curSessionId && isAliveStatus(sessionStatuses[curSessionId]);
     el.terminateBtn.classList.toggle("hidden", !show);
     updateDetachBtn();
   }
@@ -545,7 +571,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // separate: on its own it reads as a stray rule.
   function updateHeaderDivider() {
     const controls = !el.detachBtn.classList.contains("hidden") || !el.terminateBtn.classList.contains("hidden");
-    const needed = body === "thread" && (panelSide() === "left" || controls);
+    // A tab has no panel toggle, so there is never a second cluster to divide.
+    const needed = body === "thread" && !inEditor() && (panelSide() === "left" || controls);
     el.headerDivider.classList.toggle("hidden", !needed);
   }
   el.terminateBtn.innerHTML = KILL_GLYPH;
@@ -562,15 +589,57 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     el.detachBtn.classList.toggle("hidden", !show);
     updateHeaderDivider();
     if (!show) return;
-    const inEditor = caps.surface === "editor";
-    setBtnIcon(el.detachBtn, inEditor ? "layout-sidebar-" + panelSide() + "-dock" : "link-external");
-    el.detachBtn.title = inEditor ? "Move this chat to the side panel" : "Open this chat in an editor tab";
+    setBtnIcon(el.detachBtn, inEditor() ? "layout-sidebar-" + panelSide() + "-dock" : "link-external");
+    el.detachBtn.title = inEditor() ? "Move this chat to the side panel" : "Open this chat in an editor tab";
     el.detachBtn.setAttribute("aria-label", el.detachBtn.title);
   }
   el.detachBtn.addEventListener("click", () => {
     if (!curSessionId) return;
-    vscode.postMessage({ type: caps.surface === "editor" ? "attachSession" : "detachSession", id: curSessionId });
+    vscode.postMessage({ type: inEditor() ? "attachSession" : "detachSession", id: curSessionId });
   });
+
+  // A chat runs in one place at a time, so when the one being opened is already
+  // open on the other surface this one says where it is instead of showing a stale
+  // copy with a live looking composer. `elsewhereId` is that chat: it is
+  // deliberately not `curSessionId`, since nothing here owns or shows it.
+  let elsewhereId = null;
+  function renderElsewhere(m) {
+    snapshotCurrent();
+    curSessionId = null;
+    setBody("thread");
+    stopThreadLoading();
+    elsewhereId = m.id || null;
+    currentTitle = m.title || "Chat";
+    el.thread.innerHTML = "";
+    el.composer.classList.add("hidden");
+    const where = m.where || "another chat surface";
+    const box = document.createElement("div");
+    box.className = "welcome";
+    const icon = document.createElement("i");
+    icon.className = "codicon codicon-link-external welcome-icon";
+    const title = document.createElement("div");
+    title.className = "welcome-title";
+    title.textContent = "This chat is open in " + where;
+    const sub = document.createElement("div");
+    sub.className = "welcome-sub muted";
+    sub.textContent = "A chat runs in one place at a time. Bring it here to carry on where it left off, agent and all.";
+    const actions = document.createElement("div");
+    actions.className = "welcome-actions";
+    actions.appendChild(btn("Continue in " + (m.here || "this surface"), "", () =>
+      vscode.postMessage({ type: "moveHere", id: elsewhereId })));
+    actions.appendChild(btn("Show it in " + where, "secondary", () =>
+      vscode.postMessage({ type: "revealSession", id: elsewhereId })));
+    [icon, title, sub, actions].forEach((n) => box.appendChild(n));
+    el.thread.appendChild(box);
+    renderHeader();
+    updateTerminateBtn();
+  }
+  function clearElsewhere() {
+    if (!elsewhereId) return;
+    elsewhereId = null;
+    el.thread.innerHTML = "";
+    el.composer.classList.remove("hidden");
+  }
 
   el.historyBtn.addEventListener("click", () => {
     // Keep the session alive in the background and retain its transcript so
@@ -584,8 +653,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   el.titleBtn.addEventListener("click", (e) => {
     if (body === "list") return;
     e.stopPropagation();
-    // Clicking the session title renames it.
-    if (curSessionId) vscode.postMessage({ type: "renameSession", id: curSessionId, title: currentTitle });
+    // Clicking the session title renames it. In a tab the title is the tab's own,
+    // renamed from its context menu, so it is not a control here.
+    if (curSessionId && !inEditor()) vscode.postMessage({ type: "renameSession", id: curSessionId, title: currentTitle });
   });
 
   // --- Composer ------------------------------------------------------------
@@ -620,7 +690,87 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     updateSendState();
   }
 
-  el.send.addEventListener("click", send);
+  // While Devin is working, a message can either wait its turn or take over. The
+  // protocol cannot hand a message to a running prompt (Copilot calls that
+  // steering, and its agents support it), so the second option ends the turn and
+  // sends straight after it. Same split button as Copilot's: the primary half is
+  // the default action, Alt flips it, and the chevron offers the other.
+  const SEND_ACTIONS = {
+    queue: {
+      icon: "codicon-add",
+      label: "Send to Queue",
+      detail: "Send this after the current request finishes",
+      post: (text) => ({ type: "send", text })
+    },
+    stopAndSend: {
+      icon: "codicon-newline",
+      label: "Stop and Send",
+      detail: "Stop what Devin is doing, then send this",
+      post: (text) => ({ type: "stopAndSend", text })
+    }
+  };
+  let altHeld = false;
+  function defaultSendAction() {
+    return caps.sendWhileWorking === "stopAndSend" ? "stopAndSend" : "queue";
+  }
+  function otherSendAction() {
+    return defaultSendAction() === "queue" ? "stopAndSend" : "queue";
+  }
+  // What the primary half does right now: the default, or the other one while Alt
+  // is held (VS Code flips the icon with the modifier, so it never lies).
+  function primarySendAction() {
+    return altHeld ? otherSendAction() : defaultSendAction();
+  }
+  function runSendAction(name) {
+    const text = el.input.value.trim();
+    if (!text) return;
+    // Nothing is running, or the composer is borrowed for an edit: an ordinary send.
+    if (!busy || editingQueuedId || editingTurn || body === "list") { send(); return; }
+    vscode.postMessage(SEND_ACTIONS[name].post(text));
+    el.input.value = "";
+    savedDraft = "";
+    closeAutocomplete();
+    autosize();
+    updateSendState();
+  }
+  el.send.addEventListener("click", () => runSendAction(primarySendAction()));
+  el.sendMore.addEventListener("click", (e) => {
+    e.stopPropagation();
+    openSendMenu();
+  });
+  let sendFloater = null;
+  function openSendMenu() {
+    if (sendFloater) { sendFloater.close(); return; }
+    const menu = document.createElement("div");
+    menu.className = "dv-menu";
+    [defaultSendAction(), otherSendAction()].forEach((name, i) => {
+      const a = SEND_ACTIONS[name];
+      const row = document.createElement("button");
+      row.className = "dv-menu-item with-detail";
+      row.appendChild(mkIcon(a.icon.replace("codicon-", "")));
+      const text = document.createElement("span");
+      text.className = "dv-menu-text";
+      text.appendChild(Object.assign(document.createElement("span"), { textContent: a.label }));
+      text.appendChild(Object.assign(document.createElement("span"), { className: "dv-menu-detail", textContent: a.detail }));
+      const keys = document.createElement("span");
+      keys.className = "dv-menu-keys";
+      keys.textContent = i === 0 ? "Enter" : "Alt+Enter";
+      row.append(text, keys);
+      row.addEventListener("click", () => { if (sendFloater) sendFloater.close(); runSendAction(name); });
+      menu.appendChild(row);
+    });
+    sendFloater = makeFloater(el.sendGroup, menu, "right", () => { sendFloater = null; });
+  }
+  // Holding Alt swaps the primary half, so what it will do is always what it shows.
+  function trackAlt(e) {
+    if (e.altKey === altHeld) return;
+    altHeld = e.altKey;
+    updateComposerButtons();
+  }
+  document.addEventListener("keydown", trackAlt);
+  document.addEventListener("keyup", trackAlt);
+  window.addEventListener("blur", () => { if (altHeld) { altHeld = false; updateComposerButtons(); } });
+
   function stopTurn() {
     vscode.postMessage({ type: "cancel" });
     cancelPrompts();
@@ -663,7 +813,12 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       updateSendState();
       return;
     }
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+    // Enter runs the default action, Alt+Enter the other one, the way VS Code
+    // binds the queue and steer pair. Idle, both are an ordinary send.
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      runSendAction(e.altKey ? otherSendAction() : defaultSendAction());
+    }
   });
 
   el.input.addEventListener("input", () => { autosize(); updateAutocomplete(); updateSendState(); scheduleDraftSave(); });
@@ -692,6 +847,16 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   function scheduleDraftSave() {
     if (draftTimer) clearTimeout(draftTimer);
     draftTimer = setTimeout(saveDraft, 400);
+  }
+  // This chat is about to be handed to the other surface. Everything only this
+  // page knows goes back to the host first, and it waits for the reply: a draft
+  // saves on a timer, and a question's answers are half given, so without this the
+  // chat would arrive on the new surface with an empty composer and a blank
+  // question.
+  function flushState() {
+    saveDraft();
+    el.elicitationTray.querySelectorAll(".qc").forEach((w) => w.dispatchEvent(new Event("dv-teardown")));
+    vscode.postMessage({ type: "stateFlushed" });
   }
   // Put the stored draft back after something else has borrowed the composer
   // (editing a queued or an already sent message).
@@ -767,15 +932,20 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // are not limited to the keyboard.
   function updateComposerButtons() {
     const hasText = !!el.input.value.trim();
-    const queueing = busy && hasText;
+    // The split only applies to a message sent into a running turn: an edit of a
+    // queued or an already sent message is an ordinary submit.
+    const split = busy && hasText && !editingQueuedId && !editingTurn && body !== "list";
     el.stop.classList.toggle("hidden", !busy);
     // Keep Send visible unless a turn is running with nothing typed (Stop only).
     el.send.classList.toggle("hidden", busy && !hasText);
     el.send.disabled = !hasText;
-    el.send.classList.toggle("queueing", queueing);
-    el.send.title = queueing ? "Queue message (Enter)" : "Send (Enter)";
+    el.sendGroup.classList.toggle("split", split);
+    el.sendMore.classList.toggle("hidden", !split);
+    const action = split ? SEND_ACTIONS[primarySendAction()] : null;
+    el.send.title = action ? action.label + " (" + (altHeld ? "Alt+Enter" : "Enter") + ")" : "Send (Enter)";
     const icon = el.send.querySelector("i");
-    if (icon) icon.className = "codicon " + (queueing ? "codicon-add" : "codicon-newline");
+    if (icon) icon.className = "codicon " + (action ? action.icon : "codicon-newline");
+    if (!split && sendFloater) sendFloater.close();
   }
 
   el.input.addEventListener("paste", (e) => {
@@ -1402,7 +1572,14 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // orphans it); true after a live turn completion or an instant restore.
   let lastHeadReliable = false;
   // Feature gates from the host (revert capability + settings).
-  let caps = { revert: false, subagentControl: false, editRequests: "inline", checkpoints: true, showFileChanges: true, confirmRemoval: true, verbose: true, progressBorder: true, contextUsage: true, inlineReferencesStyle: "box", thinkingStyle: "fixedScrolling", streamAnim: "rise", panelSide: "right", surface: "view" };
+  // The surface comes from the page itself as well as from the host, so the chrome
+  // is right from the first paint instead of being drawn as a side panel and then
+  // corrected once a session loads.
+  let caps = { revert: false, subagentControl: false, editRequests: "inline", checkpoints: true, showFileChanges: true, confirmRemoval: true, verbose: true, progressBorder: true, contextUsage: true, inlineReferencesStyle: "box", thinkingStyle: "fixedScrolling", streamAnim: "rise", panelSide: "right", sendWhileWorking: "queue", surface: document.body.dataset.surface === "editor" ? "editor" : "view" };
+  // An editor tab holds exactly one chat: no session list, no back button and no
+  // terminate control (closing the tab is how a chat in a tab is stopped).
+  // Browsing sessions is the side panel's job.
+  function inEditor() { return caps.surface === "editor"; }
   // Pending revert-preview requests keyed by token.
   const previewWaiters = new Map();
   let previewSeq = 0;
@@ -1761,7 +1938,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // restored-checkpoint row (fading lines + label). Note: there is no redo, as
   // re-running from a rewind is non-deterministic and ACP exposes no fork.
   function renderRestoredRow() {
-    const prev = el.thread.querySelector(".restored-row:not(.moved-row)");
+    const prev = el.thread.querySelector(".restored-row:not(.ended-row)");
     if (prev) prev.remove();
     const row = document.createElement("div");
     row.className = "restored-row";
@@ -1779,18 +1956,22 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     scrollToBottom();
   }
 
-  // A chat that has just been moved here from another surface, carrying its live
-  // agent with it. Uses the same divider as a restored checkpoint.
-  function renderMovedRow(from, partial) {
+  // The agent behind this chat has stopped: it was terminated, it exited after
+  // sitting idle, or it crashed. Only an editor tab is told, since the side panel
+  // says the same thing with the gray dot in its list. The conversation stays on
+  // screen and the next message starts it up again.
+  function renderSessionEnded() {
+    setBusy(false);
+    hideWorking();
+    finalizeBlock();
     hideWelcome();
-    const prev = el.thread.querySelector(".moved-row");
+    const prev = el.thread.querySelector(".ended-row");
     if (prev) prev.remove();
     const row = document.createElement("div");
-    row.className = "restored-row moved-row";
+    row.className = "restored-row ended-row";
     const label = document.createElement("span");
     label.className = "restored-label";
-    label.textContent = "Continued from " + (from || "another surface")
-      + (partial ? ", earlier messages load when this turn ends" : "");
+    label.textContent = "The agent has stopped. Send a message to start it again.";
     row.appendChild(Object.assign(document.createElement("span"), { className: "restored-line" }));
     row.appendChild(label);
     row.appendChild(Object.assign(document.createElement("span"), { className: "restored-line" }));
@@ -2269,12 +2450,25 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     hideWelcome();
     ensureTurn();
     breakToolGroup();
-    const img = document.createElement("img");
-    img.className = "resp-image";
-    img.src = "data:" + (mime || "image/png") + ";base64," + data;
-    img.alt = "image";
-    respTarget().appendChild(img);
+    respTarget().appendChild(imageThumb(mime, data));
     scrollToBottom();
+  }
+
+  // A picture in the transcript: a thumbnail, opening to full size on a click. VS
+  // Code shows a tool's images at this size, beside the row rather than buried in
+  // it, because the picture is the result and not a detail of it.
+  function imageThumb(mime, data) {
+    const img = document.createElement("img");
+    img.className = "dv-thumb";
+    img.src = "data:" + (mime || "image/png") + ";base64," + data;
+    img.alt = "";
+    img.title = "Click to enlarge";
+    img.addEventListener("click", (e) => {
+      e.stopPropagation();
+      img.title = img.classList.toggle("expanded") ? "Click to shrink" : "Click to enlarge";
+      scrollToBottom();
+    });
+    return img;
   }
 
   // `replayed` marks reasoning that is being re-rendered rather than streamed
@@ -2291,7 +2485,6 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       ensureTurn();
       // fixedScrolling shows a live, fixed-height peek while streaming (VS
       // Code's chat.agent.thinkingStyle); collapsed starts folded.
-      breakToolGroup();
       const peek = caps.thinkingStyle === "fixedScrolling";
       const c = makeCollapsible("thinking thinking-active" + (peek ? " thinking-peek" : ""), { startCollapsed: !peek });
       const chev = document.createElement("i");
@@ -2308,7 +2501,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       const bodyEl = document.createElement("div");
       bodyEl.className = "thinking-body";
       c.body.appendChild(bodyEl);
-      respTarget().appendChild(c.root);
+      // Reasoning is part of the run it belongs to, not a break in it.
+      placeInRun(c.root);
       block = { kind: "thinking", mid, details: c.root, body: bodyEl, label, buffer: "", start: Date.now(), timer: null, peek, collapse: c, scrollEl: c.body, replayed: !!replayed };
       const tb = block;
       if (!replayed) {
@@ -2567,9 +2761,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     }
   }
 
-  // A run of consecutive tool calls collapses under one disclosure header
-  // ("Used N tools"), mirroring VS Code's grouped tool card. The run is broken
-  // by any non-tool response content (see breakToolGroup).
+  // A run of work (tool calls, edits, and the reasoning between them) collapses
+  // under one header that says what the run did, mirroring VS Code's chat. Only
+  // the reply itself ends a run: an answer, an image, or handing off to a subagent.
   function breakToolGroup() {
     if (currentTurn) currentTurn.toolRun = null;
   }
@@ -2577,14 +2771,11 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     const c = makeCollapsible("tool-group", { startCollapsed: false });
     const chev = document.createElement("i");
     chev.className = "codicon codicon-chevron-right tool-group-chevron";
-    const gicon = document.createElement("i");
-    gicon.className = "codicon codicon-tools tool-group-icon";
     const label = document.createElement("span");
     label.className = "tool-group-label";
     const statEl = document.createElement("i");
     statEl.className = "codicon tool-group-status";
     c.header.appendChild(chev);
-    c.header.appendChild(gicon);
     c.header.appendChild(label);
     c.header.appendChild(statEl);
     const body = document.createElement("div");
@@ -2592,21 +2783,114 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     c.body.appendChild(body);
     return { root: c.root, body, label, statEl, collapse: c, ids: new Set() };
   }
+
+  // "a, b and c", for a summary made of several clauses or several files.
+  function listPhrase(parts) {
+    if (parts.length < 2) return parts[0] || "";
+    return parts.slice(0, -1).join(", ") + " and " + parts[parts.length - 1];
+  }
+  // Name them while there are few and every one of them is named, and count them
+  // otherwise: "a.ts and b.ts", "3 files", "a file".
+  function thingsPhrase(names, count, noun) {
+    const uniq = [...new Set(names.filter(Boolean))];
+    if (count <= 2 && uniq.length === count) return listPhrase(uniq);
+    return count === 1 ? "a " + noun : count + " " + noun + "s";
+  }
+  function short(s, max) {
+    const t = String(s).replace(/\s+/g, " ").trim();
+    return t.length > max ? t.slice(0, max - 1) + "\u2026" : t;
+  }
+
+  // What a run of tools actually did, the way VS Code's chat says it: a leading
+  // verb and then what it was done to ("Read 3 files and ran npm test"), rather
+  // than a bare count of tools. Files and commands are named while there are few.
+  function groupSummary(g) {
+    const of = { read: [], delete: [], move: [], search: [], execute: [], fetch: [], web: [], mcp: [], agent: [], other: [] };
+    for (const id of g.ids) {
+      const entry = toolEls.get(id);
+      if (!entry) continue;
+      const d = entry.data;
+      const info = toolInfo(d);
+      const name = toolTargetName(d);
+      if (info && info.type === "subagent_check") of.agent.push("");
+      else if (info && (info.type === "mcp" || info.type === "mcp_list")) of.mcp.push(info.tool || info.server || "");
+      else if (info && info.type === "web_search") of.web.push("");
+      else if (info && info.type === "webfetch") of.fetch.push(toolField(d.rawInput, ["url", "uri", "href"]) || "");
+      else if (of[d.kind]) {
+        of[d.kind].push(
+          d.kind === "search" ? searchLine(d) || "" :
+          d.kind === "execute" ? toolCommandStr(d.rawInput) || "" :
+          d.kind === "fetch" ? toolField(d.rawInput, ["url", "uri", "href"]) || "" :
+          name
+        );
+      } else of.other.push("");
+    }
+    const one = (list, single, many) => (list.length === 1 ? single(list[0]) : many(list.length));
+    const clauses = [];
+    // What the run did to files leads the summary, as VS Code's does: the rows say
+    // "Created" and "Edited", the summary says "Created ... and updated ...".
+    const editRows = [...g.body.querySelectorAll(".edit-pill")];
+    const named = (rows) => rows.map((n) => {
+      const name = n.querySelector(".file-pill-name");
+      return name ? name.textContent : "";
+    });
+    const created = named(editRows.filter((n) => n.dataset.created));
+    const edited = named(editRows.filter((n) => !n.dataset.created));
+    if (created.length) clauses.push(["Created", thingsPhrase(created, created.length, "file")]);
+    if (edited.length) clauses.push(["Updated", thingsPhrase(edited, edited.length, "file")]);
+    if (of.read.length) clauses.push(["Read", thingsPhrase(of.read, of.read.length, "file")]);
+    if (of.search.length) {
+      clauses.push(["Searched", one(of.search,
+        (s) => (s ? "for " + short(s, 40) : "the workspace"),
+        (n) => "the workspace " + n + " times")]);
+    }
+    if (of.execute.length) {
+      // Kept short: a summary carrying every flag of a long command line would
+      // crowd out everything else the run did.
+      const named = (c) => (c ? short(c, 28) : "a command");
+      clauses.push(["Ran", one(of.execute, named, (n) => n + " commands")]);
+    }
+    if (of.web.length) {
+      clauses.push(["Searched", of.web.length === 1 ? "the web" : "the web " + of.web.length + " times"]);
+    }
+    if (of.fetch.length) {
+      clauses.push(["Fetched", one(of.fetch, (u) => (u ? short(u, 40) : "a page"), (n) => n + " pages")]);
+    }
+    if (of.mcp.length) {
+      clauses.push(one(of.mcp, (t) => (t ? ["Called", t] : ["Used", "an MCP tool"]), (n) => ["Used", n + " MCP tools"]));
+    }
+    if (of.agent.length) {
+      clauses.push(["Waited", of.agent.length === 1 ? "on a subagent" : "on " + of.agent.length + " subagents"]);
+    }
+    if (of.delete.length) clauses.push(["Deleted", thingsPhrase(of.delete, of.delete.length, "file")]);
+    if (of.move.length) clauses.push(["Moved", thingsPhrase(of.move, of.move.length, "file")]);
+    if (of.other.length) clauses.push(["Used", thingsPhrase([], of.other.length, "tool")]);
+    const parts = clauses.map(([verb, rest], i) => (i ? verb.toLowerCase() : verb) + (rest ? " " + rest : ""));
+    // A clause that already names two things carries its own "and", so the clauses
+    // are separated by commas instead: "Read a.ts and b.ts, searched for auth".
+    const phrase = parts.some((p) => / and /.test(p)) ? parts.join(", ") : listPhrase(parts);
+    if (phrase) return phrase;
+    // A run of nothing but reasoning: say that rather than counting tools.
+    return g.ids.size ? "Used " + g.ids.size + (g.ids.size === 1 ? " tool" : " tools") : "Thought it through";
+  }
+
   function updateToolGroup(g) {
-    const n = g.ids.size;
-    g.label.textContent = "Used " + n + (n === 1 ? " tool" : " tools");
+    setToolLabel(g.label, groupSummary(g));
     const running = !!g.body.querySelector(".tool.in_progress, .tool.pending");
     g.statEl.className = "codicon tool-group-status " + (running ? "codicon-loading codicon-modifier-spin" : "codicon-check");
     g.root.classList.toggle("running", running);
   }
-  // Place a freshly created tool node: the first tool of a run mounts inline,
-  // the second wraps both into a group, and the rest join the group.
-  function placeToolNode(node, id) {
+  // Place a node that belongs to a run of work: a tool call, an edit, or the
+  // reasoning in between. The first one mounts inline, the second wraps both into a
+  // group, and the rest join it. Only the reply itself ends a run, so a burst of
+  // work stays under one summary even when the agent thinks out loud part way
+  // through it, which is how VS Code's chat holds a run together.
+  function placeInRun(node, id) {
     const turn = currentTurn;
     const run = turn.toolRun || (turn.toolRun = { first: null, group: null });
     if (run.group) {
       run.group.body.appendChild(node);
-      run.group.ids.add(id);
+      if (id) run.group.ids.add(id);
       updateToolGroup(run.group);
       return run.group;
     }
@@ -2619,12 +2903,23 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     respTarget().insertBefore(g.root, run.first.node);
     g.body.appendChild(run.first.node);
     g.body.appendChild(node);
-    g.ids.add(run.first.id).add(id);
-    const firstEntry = toolEls.get(run.first.id);
+    for (const each of [run.first.id, id]) {
+      if (each) g.ids.add(each);
+    }
+    const firstEntry = run.first.id && toolEls.get(run.first.id);
     if (firstEntry) firstEntry.group = g;
     run.group = g;
     updateToolGroup(g);
     return g;
+  }
+
+  // A row already in the open run changed (an edit reported again with its diff),
+  // so the summary above it is rebuilt.
+  function refreshRunGroup(node) {
+    const run = currentTurn && currentTurn.toolRun;
+    if (run && run.group && run.group.body.contains(node)) {
+      updateToolGroup(run.group);
+    }
   }
 
   // --- Subagents -----------------------------------------------------------
@@ -2859,7 +3154,75 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     });
   }
 
+  // Tool calls that are really "a thing happened to this file": they are shown as
+  // one line naming the file, never as a section with the file buried inside it.
+  // An edit becomes the edit row itself, wherever it came from.
+  const editTools = new Map(); // tool call id -> what it has told us about the edit
+  const FILE_LINE_KINDS = ["read", "delete", "move"];
+
+  // What a file tool is acting on: the diff it produced, the location it reported,
+  // or the argument it was given, whichever it has.
+  function toolFileTarget(d) {
+    const diff = (d.content || []).find((c) => c.type === "diff" && c.path);
+    if (diff) return { path: diff.path, added: diff.added, removed: diff.removed, created: diff.created };
+    const loc = (d.locations || []).find((l) => l && l.path);
+    if (loc) return { path: loc.path, line: loc.line };
+    const raw = d.rawInput;
+    const p = raw && typeof raw === "object" ? toolFilePath(raw) : null;
+    return p ? { path: p } : null;
+  }
+
+  // The verb Devin already used for this call ("Read src/a.ts" -> "Read"), so the
+  // row reads the way the agent described it, with just the file name after it.
+  function toolVerb(d, fallback) {
+    const first = String(d.title || "").trim().split(/\s+/)[0];
+    return first || fallback;
+  }
+
+  // The file a row is about, for a summary: from the diff, the location or the
+  // argument, and failing all of those from the title the agent gave it, which
+  // reads "Read src/a.ts". Only when that tail actually looks like a path.
+  function toolTargetName(d) {
+    const target = toolFileTarget(d);
+    if (target && target.path) return baseName(target.path);
+    const rest = String(d.title || "").trim().split(/\s+/).slice(1).join(" ");
+    return rest && !/\s/.test(rest) && /[\\/.]/.test(rest) ? baseName(rest) : "";
+  }
+
+  // A search says what was looked for and where, on the row itself: the term and
+  // the directory are the whole story, so there is nothing to unfold.
+  function searchLine(d) {
+    const raw = d.rawInput;
+    if (!raw || typeof raw !== "object") return null;
+    const term = toolField(raw, ["query", "pattern", "search", "regex", "q", "text"]);
+    if (term == null) return null;
+    const dir = toolField(raw, ["path", "dir", "directory", "cwd"]);
+    return String(term) + (dir ? " in " + shorten(String(dir)) : "");
+  }
+
+  // An edit, from a tool call rather than a change event. Claims every update for
+  // that call so it is never also drawn as a tool section.
+  function editFromTool(m) {
+    const known = editTools.get(m.id);
+    if (!known && m.kind !== "edit") return false;
+    const d = known || {};
+    if (m.title) d.title = m.title;
+    if (m.rawInput !== undefined) d.rawInput = m.rawInput;
+    if (Array.isArray(m.content) && m.content.length) d.content = m.content;
+    if (Array.isArray(m.locations) && m.locations.length) d.locations = m.locations;
+    editTools.set(m.id, d);
+    const target = toolFileTarget(d);
+    // Nothing names the file yet (a pending call): the row appears with the diff.
+    if (!target) return true;
+    hideWorking();
+    renderEdit({ ...target, name: target.path || toolVerb(d, "Edit") });
+    return true;
+  }
+
   function upsertTool(m) {
+    // A subagent's work stays on its own rail, so only the turn's own edits become
+    // edit rows in the transcript.
+    if (!m.parentId && editFromTool(m)) return;
     hideWorking();
     let entry = toolEls.get(m.id);
     if (!entry) {
@@ -2892,7 +3255,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         sub.prose = null;
         railIcon = insertSubagentItem(sub, node, "", "subagent-tool").icon;
       } else {
-        group = placeToolNode(node, m.id);
+        group = placeInRun(node, m.id);
       }
       entry = { node, kindIcon, label, statEl, bodyEl, data: {}, collapse: c, group, sub, railIcon };
       toolEls.set(m.id, entry);
@@ -2922,8 +3285,51 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     entry.kindIcon.className = "codicon tool-kind " + kindIconClass;
     if (entry.railIcon) entry.railIcon.className = "codicon subagent-icon " + kindIconClass;
     entry.statEl.className = "codicon tool-status " + statusIcon(d.status);
-    setToolLabel(entry.label, d.title);
-    renderToolBody(entry);
+    // Pictures a tool produced stay beside the row whether or not it is expanded,
+    // the way VS Code lifts them out of the collapsible: a screenshot is the
+    // result, not a detail of it.
+    renderToolMedia(entry);
+    // A file the agent read, deleted or moved is one line naming that file, with
+    // nothing to expand: the file itself is one click away, in a real editor. A
+    // search is one line too, saying what it looked for and where. A tool that
+    // came back with a picture or a terminal keeps its body: there is more to it.
+    const plain = !(d.content || []).some((c) => c.type === "image" || c.type === "terminal");
+    const fileLine = plain && FILE_LINE_KINDS.includes(d.kind) ? toolFileTarget(d) : null;
+    const search = plain && !fileLine && d.kind === "search" ? searchLine(d) : null;
+    if (fileLine || search) {
+      const head = entry.node.querySelector(".dv-collapsible-header");
+      setToolLabel(entry.label, toolVerb(d, fileLine ? "Read" : "Search") + " " +
+        (fileLine ? baseName(fileLine.path) : search));
+      entry.node.classList.add("tool-empty", "dv-nocollapse");
+      entry.bodyEl.innerHTML = "";
+      head.title = fileLine ? fileLine.path : d.title || "";
+      if (fileLine && !entry.node.dataset.opensFile) {
+        entry.node.dataset.opensFile = "1";
+        head.addEventListener("click", () => {
+          const f = toolFileTarget(entry.data);
+          if (f) vscode.postMessage({ type: "openFile", path: f.path, line: f.line });
+        });
+      }
+    } else {
+      // A command shows the command itself in the row, syntax highlighted, the way
+      // VS Code's terminal part titles it: the row is the command, not a sentence
+      // about it. The status icon beside it already says how it went.
+      const cmd = d.kind === "execute" ? toolCommandStr(d.rawInput) : null;
+      if (cmd) {
+        entry.label.textContent = "";
+        const verb = document.createElement("span");
+        verb.className = "tool-verb";
+        verb.textContent = d.status === "in_progress" || d.status === "pending" ? "Running" : "Ran";
+        const code = document.createElement("code");
+        code.className = "hljs tool-label-code";
+        code.innerHTML = renderShell(cmd);
+        entry.label.append(verb, code);
+        entry.node.querySelector(".dv-collapsible-header").title = cmd;
+      } else {
+        setToolLabel(entry.label, d.title);
+      }
+      renderToolBody(entry);
+    }
     // Track files this turn looked at for a "Used N references" summary.
     if (currentTurn && Array.isArray(d.locations) && ["read", "search", "fetch"].includes(d.kind)) {
       currentTurn.refs = currentTurn.refs || new Map();
@@ -2995,10 +3401,17 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
 
   // A shell command block (VS Code's terminal command style): a dim $ prompt,
   // the syntax-highlighted command, and a "Run in terminal" affordance, instead
-  // of dumping the argument JSON.
-  function toolCommandBlock(cmd) {
+  // of dumping the argument JSON. Captioned "Input", so a command and what it
+  // printed read as the Input / Output pair VS Code's chat shows.
+  function toolCommandBlock(cmd, captioned = true) {
     const sec = document.createElement("div");
     sec.className = "tool-section";
+    if (captioned) {
+      const title = document.createElement("div");
+      title.className = "tool-section-title";
+      title.textContent = "Input";
+      sec.appendChild(title);
+    }
     const box = document.createElement("div");
     box.className = "tool-command";
     const prompt = document.createElement("span");
@@ -3172,7 +3585,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       } else {
         // A tool that returns JSON gets it pretty printed and highlighted,
         // whichever tool it is: MCP servers are the common case, not the only one.
-        body.appendChild(toolSection("Result", text).sec);
+        // "Output" to pair with the "Input" above it, as VS Code's chat labels them.
+        body.appendChild(toolSection("Output", text).sec);
       }
     }
 
@@ -3181,41 +3595,26 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       hasContent = true;
       termItems.forEach((c) => {
         const cached = terminalCache.get(c.terminalId);
-        const { sec, pre } = toolSection("", (cached && cached.output) || "\u2026", { cls: "terminal-pre", json: false });
+        const { sec, pre } = toolSection("Output", (cached && cached.output) || "\u2026", { cls: "terminal-pre", json: false });
         pre.setAttribute("data-terminal", c.terminalId);
         body.appendChild(sec);
       });
-      // Terminal cards are worth showing open by default.
-      if (!entry.node.dataset.autoOpened) {
-        if (entry.collapse) entry.collapse.setCollapsed(false);
-        entry.node.dataset.autoOpened = "1";
-      }
-    }
-
-    const imgItems = (d.content || []).filter((c) => c.type === "image" && c.data);
-    if (imgItems.length) {
-      hasContent = true;
-      imgItems.forEach((c) => {
-        const sec = document.createElement("div");
-        sec.className = "tool-section";
-        const img = document.createElement("img");
-        img.className = "tool-image";
-        img.src = "data:" + (c.mime || "image/png") + ";base64," + c.data;
-        img.alt = "";
-        sec.appendChild(img);
-        body.appendChild(sec);
-      });
-      if (!entry.node.dataset.autoOpened) {
-        if (entry.collapse) entry.collapse.setCollapsed(false);
-        entry.node.dataset.autoOpened = "1";
-      }
+      // A command that finishes in a moment should not have flashed its output on
+      // the way past, and one that is still going is worth watching. So the output
+      // opens itself only once the command has been running for a while, and closes
+      // again when it succeeds. VS Code's terminal part behaves the same way. A
+      // failure stays open (below), and a section opened by hand is left alone.
+      watchTerminalOutput(entry);
     }
 
     const diffItems = (d.content || []).filter((c) => c.type === "diff" && c.path);
     const locs = (d.locations || []).slice();
     const fileRows = [
       ...diffItems.map((c) => ({ path: c.path, diff: true, added: c.added, removed: c.removed })),
-      ...locs.map((l) => ({ path: l.path, line: l.line, diff: false }))
+      ...locs.map((l) => ({ path: l.path, line: l.line, diff: false })),
+      // Files the tool pointed at rather than quoted (a search hit, a listing):
+      // each one opens.
+      ...(d.content || []).filter((c) => c.type === "link" && c.path).map((c) => ({ path: c.path, diff: false }))
     ];
     // For a file tool with no location/diff, surface the path from rawInput as a
     // pill rather than dumping the argument JSON.
@@ -3248,6 +3647,52 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     if (d.status === "failed" && hasContent && entry.collapse && !entry.node.dataset.autoOpened) {
       entry.collapse.setCollapsed(false);
       entry.node.dataset.autoOpened = "1";
+    }
+  }
+
+  // Pictures a tool produced, kept between the row and its body so they are there
+  // whether or not it is open.
+  function renderToolMedia(entry) {
+    const shots = (entry.data.content || []).filter((c) => c.type === "image" && c.data);
+    if (!shots.length) {
+      if (entry.mediaEl) { entry.mediaEl.remove(); entry.mediaEl = null; }
+      return;
+    }
+    if (!entry.mediaEl) {
+      entry.mediaEl = document.createElement("div");
+      entry.mediaEl.className = "tool-media";
+      entry.node.insertBefore(entry.mediaEl, entry.node.children[1] || null);
+    }
+    entry.mediaEl.innerHTML = "";
+    shots.forEach((c) => entry.mediaEl.appendChild(imageThumb(c.mime, c.data)));
+  }
+
+  // How long a command has to run before its output is worth opening on its own.
+  const TERMINAL_WATCH_MS = 2000;
+
+  function watchTerminalOutput(entry) {
+    const running = entry.data.status === "in_progress" || entry.data.status === "pending";
+    if (running) {
+      if (!entry.watchTimer) {
+        entry.watchTimer = setTimeout(() => {
+          entry.watchTimer = null;
+          const still = entry.data.status === "in_progress" || entry.data.status === "pending";
+          if (still && entry.collapse && entry.collapse.isCollapsed() && !entry.collapse.userToggled()) {
+            entry.collapse.setCollapsed(false);
+            entry.node.dataset.autoOpened = "1";
+          }
+        }, TERMINAL_WATCH_MS);
+      }
+      return;
+    }
+    if (entry.watchTimer) {
+      clearTimeout(entry.watchTimer);
+      entry.watchTimer = null;
+    }
+    // Done and well: put back what was only opened to watch it.
+    if (entry.data.status === "completed" && entry.node.dataset.autoOpened && !entry.collapse.userToggled()) {
+      entry.collapse.setCollapsed(true);
+      delete entry.node.dataset.autoOpened;
     }
   }
 
@@ -3298,53 +3743,70 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     const removed = typeof m === "object" ? m.removed : undefined;
     const created = typeof m === "object" && m.created;
     if (path) wsCounts.set(path, { added: added || 0, removed: removed || 0 });
+    // A live edit is part of the working set, so it can be kept or undone here.
+    renderEdit({ path, added, removed, created, actionable: true });
+  }
+
+  // The one way an edit is ever shown: the pencil, what happened to the file, and
+  // the file itself with its line counts. A file can report changes several times
+  // in a turn (a tool call, its updates, and the change event all carry the same
+  // diff), so there is one row per file per turn, rewritten in place.
+  function renderEdit(e) {
+    const path = e.path;
     finalizeBlock();
     hideWelcome();
     ensureTurn();
-    // The same file can report changes several times in a turn (the initial
-    // tool_call plus repeated tool_call_update events all resend the diff), so
-    // reuse one pill per path per turn and refresh it in place rather than
-    // stacking duplicate rows.
     const turn = currentTurn;
     turn.editPills = turn.editPills || new Map();
-    let node = path ? turn.editPills.get(path) : null;
+    const key = path || e.name;
+    let node = key ? turn.editPills.get(key) : null;
     const isNew = !node;
     if (isNew) {
       node = document.createElement("div");
       node.className = "edit-pill";
-      if (path) turn.editPills.set(path, node);
-    } else {
-      node.innerHTML = "";
+      if (key) turn.editPills.set(key, node);
+    } else if (node.classList.contains("resolved")) {
+      // Kept or undone by hand: leave that alone, a later update must not undo it.
+      return;
     }
-    const status = document.createElement("i");
-    status.className = "codicon codicon-check edit-pill-status";
-    // Text status next to the icon, like VS Code's edit-pill .status-label.
+    // An edit reported by the agent alone (a reloaded transcript) has no working
+    // set behind it, so it cannot offer Keep and Undo. Once a row has them it
+    // keeps them: the same edit arrives again as the tool call completes.
+    const actionable = e.actionable || node.dataset.actionable === "1";
+    if (actionable && path) node.dataset.actionable = "1";
+    if (e.created) node.dataset.created = "1";
+    node.innerHTML = "";
+    const icon = document.createElement("i");
+    // The same pencil whether the file was created or changed: it is the same
+    // action to review, and a tick here would read as "already dealt with".
+    icon.className = "codicon codicon-edit edit-pill-status";
     const label = document.createElement("span");
     label.className = "edit-pill-label";
-    // Once a file is shown as Created, keep that label even as later edits land.
-    if (created) node.dataset.created = "1";
     label.textContent = node.dataset.created ? "Created" : "Edited";
-    node.appendChild(status);
+    node.appendChild(icon);
     node.appendChild(label);
-    node.appendChild(filePill({ path, diff: true, added, removed }));
+    node.appendChild(filePill({ path: path || e.name, diff: !!path, added: e.added, removed: e.removed }));
     // Inline Keep / Undo for this edit (VS Code shows accept/reject per edit),
     // in addition to the Keep all / Undo all in the docked working set.
-    if (path) {
+    if (actionable && path) {
       const actions = document.createElement("div");
       actions.className = "edit-pill-actions";
-      actions.appendChild(iconBtn("codicon-check", "Keep this change", (e) => {
-        e.stopPropagation();
+      actions.appendChild(iconBtn("codicon-check", "Keep this change", (ev) => {
+        ev.stopPropagation();
         vscode.postMessage({ type: "acceptFile", path });
         markEditResolved(node, "Kept");
       }));
-      actions.appendChild(iconBtn("codicon-discard", "Undo this change", (e) => {
-        e.stopPropagation();
+      actions.appendChild(iconBtn("codicon-discard", "Undo this change", (ev) => {
+        ev.stopPropagation();
         vscode.postMessage({ type: "rejectFile", path });
         markEditResolved(node, "Undone");
       }));
       node.appendChild(actions);
     }
-    if (isNew) { breakToolGroup(); respTarget().appendChild(node); }
+    // An edit is part of the run that made it, so it joins the group rather than
+    // splitting it: that is how a run comes to read "Created a.ts, updated b.ts".
+    if (isNew) placeInRun(node);
+    else refreshRunGroup(node);
     scrollToBottom();
   }
 
@@ -3430,7 +3892,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     const wrap = document.createElement("div");
     wrap.className = "cw-detail";
     if (data.command) {
-      wrap.appendChild(toolCommandBlock(data.command));
+      // The question already says what this is, so the command needs no caption.
+      wrap.appendChild(toolCommandBlock(data.command, false));
     }
     const paths = [
       ...(data.content || []).filter((c) => c && c.type === "diff" && c.path).map((c) => c.path),
@@ -3445,7 +3908,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     // already rendered in the transcript just above.
     if (!wrap.childElementCount && data.toolCallId) {
       const entry = toolEls.get(data.toolCallId);
-      const label = entry && entry.label && entry.label.textContent;
+      const edit = editTools.get(data.toolCallId);
+      const label = (entry && entry.label && entry.label.textContent) || (edit && edit.title);
       if (label) {
         const line = document.createElement("div");
         line.className = "cw-message muted";
@@ -4345,8 +4809,6 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     const state = { q: "", status: new Set(), grouping: "workspace", sort: "activity" };
     let searchFloater = null;
     let filterFloater = null;
-    let refreshBtn = null;
-    let refreshTimer = null;
 
     // Optional in-list toolbar, used by the side panel and the title switcher.
     // The full-screen list is driven from the header instead (controls omitted).
@@ -4372,14 +4834,6 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
           startPanelDrag(e);
         });
       }
-      // Spin until the refreshed list actually arrives (devin list can take a
-      // few seconds), with a safety stop so it never spins forever.
-      refreshBtn = mkTool("refresh", "Refresh sessions", () => {
-        refreshBtn.classList.add("spin");
-        clearTimeout(refreshTimer);
-        refreshTimer = setTimeout(() => refreshBtn.classList.remove("spin"), 15000);
-        vscode.postMessage({ type: "refreshSessions" });
-      });
       const titleLabel = document.createElement("span");
       titleLabel.className = "session-panel-title";
       titleLabel.textContent = "Sessions";
@@ -4388,7 +4842,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       const newBtn = buildNewSessionButton({ compact: true });
       const searchBtn = mkTool("search", "Search sessions", (b) => api.toggleSearch(b));
       const filterBtn = mkTool("list-filter", "Filter sessions", (b) => api.toggleFilter(b));
-      toolbar.append(refreshBtn, titleLabel, spacer, newBtn, searchBtn, filterBtn);
+      toolbar.append(titleLabel, spacer, newBtn, searchBtn, filterBtn);
       container.appendChild(toolbar);
     }
 
@@ -4397,8 +4851,6 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     container.appendChild(bodyEl);
 
     function renderBody() {
-      // A refresh finished: stop the spinner.
-      if (refreshBtn) { clearTimeout(refreshTimer); refreshBtn.classList.remove("spin"); }
       bodyEl.innerHTML = "";
       if (!lastSessions.length) {
         bodyEl.innerHTML = '<div class="sessions-empty"><i class="codicon codicon-comment-discussion"></i><div>No chats yet.</div></div>';
@@ -4507,6 +4959,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // --- Title session switcher (dropdown from the header title) -------------
 
   function toggleTitleMenu() {
+    if (inEditor()) return;
     if (document.getElementById("title-menu")) { closeTitleMenu(); return; }
     vscode.postMessage({ type: "refreshSessions" });
     const menu = document.createElement("div");
@@ -4515,12 +4968,14 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     menu.addEventListener("click", (e) => e.stopPropagation());
     el.titleBtn.parentElement.appendChild(menu);
     menuCtrl = mountSessionList(menu, { controls: "panel" });
+    reportListVisible();
   }
 
   function closeTitleMenu() {
     const m = document.getElementById("title-menu");
     if (m) m.remove();
     menuCtrl = null;
+    reportListVisible();
   }
 
   // --- Sessions list -------------------------------------------------------
@@ -4668,6 +5123,18 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // idle and unchanged, otherwise ask the host to wake/reload it.
   function switchToSession(id, title) {
     if (id === curSessionId) { setBody("thread"); return; }
+    // Held by the other surface: say so rather than restoring a copy of it here.
+    // The host answers with the same state, and corrects this if it disagrees.
+    if (elsewhereIds.includes(id)) {
+      renderElsewhere({
+        id,
+        title,
+        where: inEditor() ? "the side panel" : "an editor tab",
+        here: inEditor() ? "this tab" : "the side panel"
+      });
+      vscode.postMessage({ type: "loadSession", id });
+      return;
+    }
     currentTitle = title || "Chat";
     el.chatTitle.textContent = currentTitle;
     setBody("thread");
@@ -4760,34 +5227,41 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     title.className = "session-title";
     title.textContent = s.title || s.short_id || s.id;
     // Liveness dot: green = running, amber = waiting for you, gray = not running.
+    // A chat on the other surface is alive, but only that surface knows how it is
+    // getting on, so it reads as running there rather than as dead here.
+    const away = elsewhereIds.includes(s.id);
     const st = sessionStatuses[s.id];
     const dot = document.createElement("span");
     dot.className = "session-dot " +
       (st === "running" ? "dot-running"
         : st === "attention" ? "dot-attention"
         : st === "starting" ? "dot-starting"
-        : st === "idle" ? "dot-idle"
+        : st === "idle" || away ? "dot-idle"
         : "dot-dead");
     dot.title = st === "running" ? "Running"
       : st === "attention" ? "Needs your input"
       : st === "starting" ? "Waking\u2026"
+      : away ? "Running in " + (inEditor() ? "the side panel" : "an editor tab")
       : st === "idle" ? "Alive, waiting for you"
       : "Not running";
     title.insertBefore(dot, title.firstChild);
     if (st === "attention") item.classList.add("needs-attention");
     // Running on another surface: say so before it is clicked, since a chat runs
     // in one place at a time.
-    if (elsewhereIds.includes(s.id)) {
+    if (away) {
       const badge = document.createElement("i");
       badge.className = "codicon codicon-link-external session-elsewhere";
-      badge.title = "Open in another chat surface";
+      badge.title = "Open in " + (inEditor() ? "the side panel" : "an editor tab");
       title.appendChild(badge);
     }
     const meta = document.createElement("div");
     meta.className = "session-meta";
     const time = document.createElement("span");
     time.className = "session-time";
-    time.textContent = s.last_activity_ago || agoFrom(s.last_activity_at) || "";
+    // Timed from the activity stamp rather than the CLI's own wording, so every
+    // re-listing brings the label up to date, including for a chat only this
+    // window knows about yet.
+    time.textContent = agoFrom(s.last_activity_at) || s.last_activity_ago || "";
     const code = document.createElement("span");
     code.className = "session-code";
     code.textContent = s.short_id || s.id;
@@ -4919,6 +5393,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     el.thread.dataset.anim = caps.streamAnim || "rise";
     applyPanelSide();
     updateDetachBtn();
+    // The split button's primary half follows the default action setting.
+    updateComposerButtons();
   }
 
   // --- Welcome / empty state ----------------------------------------------
@@ -5294,12 +5770,16 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         if (m.title) { currentTitle = m.title; el.chatTitle.textContent = currentTitle; }
         // The thread now shows this session; retire any retained snapshot for it.
         if (m.sessionId) { curSessionId = m.sessionId; views.delete(m.sessionId); dirtyViews.delete(m.sessionId); }
+        // Remembered so an editor tab restored after a window reload comes back to
+        // the chat it was holding instead of an empty tab.
+        vscode.setState({ sessionId: curSessionId });
         // Refresh the header so the title and code badge reflect the session now
         // shown (e.g. after starting a new session).
         renderHeader();
         updateTerminateBtn();
         break;
       case "clear":
+        clearElsewhere();
         workingEl = null;
         // Any prior load is over: drop the replay freeze before this clear
         // rebuilds the thread (a new clear{loading} re-arms it just below).
@@ -5363,8 +5843,10 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         break;
       case "sessionsLoading":
         // Keep whatever is already listed on screen and just run the top loading
-        // bar, so returning to the list never blanks it while it revalidates.
-        showLoadingBar();
+        // bar, so returning to the list never blanks it while it revalidates. The
+        // list keeps itself up to date in the background, and that must not flash a
+        // loading bar over a chat someone is reading.
+        if (listShown) showLoadingBar();
         if (!lastSessions.length) {
           el.sessionsList.innerHTML = "";
           listCtrl = null;
@@ -5392,7 +5874,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       case "queued": renderQueued(m.items); break;
       case "attachments": renderAttachments(m.items); break;
       case "draft": applyDraft(m); break;
-      case "moved": renderMovedRow(m.from, m.partial); break;
+      case "elsewhere": hideBoot(); renderElsewhere(m); break;
+      case "sessionEnded": renderSessionEnded(); break;
+      case "flushState": flushState(); break;
       case "implicitContext":
         implicit = m.file ? { path: m.file.path, name: m.file.name, line1: m.file.line1, line2: m.file.line2, enabled: m.enabled !== false } : null;
         renderComposerContext();
@@ -5423,6 +5907,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
           progressBorder: m.progressBorder !== undefined ? !!m.progressBorder : caps.progressBorder,
           contextUsage: m.contextUsage !== undefined ? !!m.contextUsage : caps.contextUsage,
           inlineReferencesStyle: m.inlineReferencesStyle || caps.inlineReferencesStyle,
+          sendWhileWorking: m.sendWhileWorking || caps.sendWhileWorking,
           thinkingStyle: m.thinkingStyle || caps.thinkingStyle,
           streamAnim: m.streamAnim || caps.streamAnim,
           panelSide: m.panelSide || caps.panelSide,

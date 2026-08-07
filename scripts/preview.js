@@ -9,6 +9,8 @@
 // A --scenario flag selects which mock conversation to render (default: full),
 // and --width sets the panel width in pixels (default 460, the narrow sidebar).
 // The README screenshots are captured at a wider one, see docs/screenshots.md.
+// --surface editor renders the page as a chat tab (one chat, no session list),
+// which is what a detached chat looks like.
 
 const fs = require("fs");
 const path = require("path");
@@ -19,6 +21,8 @@ const MEDIA = path.join(ROOT, "media");
 
 const widthIdx = process.argv.indexOf("--width");
 const panelWidth = widthIdx >= 0 ? Number(process.argv[widthIdx + 1]) || 460 : 460;
+const surfaceIdx = process.argv.indexOf("--surface");
+const surface = surfaceIdx >= 0 && process.argv[surfaceIdx + 1] === "editor" ? "editor" : "view";
 
 // VS Code "Dark Modern"-ish tokens, enough for the chat panel to look right.
 const VARS = {
@@ -109,10 +113,15 @@ const SCENARIOS = {
       { content: "Run the test suite", status: "pending" }
     ] },
     { type: "toolCall", id: "t1", title: "Read src/auth/token.ts", kind: "read", status: "completed", locations: [{ path: "src/auth/token.ts", line: 42 }] },
+    { type: "fileChange", path: "src/auth/token-service.ts", added: 34, removed: 6, created: true },
+    { type: "thoughtChunk", text: "The callers still import the old helpers, so those need updating before the tests will pass.", messageId: "t-mid" },
+    { type: "fileChange", path: "src/auth/session.ts", added: 4, removed: 2 },
     { type: "toolCall", id: "t2", title: "Edit src/auth/token-service.ts", kind: "edit", status: "completed", rawInput: { path: "src/auth/token-service.ts" }, content: [{ type: "diff", path: "src/auth/token-service.ts", added: 34, removed: 6 }] },
     { type: "toolCall", id: "t3", title: "Run npm test", kind: "execute", status: "completed",
       rawInput: { command: "npm test --workspace=packages/auth -- --coverage --runInBand --reporters=default --reporters=jest-junit" },
       content: [{ type: "text", text: "PASS  auth.test.ts\n  \u2713 issues a token (12 ms)\n  \u2713 rejects an expired token (4 ms)\n\nTests: 2 passed, 2 total" }] },
+    { type: "toolCall", id: "t3b", title: "Capture browser screenshot", kind: "other", status: "completed",
+      content: [{ type: "image", mime: "image/png", data: "iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAYAAACinX6EAAAAT0lEQVR4nO3OsQ2AMAwF0P9DKGgo2H9DKGgoWCkFDYUUKQUFhZ+ku5NlyRIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB8dwFmFwGVAAAAAElFTkSuQmCC" }] },
     { type: "toolCall", id: "t4", title: "Checked on subagent", kind: "other", status: "completed",
       meta: { inferenceToolName: "read_subagent" }, rawInput: { agent_id: "78cc5558", block: true, timeout: 600 },
       content: [{ type: "text", text: "The explore agent mapped every session write path." }] },
@@ -145,8 +154,10 @@ const SCENARIOS = {
     { type: "ready" },
     { type: "body", body: "thread" },
     { type: "capabilities", revert: true, editRequests: "inline", checkpoints: true },
+    { type: "sessionReady", sessionId: "s1" },
     { type: "userMessage", text: "Refactor the auth module and run the tests." },
-    { type: "assistantStart" }
+    { type: "assistantStart" },
+    { type: "busy", value: true }
   ],
   // Exercises the newer rendering: web search / fetch / MCP tools, a grouped
   // tool run, and a mermaid diagram.
@@ -237,6 +248,14 @@ const SCENARIOS = {
         { id: "s6", short_id: "devin-9d81", title: "Investigate 502s on the API gateway", working_directory: "/Users/dev/Projects/api-service", last_activity_ago: "1w ago" }
       ]
     }
+  ],
+  // A chat opened on the surface that is not holding it: it says where it is, and
+  // offers to bring it over rather than showing a copy of it.
+  elsewhere: [
+    { type: "ready" },
+    options("adaptive"),
+    { type: "elsewhere", id: "s1", title: "Centralise token refresh in the auth module",
+      where: "an editor tab", here: "the side panel" }
   ]
 };
 
@@ -269,7 +288,7 @@ body {
 <link rel="stylesheet" href="${cssCodicon}" />
 <link rel="stylesheet" href="${cssMain}" />
 </head>
-<body data-logo="" data-model-icons="{}" data-mermaid-src="${mermaid}" class="vscode-dark">
+<body data-logo="" data-model-icons="{}" data-mermaid-src="${mermaid}" data-surface="${surface}" class="vscode-dark">
 ${body}
 <script>
   // Mock the VS Code webview API before the bundle loads.

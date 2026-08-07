@@ -135,7 +135,6 @@ test("a chat moved mid turn rebuilds the same transcript on the new surface", as
   after.post({ type: "clear", loading: true });
   paintedReplay(log).forEach((m) => after.post(m));
   after.post({ type: "loaded" });
-  after.post({ type: "moved", from: "the side panel" });
   after.post({ type: "busy", value: true });
   await after.settle(30);
 
@@ -143,15 +142,16 @@ test("a chat moved mid turn rebuilds the same transcript on the new surface", as
   assert.deepStrictEqual(after.reqTexts(), ["Refactor the auth module", "Now run the tests"]);
   assert.deepStrictEqual(after.respTexts(), before.respTexts(), "and every reply");
   const tools = (h) => [...h.thread().querySelectorAll(".tool")].map((t) =>
-    [...t.querySelectorAll(".tool-verb, .tool-detail")].map((x) => x.textContent).join(""));
-  assert.deepStrictEqual(tools(after), ["Read src/auth/token.ts", "Run npm test"], "with the tool calls, in order");
+    [...t.querySelectorAll(".tool-verb, .tool-detail, .tool-label-code")].map((x) => x.textContent).join(""));
+  // A file the agent read is one line naming that file, not a path to unfold, and
+  // a command is titled by the command itself, still running here.
+  assert.deepStrictEqual(tools(after), ["Read token.ts", "Runningnpm test"], "with the tool calls, in order");
   assert.deepStrictEqual(tools(after), tools(before));
   assert.match(after.thread().textContent, /Reading the module first/, "and the reasoning");
   const plan = (h) => [...h.document.querySelectorAll(".plan-docked .plan-entry-text")].map((s) => s.textContent.trim());
   assert.deepStrictEqual(plan(after), ["Extract TokenService", "Update the callers"],
     "the plan it is working through came too");
   assert.deepStrictEqual(plan(after), plan(before));
-  assert.ok(after.thread().querySelector(".moved-row"), "with a divider saying where it came from");
   assert.ok(!after.document.querySelector("#welcome:not(.hidden)"), "and no welcome screen over it");
   assert.strictEqual(after.errors().length, 0, "rebuild threw: " + JSON.stringify(after.errors()));
   assert.strictEqual(before.errors().length, 0);

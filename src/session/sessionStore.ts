@@ -8,6 +8,7 @@ export class SessionStore {
   private static readonly ACTIVE_KEY = "devin.activeSession.v1";
   private static readonly VIEWING_KEY = "devin.viewingSession.v1";
   private static readonly TITLES_KEY = "devin.sessionTitles.v1";
+  private static readonly PINNED_KEY = "devin.pinnedTitles.v1";
   private static readonly OPTIONS_KEY = "devin.options.v1";
   private static readonly CWDS_KEY = "devin.sessionCwd.v1";
   private static readonly INTERRUPTED_KEY = "devin.interrupted.v1";
@@ -60,19 +61,50 @@ export class SessionStore {
     return this.state.get<Record<string, string>>(SessionStore.TITLES_KEY, {});
   }
 
+  // Names we set ourselves (a rename), held until the CLI's own listing reports
+  // the same name back. A `devin list` already in flight when the rename landed
+  // still carries the old name, and without this it would quietly undo it.
+  pinnedTitles(): Record<string, string> {
+    return this.state.get<Record<string, string>>(SessionStore.PINNED_KEY, {});
+  }
+
+  setTitle(id: string, title: string): void {
+    if (!id || !title) {
+      return;
+    }
+    void this.state.update(SessionStore.TITLES_KEY, { ...this.titles(), [id]: title });
+    void this.state.update(SessionStore.PINNED_KEY, { ...this.pinnedTitles(), [id]: title });
+  }
+
   // Remember titles so names show instantly on reopen, before `devin list`
   // has returned (or for sessions no longer in a listed directory).
   cacheTitles(map: Record<string, string>): void {
     const current = this.titles();
+    const pins = this.pinnedTitles();
     let changed = false;
+    let unpinned = false;
     for (const [id, title] of Object.entries(map)) {
-      if (title && current[id] !== title) {
+      if (!title) {
+        continue;
+      }
+      const pinned = pins[id];
+      if (pinned !== undefined) {
+        if (pinned !== title) {
+          continue; // the listing has not caught up with our rename yet
+        }
+        delete pins[id];
+        unpinned = true;
+      }
+      if (current[id] !== title) {
         current[id] = title;
         changed = true;
       }
     }
     if (changed) {
       void this.state.update(SessionStore.TITLES_KEY, current);
+    }
+    if (unpinned) {
+      void this.state.update(SessionStore.PINNED_KEY, pins);
     }
   }
 
@@ -178,6 +210,11 @@ export class SessionStore {
 
   remove(id: string): void {
     void this.state.update(SessionStore.IDS_KEY, this.ids().filter((x) => x !== id));
+    const pins = this.pinnedTitles();
+    if (id in pins) {
+      delete pins[id];
+      void this.state.update(SessionStore.PINNED_KEY, pins);
+    }
     const cwds = this.cwds();
     if (id in cwds) {
       delete cwds[id];
