@@ -117,7 +117,8 @@ function buildData(opts) {
           ? [
               { name: "github", scope: "user", transport: "http", file: USER_DIR + "/mcp_config.json", detail: "https://api.example.com/mcp", disabled: false, loggedIn: true, oauthCapable: true, envKeys: [], headerKeys: [] },
               { name: "time", scope: "user", transport: "stdio", file: USER_DIR + "/mcp_config.json", detail: "stdio · uvx", disabled: false, loggedIn: false, oauthCapable: false, envKeys: [], headerKeys: [] },
-              { name: "issue-tracker", scope: "user", transport: "http", file: USER_DIR + "/mcp_config.json", detail: "https://tracker.example.com/mcp", disabled: true, loggedIn: false, oauthCapable: true, envKeys: ["TRACKER_TOKEN"], headerKeys: [] }
+              { name: "issue-tracker", scope: "user", transport: "http", file: USER_DIR + "/mcp_config.json", detail: "https://tracker.example.com/mcp", disabled: true, loggedIn: false, oauthCapable: true, envKeys: ["TRACKER_TOKEN"], headerKeys: [] },
+              { name: "godot-ai", scope: "user", source: "windsurf", transport: "http", file: HOME + "/.codeium/windsurf/mcp_config.json", detail: "http://127.0.0.1:8000/mcp", disabled: false, loggedIn: false, oauthCapable: true, envKeys: [], headerKeys: [] }
             ]
           : [{ name: "postgres", scope: "project", transport: "stdio", file: f.path + "/.devin/mcp_config.json", detail: "stdio · npx", disabled: false, loggedIn: false, oauthCapable: false, envKeys: ["DATABASE_URL"], headerKeys: [] }])
       }))

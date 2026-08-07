@@ -38,6 +38,46 @@ export function userMcpConfigPath(): string {
   return path.join(userConfigDir(), "mcp_config.json");
 }
 
+// Windsurf keeps its own MCP servers here, and the Devin CLI imports them, so
+// they are part of what this agent can do whether or not Devin was told about
+// them. They are managed here rather than left to another editor.
+export function windsurfDir(): string {
+  return path.join(os.homedir(), ".codeium", "windsurf");
+}
+
+export function windsurfMcpConfigPath(): string {
+  return path.join(windsurfDir(), "mcp_config.json");
+}
+
+// Add, replace or (with a null definition) remove one server in an mcpServers
+// file. The Devin CLI owns its own files, so this is only for the ones it merely
+// imports: `devin mcp` will not write to another tool's config.
+export function writeMcpServer(file: string, name: string, def: Record<string, unknown> | null): void {
+  // `readConfig` answers {} for a file it cannot parse, which is fine for showing
+  // one and ruinous for writing it: the write would replace someone else's broken
+  // config with a document holding nothing but this server. Refuse instead.
+  if (fs.existsSync(file)) {
+    const raw = fs.readFileSync(file, "utf8");
+    try {
+      if (raw.trim()) JSON.parse(stripJsonComments(raw));
+    } catch {
+      throw new Error(`${file} is not valid JSON, so it was left alone. Fix the file and try again.`);
+    }
+  }
+  const current = readConfig(file);
+  const servers = (current.mcpServers && typeof current.mcpServers === "object"
+    ? current.mcpServers
+    : {}) as Record<string, unknown>;
+  if (def === null) {
+    delete servers[name];
+  } else {
+    servers[name] = def;
+  }
+  current.mcpServers = servers;
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(current, null, 2) + "\n", "utf8");
+}
+
 // MCP OAuth tokens are stored per server under the data dir; their presence
 // tells us a server is logged in.
 export function mcpOauthDir(): string {

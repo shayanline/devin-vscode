@@ -38,6 +38,7 @@ Moving between sessions and surfaces, and keeping what you had typed.
 - A run of tools says what it did, not "Used N tools", in two clauses.
 - The rows of a run are chained, like the steps of a chain of thought.
 - A reopened command no longer repeats its input as its output.
+- Settings lists Windsurf's MCP servers, and manages them in place.
 - "Used N references" folds like every other section, chevron and all.
 - A folded plan names the item being worked on, not just how many are done.
 - An MCP server that will not start is named in the chat, and can be dismissed.
@@ -112,6 +113,7 @@ Moving between sessions and surfaces, and keeping what you had typed.
 - Staged files live in extension storage, per chat: base64 is not settings data.
 - Resource links and embedded resources in a tool result are no longer dropped.
 - Devin's output and turn stats notifications are read, not just logged.
+- A config belonging to another tool is refused if it does not parse.
 - The working set is kept in extension storage, so it outlives the agent.
 - Line counts trim what both sides share before the table, not after.
 - A rename goes through the agent holding the chat, and outlives a stale list.

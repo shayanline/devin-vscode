@@ -715,11 +715,15 @@
 
     mcp() {
       const g = scoped(data.mcp && data.mcp.byScope);
-      const rows = ((g && g.servers) || []).map((sv) => {
+      const all = (g && g.servers) || [];
+      const row = (sv) => {
         const meta = [tag(sv.transport, "muted")];
         if (sv.disabled) meta.push(tag("disabled", "muted"));
         if (sv.loggedIn) meta.push(tag("signed in", "scope"));
         if ((sv.envKeys || []).length) meta.push(tag(sv.envKeys.length + " env", "muted"));
+        // Which file the server is written in decides who edits it: the CLI owns
+        // its own, and another tool's is written directly.
+        const src = sv.source === "windsurf" ? { source: "windsurf" } : {};
         const actions = [];
         if (sv.loggedIn) {
           actions.push(iconBtn("sign-out", "Log out", () => post("settings:mcpVerb", { verb: "logout", name: sv.name, root: g.root })));
@@ -727,17 +731,28 @@
           actions.push(iconBtn("key", "Log in (OAuth)", () => post("settings:mcpLogin", { name: sv.name, root: g.root })));
         }
         actions.push(sv.disabled
-          ? iconBtn("check", "Enable", () => post("settings:mcpVerb", { verb: "enable", name: sv.name, scope: sv.scope, root: g.root }))
-          : iconBtn("circle-slash", "Disable", () => post("settings:mcpVerb", { verb: "disable", name: sv.name, scope: sv.scope, root: g.root })));
+          ? iconBtn("check", "Enable", () => post("settings:mcpVerb", Object.assign({ verb: "enable", name: sv.name, scope: sv.scope, root: g.root }, src)))
+          : iconBtn("circle-slash", "Disable", () => post("settings:mcpVerb", Object.assign({ verb: "disable", name: sv.name, scope: sv.scope, root: g.root }, src))));
         if (sv.file) actions.push(iconBtn("edit", "Edit config", () => post("settings:openFile", { path: sv.file })));
-        actions.push(iconBtn("trash", "Remove", () => post("settings:mcpVerb", { verb: "remove", name: sv.name, scope: sv.scope, root: g.root }), "danger"));
+        actions.push(iconBtn("trash", "Remove", () => post("settings:mcpVerb", Object.assign({ verb: "remove", name: sv.name, scope: sv.scope, root: g.root }, src)), "danger"));
         // The name is its own element so a disabled server can be struck through
         // without striking through its tags.
         const name = h("span", { class: "settings-list-name", text: sv.name });
         return listRow([name].concat(meta), sv.detail, actions, sv.disabled ? "disabled" : "");
-      });
-      return group("MCP servers", rows.length ? rows : [empty("No MCP servers here.")],
-        { action: addBtn("Add MCP server", mcpModalBody) });
+      };
+      const own = all.filter((sv) => sv.source !== "windsurf");
+      const wind = all.filter((sv) => sv.source === "windsurf");
+      const groups = [group("MCP servers", own.length ? own.map(row) : [empty("No MCP servers here.")],
+        { action: addBtn("Add MCP server", mcpModalBody) })];
+      // Windsurf's servers are loaded by the Devin CLI too, so they are part of
+      // what this agent can do. They are listed apart because they live in
+      // Windsurf's config and editing one changes it for Windsurf as well.
+      if (wind.length || scope === "user") {
+        groups.push(group("MCP servers from Windsurf",
+          wind.length ? wind.map(row) : [empty("Windsurf has no MCP servers configured.")],
+          { action: addBtn("Add MCP server to Windsurf", (close, gg) => mcpModalBody(close, gg, "windsurf")) }));
+      }
+      return h("div", {}, groups);
     },
 
     hooks() {
@@ -953,12 +968,14 @@
     ]);
   }
 
-  function mcpModalBody(close, g) {
+  function mcpModalBody(close, g, source) {
     const name = textInput("", "github");
     const cmd = textInput("", "https://mcp.example.com/mcp");
     const envIn = textInput("", "TOKEN=abc123, REGION=eu");
     return h("div", null, [
-      h("div", { class: "settings-modal-desc", text: "Adds a server to " + scopeLabelOf(scope) + ". Enter a URL for HTTP transport, or a command line for stdio." }),
+      h("div", { class: "settings-modal-desc", text: source === "windsurf"
+        ? "Adds a server to Windsurf's config, which the Devin CLI reads too. Enter a URL for HTTP transport, or a command line for stdio."
+        : "Adds a server to " + scopeLabelOf(scope) + ". Enter a URL for HTTP transport, or a command line for stdio." }),
       fieldRow("Name", name),
       fieldRow("URL or command", cmd, "A URL uses HTTP transport. A command line (npx -y @scope/server) uses stdio."),
       fieldRow("Env", envIn, "Comma separated KEY=value pairs. Optional."),
@@ -984,7 +1001,7 @@
             if (eq > 0) env[pair.slice(0, eq).trim()] = pair.slice(eq + 1).trim();
           }
           if (Object.keys(env).length) options.env = env;
-          post("settings:mcpAdd", { options, root: g.root });
+          post("settings:mcpAdd", { options, root: g.root, source });
           deferClose(close);
         }, "primary")
       ])
