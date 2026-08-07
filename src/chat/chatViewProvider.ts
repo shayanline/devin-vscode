@@ -4,6 +4,8 @@ import * as path from "path";
 import * as crypto from "crypto";
 import { AcpClient, AcpHost } from "../acp/client";
 import {
+  AgentStopped,
+  CliOutput,
   ConfigOption,
   ContentBlock,
   PromptResult,
@@ -12,6 +14,7 @@ import {
   ReadTextFileParams,
   RequestPermissionParams,
   RequestPermissionResult,
+  ResponseDimension,
   RevertPreviewResult,
   SessionUpdateNotification,
   SubagentCompleted,
@@ -82,6 +85,10 @@ interface Runtime {
   // visible one. Replayed when the session is reopened so its progress is shown
   // even for a turn that is still running (capped so it can't grow unbounded).
   bgBuffer: Record<string, unknown>[];
+  // MCP servers this agent could not reach, by name. The CLI only says so on its
+  // output stream, so without this a broken server is invisible in the panel and
+  // an aborted session load can only guess at the reason.
+  mcpProblems: Map<string, string>;
   // Subagent bookkeeping. A subagent is announced twice: first as the parent's
   // `run_subagent` tool call (which owns the rendered block) and then under its
   // own agentId, which is what all its later work is tagged with. These map one
@@ -635,6 +642,8 @@ export class ChatController implements AcpHost {
     rt.client.setHost(this);
     rt.client.on("log", (line: string) => this.log(line));
     rt.client.on("update", (n: SessionUpdateNotification) => this.onUpdate(n));
+    rt.client.on("output", (o: CliOutput) => this.onCliOutput(rt, o));
+    rt.client.on("stopped", (s: AgentStopped) => this.onAgentStopped(rt, s));
     rt.client.on("exit", () => this.onRuntimeExit(rt));
     rt.terminals.retarget(
       (terminalId, output, exitStatus) => {
@@ -749,6 +758,7 @@ export class ChatController implements AcpHost {
       bgBuffer: [],
       log: [],
       logFull: true,
+      mcpProblems: new Map(),
       subagentSpawns: [],
       subagentIds: new Map()
     };
@@ -756,9 +766,55 @@ export class ChatController implements AcpHost {
     client.setHost(this);
     client.on("log", (line: string) => this.log(line));
     client.on("update", (n: SessionUpdateNotification) => this.onUpdate(n));
+    client.on("output", (o: CliOutput) => this.onCliOutput(rt, o));
+    client.on("stopped", (s: AgentStopped) => this.onAgentStopped(rt, s));
     client.on("exit", () => this.onRuntimeExit(rt));
     client.start();
     return rt;
+  }
+
+  // The CLI's own output stream. Its MCP channel is the only place a server that
+  // would not start is reported: the tool call simply never happens, and a session
+  // load the agent aborts over it says nothing about why.
+  private onCliOutput(rt: Runtime, out: CliOutput): void {
+    this.log(`[${out.channel || "cli"}] ${out.message || ""}`);
+    if (out.channel !== "MCP" || (out.level !== "warn" && out.level !== "error")) {
+      return;
+    }
+    const name = /'([^']+)'/.exec(out.message || "")?.[1];
+    if (name) {
+      rt.mcpProblems.set(name, (out.message || "").trim());
+      this.postMcpProblems(rt);
+    }
+  }
+
+  private postMcpProblems(rt: Runtime): void {
+    if (this.activeId !== rt.id || !rt.mcpProblems.size) {
+      return;
+    }
+    this.post({
+      type: "mcpProblems",
+      servers: [...rt.mcpProblems].map(([name, message]) => ({ name, message }))
+    });
+  }
+
+  // What a finished turn cost. The CLI hands over its own labelled figures
+  // (`responseDimensions`), so the footer shows those rather than inventing names
+  // for them, alongside the wall clock time it reports.
+  private onAgentStopped(rt: Runtime, stopped: AgentStopped): void {
+    const stats = stopped.stats;
+    if (!stats) {
+      return;
+    }
+    this.emit(rt, {
+      type: "turnStats",
+      model: stats.modelLabel,
+      totalTimeMs: stats.totalTimeMs,
+      dimensions: (stats.responseDimensions || []).map((d) => ({
+        label: d.label,
+        value: dimensionText(d)
+      })).filter((d) => d.label && d.value)
+    });
   }
 
   // A runtime's `devin acp` exited (crash, kill, or idle exit). Drop it from
@@ -862,12 +918,18 @@ export class ChatController implements AcpHost {
   // A session/load the agent aborted (most often because a configured MCP server
   // failed to start, which it treats as fatal). Point the user at the output for
   // the underlying reason rather than showing the opaque agent message.
-  private reportLoadFailure(message: string): void {
+  private reportLoadFailure(message: string, rt?: Runtime): void {
     this.log(`[load-failed] ${message}`);
     const show = "Show Output";
+    // The agent treats an MCP server that will not start as fatal, and it is by
+    // far the most common reason a load is aborted. When its output stream named
+    // the servers, say which, instead of leaving the user to guess.
+    const blamed = rt && rt.mcpProblems.size ? [...rt.mcpProblems.keys()].join(", ") : "";
     void vscode.window
       .showErrorMessage(
-        "Couldn't open this session. A configured MCP server may have failed to start, or the session is unavailable. See the Devin output for details.",
+        blamed
+          ? `Couldn't open this session. These MCP servers failed to start: ${blamed}. See the Devin output for details.`
+          : "Couldn't open this session. A configured MCP server may have failed to start, or the session is unavailable. See the Devin output for details.",
         show
       )
       .then((choice) => {
@@ -1650,7 +1712,7 @@ export class ChatController implements AcpHost {
         this.sessionsCache = undefined;
         this.broadcastStatuses();
         await this.closeOutSession(OPEN_FAILED);
-        this.reportLoadFailure(loadFailed);
+        this.reportLoadFailure(loadFailed, rt);
       } else {
         this.post({ type: "loaded" });
         this.reportInterrupted(id);
@@ -1668,6 +1730,7 @@ export class ChatController implements AcpHost {
           // Republish the queue so any messages still waiting on this session
           // reappear after a reload, not just after an instant re-attach.
           this.postQueued(opened);
+          this.postMcpProblems(opened);
         }
         // Anything typed while it was opening has been waiting for the channel.
         if (opened) {
@@ -1841,7 +1904,7 @@ export class ChatController implements AcpHost {
         // The agent could not reload this session: return to the list rather
         // than leaving a stale, non-interactive transcript on screen.
         await this.closeOutSession(OPEN_FAILED);
-        this.reportLoadFailure(wakeFailed);
+        this.reportLoadFailure(wakeFailed, rt);
       } else if (this.activeId === id) {
         await this.postTurnHead(false);
       }
@@ -3885,6 +3948,23 @@ function textOf(content: any): string {
     return content.resource.text;
   }
   return "";
+}
+
+// One of the CLI's own response figures as text: it supplies the number, the unit
+// and both spellings of it, so the panel only has to pick the right one.
+function dimensionText(d: ResponseDimension): string {
+  const k = d.kind;
+  if (!k || k.value === undefined || k.value === null) {
+    return "";
+  }
+  if (typeof k.value === "string") {
+    return k.value;
+  }
+  const rounded = Math.abs(k.value) >= 10 || Number.isInteger(k.value)
+    ? Math.round(k.value).toLocaleString()
+    : k.value.toFixed(2);
+  const unit = Math.abs(k.value) === 1 ? k.tail : k.pluralTail || k.tail;
+  return `${k.prefix || ""}${rounded}${unit || ""}`;
 }
 
 // The path inside a file URI, for a resource a tool points at.

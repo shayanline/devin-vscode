@@ -1897,6 +1897,24 @@ body {
   color: var(--vscode-editorWarning-foreground, #cca700);
 }
 
+/* An MCP server that would not start is a warning about what this chat can do,
+   so it sits above the composer for as long as it is true. */
+.mcp-card {
+  border-color: var(--vscode-editorWarning-foreground, #cca700);
+}
+
+.mcp-card .error-head .codicon {
+  color: var(--vscode-editorWarning-foreground, #cca700);
+}
+
+.mcp-detail {
+  margin-top: var(--dv-space-2);
+  font-size: var(--dv-fs-s);
+  white-space: pre-wrap;
+  max-height: 84px;
+  overflow-y: auto;
+}
+
 .bubble p {
   margin: 0 0 16px;
 }

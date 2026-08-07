@@ -219,3 +219,35 @@ export interface WriteTextFileParams {
   path: string;
   content: string;
 }
+
+// `_cognition.ai/output`: the CLI's own log stream. The MCP channel is the only
+// place it says a configured server would not start, which is otherwise invisible.
+export interface CliOutput {
+  channel?: string;
+  level?: string; // info | warn | error
+  message?: string;
+  sessionId?: string;
+}
+
+// `_cognition.ai/agent_stopped`: what a finished turn cost. `responseDimensions`
+// is the CLI's own display contract for it (a label and a value, ready to show),
+// so the panel renders those rather than inventing its own wording.
+export interface ResponseDimension {
+  uid?: string;
+  groupTitle?: string;
+  label?: string;
+  kind?: { type?: string; value?: number | string; prefix?: string; tail?: string; pluralTail?: string };
+}
+
+export interface AgentStopped {
+  cause?: string;
+  sessionId?: string;
+  stats?: {
+    toolCalls?: number;
+    filesChanged?: number;
+    commandsRun?: number;
+    totalTimeMs?: number;
+    modelLabel?: string;
+    responseDimensions?: ResponseDimension[];
+  };
+}

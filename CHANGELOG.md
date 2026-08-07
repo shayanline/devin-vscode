@@ -38,6 +38,9 @@ Moving between sessions and surfaces, and keeping what you had typed.
 - A run of tools says what it did, not "Used N tools".
 - "Used N references" folds like every other section, chevron and all.
 - A folded plan names the item being worked on, not just how many are done.
+- An MCP server that will not start is named in the chat, with what it said.
+- A session that fails to open names the MCP servers that stopped it.
+- A finished turn says how long it took, with what it cost on hover.
 - A run keeps its edits and its reasoning together, under one summary.
 - A screenshot a tool took is shown beside the row, open or shut, and enlarges.
 - A command row reads "Ran" then the command, "Running" while it is going.
@@ -97,6 +100,7 @@ Moving between sessions and surfaces, and keeping what you had typed.
 - ACP cannot steer a running prompt, so "stop and send" heads the queue.
 - Staged files live in extension storage, per chat: base64 is not settings data.
 - Resource links and embedded resources in a tool result are no longer dropped.
+- Devin's output and turn stats notifications are read, not just logged.
 - The working set is kept in extension storage, so it outlives the agent.
 - Line counts trim what both sides share before the table, not after.
 - A rename goes through the agent holding the chat, and outlives a stale list.

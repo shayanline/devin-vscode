@@ -2,6 +2,8 @@ import { spawn, execFile, ChildProcessWithoutNullStreams } from "child_process";
 import { EventEmitter } from "events";
 import { JsonRpcConnection } from "./connection";
 import {
+  AgentStopped,
+  CliOutput,
   ContentBlock,
   CreateTerminalParams,
   InitializeResult,
@@ -125,10 +127,20 @@ export class AcpClient extends EventEmitter {
       this.emit("update", params as SessionUpdateNotification);
       return;
     }
-    // Devin custom notifications (logs, mcp status) start with `_cognition.ai/`.
-    // Log a small payload preview so their shape can be inspected in the Output
-    // channel (used to decide what to surface in the UI, e.g. MCP start /
-    // interaction lines).
+    // Devin's own notifications. `output` carries the CLI's log stream, which is
+    // where MCP tells you a server would not start, and `agent_stopped` carries
+    // the numbers behind a finished turn. Both are worth showing, so they are
+    // events rather than lines in the output channel.
+    if (method === "_cognition.ai/output") {
+      this.emit("output", params as CliOutput);
+      return;
+    }
+    if (method === "_cognition.ai/agent_stopped") {
+      this.emit("stopped", params as AgentStopped);
+      return;
+    }
+    // Anything else: log a small payload preview so its shape can be inspected in
+    // the Output channel before deciding whether to surface it.
     let preview = "";
     try {
       const s = JSON.stringify(params);
