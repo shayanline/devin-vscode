@@ -2245,7 +2245,7 @@ body {
 }
 
 .thinking-plain .thinking-icon {
-  left: 0;
+  left: 1px;
   top: 3px;
 }
 
@@ -2679,20 +2679,28 @@ body {
   padding-left: 10px;
   display: flex;
   flex-direction: column;
-  /* A collapsed row is only as tall as its own text, so without a little air
-     between them the gap opened for each node leaves no line to see. */
-  row-gap: 5px;
 }
 
-/* Where the node sits within its row, which is the middle of its leading glyph.
-   A row carrying a file chip is taller, so its node sits lower. */
+/* Rows carry the same 6px of vertical padding VS Code gives a step in a chain
+   (chatThinkingContent.css: padding 6px 12px 6px 24px), which is what leaves room
+   for the line between one node and the next.
+
+   `--node-y` is the middle of the row's leading glyph, which is where the line
+   must break. A row carrying a file chip is taller, so its node sits lower. */
 .tool-group-body > * {
   position: relative;
-  --node-y: 9.5px;
+  padding-top: 6px;
+  padding-bottom: 6px;
+  --node-y: 15.3px;
 }
 
 .tool-group-body > .edit-pill {
-  --node-y: 14px;
+  --node-y: 20px;
+}
+
+/* Reasoning's node is its first bullet, which sits lower than a row's glyph. */
+.tool-group-body > .thinking-plain {
+  --node-y: 23px;
 }
 
 .tool-group-body > *::before {
@@ -2705,20 +2713,20 @@ body {
   bottom: -3px;
   width: 1px;
   background-color: var(--dv-border);
-  mask-image: linear-gradient(to bottom, #000 0 calc(var(--node-y) - 4px), transparent calc(var(--node-y) - 4px) calc(var(--node-y) + 11px), #000 calc(var(--node-y) + 11px) 100%);
-  -webkit-mask-image: linear-gradient(to bottom, #000 0 calc(var(--node-y) - 4px), transparent calc(var(--node-y) - 4px) calc(var(--node-y) + 11px), #000 calc(var(--node-y) + 11px) 100%);
+  mask-image: linear-gradient(to bottom, #000 0 calc(var(--node-y) - 10px), transparent calc(var(--node-y) - 10px) calc(var(--node-y) + 10px), #000 calc(var(--node-y) + 10px) 100%);
+  -webkit-mask-image: linear-gradient(to bottom, #000 0 calc(var(--node-y) - 10px), transparent calc(var(--node-y) - 10px) calc(var(--node-y) + 10px), #000 calc(var(--node-y) + 10px) 100%);
 }
 
 /* The chain starts at the first node and ends at the last, so it never hangs
    past either end of the run. */
 .tool-group-body > *:first-child::before {
-  mask-image: linear-gradient(to bottom, transparent 0 calc(var(--node-y) + 11px), #000 calc(var(--node-y) + 11px) 100%);
-  -webkit-mask-image: linear-gradient(to bottom, transparent 0 calc(var(--node-y) + 11px), #000 calc(var(--node-y) + 11px) 100%);
+  mask-image: linear-gradient(to bottom, transparent 0 calc(var(--node-y) + 10px), #000 calc(var(--node-y) + 10px) 100%);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0 calc(var(--node-y) + 10px), #000 calc(var(--node-y) + 10px) 100%);
 }
 
 .tool-group-body > *:last-child::before {
-  mask-image: linear-gradient(to bottom, #000 0 calc(var(--node-y) - 4px), transparent calc(var(--node-y) - 4px) 100%);
-  -webkit-mask-image: linear-gradient(to bottom, #000 0 calc(var(--node-y) - 4px), transparent calc(var(--node-y) - 4px) 100%);
+  mask-image: linear-gradient(to bottom, #000 0 calc(var(--node-y) - 10px), transparent calc(var(--node-y) - 10px) 100%);
+  -webkit-mask-image: linear-gradient(to bottom, #000 0 calc(var(--node-y) - 10px), transparent calc(var(--node-y) - 10px) 100%);
 }
 
 .tool-group-body > *:only-child::before {
@@ -2731,8 +2739,8 @@ body {
   content: "";
   position: absolute;
   left: 9.5px;
-  top: -9px;
-  height: 15px;
+  top: -6px;
+  height: 18px;
   width: 7.5px;
   border-left: 1px solid var(--dv-border);
   border-bottom: 1px solid var(--dv-border);
