@@ -2004,11 +2004,16 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     scrollToBottom();
   }
 
+  // Servers whose warning has been read and sent away, for this chat.
+  const mcpDismissed = new Set();
+
   // MCP servers the agent could not reach. The tool calls they would have offered
   // simply never happen, so without saying this the chat looks capable of things
   // it is not. One row per chat, above the composer, rebuilt as more turn up.
   function renderMcpProblems(servers) {
-    const list = servers || [];
+    // Once it has been read it is noise, so it can be sent away. A server that
+    // fails later is new news and says so again, and a session change starts over.
+    const list = (servers || []).filter((s) => !mcpDismissed.has(s.name));
     let box = document.getElementById("mcp-problems");
     if (!list.length) { if (box) box.remove(); return; }
     if (!box) {
@@ -2027,7 +2032,12 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       ? "The MCP server " + list[0].name + " did not start, so its tools are not available."
       : list.length + " MCP servers did not start, so their tools are not available: " +
         list.map((s) => s.name).join(", ");
-    head.append(icon, msg);
+    const close = actionBtn("codicon-close", "Dismiss", () => {
+      list.forEach((s) => mcpDismissed.add(s.name));
+      box.remove();
+    });
+    close.classList.add("mcp-dismiss");
+    head.append(icon, msg, close);
     box.appendChild(head);
     const detail = document.createElement("div");
     detail.className = "mcp-detail muted";
@@ -5998,6 +6008,10 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         break;
       case "clear":
         clearElsewhere();
+        // The warning belongs to the agent behind this chat, so it does not carry
+        // over to the next one, dismissed or not.
+        renderMcpProblems([]);
+        mcpDismissed.clear();
         workingEl = null;
         // Any prior load is over: drop the replay freeze before this clear
         // rebuilds the thread (a new clear{loading} re-arms it just below).

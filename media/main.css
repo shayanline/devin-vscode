@@ -1954,6 +1954,11 @@ body {
   color: var(--vscode-editorWarning-foreground, #cca700);
 }
 
+.mcp-card .error-head .mcp-dismiss {
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+
 .mcp-detail {
   margin-top: var(--dv-space-2);
   font-size: var(--dv-fs-s);

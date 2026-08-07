@@ -38,7 +38,7 @@ Moving between sessions and surfaces, and keeping what you had typed.
 - A run of tools says what it did, not "Used N tools".
 - "Used N references" folds like every other section, chevron and all.
 - A folded plan names the item being worked on, not just how many are done.
-- An MCP server that will not start is named in the chat, with what it said.
+- An MCP server that will not start is named in the chat, and can be dismissed.
 - A session that fails to open names the MCP servers that stopped it.
 - A finished turn says how long it took, with what it cost on hover.
 - A command shows the output it is producing, not just its exit code.
