@@ -3311,6 +3311,17 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
 
   // A search says what was looked for and where, on the row itself: the term and
   // the directory are the whole story, so there is nothing to unfold.
+  // A command as one line of label, following VS Code's buildCommandDisplayText in
+  // runInTerminalHelpers.ts: undo the escaping artefacts, put a multi line command
+  // on one line, and stop at 80 characters. A hard limit rather than letting the
+  // panel decide, so a run of chained commands cannot take the whole row and the
+  // rows stay a scannable column.
+  const COMMAND_DISPLAY_MAX = 80;
+  function commandDisplayText(cmd) {
+    const flat = String(cmd).replace(/\\(["'/])/g, "$1").replace(/\r\n|\r|\n/g, " ");
+    return flat.length > COMMAND_DISPLAY_MAX ? flat.slice(0, COMMAND_DISPLAY_MAX - 3) + "..." : flat;
+  }
+
   function searchLine(d) {
     const raw = d.rawInput;
     if (!raw || typeof raw !== "object") return null;
@@ -3446,19 +3457,10 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         verb.className = "tool-verb";
         verb.textContent = d.status === "in_progress" || d.status === "pending" ? "Running" : "Ran";
         const code = document.createElement("code");
-        code.className = "hljs tool-label-code";
-        // The row is one line. A command can be a whole heredoc, and putting all of
-        // it here grew the row to a dozen lines with the chevron adrift in the
-        // middle of it. Only the first line goes in the row; the rest is the Input
-        // section, which is what expanding it is for.
-        const lines = cmd.split("\n");
-        code.innerHTML = renderShell(lines[0]);
-        if (lines.length > 1) {
-          const more = document.createElement("span");
-          more.className = "tool-label-more";
-          more.textContent = "\u2026";
-          code.appendChild(more);
-        }
+        // Plain text, not highlighted: on the row the command is a label, and VS
+        // Code only colours it in the block you get by expanding it.
+        code.className = "tool-label-code";
+        code.textContent = commandDisplayText(cmd);
         entry.label.append(verb, code);
         entry.node.querySelector(".dv-collapsible-header").title = cmd;
       } else if (search) {
