@@ -66,6 +66,7 @@ Moving between sessions and surfaces, and keeping what you had typed.
 - Its output opens itself only while it runs, and closes again when it passes.
 - A message typed while a chat is opening waits for it instead of vanishing.
 - Keeping a change then editing again diffs that edit, not the whole session.
+- Keep all and Undo all mark every edit in the transcript, not just one.
 - Changes waiting to be reviewed survive a window reload, counts included.
 - Reopening a chat no longer recounts every edit it ever made.
 - Files and images staged in the composer survive leaving the chat.

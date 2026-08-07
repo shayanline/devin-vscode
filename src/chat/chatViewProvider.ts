@@ -216,6 +216,7 @@ export class ChatController implements AcpHost {
   private implicitEnabled = true;
   private implicitTimer?: NodeJS.Timeout;
   private changeListSub?: vscode.Disposable;
+  private changeResolveSub?: vscode.Disposable;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -229,6 +230,12 @@ export class ChatController implements AcpHost {
     private readonly surfaces?: SurfaceHost
   ) {
     this.changeListSub = this.changes.onDidChangeList(() => this.postWorkingSet());
+    // Keeping or undoing a change is answered by the tracker, not by the button
+    // that asked: "Keep all" and the Source Control view resolve files nobody
+    // clicked, and the edit rows for those have to say so too.
+    this.changeResolveSub = this.changes.onDidResolve((e) =>
+      this.post({ type: "changesResolved", paths: e.paths, action: e.action })
+    );
     this.implicitEnabled = this.cfg().get<boolean>("implicitContext.enabled", true);
     // Keep the implicit "current file" pill in sync with the active editor and
     // its selection (the latter debounced, since selection changes fire often).
@@ -533,6 +540,8 @@ export class ChatController implements AcpHost {
     this.loading.clear();
     this.changeListSub?.dispose();
     this.changeListSub = undefined;
+    this.changeResolveSub?.dispose();
+    this.changeResolveSub = undefined;
     for (const d of this.ownDisposables) {
       try { d.dispose(); } catch { /* ignore */ }
     }
