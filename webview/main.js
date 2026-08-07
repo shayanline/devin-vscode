@@ -3319,7 +3319,12 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   const COMMAND_DISPLAY_MAX = 80;
   function commandDisplayText(cmd) {
     const flat = String(cmd).replace(/\\(["'/])/g, "$1").replace(/\r\n|\r|\n/g, " ");
-    return flat.length > COMMAND_DISPLAY_MAX ? flat.slice(0, COMMAND_DISPLAY_MAX - 3) + "..." : flat;
+    // Drop a leading "cd <dir> &&", as VS Code's extractCdPrefix does: the row is
+    // for the command, and the path it was run in is the least interesting half of
+    // it, while being long enough to push the command itself off the end.
+    const cd = /^cd ([^\s]+) &&\s+(.+)$/.exec(flat);
+    const shown = cd ? cd[2] : flat;
+    return shown.length > COMMAND_DISPLAY_MAX ? shown.slice(0, COMMAND_DISPLAY_MAX - 3) + "..." : shown;
   }
 
   function searchLine(d) {
@@ -3397,7 +3402,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     if (m.kind) d.kind = m.kind;
     if (m.meta) d.meta = Object.assign(d.meta || {}, m.meta);
     if (m.status) d.status = m.status;
-    if (m.rawInput !== undefined) d.rawInput = m.rawInput;
+    // An update that carries no arguments sends null rather than leaving them out,
+    // so taking it at face value would erase the command the row is named after.
+    if (m.rawInput !== undefined && m.rawInput !== null) d.rawInput = m.rawInput;
     if (m.terminalId) d.terminalId = m.terminalId;
     if (Array.isArray(m.content) && m.content.length) d.content = m.content;
     if (Array.isArray(m.locations) && m.locations.length) d.locations = m.locations;
@@ -3723,7 +3730,11 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       if (u != null) { body.appendChild(toolSummaryLine("Fetch", String(u), String(u))); inputShown = true; hasContent = true; }
     }
 
-    const textItems = (d.content || []).filter((c) => c.type === "text" && c.text);
+    // A replayed command hands back the command itself, as the shell script it
+    // was sent as, and that is not output: rendering it made every reloaded row
+    // show its own input twice, once as the command and once as the result.
+    const ran = d.kind === "execute" ? String(toolCommandStr(d.rawInput) || "").trim() : "";
+    const textItems = (d.content || []).filter((c) => c.type === "text" && c.text && !(ran && c.text.trim() === ran));
     if (textItems.length) {
       hasContent = true;
       const text = textItems.map((c) => c.text).join("\n");

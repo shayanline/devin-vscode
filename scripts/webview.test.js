@@ -1610,6 +1610,60 @@ test("a long chain of commands is cut to a scannable length", async () => {
   assert.strictEqual(h.errors().length, 0);
 });
 
+test("a reloaded command does not report its own input as its output", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  // How a replayed run arrives: the command comes back as the script it was sent
+  // as, which is not output. Rendering it showed every old row its input twice.
+  const cmd = "npm test -- --coverage";
+  h.post({
+    type: "toolCall",
+    id: "r1",
+    kind: "execute",
+    status: "completed",
+    rawInput: { command: cmd },
+    content: [{ type: "text", text: cmd }]
+  });
+  await h.settle(20);
+
+  const body = h.thread().querySelector(".tool-body");
+  assert.strictEqual(body.querySelectorAll("pre").length, 0, "the command is not also the result");
+  assert.strictEqual(h.thread().querySelector(".tool-command code").textContent, cmd, "it is still the command");
+
+  // Real output is still shown.
+  h.post({ type: "toolCallUpdate", id: "r1", content: [{ type: "text", text: "2 passing" }] });
+  await h.settle(20);
+  assert.match(h.thread().querySelector(".tool-body pre").textContent, /2 passing/);
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a command's row drops the cd that got it there", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({
+    type: "toolCall",
+    id: "cd1",
+    kind: "execute",
+    status: "completed",
+    rawInput: { command: "cd /Users/shayan/VSCode/devin-vscode && npm test" }
+  });
+  await h.settle(20);
+
+  // VS Code's extractCdPrefix: the row is for the command, not for the path it
+  // was run in, which is long enough to push the command off the end.
+  assert.strictEqual(h.thread().querySelector(".tool .tool-label-code").textContent, "npm test");
+  assert.strictEqual(
+    h.thread().querySelector(".tool-command code").textContent,
+    "cd /Users/shayan/VSCode/devin-vscode && npm test",
+    "expanding it still shows what actually ran"
+  );
+  assert.strictEqual(h.errors().length, 0);
+});
+
 test("a listing is grouped by folder, not a wall of pills", async () => {
   const h = createHarness();
   h.post({ type: "ready" });
