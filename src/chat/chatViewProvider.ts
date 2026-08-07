@@ -24,6 +24,7 @@ import { TerminalManager } from "../acp/terminal";
 import { DevinSession, listSessions } from "../session/sessionList";
 import { SessionStore } from "../session/sessionStore";
 import { ChangeTracker } from "../diff/changeTracker";
+import { paintedReplay, recordPainted } from "./transcriptLog";
 import { StatusBar } from "../ui/statusBar";
 import { checkHealth, CliHealth, loginShellEnv } from "../cli/locate";
 import { cachedFamilies, familyOf, listModelFamilies, ModelFamily } from "../cli/models";
@@ -62,10 +63,16 @@ interface Runtime {
   // The prompt in flight, if any. A session can change surface mid turn, and the
   // surface it lands on has to be the one that ends it.
   turn?: Promise<PromptResult>;
-  // Set when a session arrived on this surface mid turn. Its transcript could not
-  // be replayed then (loading over a live channel aborts the running prompt), so
-  // it is replayed as soon as the turn ends.
+  // Set when a session arrived on this surface mid turn and its own record of the
+  // transcript was incomplete, so the rest is fetched from the CLI once the turn
+  // ends and the channel is free.
   needsReplay?: boolean;
+  // Everything this session has painted into a transcript, in order, so a chat
+  // that moves surface can be rebuilt on the new one. The CLI cannot be asked for
+  // it mid turn: `session/load` over a live channel kills the running prompt.
+  log: Record<string, unknown>[];
+  // False once the oldest entries were dropped, which makes a rebuild partial.
+  logFull: boolean;
   // Messages the user submitted while a turn was in flight. The blocks (implicit
   // context + attachments + text) are snapshotted at queue time; the host sends
   // them in order as the session frees up (VS Code's chat queue).
@@ -580,11 +587,16 @@ export class ChatController implements AcpHost {
     }
     this.post({ type: "body", body: "thread" });
     if (rt.busy) {
-      // Nothing can be replayed while the prompt is running, so the transcript
-      // starts at the move and is filled in the moment the turn ends.
-      rt.needsReplay = true;
-      this.post({ type: "clear" });
-      this.post({ type: "moved", from: transfer.from, partial: true });
+      // A running turn cannot be replayed by the agent (loading over a live
+      // channel kills the prompt), so the chat brings its own transcript with it.
+      if (rt.log.length) {
+        this.replayLog(rt);
+      } else {
+        this.post({ type: "clear" });
+      }
+      // Only what the record could not hold is worth asking the CLI for later.
+      rt.needsReplay = !rt.logFull;
+      this.post({ type: "moved", from: transfer.from, partial: !rt.logFull });
       await this.activateSession(rt.id);
     } else {
       await this.doLoadSession(rt.id);
@@ -653,6 +665,8 @@ export class ChatController implements AcpHost {
       pending: [],
       queued: [],
       bgBuffer: [],
+      log: [],
+      logFull: true,
       subagentSpawns: [],
       subagentIds: new Map()
     };
@@ -1426,6 +1440,10 @@ export class ChatController implements AcpHost {
     if (already) {
       already.bgBuffer = [];
       already.needsReplay = false;
+      // The transcript is about to be rebuilt from the agent, so the record of
+      // what is painted starts again with it.
+      already.log = [];
+      already.logFull = true;
     }
     // "Waking session…" while a fresh acp spins up; a live one loads instantly.
     this.post({ type: "clear", loading: true, waking: !already });
@@ -2419,6 +2437,7 @@ export class ChatController implements AcpHost {
     }
 
     const sent = rt;
+    this.record(sent, { type: "userMessage", text });
     // For a fresh chat the message was already rendered above; only echo it here
     // for a send within an existing (visible) session.
     if (!startNew) {
@@ -2603,6 +2622,25 @@ export class ChatController implements AcpHost {
   // Replay a backgrounded session's buffered stream into the (now visible)
   // transcript and clear it, so returning shows the progress the turn made while
   // it was not on screen.
+  private record(rt: Runtime, payload: Record<string, unknown>): void {
+    if (recordPainted(rt.log, payload)) {
+      rt.logFull = false;
+    }
+  }
+
+  // Rebuild a transcript from what this session has already painted. This is how
+  // a chat keeps its history when it moves surface mid turn, when asking the agent
+  // for it would abort the turn.
+  private replayLog(rt: Runtime): void {
+    this.post({ type: "clear", loading: true });
+    for (const payload of paintedReplay(rt.log)) {
+      this.post(payload);
+    }
+    this.post({ type: "loaded" });
+    // The log is a superset of anything buffered while the session was hidden.
+    rt.bgBuffer = [];
+  }
+
   private flushBgBuffer(rt: Runtime): void {
     if (!rt.bgBuffer.length) {
       return;
@@ -2890,6 +2928,7 @@ export class ChatController implements AcpHost {
     if (!rt) {
       return;
     }
+    this.record(rt, payload);
     // The visible session streams straight into the transcript. This includes an
     // active session/load replay (rt.replaying), which is how a reload paints its
     // history; a silent background wake is suppressed (its cached view is shown).
