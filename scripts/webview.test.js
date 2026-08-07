@@ -1676,6 +1676,39 @@ test("a skipped plan entry renders struck through with a slash icon", async () =
   assert.strictEqual(h.errors().length, 0);
 });
 
+test("a folded plan says where it has got to, not just how far", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "plan", entries: [
+    { content: "Read the auth module", status: "completed" },
+    { content: "Extract the token service", status: "in_progress" },
+    { content: "Run the tests", status: "pending" }
+  ] });
+  await h.settle(10);
+
+  const widget = h.document.getElementById("todo-widget");
+  assert.ok(widget._ctrl.isCollapsed(), "it folds itself once work is under way");
+  assert.strictEqual(widget.querySelector(".plan-count").textContent, "1/3");
+  assert.strictEqual(
+    widget.querySelector(".plan-at").textContent,
+    "Extract the token service",
+    "and names the item being worked on, so a plan that stops moving reads as stale"
+  );
+
+  // Nothing under way: it names what is waiting instead.
+  h.post({ type: "plan", entries: [
+    { content: "Read the auth module", status: "completed" },
+    { content: "Extract the token service", status: "pending" }
+  ] });
+  await h.settle(10);
+  const at = widget.querySelector(".plan-at");
+  assert.strictEqual(at.textContent, "Extract the token service");
+  assert.ok(at.classList.contains("plan-at-next"), "marked as what is next rather than what is happening");
+  assert.strictEqual(h.errors().length, 0);
+});
+
 test("the plan remembers a manual collapse for the next run in the session", async () => {
   const h = createHarness();
   h.post({ type: "ready" });

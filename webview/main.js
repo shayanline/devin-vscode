@@ -2637,14 +2637,27 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       title.textContent = "Plan";
       const count = document.createElement("span");
       count.className = "plan-count";
+      // Folded, the plan is a header and nothing else, so it has to say where the
+      // agent is: a bare "2/13" for the rest of a long turn reads as stuck.
+      const at = document.createElement("span");
+      at.className = "plan-at";
       ctrl.header.appendChild(chev);
       ctrl.header.appendChild(title);
       ctrl.header.appendChild(count);
+      ctrl.header.appendChild(at);
       el.todoWidget.appendChild(ctrl.root);
       el.todoWidget._ctrl = ctrl;
       el.todoWidget._count = count;
+      el.todoWidget._at = at;
     }
     el.todoWidget._count.textContent = done + "/" + entries.length;
+    // The item being worked on, or the next one waiting, so the folded header says
+    // where the plan has got to rather than only how far.
+    const here = entries.find((e) => e.status === "in_progress")
+      || entries.find((e) => !e.status || e.status === "pending");
+    el.todoWidget._at.textContent = here ? here.content : "";
+    el.todoWidget._at.title = here ? here.content : "";
+    el.todoWidget._at.classList.toggle("plan-at-next", !!here && here.status !== "in_progress");
     ctrl.body.innerHTML = "";
     entries.forEach((e) => ctrl.body.appendChild(planRow(e)));
     // Honour a remembered manual choice; otherwise auto-collapse once work is
