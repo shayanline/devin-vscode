@@ -15,14 +15,19 @@ Moving between sessions and surfaces, and keeping what you had typed.
 ### Highlights
 - Move a chat between the side panel and an editor tab, live agent and all.
 - A chat open on another surface is marked, and offers to show or move it.
-- Closing a detached tab asks: keep it open, move it to the panel, or stop it.
+- Closing a detached tab asks: reopen, move it to the panel, or stop it.
 - The sessions panel docks on the right by default, or the left, from a setting.
 - Drag the panel by its own header to move it to the other side.
 - Reloading the window puts you back in the chat you were reading.
 - An unsent prompt is kept per chat, through switches, reloads and restarts.
 - Answers given to a question, "Other" text included, survive leaving a session.
 - Enter walks the questions and submits the last one, Shift+Enter for a line.
+- A permission prompt now shows the command it is asking you to allow.
+- Waiting on a subagent reads as agent work, naming the agent and the wait.
+- Reasoning blocks, subagents and agent waits lead with their own icon.
+- The header no longer narrates the tool that is running.
 - Keeping a change no longer draws its diff as if the whole file were new.
+- A restore no longer winds a kept file back further than the checkpoint.
 - A pending question is no longer duplicated, or left over another chat.
 - The question and permission trays scroll instead of hiding the transcript.
 - Switching sessions keeps each chat's plan, changed files and context ring.

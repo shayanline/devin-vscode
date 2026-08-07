@@ -453,15 +453,6 @@ body {
   flex: 1;
 }
 
-#status {
-  font-size: 0.85em;
-  opacity: 0.7;
-  max-width: 55%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 /* Body */
 #body {
   flex: 1;
@@ -2054,6 +2045,12 @@ body {
 
 .thinking > .dv-collapsible-header {
   font-size: var(--dv-fs-s);
+}
+
+.thinking-glyph {
+  flex: 0 0 auto;
+  font-size: 14px;
+  opacity: 0.85;
 }
 
 /* Label hugs its text so the chevron reveals right at the text's edge (not the
@@ -4518,8 +4515,8 @@ body.dv-resizing #sessions-resizer {
 }
 
 /* With the panel on the right, its toggle belongs at the far end of the header,
-   past the terminate button: [terminate] | [panel]. Everything else is order 0,
-   so these two are the only ones that need moving. */
+   past the thread controls: [detach] [terminate] | [panel]. Everything else is
+   order 0, so these two are the only ones that need moving. */
 #chat[data-panel-side="right"] #header-divider {
   order: 1;
 }

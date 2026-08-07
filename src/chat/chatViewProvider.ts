@@ -3064,11 +3064,22 @@ export class ChatController implements AcpHost {
   requestPermission(params: RequestPermissionParams): Promise<RequestPermissionResult> {
     const rt = this.runtimeBySessionId(params.sessionId);
     const requestId = `perm-${++ChatController.permissionSeq}`;
+    const tc = params.toolCall || ({} as RequestPermissionParams["toolCall"]);
+    // Devin asks about a command without a title, putting the command itself in
+    // `_meta`. Without it the widget could only say "a tool", which is not enough
+    // to answer: the user has to see what would run.
+    const command = typeof tc._meta?.["cognition.ai/editableCommand"] === "string"
+      ? (tc._meta["cognition.ai/editableCommand"] as string).trim()
+      : undefined;
     const payload = {
       type: "permission",
       requestId,
-      title: params.toolCall?.title || "Devin wants to run a tool",
-      kind: params.toolCall?.kind,
+      title: tc.title || (command ? "Devin wants to run a command" : "Devin wants to run a tool"),
+      kind: tc.kind,
+      command,
+      toolCallId: tc.toolCallId,
+      content: tc.content,
+      locations: tc.locations,
       options: params.options
     };
     if (rt) {

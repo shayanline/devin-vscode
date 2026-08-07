@@ -27,17 +27,17 @@
       <button id="list-refresh-btn" class="icon-btn hidden" title="Refresh sessions"><i class="codicon codicon-refresh"></i></button>
       <button id="title-btn" class="title-btn"><span id="title-code" class="session-code hidden"></span><span id="chat-title">Chat</span></button>
       <span class="spacer"></span>
-      <span id="status"></span>
       <!-- List-mode right cluster -->
       <div id="new-session-dd" class="hidden"></div>
       <button id="list-search-btn" class="icon-btn hidden" title="Search sessions"><i class="codicon codicon-search"></i></button>
       <button id="list-filter-btn" class="icon-btn hidden" title="Filter sessions"><i class="codicon codicon-list-filter"></i></button>
       <button id="settings-btn" class="icon-btn hidden" title="Devin settings"><i class="codicon codicon-gear"></i></button>
-      <!-- Thread-mode right cluster -->
-      <button id="terminate-btn" class="icon-btn hidden" title="Terminate this session (stop its process)"></button>
+      <!-- Thread-mode right cluster. Moving the chat comes before stopping it:
+           terminate stays next to the panel toggle at the far end. -->
       <!-- Moves this chat between the side panel and an editor tab, carrying the
            live agent with it. -->
       <button id="detach-btn" class="icon-btn hidden"></button>
+      <button id="terminate-btn" class="icon-btn hidden" title="Terminate this session (stop its process)"></button>
     </div>
 
     <div id="body">
