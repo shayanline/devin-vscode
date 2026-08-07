@@ -2459,13 +2459,20 @@ body {
 }
 
 .tool .tool-label-code {
+  display: inline;
   padding: 0;
   background: none;
   font-family: var(--vscode-editor-font-family);
   font-size: 0.95em;
-  white-space: pre;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  /* The row never grows past one line, whatever the command is: the label clips
+     it, so this must not wrap or preserve its own line breaks. */
+  white-space: nowrap;
+}
+
+/* A command that carries on past its first line says so. */
+.tool-label-more {
+  opacity: 0.7;
+  margin-left: 2px;
 }
 
 /* A file row (read / deleted / moved) opens the file itself, so it reads as a
