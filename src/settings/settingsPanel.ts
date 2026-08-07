@@ -7,6 +7,9 @@ import {
   ConfigScope,
   loadConfigFile,
   mcpOauthDir,
+  windsurfDir,
+  windsurfMcpConfigPath,
+  writeMcpServer,
   readConfig,
   setConfigPath,
   stripJsonComments,
@@ -157,7 +160,7 @@ export class SettingsPanel {
   // on every refresh, and re-attaches only when the set of directories that
   // exist has changed (a .devin folder may be created while the panel is open).
   private startWatching(): void {
-    const dirs = [userConfigDir(), ...this.folders().map((f) => path.join(f.path, ".devin"))]
+    const dirs = [userConfigDir(), windsurfDir(), ...this.folders().map((f) => path.join(f.path, ".devin"))]
       .filter((d) => {
         try { return fs.existsSync(d); } catch { return false; }
       });
@@ -268,6 +271,13 @@ export class SettingsPanel {
           await this.sendData();
           return;
         case "settings:mcpAdd": {
+          // A server that belongs to another tool is written straight into that
+          // tool's file: `devin mcp` only ever edits Devin's own.
+          if (msg.source === "windsurf") {
+            this.writeWindsurf(msg.options as McpAddOptions);
+            await this.sendData();
+            return;
+          }
           const r = await mcpAdd(this.ctxFor(msg.root), msg.options as McpAddOptions);
           if (!r.ok) {
             void vscode.window.showErrorMessage("Add MCP server failed: " + (r.err || "unknown error"));
@@ -276,6 +286,11 @@ export class SettingsPanel {
           return;
         }
         case "settings:mcpVerb": {
+          if (msg.source === "windsurf" && msg.verb !== "login" && msg.verb !== "logout") {
+            this.windsurfVerb(String(msg.verb), String(msg.name));
+            await this.sendData();
+            return;
+          }
           const r = await mcpVerb(this.ctxFor(msg.root), msg.verb, String(msg.name), msg.scope ? scopeOf(msg.scope) : undefined);
           if (!r.ok) {
             void vscode.window.showErrorMessage(`MCP ${msg.verb} failed: ` + (r.err || "unknown error"));
@@ -364,6 +379,41 @@ export class SettingsPanel {
     if (choice !== "Reset") return;
     for (const k of keys) setConfigPath(scope, k, undefined, root || this.root());
     await this.sendData();
+  }
+
+  // Remove, or turn off without losing, a server in Windsurf's config. Windsurf
+  // and the CLI both read `disabled`, so turning one off here turns it off in
+  // both, which is the point: it is one list of servers, not two.
+  private windsurfVerb(verb: string, name: string): void {
+    const file = windsurfMcpConfigPath();
+    const servers = readConfig(file).mcpServers as Record<string, unknown> | undefined;
+    const def = servers && typeof servers === "object" ? servers[name] : undefined;
+    if (!def || typeof def !== "object") {
+      return;
+    }
+    if (verb === "remove") {
+      writeMcpServer(file, name, null);
+      return;
+    }
+    const next = { ...(def as Record<string, unknown>) };
+    if (verb === "disable") {
+      next.disabled = true;
+    } else {
+      delete next.disabled;
+      delete next.enabled;
+    }
+    writeMcpServer(file, name, next);
+  }
+
+  // Add a server to Windsurf's config, in the shape Windsurf itself writes.
+  private writeWindsurf(o: McpAddOptions): void {
+    const def: Record<string, unknown> = o.url
+      ? { serverUrl: o.url }
+      : { command: o.command || "", args: o.args || [] };
+    if (o.env && Object.keys(o.env).length) {
+      def.env = o.env;
+    }
+    writeMcpServer(windsurfMcpConfigPath(), o.name, def);
   }
 
   private mcpLoginTerminal(name: string, root?: string): void {
@@ -695,7 +745,7 @@ export class SettingsPanel {
     const out: unknown[] = [];
     const seen = new Set<string>();
     const auth = this.mcpLoggedIn();
-    const addFrom = (file: string) => {
+    const addFrom = (file: string, source = "devin") => {
       if (!fs.existsSync(file)) return;
       const servers = readConfig(file).mcpServers;
       if (!servers || typeof servers !== "object") return;
@@ -703,11 +753,13 @@ export class SettingsPanel {
         if (seen.has(name)) continue;
         seen.add(name);
         const d = (def || {}) as Record<string, unknown>;
-        const transport = typeof d.type === "string" ? String(d.type) : (d.url ? "http" : "stdio");
-        const url = typeof d.url === "string" ? d.url : "";
+        // Windsurf writes an http server's address as `serverUrl`, so a server
+        // imported from it is not stdio just because it has no `url`.
+        const url = typeof d.url === "string" ? d.url : (typeof d.serverUrl === "string" ? d.serverUrl : "");
+        const transport = typeof d.type === "string" ? String(d.type) : (url ? "http" : "stdio");
         const loggedIn = (url && auth.urls.has(url)) || auth.names.has(name);
         out.push({
-          name, scope, transport, file,
+          name, scope, transport, file, source,
           // A safe, secret-free summary. Never expose command args or headers:
           // stdio args and tokens can contain secrets (see mcp get).
           detail: safeMcpDetail(url, d.command),
@@ -722,6 +774,9 @@ export class SettingsPanel {
     if (scope === "user") {
       addFrom(userMcpConfigPath());
       addFrom(userConfigPath());
+      // The CLI imports these, so this agent has them whether or not Devin was
+      // told about them. Showing them is the only way to know what is loaded.
+      addFrom(windsurfMcpConfigPath(), "windsurf");
     } else if (root) {
       addFrom(path.join(root, ".devin", "mcp_config.json"));
     }

@@ -1,0 +1,99 @@
+// Tests for src/settings/configService.ts, the only place the extension writes
+// a config file itself. Everything else goes through the `devin` CLI, which owns
+// its own files; this is what edits the ones it merely imports, so a mistake here
+// corrupts another tool's configuration rather than ours.
+//
+// It touches nothing but fs/os/path, so it loads outside VS Code with no stub.
+
+const test = require("node:test");
+const assert = require("node:assert");
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const esbuild = require("esbuild");
+
+const ROOT = path.resolve(__dirname, "..");
+const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "devin-config-"));
+
+const outfile = path.join(TMP, "configService.js");
+esbuild.buildSync({
+  entryPoints: [path.join(ROOT, "src/settings/configService.ts")],
+  outfile,
+  bundle: true,
+  platform: "node",
+  format: "cjs",
+  logLevel: "error"
+});
+const { writeMcpServer, windsurfMcpConfigPath, readConfig } = require(outfile);
+
+const serversIn = (file) => readConfig(file).mcpServers || {};
+
+test("Windsurf's config is found where Windsurf keeps it", () => {
+  const p = windsurfMcpConfigPath();
+  assert.strictEqual(path.basename(p), "mcp_config.json");
+  assert.ok(p.endsWith(path.join(".codeium", "windsurf", "mcp_config.json")), p);
+  assert.ok(p.startsWith(os.homedir()), "under the user's home, not the workspace");
+});
+
+test("a server can be added, turned off and removed in another tool's file", () => {
+  const file = path.join(TMP, "windsurf", "mcp_config.json");
+
+  // The file need not exist yet: Windsurf may never have been opened.
+  writeMcpServer(file, "godot-ai", { serverUrl: "http://127.0.0.1:8000/mcp" });
+  assert.deepStrictEqual(serversIn(file), { "godot-ai": { serverUrl: "http://127.0.0.1:8000/mcp" } });
+
+  // Adding a second leaves the first alone.
+  writeMcpServer(file, "fetch", { command: "docker", args: ["run", "-i", "--rm", "mcp/fetch"] });
+  assert.deepStrictEqual(Object.keys(serversIn(file)), ["godot-ai", "fetch"]);
+
+  // Turning one off keeps its definition, so it can be turned back on.
+  const off = { ...serversIn(file)["godot-ai"], disabled: true };
+  writeMcpServer(file, "godot-ai", off);
+  assert.deepStrictEqual(serversIn(file)["godot-ai"], { serverUrl: "http://127.0.0.1:8000/mcp", disabled: true });
+
+  writeMcpServer(file, "godot-ai", null);
+  assert.deepStrictEqual(Object.keys(serversIn(file)), ["fetch"], "removing one leaves the rest");
+});
+
+test("everything else in the file survives the edit", () => {
+  const file = path.join(TMP, "other", "mcp_config.json");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  // A real config carries keys we know nothing about, and a server we edit may
+  // carry its own: Windsurf stamps a `registry` on the ones it installed.
+  fs.writeFileSync(file, JSON.stringify({
+    someWindsurfSetting: { keep: true },
+    mcpServers: { "devin/fetch": { command: "docker", registry: "devin/fetch" } }
+  }, null, 2));
+
+  writeMcpServer(file, "devin/fetch", { command: "docker", registry: "devin/fetch", disabled: true });
+  const after = readConfig(file);
+  assert.deepStrictEqual(after.someWindsurfSetting, { keep: true }, "a setting we do not understand is not dropped");
+  assert.strictEqual(after.mcpServers["devin/fetch"].registry, "devin/fetch", "nor a field of the server itself");
+
+  writeMcpServer(file, "brand-new", { serverUrl: "https://example.com/mcp" });
+  assert.deepStrictEqual(readConfig(file).someWindsurfSetting, { keep: true });
+});
+
+test("a file that does not parse is refused, not overwritten", () => {
+  const file = path.join(TMP, "broken", "mcp_config.json");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const broken = '{ "mcpServers": { "a": { "url": "x" } }   <- someone was editing this';
+  fs.writeFileSync(file, broken);
+
+  // Reading answers {} for anything unparseable, which is right for showing a
+  // file and ruinous for writing one: the write would replace another tool's
+  // config with a document holding nothing but the new server.
+  assert.deepStrictEqual(readConfig(file), {});
+  assert.throws(() => writeMcpServer(file, "new", { serverUrl: "https://example.com" }), /not valid JSON/);
+  assert.strictEqual(fs.readFileSync(file, "utf8"), broken, "their file is untouched");
+});
+
+test("a file with comments keeps parsing, and can still be written", () => {
+  const file = path.join(TMP, "jsonc", "mcp_config.json");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, '{\n  // the fetch server\n  "mcpServers": { "fetch": { "command": "docker" } }\n}');
+  writeMcpServer(file, "other", { serverUrl: "https://example.com/mcp" });
+  assert.deepStrictEqual(Object.keys(serversIn(file)), ["fetch", "other"]);
+});
+
+test.after(() => fs.rmSync(TMP, { recursive: true, force: true }));

@@ -322,6 +322,30 @@ test("a disabled MCP server reads as switched off", () => {
   assert.ok(!on.classList.contains("disabled"));
 });
 
+test("a server Windsurf owns is listed apart, and managed in place", () => {
+  const h = createSettings();
+  h.openSection("MCP");
+  const titles = h.all(".settings-group-title").map((t) => h.text(t));
+  assert.ok(titles.includes("MCP servers from Windsurf"), "expected a group of its own: " + titles.join(", "));
+
+  // Devin's own servers stay in the first group, Windsurf's in the second.
+  const groups = h.all("#settings-content .settings-group");
+  const wind = groups.find((g) => h.text(g.querySelector(".settings-group-title")) === "MCP servers from Windsurf");
+  const names = [...wind.querySelectorAll(".settings-list-name")].map((n) => h.text(n));
+  assert.deepStrictEqual(names, ["godot-ai"]);
+  const own = groups.find((g) => h.text(g.querySelector(".settings-group-title")) === "MCP servers");
+  assert.ok(![...own.querySelectorAll(".settings-list-name")].some((n) => h.text(n) === "godot-ai"));
+
+  // The CLI cannot write another tool's config, so the row says where it belongs
+  // and the host writes the file itself.
+  const disable = [...wind.querySelectorAll(".settings-icon-btn")].find((b) => b.getAttribute("aria-label") === "Disable");
+  disable.click();
+  const msg = h.last("settings:mcpVerb");
+  assert.strictEqual(msg.source, "windsurf", "without this the CLI would be asked, and would fail");
+  assert.strictEqual(msg.name, "godot-ai");
+  assert.strictEqual(msg.verb, "disable");
+});
+
 test("an action that hands work to the host shows itself running", () => {
   const h = createSettings();
   h.openSection("MCP");
