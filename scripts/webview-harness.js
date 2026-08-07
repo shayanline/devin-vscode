@@ -16,7 +16,9 @@ const { JSDOM, VirtualConsole } = require("jsdom");
 
 const ROOT = path.resolve(__dirname, "..");
 
-function createHarness() {
+// `surface` mounts the page as the extension does: "view" is the side panel,
+// "editor" is a chat tab, which is one chat with no session list.
+function createHarness({ surface = "view" } = {}) {
   const bundlePath = path.join(ROOT, "dist", "webview.js");
   if (!fs.existsSync(bundlePath)) {
     throw new Error("dist/webview.js not found. Run `npm run compile` first.");
@@ -31,18 +33,20 @@ function createHarness() {
 
   const html =
     `<!DOCTYPE html><html><head></head>` +
-    `<body data-logo="logo.svg" data-model-icons="{}">${body}</body></html>`;
+    `<body data-logo="logo.svg" data-model-icons="{}" data-surface="${surface}">${body}</body></html>`;
   const dom = new JSDOM(html, { runScripts: "outside-only", pretendToBeVisual: true, virtualConsole });
   const { window } = dom;
 
   const posted = [];
+  // What the page has recorded for a reload (the chat a tab is holding).
+  let state;
   window.acquireVsCodeApi = () => ({
     // The real postMessage structured-clones to the host, which also strips the
     // jsdom realm's prototypes. JSON round-trip mirrors that so assertions with
     // deepStrictEqual see plain objects/arrays.
     postMessage: (m) => posted.push(JSON.parse(JSON.stringify(m))),
-    getState: () => undefined,
-    setState: () => {}
+    getState: () => state,
+    setState: (s) => { state = s; }
   });
 
   // The bundle is an IIFE; running it via the window's own Function constructor
@@ -64,6 +68,7 @@ function createHarness() {
     post,
     settle,
     thread,
+    state: () => state,
     reqTexts: () => [...thread().querySelectorAll(".req-text")].map((e) => e.textContent.trim()),
     respTexts: () => [...thread().querySelectorAll(".resp-text")].map((e) => e.textContent.trim()),
     // The webview posts { type: "webviewError" } whenever a message handler throws.

@@ -84,6 +84,12 @@
         "icon": "$(terminal)"
       },
       {
+        "command": "devin.renameTabSession",
+        "title": "Rename Session",
+        "category": "Devin",
+        "icon": "$(edit)"
+      },
+      {
         "command": "devin.showSessions",
         "title": "Show Sessions",
         "category": "Devin",
@@ -163,6 +169,16 @@
         {
           "command": "devin.openChangeDiff",
           "when": "false"
+        },
+        {
+          "command": "devin.renameTabSession",
+          "when": "false"
+        }
+      ],
+      "editor/title/context": [
+        {
+          "command": "devin.renameTabSession",
+          "when": "activeWebviewPanelId == 'devin.chatEditor'"
         }
       ],
       "scm/title": [
@@ -344,6 +360,19 @@
           ],
           "default": "right",
           "description": "Which side of the chat the docked sessions panel opens on. You can also drag the panel by its header to the other side."
+        },
+        "devin.sendWhileWorking": {
+          "type": "string",
+          "enum": [
+            "queue",
+            "stopAndSend"
+          ],
+          "enumDescriptions": [
+            "Send the message after the current request finishes",
+            "Stop what Devin is doing, then send the message"
+          ],
+          "default": "queue",
+          "description": "What Enter does with a message typed while Devin is working. The other action is always on Alt+Enter, and on the chevron beside Send."
         },
         "devin.extraArgs": {
           "type": "array",

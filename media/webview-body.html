@@ -23,8 +23,6 @@
       <button id="panel-toggle" class="icon-btn hidden"></button>
       <span id="header-divider" class="header-divider hidden"></span>
       <button id="history-btn" class="icon-btn hidden" title="Back to sessions"><i class="codicon codicon-arrow-left"></i></button>
-      <!-- Refresh sits in front of the "Sessions" title on the list page. -->
-      <button id="list-refresh-btn" class="icon-btn hidden" title="Refresh sessions"><i class="codicon codicon-refresh"></i></button>
       <button id="title-btn" class="title-btn"><span id="title-code" class="session-code hidden"></span><span id="chat-title">Chat</span></button>
       <span class="spacer"></span>
       <!-- List-mode right cluster -->
@@ -66,7 +64,12 @@
           </div>
           <div class="toolbar-right">
             <button id="usage" class="usage-ring hidden" title=""></button>
-            <button id="send" class="send-btn" title="Send (Enter)" disabled><i class="codicon codicon-newline"></i></button>
+            <!-- Send, and while Devin is working a split button: the primary half
+                 runs the default action, the chevron offers the other one. -->
+            <div id="send-group" class="send-group">
+              <button id="send" class="send-btn" title="Send (Enter)" disabled><i class="codicon codicon-newline"></i></button>
+              <button id="send-more" class="send-btn send-more hidden" title="More send options" aria-haspopup="true"><i class="codicon codicon-chevron-down"></i></button>
+            </div>
             <button id="stop" class="send-btn stop hidden" title="Stop"><i class="codicon codicon-stop-circle"></i></button>
           </div>
         </div>

@@ -14,8 +14,46 @@ Moving between sessions and surfaces, and keeping what you had typed.
 
 ### Highlights
 - Move a chat between the side panel and an editor tab, live agent and all.
-- A chat open on another surface is marked, and offers to show or move it.
-- Closing a detached tab asks: reopen, move it to the panel, or stop it.
+- A detached chat is only that chat: no session list, no back, no terminate.
+- An editor tab is named after the chat it holds, and follows a rename.
+- Rename a detached chat's session by right clicking its editor tab.
+- A tab restored after a window reload comes back to the chat it was holding.
+- A moved chat keeps the prompt you were part way through writing.
+- A question half answered keeps its answers when the chat changes surface.
+- A chat open on the other surface says so, and offers to bring it over.
+- A chat started in an editor tab shows in the side panel's list right away.
+- The session list keeps itself up to date, so the Refresh button is gone.
+- A chat started, renamed or deleted anywhere shows up on its own.
+- The New Session menu no longer repeats what its own button does.
+- An edit reads the same everywhere: one line with the file and its counts.
+- A created file carries the same pencil as an edited one, not a green tick.
+- An edit in a run of tools is its own row, not buried in a tool section.
+- A file the agent read is one line, and clicking it opens the file itself.
+- Clicking a file opens it even when it lives outside the workspace.
+- A search says what it looked for and where, in one line.
+- Typing while Devin works gives a split Send: queue it, or stop and send.
+- Alt+Enter takes the other action, and the chevron says what each one does.
+- A setting picks which of the two Enter does.
+- A run of tools says what it did, not "Used N tools".
+- A run keeps its edits and its reasoning together, under one summary.
+- A screenshot a tool took is shown beside the row, open or shut, and enlarges.
+- A command row reads "Ran" then the command, "Running" while it is going.
+- Files a tool pointed at (a search hit, a listing) are listed and open.
+- Reasoning part way through the work no longer splits it in two.
+- Closing a detached tab: cancel puts the tab back, and dismissing it is safe.
+- A command and what it printed read as an Input and Output pair.
+- A command titles its own row, highlighted, instead of a sentence about it.
+- Its output opens itself only while it runs, and closes again when it passes.
+- A message typed while a chat is opening waits for it instead of vanishing.
+- Keeping a change then editing again diffs that edit, not the whole session.
+- Files and images staged in the composer survive leaving the chat.
+- They survive a window reload too, and a chat started from the list keeps them.
+- Renaming a chat that is open in an editor tab now sticks.
+- A rename shows up everywhere at once, with no refresh.
+- A rename that fails says so instead of looking like it worked.
+- Moving a chat no longer leaves a "Continued from" note in the transcript.
+- A tab says when its agent has stopped: the next message starts it again.
+- Closing a detached tab asks first: stop it, move it to the panel, or cancel.
 - The sessions panel docks on the right by default, or the left, from a setting.
 - Drag the panel by its own header to move it to the other side.
 - Reloading the window puts you back in the chat you were reading.
@@ -45,6 +83,16 @@ Moving between sessions and surfaces, and keeping what you had typed.
 
 ### Under the hood
 - A moved chat hands over its live runtime: no process, lock or turn restarts.
+- A chat's page writes its draft and answers back before it changes surface.
+- Every surface is told when another one starts, moves, stops or renames a chat.
+- The CLI has no change feed, so its session store is watched for the rest.
+- Only a list on screen is re-listed, since each listing runs `devin list`.
+- A reloaded transcript can tell a created file from a changed one.
+- ACP cannot steer a running prompt, so "stop and send" heads the queue.
+- Staged files live in extension storage, per chat: base64 is not settings data.
+- Resource links and embedded resources in a tool result are no longer dropped.
+- A rename goes through the agent holding the chat, and outlives a stale list.
+- An agent whose tab closed mid decision now stops with the rest on the way out.
 - File edits are tracked per session, so a panel lists only its own chat's.
 - Kept and undone files keep their original text, for open diffs and restores.
 - Drafts live in workspace state, answers ride on the pending request.

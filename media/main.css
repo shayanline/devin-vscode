@@ -657,15 +657,48 @@ body {
   cursor: default;
 }
 
-/* While a turn runs, the Send button becomes a Queue button: a secondary
-   treatment so it reads as "add to the queue" next to the Stop button. */
-.send-btn.queueing {
-  background: var(--vscode-button-secondaryBackground);
-  color: var(--vscode-button-secondaryForeground);
+
+/* While Devin is working, Send becomes a split button, VS Code's
+   monaco-dropdown-with-default: the primary half runs the default action and the
+   chevron beside it offers the other. Idle, it is just Send, so the group only
+   joins the two halves once the chevron is there. */
+.send-group {
+  display: inline-flex;
+  align-items: stretch;
+  flex: 0 0 auto;
 }
 
-.send-btn.queueing:hover:not(:disabled) {
+.send-more {
+  width: 16px;
+  border-radius: 0 var(--dv-radius-sm) var(--dv-radius-sm) 0;
+}
+
+.send-more .codicon {
+  font-size: 12px;
+}
+
+/* A message sent into a running turn is a secondary action next to Stop, so the
+   whole control takes the secondary treatment, both halves alike. It carries its
+   own border, the way the New Session split button does: a secondary fill alone
+   is the same colour as the input it sits in. */
+.send-group.split {
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: var(--dv-radius-sm);
+  overflow: hidden;
+}
+
+.send-group.split .send-btn {
+  background: var(--vscode-button-secondaryBackground);
+  color: var(--vscode-button-secondaryForeground);
+  border-radius: 0;
+}
+
+.send-group.split .send-btn:hover:not(:disabled) {
   background: var(--vscode-button-secondaryHoverBackground);
+}
+
+.send-group.split .send-more {
+  border-left: 1px solid var(--vscode-panel-border);
 }
 
 /* Stop is VS Code's cancel action: a plain icon-foreground button (not filled),
@@ -1817,6 +1850,16 @@ body {
   border-color: var(--vscode-focusBorder);
 }
 
+/* The empty state's own actions (a chat that is open on the other surface), as
+   real buttons rather than prompt chips: they act on the chat, not the composer. */
+.welcome-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--dv-space-2);
+  margin-top: 12px;
+}
+
 /* Drag and drop hint, sitting below the prompts as a quieter footnote. */
 .welcome-hint {
   max-width: 320px;
@@ -2392,6 +2435,32 @@ body {
   cursor: default;
 }
 
+/* A command titles its own row, so the code sits inline in the header without a
+   block's padding or background of its own. */
+.tool .tool-verb + .tool-label-code {
+  margin-left: 5px;
+}
+
+.tool .tool-label-code {
+  padding: 0;
+  background: none;
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.95em;
+  white-space: pre;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* A file row (read / deleted / moved) opens the file itself, so it reads as a
+   link rather than as a section that refuses to open. */
+.tool[data-opens-file] > .dv-collapsible-header {
+  cursor: pointer;
+}
+
+.tool[data-opens-file]:hover .label .tool-detail {
+  text-decoration: underline;
+}
+
 .tool.tool-empty .tool-chevron {
   display: none;
 }
@@ -2413,8 +2482,9 @@ body {
   height: auto;
 }
 
-/* A run of consecutive tool calls collapses under one disclosure header
-   ("Used N tools"), like VS Code's grouped tool card. */
+/* A run of consecutive tool calls collapses under one disclosure header that says
+   what the run did ("Read 3 files and ran npm test"), like VS Code's chat. The
+   header carries no icon of its own: the summary is the whole row. */
 .tool-group {
   font-size: 0.92em;
 }
@@ -2928,15 +2998,35 @@ body {
   opacity: 0.7;
 }
 
-/* Images produced in a response or a tool result. */
-.resp-image,
-.tool-image {
+/* A picture in the transcript, from a response or a tool: a thumbnail that opens
+   to full size on a click, as VS Code shows them. */
+.dv-thumb {
   display: block;
-  max-width: 100%;
+  max-width: 180px;
+  max-height: 80px;
   height: auto;
-  margin: var(--dv-space-3) 0;
+  margin: var(--dv-space-2) 0;
   border: 1px solid var(--dv-border);
   border-radius: var(--dv-radius-md);
+  cursor: zoom-in;
+  object-fit: cover;
+  object-position: top left;
+}
+
+.dv-thumb.expanded {
+  max-width: 100%;
+  max-height: none;
+  cursor: zoom-out;
+  object-fit: contain;
+}
+
+/* A tool's pictures sit between its row and its body, lined up with the row's
+   text so they read as that row's result. */
+.tool-media {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--dv-space-2);
+  padding-left: 20px;
 }
 
 /* File / symbol references as bordered pills (VS Code chat-codeblock-pill /
@@ -3543,15 +3633,6 @@ body.dv-resizing #sessions-resizer {
 .session-tool-btn.active {
   color: var(--vscode-focusBorder);
 }
-.session-tool-btn.spin .codicon {
-  animation: dv-tool-spin 0.6s linear infinite;
-}
-@keyframes dv-tool-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
 /* Status filter chips */
 .session-filter {
   display: flex;
@@ -4548,9 +4629,6 @@ body.dv-resizing #sessions-resizer {
 .icon-btn.active {
   color: var(--vscode-focusBorder);
 }
-.icon-btn.spin .codicon {
-  animation: dv-tool-spin 0.6s linear infinite;
-}
 
 /* New Session split button (webview-owned): the labelled half acts, the chevron
    beside it opens the menu. Secondary styled, not primary. */
@@ -4677,6 +4755,34 @@ body.dv-resizing #sessions-resizer {
 .dv-menu-item.radio:not(.checked) .dv-menu-check {
   opacity: 0;
 }
+
+/* A menu row that explains itself: the action, what it does underneath, and its
+   keystroke on the right, like VS Code's action widget rows. */
+.dv-menu-item.with-detail {
+  align-items: flex-start;
+  white-space: normal;
+}
+
+.dv-menu-item .dv-menu-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.dv-menu-item .dv-menu-detail {
+  color: var(--dv-dim);
+  font-size: 0.9em;
+  max-width: 260px;
+}
+
+.dv-menu-item .dv-menu-keys {
+  flex: 0 0 auto;
+  margin-left: 12px;
+  opacity: 0.7;
+  font-size: 0.9em;
+}
 .session-search-pop {
   width: 220px;
   padding: 5px 8px;
@@ -4694,9 +4800,9 @@ body.dv-resizing #sessions-resizer {
 
 
 
-/* A chat moved between the side panel and an editor tab keeps its own divider,
-   dimmer than a restored checkpoint since nothing was rewound. */
-.moved-row .restored-label {
+/* A chat whose agent has stopped says so, dimmer than a restored checkpoint
+   since nothing was rewound. */
+.ended-row .restored-label {
   color: var(--dv-dim);
   font-style: italic;
 }

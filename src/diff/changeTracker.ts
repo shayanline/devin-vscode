@@ -80,9 +80,15 @@ export class ChangeTracker
     const snap = this.snapshots.get(fsPath);
     if (snap) {
       snap.sessions.add(sessionId);
-      // Edited again after being kept or undone: back into the working set,
-      // still against the text the file had before Devin first touched it.
-      snap.resolved = false;
+      if (snap.resolved) {
+        // Kept or undone, and now edited again. The review starts from what was
+        // kept, not from what the file was before Devin first touched it: keeping
+        // the older text made the next diff show every change of the session over
+        // again, including the ones already dealt with. `oldText` is what the file
+        // held immediately before this edit, which is exactly that baseline.
+        snap.original = oldText;
+        snap.resolved = false;
+      }
     } else {
       this.snapshots.set(fsPath, { original: oldText, sessions: new Set([sessionId]) });
     }
