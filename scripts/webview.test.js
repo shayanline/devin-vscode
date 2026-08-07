@@ -1706,6 +1706,45 @@ test("a skipped plan entry renders struck through with a slash icon", async () =
   assert.strictEqual(h.errors().length, 0);
 });
 
+test("a command shows the output it is producing, not just its exit code", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({
+    type: "toolCall",
+    id: "c1",
+    kind: "execute",
+    status: "in_progress",
+    rawInput: { command: "npm test" },
+    terminalId: "term-1"
+  });
+  h.post({ type: "terminalOutput", terminalId: "term-1", output: "running 12 tests\n" });
+  await h.settle(20);
+
+  const pre = h.thread().querySelector('pre[data-terminal="term-1"]');
+  assert.ok(pre, "the row shows the terminal it is running in");
+  assert.match(pre.textContent, /running 12 tests/, "and the output as it arrives");
+
+  // Devin reports only the exit code when it finishes, which the output already
+  // ends with, so it must not be repeated as a second Output block.
+  h.post({ type: "terminalOutput", terminalId: "term-1", output: "running 12 tests\nall passed\n", exitStatus: { exitCode: 0 } });
+  h.post({
+    type: "toolCallUpdate",
+    id: "c1",
+    status: "completed",
+    content: [{ type: "text", text: "Exited with code 0" }]
+  });
+  await h.settle(20);
+
+  const live = h.thread().querySelector('pre[data-terminal="term-1"]');
+  assert.match(live.textContent, /all passed/);
+  assert.match(live.textContent, /exited code 0/);
+  const outputs = [...h.thread().querySelectorAll(".tool-section-title")].filter((t) => t.textContent === "Output");
+  assert.strictEqual(outputs.length, 1, "one Output block, not two saying the same thing");
+  assert.strictEqual(h.errors().length, 0);
+});
+
 test("an MCP server that would not start is said out loud", async () => {
   const h = createHarness();
   h.post({ type: "ready" });
