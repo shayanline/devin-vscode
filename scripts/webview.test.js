@@ -1550,6 +1550,36 @@ test("an executed command reads as Input and Output", async () => {
   assert.strictEqual(h.errors().length, 0);
 });
 
+test("a command spanning many lines still takes one row", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  const heredoc = "python3 - <<'PY'\nimport re\nprint(re)\nPY";
+  h.post({
+    type: "toolCall",
+    id: "c2",
+    title: "Run a script",
+    kind: "execute",
+    status: "completed",
+    rawInput: { command: heredoc },
+    content: [{ type: "text", text: "done" }]
+  });
+  await h.settle(20);
+
+  const label = h.thread().querySelector(".tool .tool-label-code");
+  assert.strictEqual(label.textContent, "python3 - <<'PY'\u2026", "the row shows the first line and says there is more");
+  assert.ok(!label.textContent.includes("import re"), "the rest does not grow the row");
+  assert.strictEqual(
+    h.thread().querySelector(".tool .dv-collapsible-header").title,
+    heredoc,
+    "the whole command is still there on hover"
+  );
+  // And in full where it belongs, in the Input section.
+  assert.strictEqual(h.thread().querySelector(".tool-command code").textContent, heredoc);
+  assert.strictEqual(h.errors().length, 0);
+});
+
 test("a command's output opens itself only while it is still running", async () => {
   const h = createHarness();
   h.post({ type: "ready" });

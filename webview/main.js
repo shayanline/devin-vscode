@@ -3338,7 +3338,18 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         verb.textContent = d.status === "in_progress" || d.status === "pending" ? "Running" : "Ran";
         const code = document.createElement("code");
         code.className = "hljs tool-label-code";
-        code.innerHTML = renderShell(cmd);
+        // The row is one line. A command can be a whole heredoc, and putting all of
+        // it here grew the row to a dozen lines with the chevron adrift in the
+        // middle of it. Only the first line goes in the row; the rest is the Input
+        // section, which is what expanding it is for.
+        const lines = cmd.split("\n");
+        code.innerHTML = renderShell(lines[0]);
+        if (lines.length > 1) {
+          const more = document.createElement("span");
+          more.className = "tool-label-more";
+          more.textContent = "\u2026";
+          code.appendChild(more);
+        }
         entry.label.append(verb, code);
         entry.node.querySelector(".dv-collapsible-header").title = cmd;
       } else {

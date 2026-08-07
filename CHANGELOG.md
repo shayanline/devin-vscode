@@ -46,6 +46,7 @@ Moving between sessions and surfaces, and keeping what you had typed.
 - Closing a detached tab: cancel puts the tab back, and dismissing it is safe.
 - A command and what it printed read as an Input and Output pair.
 - A command titles its own row, highlighted, instead of a sentence about it.
+- A command of many lines takes one row, with the rest under Input.
 - Its output opens itself only while it runs, and closes again when it passes.
 - A message typed while a chat is opening waits for it instead of vanishing.
 - Keeping a change then editing again diffs that edit, not the whole session.
