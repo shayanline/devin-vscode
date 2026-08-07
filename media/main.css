@@ -2707,10 +2707,10 @@ body {
   content: "";
   position: absolute;
   left: 7px;
-  /* Reaches into the space between rows so consecutive segments meet, making one
-     line down the run rather than a dash per row. */
-  top: -3px;
-  bottom: -3px;
+  /* Exactly the row, as VS Code draws each segment (top:0, bottom:0). Reaching
+     past the row made consecutive segments overlap, drawing the join twice. */
+  top: 0;
+  bottom: 0;
   width: 1px;
   background-color: var(--dv-border);
   mask-image: linear-gradient(to bottom, #000 0 calc(var(--node-y) - 10px), transparent calc(var(--node-y) - 10px) calc(var(--node-y) + 10px), #000 calc(var(--node-y) + 10px) 100%);
@@ -2733,23 +2733,24 @@ body {
   background: none;
 }
 
-/* Curved connector dropping out of the group header into the first node, the
-   same corner the reasoning chain and a subagent's timeline use. */
-.tool-group:not(.dv-collapsed) .tool-group-body::before {
+/* Curved connector from the header into the first node, in the shape and size VS
+   Code uses (chatThinkingContent.css: 5px wide, 16px tall, 5px radius, dropping
+   from the header's bottom edge). It hangs off the group rather than off the body
+   so the collapse wrapper cannot clip it. */
+.tool-group:not(.dv-collapsed)::after {
   content: "";
   position: absolute;
-  left: 9.5px;
-  top: -6px;
-  height: 18px;
-  width: 7.5px;
+  left: 18px;
+  top: 20px;
+  height: 16px;
+  width: 5px;
   border-left: 1px solid var(--dv-border);
   border-bottom: 1px solid var(--dv-border);
   border-bottom-left-radius: 5px;
 }
 
-/* Headroom so the curved connector is not clipped by the collapse wrapper. */
-.tool-group .dv-collapsible-anim-inner {
-  padding-top: var(--dv-space-4);
+.tool-group {
+  position: relative;
 }
 
 .tool-body {
