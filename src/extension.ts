@@ -31,6 +31,10 @@ export function activate(context: vscode.ExtensionContext): void {
   const store = new SessionStore(context.workspaceState);
   const statusBar = new StatusBar();
   context.subscriptions.push(output, changes.register(), statusBar);
+  // A change waiting to be reviewed has nothing to do with the agent that made it,
+  // so it survives a window reload: without this the diffs and their Keep and Undo
+  // were forgotten, and the next edit looked like a brand new set of changes.
+  void changes.useStore(context.storageUri || context.globalStorageUri);
 
   manager = new ChatManager(context, store, changes, statusBar, output);
   const chat = manager;

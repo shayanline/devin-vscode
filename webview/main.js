@@ -4329,6 +4329,13 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // cached so its collapsed state survives the frequent re-renders during a turn.
   function renderWorkingSet(files) {
     if (!files || files.length === 0) { hideWorkingSet(); return; }
+    // Counts sent with the files fill the tally, so a working set restored after a
+    // window reload shows its line counts rather than bare names.
+    files.forEach((f) => {
+      if (f.path && !wsCounts.has(f.path) && (f.added || f.removed)) {
+        wsCounts.set(f.path, { added: f.added || 0, removed: f.removed || 0 });
+      }
+    });
     wsFiles = files;
     el.workingSet.classList.remove("hidden");
     let ctrl = el.workingSet._ctrl;
