@@ -2352,6 +2352,25 @@ body {
   color: var(--dv-dim);
   font-size: var(--dv-fs-s);
   font-variant-numeric: tabular-nums;
+  flex: 0 0 auto;
+}
+
+/* Where the plan has got to, shown on the header so a folded plan is not just a
+   count. It takes the rest of the row and gives way before the count does. */
+.plan-at {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dv-dim);
+  font-size: var(--dv-fs-s);
+}
+
+/* Nothing is under way, so the header names what is waiting instead. */
+.plan-at-next {
+  opacity: 0.75;
+  font-style: italic;
 }
 
 .plan-chevron {

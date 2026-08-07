@@ -37,6 +37,7 @@ Moving between sessions and surfaces, and keeping what you had typed.
 - A setting picks which of the two Enter does.
 - A run of tools says what it did, not "Used N tools".
 - "Used N references" folds like every other section, chevron and all.
+- A folded plan names the item being worked on, not just how many are done.
 - A run keeps its edits and its reasoning together, under one summary.
 - A screenshot a tool took is shown beside the row, open or shut, and enlarges.
 - A command row reads "Ran" then the command, "Running" while it is going.
