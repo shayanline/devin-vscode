@@ -1821,11 +1821,18 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     }
     footer.classList.toggle("is-last", turns[turns.length - 1] === turn);
     // Right-aligned "time • model" detail, matching VS Code's chat-footer-details.
+    // What the turn actually cost hangs off it: the CLI reports its own figures
+    // (how long, how many ACUs, how many messages), so they are shown on hover
+    // rather than guessed at or crammed into the row.
     if (caps.verbose && !turn.replayed && turn.completedAt) {
       const det = document.createElement("span");
       det.className = "chat-footer-details";
       det.appendChild(timeFlip("", turn.completedAt));
+      if (turn.tookMs) det.appendChild(document.createTextNode("  \u2022  " + fmtDuration(turn.tookMs)));
       if (turn.model) det.appendChild(document.createTextNode("  \u2022  " + turn.model));
+      if (turn.stats && turn.stats.length) {
+        det.title = turn.stats.map((d) => d.label + ": " + d.value).join("\n");
+      }
       footer.appendChild(det);
     }
     turn.footer = footer;
@@ -1957,6 +1964,48 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     row.appendChild(right);
     el.thread.appendChild(row);
     scrollToBottom();
+  }
+
+  // MCP servers the agent could not reach. The tool calls they would have offered
+  // simply never happen, so without saying this the chat looks capable of things
+  // it is not. One row per chat, above the composer, rebuilt as more turn up.
+  function renderMcpProblems(servers) {
+    const list = servers || [];
+    let box = document.getElementById("mcp-problems");
+    if (!list.length) { if (box) box.remove(); return; }
+    if (!box) {
+      box = document.createElement("div");
+      box.id = "mcp-problems";
+      box.className = "tray-card mcp-card";
+      el.permissionTray.parentElement.insertBefore(box, el.permissionTray);
+    }
+    box.innerHTML = "";
+    const head = document.createElement("div");
+    head.className = "error-head";
+    const icon = document.createElement("i");
+    icon.className = "codicon codicon-warning";
+    const msg = document.createElement("span");
+    msg.textContent = list.length === 1
+      ? "The MCP server " + list[0].name + " did not start, so its tools are not available."
+      : list.length + " MCP servers did not start, so their tools are not available: " +
+        list.map((s) => s.name).join(", ");
+    head.append(icon, msg);
+    box.appendChild(head);
+    const detail = document.createElement("div");
+    detail.className = "mcp-detail muted";
+    detail.textContent = list.map((s) => s.message).join("\n");
+    box.appendChild(detail);
+  }
+
+  // What the turn cost, from the CLI's own figures. It supplies the labels, so the
+  // footer shows what it was given rather than a wording of our own.
+  function applyTurnStats(m) {
+    const turn = currentTurn || turns[turns.length - 1];
+    if (!turn) return;
+    turn.stats = (m.dimensions || []).filter((d) => d.label && d.value);
+    if (m.model) turn.model = m.model;
+    if (m.totalTimeMs) turn.tookMs = m.totalTimeMs;
+    if (turn.footer) buildTurnFooter(turn);
   }
 
   // The agent behind this chat has stopped: it was terminated, it exited after
@@ -5596,6 +5645,14 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   }
 
   // Short local time (HH:MM) for turn timestamps.
+  // How long a turn took, as the CLI measured it.
+  function fmtDuration(ms) {
+    const s = ms / 1000;
+    if (s < 60) return (s < 10 ? s.toFixed(1) : Math.round(s)) + "s";
+    const m = Math.floor(s / 60);
+    return m + "m " + Math.round(s - m * 60) + "s";
+  }
+
   function fmtTime(ts) {
     try { return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
     catch { return ""; }
@@ -5908,6 +5965,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       case "queued": renderQueued(m.items); break;
       case "attachments": renderAttachments(m.items); break;
       case "draft": applyDraft(m); break;
+      case "mcpProblems": renderMcpProblems(m.servers); break;
+      case "turnStats": applyTurnStats(m); break;
       case "elsewhere": hideBoot(); renderElsewhere(m); break;
       case "sessionEnded": renderSessionEnded(); break;
       case "flushState": flushState(); break;

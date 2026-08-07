@@ -1706,6 +1706,67 @@ test("a skipped plan entry renders struck through with a slash icon", async () =
   assert.strictEqual(h.errors().length, 0);
 });
 
+test("an MCP server that would not start is said out loud", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({
+    type: "mcpProblems",
+    servers: [{ name: "godot-ai", message: "MCP server 'godot-ai' connection failed: refused" }]
+  });
+  await h.settle(10);
+
+  const card = h.document.getElementById("mcp-problems");
+  assert.ok(card, "a chat missing half its tools has to say so");
+  assert.match(card.textContent, /godot-ai did not start/);
+  assert.match(card.textContent, /connection failed: refused/, "with what the CLI actually said");
+
+  // A second one folds into the same row rather than stacking.
+  h.post({
+    type: "mcpProblems",
+    servers: [
+      { name: "godot-ai", message: "MCP server 'godot-ai' connection failed: refused" },
+      { name: "telegram", message: "Failed to connect to MCP server 'telegram'" }
+    ]
+  });
+  await h.settle(10);
+  assert.strictEqual(h.document.querySelectorAll("#mcp-problems").length, 1);
+  assert.match(h.document.getElementById("mcp-problems").textContent, /2 MCP servers did not start/);
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a finished turn shows what it cost, in the CLI's own figures", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "capabilities", verbose: true });
+  h.post({ type: "userMessage", text: "do the thing" });
+  h.post({ type: "assistantChunk", text: "done" });
+  h.post({ type: "assistantEnd" });
+  h.post({ type: "busy", value: false });
+  h.post({
+    type: "turnStats",
+    model: "Claude Opus 5 High",
+    totalTimeMs: 6605,
+    dimensions: [
+      { label: "ACUs spent", value: "0.11 ACUs" },
+      { label: "Agent messages", value: "3 messages" }
+    ]
+  });
+  await h.settle(20);
+
+  const det = h.thread().querySelector(".chat-footer-details");
+  assert.ok(det, "the footer carries the detail");
+  assert.match(det.textContent, /6\.6s/, "how long it took, as the CLI measured it");
+  assert.match(det.textContent, /Claude Opus 5 High/);
+  assert.match(det.title, /ACUs spent: 0\.11 ACUs/, "and what it cost, on hover");
+  assert.match(det.title, /Agent messages: 3 messages/);
+  assert.strictEqual(h.errors().length, 0);
+});
+
 test("a folded plan says where it has got to, not just how far", async () => {
   const h = createHarness();
   h.post({ type: "ready" });
