@@ -2649,6 +2649,66 @@ body {
   align-items: flex-start;
 }
 
+/* A listing, grouped by folder: one row per file, the folder named once above
+   them, and the whole list scrolls instead of pushing the turn off the screen. */
+.file-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  max-height: 260px;
+  overflow-y: auto;
+  padding: var(--dv-space-2);
+  border: 1px solid var(--dv-border);
+  border-radius: var(--dv-radius-sm);
+}
+
+.file-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 2px 2px;
+  color: var(--dv-dim);
+  font-size: var(--dv-fs-s);
+}
+
+.file-group-head:not(:first-child) {
+  margin-top: var(--dv-space-2);
+}
+
+.file-group-icon {
+  font-size: 13px;
+  flex: 0 0 auto;
+}
+
+.file-group-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.file-group-count {
+  margin-left: auto;
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.8;
+}
+
+/* Inside a group a file is a row, not a pill: no border, full width, and it
+   highlights like a list item. */
+.file-groups .file-group-row {
+  border-color: transparent;
+  background: none;
+  margin-left: 16px;
+  padding: 2px 4px;
+  border-radius: 3px;
+}
+
+.file-groups .file-group-row:hover {
+  background: var(--vscode-list-hoverBackground);
+  border-color: transparent;
+}
+
 /* Command block for a run tool: a dim $ prompt + the command, VS Code's
    terminal command style, instead of the raw argument JSON. */
 .tool-command {

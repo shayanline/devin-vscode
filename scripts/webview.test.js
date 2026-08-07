@@ -1552,6 +1552,54 @@ test("an executed command is the command and what it printed, uncaptioned", asyn
   assert.strictEqual(h.errors().length, 0);
 });
 
+test("a listing is grouped by folder, not a wall of pills", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "capabilities", root: "/repo" });
+  const files = [
+    "/repo/src/acp/client.ts", "/repo/src/acp/types.ts", "/repo/src/acp/terminal.ts",
+    "/repo/src/chat/chatManager.ts", "/repo/src/chat/chatViewProvider.ts",
+    "/repo/src/cli/locate.ts", "/repo/src/extension.ts"
+  ];
+  h.post({
+    type: "toolCall",
+    id: "g1",
+    kind: "search",
+    status: "completed",
+    rawInput: { query: "src/**/*.ts" },
+    content: files.map((path) => ({ type: "link", path }))
+  });
+  await h.settle(20);
+
+  const heads = [...h.thread().querySelectorAll(".file-group-name")].map((n) => n.textContent);
+  assert.deepStrictEqual(heads, ["src/acp", "src/chat", "src/cli", "src"], "one heading per folder, in the order found");
+  const counts = [...h.thread().querySelectorAll(".file-group-count")].map((n) => n.textContent);
+  assert.deepStrictEqual(counts, ["3", "2", "1", "1"], "each says how many are in it");
+  assert.strictEqual(h.thread().querySelectorAll(".file-group-row").length, 7, "every file is still a row that opens");
+  assert.strictEqual(h.thread().querySelectorAll(".tool-files").length, 0, "and none of it is pills");
+
+  // The row carries what was looked for and how many turned up, so the body does
+  // not repeat it, and the raw argument fallback must not dump it back as JSON.
+  const row = [...h.thread().querySelectorAll(".tool .label")].find((l) => l.textContent.includes("src/**/*.ts"));
+  assert.match(row.textContent, /src\/\*\*\/\*\.ts, 7 results/);
+  assert.strictEqual(h.thread().querySelectorAll(".tool-summary").length, 0, "the query is not said twice");
+  assert.strictEqual(h.thread().querySelectorAll(".tool-body pre").length, 0, "and never as raw JSON");
+
+  // A handful stays as pills: grouping four files under one heading is worse.
+  h.post({
+    type: "toolCall",
+    id: "g2",
+    kind: "search",
+    status: "completed",
+    content: files.slice(0, 3).map((path) => ({ type: "link", path }))
+  });
+  await h.settle(20);
+  assert.strictEqual(h.thread().querySelectorAll(".tool-files").length, 1, "a short result is still pills");
+  assert.strictEqual(h.errors().length, 0);
+});
+
 test("a command spanning many lines still takes one row", async () => {
   const h = createHarness();
   h.post({ type: "ready" });

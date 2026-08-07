@@ -3362,7 +3362,11 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     const plain = !(d.content || []).some((c) => c.type === "image" || c.type === "terminal");
     const fileLine = plain && FILE_LINE_KINDS.includes(d.kind) ? toolFileTarget(d) : null;
     const search = plain && !fileLine && d.kind === "search" ? searchLine(d) : null;
-    if (fileLine || search) {
+    // A search that found files has something to show, so it keeps its body. Only
+    // one that came back with nothing to list stays a single line: emptying the
+    // body regardless threw away every result a glob had just gone and found.
+    const hits = (d.content || []).filter((c) => c.type === "link" && c.path).length;
+    if (fileLine || (search && !hits)) {
       const head = entry.node.querySelector(".dv-collapsible-header");
       setToolLabel(entry.label, toolVerb(d, fileLine ? "Read" : "Search") + " " +
         (fileLine ? baseName(fileLine.path) : search));
@@ -3402,6 +3406,11 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         }
         entry.label.append(verb, code);
         entry.node.querySelector(".dv-collapsible-header").title = cmd;
+      } else if (search) {
+        // What it looked for, and how many it found, the way VS Code's chat titles
+        // a search. The results themselves are in the body.
+        setToolLabel(entry.label, toolVerb(d, "Search") + " " + search +
+          ", " + hits + (hits === 1 ? " result" : " results"));
       } else {
         setToolLabel(entry.label, d.title);
       }
@@ -3645,7 +3654,13 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       if (cmd) { body.appendChild(toolCommandBlock(cmd, false)); inputShown = true; hasContent = true; }
     } else if (d.kind === "search") {
       const q = toolField(isObj ? raw : null, ["query", "pattern", "search", "regex", "q", "text"]);
-      if (q != null) { body.appendChild(toolSummaryLine("Search", String(q))); inputShown = true; hasContent = true; }
+      // Unless the row already says what was searched for, which it does whenever
+      // the search found something to list.
+      const onRow = searchLine(d) && (d.content || []).some((c) => c.type === "link" && c.path);
+      if (q != null && !onRow) { body.appendChild(toolSummaryLine("Search", String(q))); hasContent = true; }
+      // Either way the input has been shown, on the row if not in the body, so the
+      // raw argument fallback must not dump the query back out as JSON.
+      if (q != null) inputShown = true;
     } else if (d.kind === "fetch") {
       const u = toolField(isObj ? raw : null, ["url", "uri", "href"]);
       if (u != null) { body.appendChild(toolSummaryLine("Fetch", String(u), String(u))); inputShown = true; hasContent = true; }
@@ -3718,10 +3733,11 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     }
     if (fileRows.length) {
       hasContent = true;
-      const sec = document.createElement("div");
-      sec.className = "tool-section tool-files";
-      fileRows.forEach((f) => sec.appendChild(filePill(f)));
-      body.appendChild(sec);
+      // A handful of files reads well as pills. A listing does not: forty of them
+      // wrap into a wall, and a pill only carries the file name, so half of them
+      // say "index.ts" and none of them say where. Past a handful they become rows
+      // grouped under the folder they are in.
+      body.appendChild(fileRows.length > 6 ? fileGroups(fileRows) : filePills(fileRows));
     }
 
     // Raw argument JSON, only as a fallback: we did not show a friendly input
@@ -3793,6 +3809,59 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // A file reference rendered as a VS Code style pill: a file-type icon, the
   // name, and (for edits) +added / -removed line counts. Clicking opens a diff
   // for edited files or the file at a line otherwise.
+  function filePills(rows) {
+    const sec = document.createElement("div");
+    sec.className = "tool-section tool-files";
+    rows.forEach((f) => sec.appendChild(filePill(f)));
+    return sec;
+  }
+
+  // The folder a result is in, relative to the workspace, which is what makes one
+  // "index.ts" among forty of them tell you anything.
+  function folderOf(p) {
+    const parts = String(p).split(/[\\/]/);
+    parts.pop();
+    let dir = parts.join("/");
+    const root = caps.root ? String(caps.root).replace(/[\\/]+$/, "") : "";
+    if (root && dir.startsWith(root)) dir = dir.slice(root.length).replace(/^[\\/]+/, "");
+    return dir || ".";
+  }
+
+  // A listing, as rows grouped by folder. The folder is named once, each file is
+  // one row under it, and the whole thing scrolls rather than pushing the rest of
+  // the turn off the screen.
+  function fileGroups(rows) {
+    const sec = document.createElement("div");
+    sec.className = "tool-section file-groups";
+    const byDir = new Map();
+    rows.forEach((f) => {
+      const dir = folderOf(f.path);
+      if (!byDir.has(dir)) byDir.set(dir, []);
+      byDir.get(dir).push(f);
+    });
+    [...byDir].forEach(([dir, files]) => {
+      const head = document.createElement("div");
+      head.className = "file-group-head";
+      const icon = document.createElement("i");
+      icon.className = "codicon codicon-folder file-group-icon";
+      const name = document.createElement("span");
+      name.className = "file-group-name";
+      name.textContent = dir;
+      name.title = dir;
+      const count = document.createElement("span");
+      count.className = "file-group-count";
+      count.textContent = files.length;
+      head.append(icon, name, count);
+      sec.appendChild(head);
+      files.forEach((f) => {
+        const row = filePill(f);
+        row.classList.add("file-group-row");
+        sec.appendChild(row);
+      });
+    });
+    return sec;
+  }
+
   function filePill(f) {
     const link = document.createElement("a");
     link.className = "file-change";
@@ -6008,6 +6077,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       case "interrupted": hideBoot(); renderInterrupted(); break;
       case "capabilities":
         caps = Object.assign(caps, {
+          root: m.root || caps.root,
           revert: !!m.revert,
           subagentControl: !!m.subagentControl,
           editRequests: m.editRequests || caps.editRequests,
