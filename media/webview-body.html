@@ -64,13 +64,14 @@
           </div>
           <div class="toolbar-right">
             <button id="usage" class="usage-ring hidden" title=""></button>
-            <!-- Send, and while Devin is working a split button: the primary half
-                 runs the default action, the chevron offers the other one. -->
+            <!-- Stop comes first, then Send, which is the order VS Code's chat
+                 puts them in: the send control stays at the far end whether it is
+                 the blue Send or, while Devin works, the split queue button. -->
+            <button id="stop" class="send-btn stop hidden" title="Stop"><i class="codicon codicon-stop-circle"></i></button>
             <div id="send-group" class="send-group">
               <button id="send" class="send-btn" title="Send (Enter)" disabled><i class="codicon codicon-newline"></i></button>
               <button id="send-more" class="send-btn send-more hidden" title="More send options" aria-haspopup="true"><i class="codicon codicon-chevron-down"></i></button>
             </div>
-            <button id="stop" class="send-btn stop hidden" title="Stop"><i class="codicon codicon-stop-circle"></i></button>
           </div>
         </div>
       </div>

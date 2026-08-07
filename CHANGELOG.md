@@ -32,6 +32,7 @@ Moving between sessions and surfaces, and keeping what you had typed.
 - Clicking a file opens it even when it lives outside the workspace.
 - A search says what it looked for and where, in one line.
 - Typing while Devin works gives a split Send: queue it, or stop and send.
+- It sits after Stop at the far end, flat, and keeps the send glyph.
 - Alt+Enter takes the other action, and the chevron says what each one does.
 - A setting picks which of the two Enter does.
 - A run of tools says what it did, not "Used N tools".
