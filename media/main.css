@@ -2476,10 +2476,13 @@ body {
   margin-left: 5px;
 }
 
+/* The command sits in its own chip, the way VS Code's chat sets a terminal
+   command apart from the "Ran" that introduces it. */
 .tool .tool-label-code {
   display: inline;
-  padding: 0;
-  background: none;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--vscode-textCodeBlock-background);
   font-family: var(--vscode-editor-font-family);
   font-size: 0.95em;
   /* The row never grows past one line, whatever the command is: the label clips
@@ -2663,7 +2666,8 @@ body {
 }
 
 .tool-command-prompt {
-  color: var(--vscode-terminal-ansiGreen, #3fb950);
+  color: var(--vscode-icon-foreground, var(--vscode-foreground));
+  opacity: 0.6;
   user-select: none;
   flex: 0 0 auto;
   font-weight: 600;
@@ -3011,9 +3015,12 @@ body {
   font-size: var(--dv-fs-s);
 }
 
+/* Plain, like every other action glyph in the transcript. Colour in VS Code's
+   chat means a state (running, failed) or a count (+14 -2), and an edit that
+   happened is neither. */
 .edit-pill-status {
   font-size: 12px;
-  color: var(--vscode-testing-iconPassed, var(--vscode-charts-green, #3fb950));
+  color: var(--vscode-icon-foreground, var(--vscode-foreground));
   flex: 0 0 auto;
 }
 
