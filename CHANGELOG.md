@@ -41,6 +41,7 @@ Moving between sessions and surfaces, and keeping what you had typed.
 - An MCP server that will not start is named in the chat, with what it said.
 - A session that fails to open names the MCP servers that stopped it.
 - A finished turn says how long it took, with what it cost on hover.
+- A command shows the output it is producing, not just its exit code.
 - A run keeps its edits and its reasoning together, under one summary.
 - A screenshot a tool took is shown beside the row, open or shut, and enlarges.
 - A command row reads "Ran" then the command, "Running" while it is going.

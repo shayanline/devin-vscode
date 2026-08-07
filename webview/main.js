@@ -3332,6 +3332,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     if (m.meta) d.meta = Object.assign(d.meta || {}, m.meta);
     if (m.status) d.status = m.status;
     if (m.rawInput !== undefined) d.rawInput = m.rawInput;
+    if (m.terminalId) d.terminalId = m.terminalId;
     if (Array.isArray(m.content) && m.content.length) d.content = m.content;
     if (Array.isArray(m.locations) && m.locations.length) d.locations = m.locations;
 
@@ -3651,7 +3652,12 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     if (textItems.length) {
       hasContent = true;
       const text = textItems.map((c) => c.text).join("\n");
-      if (info && (info.type === "web_search" || info.type === "webfetch")) {
+      // A command whose terminal we hold reports nothing but its exit code, and the
+      // output below already ends with it. Two Output blocks saying the same thing
+      // is one too many.
+      if (d.terminalId && /^Exited with code /.test(text.trim())) {
+        // nothing: the terminal section carries it
+      } else if (info && (info.type === "web_search" || info.type === "webfetch")) {
         // The result is a short summary ("Found 5 results", "Fetched N chars"),
         // so a dim caption reads better than a heavyweight Result block.
         const note = document.createElement("div");
@@ -3666,7 +3672,12 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       }
     }
 
+    // Devin's tool call never mentions the terminal it asked the client to open,
+    // and once the command exits it reports only "Exited with code 0". The host
+    // matches the terminal to the call, so the output the command actually
+    // produced can be shown here, live, instead of nothing at all.
     const termItems = (d.content || []).filter((c) => c.type === "terminal" && c.terminalId);
+    if (!termItems.length && d.terminalId) termItems.push({ terminalId: d.terminalId });
     if (termItems.length) {
       hasContent = true;
       termItems.forEach((c) => {

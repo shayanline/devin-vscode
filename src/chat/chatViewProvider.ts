@@ -89,6 +89,9 @@ interface Runtime {
   // output stream, so without this a broken server is invisible in the panel and
   // an aborted session load can only guess at the reason.
   mcpProblems: Map<string, string>;
+  // Terminals we have started but not yet matched to the tool call that asked for
+  // them, newest last.
+  pendingTerminals: { id: string; command: string }[];
   // Subagent bookkeeping. A subagent is announced twice: first as the parent's
   // `run_subagent` tool call (which owns the rendered block) and then under its
   // own agentId, which is what all its later work is tagged with. These map one
@@ -759,6 +762,7 @@ export class ChatController implements AcpHost {
       log: [],
       logFull: true,
       mcpProblems: new Map(),
+      pendingTerminals: [],
       subagentSpawns: [],
       subagentIds: new Map()
     };
@@ -3394,7 +3398,8 @@ export class ChatController implements AcpHost {
           status: u.status || "pending",
           rawInput: u.rawInput,
           content: normalizeToolContent(u.content),
-          locations: normalizeLocations(u.locations)
+          locations: normalizeLocations(u.locations),
+          terminalId: claimTerminal(rt, u)
         });
         this.recordDiffs(u, rt);
         return;
@@ -3691,7 +3696,19 @@ export class ChatController implements AcpHost {
   // routed to the runtime that owns the session.
   createTerminal(params: CreateTerminalParams): { terminalId: string } {
     const rt = this.runtimeBySessionId(params.sessionId);
-    return rt ? rt.terminals.create(params) : { terminalId: "" };
+    if (!rt) {
+      return { terminalId: "" };
+    }
+    const created = rt.terminals.create(params);
+    // The tool call for this command lands a moment later and says nothing about
+    // the terminal, so the row would have no way to show the output arriving. We
+    // are the ones running it, so hold on to the command and hand the id to the
+    // row that matches.
+    rt.pendingTerminals.push({ id: created.terminalId, command: params.command });
+    if (rt.pendingTerminals.length > 8) {
+      rt.pendingTerminals.shift();
+    }
+    return created;
   }
 
   terminalOutput(params: TerminalRef): { output: string; truncated: boolean; exitStatus: TerminalExitStatus | null } {
@@ -3948,6 +3965,22 @@ function textOf(content: any): string {
     return content.resource.text;
   }
   return "";
+}
+
+// The terminal this tool call is running in. The agent asks the client to create
+// one, then only reads it once it has exited, so the call itself never mentions
+// it: the command is the only thing they share. Matching on it lets the row show
+// the output as it arrives, which is ours to show because we are running it.
+function claimTerminal(rt: Runtime | undefined, u: { rawInput?: Record<string, unknown> }): string | undefined {
+  const command = typeof u.rawInput?.command === "string" ? u.rawInput.command : "";
+  if (!rt || !command) {
+    return undefined;
+  }
+  const i = rt.pendingTerminals.findIndex((t) => t.command === command);
+  if (i < 0) {
+    return undefined;
+  }
+  return rt.pendingTerminals.splice(i, 1)[0].id;
 }
 
 // One of the CLI's own response figures as text: it supplies the number, the unit
