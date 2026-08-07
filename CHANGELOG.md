@@ -37,6 +37,7 @@ Moving between sessions and surfaces, and keeping what you had typed.
 - A setting picks which of the two Enter does.
 - A run of tools says what it did, not "Used N tools", in two clauses.
 - The rows of a run are chained, like the steps of a chain of thought.
+- A reopened command no longer repeats its input as its output.
 - "Used N references" folds like every other section, chevron and all.
 - A folded plan names the item being worked on, not just how many are done.
 - An MCP server that will not start is named in the chat, and can be dismissed.
@@ -46,6 +47,7 @@ Moving between sessions and surfaces, and keeping what you had typed.
 - An expanded command is the command and its output, without the captions.
 - The command on a row sits in its own chip, as VS Code's chat sets it.
 - A long command is cut short on the row, and left unhighlighted there.
+- A command's row drops the "cd" that got it there, and shows the command.
 - Action icons are plain: colour is for a state or a count, not an edit.
 - A search keeps the files it found, grouped by folder, instead of losing them.
 - A search row says what it looked for and how many it found.
