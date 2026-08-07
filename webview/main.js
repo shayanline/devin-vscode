@@ -2980,9 +2980,14 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     if (of.delete.length) clauses.push(["Deleted", thingsPhrase(of.delete, of.delete.length, "file")]);
     if (of.move.length) clauses.push(["Moved", thingsPhrase(of.move, of.move.length, "file")]);
     if (of.other.length) clauses.push(["Used", thingsPhrase([], of.other.length, "tool")]);
-    const parts = clauses.map(([verb, rest], i) => (i ? verb.toLowerCase() : verb) + (rest ? " " + rest : ""));
-    // A clause that already names two things carries its own "and", so the clauses
-    // are separated by commas instead: "Read a.ts and b.ts, searched for auth".
+    // Two clauses at most, joined with "and", which is what VS Code's chat does:
+    // "Updated 2 files and ran commands in terminal". Chaining every one of them
+    // made a header that ran past the width of the panel, taking its own chevron
+    // with it, and a summary that has to be read word by word is not a summary.
+    // The rest of what the run did is a click away, which is what the group is for.
+    const parts = clauses.slice(0, 2).map(([verb, rest], i) => (i ? verb.toLowerCase() : verb) + (rest ? " " + rest : ""));
+    // A clause that already names two things carries its own "and", so the pair is
+    // separated by a comma instead: "Read a.ts and b.ts, ran npm test".
     const phrase = parts.some((p) => / and /.test(p)) ? parts.join(", ") : listPhrase(parts);
     if (phrase) return phrase;
     // A run of nothing but reasoning: say that rather than counting tools.

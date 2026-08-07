@@ -1454,7 +1454,7 @@ test("a run of tools says what it did, not how many tools it used", async () => 
 
   h.post({ type: "toolCall", id: "t5", title: "Grep for auth", kind: "search", status: "completed", rawInput: { pattern: "auth", path: "/w/src" } });
   await h.settle(15);
-  assert.strictEqual(label(), "Read 3 files, searched for auth in w/src and ran npm test");
+  assert.strictEqual(label(), "Read 3 files and searched for auth in w/src");
 
   // A clause that already names two things carries its own "and", so the clauses
   // are separated by commas instead.
@@ -1466,6 +1466,9 @@ test("a run of tools says what it did, not how many tools it used", async () => 
   const labels = [...h.thread().querySelectorAll(".tool-group-label")].map((l) => l.textContent);
   assert.strictEqual(labels[1], "Read one.ts and two.ts, ran npm run build");
   assert.strictEqual(h.errors().length, 0);
+  // However much a run did, the summary is two clauses, as VS Code's chat keeps
+  // it: chaining all of them ran the header past the panel and off its chevron.
+  labels.forEach((l) => assert.ok(l.split(/, | and /).length <= 3, "at most two clauses: " + l));
 });
 
 test("a run holds its reasoning and its edits together, under one summary", async () => {
@@ -1489,7 +1492,7 @@ test("a run holds its reasoning and its edits together, under one summary", asyn
   assert.strictEqual(body.querySelectorAll(".thinking").length, 1, "and the reasoning between them");
   assert.strictEqual(
     groups[0].querySelector(".tool-group-label").textContent,
-    "Created new.ts, updated shared.ts and read plan.ts",
+    "Created new.ts and updated shared.ts",
     "the summary names what it did to each file, and reads like VS Code's"
   );
 
