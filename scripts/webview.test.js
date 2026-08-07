@@ -1858,6 +1858,38 @@ test("an MCP server that would not start is said out loud", async () => {
   await h.settle(10);
   assert.strictEqual(h.document.querySelectorAll("#mcp-problems").length, 1);
   assert.match(h.document.getElementById("mcp-problems").textContent, /2 MCP servers did not start/);
+
+  // Read once, it is noise: it can be sent away and must stay away.
+  h.document.querySelector("#mcp-problems .mcp-dismiss").click();
+  await h.settle(10);
+  assert.strictEqual(h.document.getElementById("mcp-problems"), null, "dismissed");
+  h.post({
+    type: "mcpProblems",
+    servers: [
+      { name: "godot-ai", message: "MCP server 'godot-ai' connection failed: refused" },
+      { name: "telegram", message: "Failed to connect to MCP server 'telegram'" }
+    ]
+  });
+  await h.settle(10);
+  assert.strictEqual(h.document.getElementById("mcp-problems"), null, "and does not come back on its own");
+
+  // A server that fails afterwards is news again.
+  h.post({
+    type: "mcpProblems",
+    servers: [
+      { name: "godot-ai", message: "MCP server 'godot-ai' connection failed: refused" },
+      { name: "fetch", message: "MCP server 'fetch' connection failed: timeout" }
+    ]
+  });
+  await h.settle(10);
+  const back = h.document.getElementById("mcp-problems");
+  assert.ok(back, "a server that failed later says so");
+  assert.match(back.textContent, /The MCP server fetch did not start/, "naming only the new one");
+
+  // And a different chat starts over, dismissed or not.
+  h.post({ type: "clear" });
+  await h.settle(10);
+  assert.strictEqual(h.document.getElementById("mcp-problems"), null, "the warning belongs to the chat it came from");
   assert.strictEqual(h.errors().length, 0);
 });
 
