@@ -62,6 +62,16 @@ export class ChatManager implements vscode.WebviewViewProvider, vscode.WebviewPa
     controller.focus();
   }
 
+  // A question's half given answers, flushed as its widget is torn down, which is
+  // also how a session leaves a surface: find whoever holds the request now.
+  saveAnswerDraft(requestId: string, state: unknown, except: ChatController): void {
+    for (const c of this.controllers()) {
+      if (c !== except && c.storeAnswerDraft(requestId, state)) {
+        return;
+      }
+    }
+  }
+
   elsewhere(except: ChatController): string[] {
     const ids = new Set<string>();
     for (const c of this.controllers()) {

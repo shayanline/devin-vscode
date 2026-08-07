@@ -230,7 +230,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     el.settingsBtn.classList.toggle("hidden", !list);
     // Thread-mode clusters.
     el.historyBtn.classList.toggle("hidden", list);
-    el.headerDivider.classList.toggle("hidden", list);
+    updateHeaderDivider();
     el.titleBtn.classList.toggle("as-heading", list);
     el.chatTitle.textContent = list ? "Sessions" : currentTitle;
     // In a session, the session code shows as a badge to the left of the title.
@@ -539,6 +539,15 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     el.terminateBtn.classList.toggle("hidden", !show);
     updateDetachBtn();
   }
+
+  // With the panel on the right the divider sits between the thread controls and
+  // the panel toggle, so it is only a separator while there is something to
+  // separate: on its own it reads as a stray rule.
+  function updateHeaderDivider() {
+    const controls = !el.detachBtn.classList.contains("hidden") || !el.terminateBtn.classList.contains("hidden");
+    const needed = body === "thread" && (panelSide() === "left" || controls);
+    el.headerDivider.classList.toggle("hidden", !needed);
+  }
   el.terminateBtn.innerHTML = KILL_GLYPH;
   el.terminateBtn.addEventListener("click", () => {
     // Terminating from inside a session returns to the list once confirmed.
@@ -551,6 +560,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   function updateDetachBtn() {
     const show = body === "thread" && !!curSessionId;
     el.detachBtn.classList.toggle("hidden", !show);
+    updateHeaderDivider();
     if (!show) return;
     const inEditor = caps.surface === "editor";
     setBtnIcon(el.detachBtn, inEditor ? "layout-sidebar-" + panelSide() + "-dock" : "link-external");
@@ -666,6 +676,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // message borrows the same box, so those keep out of the draft.
   let draftTimer = null;
   let savedDraft = null;
+  // Which chat the text in the composer belongs to, so text typed in one is not
+  // left sitting in another.
+  let savedDraftKey = null;
   function draftKey() { return curSessionId || null; }
   function saveDraft() {
     if (draftTimer) { clearTimeout(draftTimer); draftTimer = null; }
@@ -673,6 +686,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     const text = el.input.value;
     if (text === savedDraft) return;
     savedDraft = text;
+    savedDraftKey = draftKey();
     vscode.postMessage({ type: "draft", id: draftKey(), text });
   }
   function scheduleDraftSave() {
@@ -691,7 +705,13 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   function applyDraft(m) {
     const id = m.id || null;
     if (id !== draftKey() || editingQueuedId || editingTurn) return;
+    // A surface fills its new chat box before it is handed a session, so the
+    // composer can still hold text meant for another chat. Untouched, it goes.
+    if (savedDraftKey !== id && el.input.value && el.input.value === savedDraft) {
+      el.input.value = "";
+    }
     savedDraft = m.text || "";
+    savedDraftKey = id;
     if (el.input.value || !m.text) return;
     el.input.value = m.text;
     autosize();
@@ -1761,14 +1781,16 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
 
   // A chat that has just been moved here from another surface, carrying its live
   // agent with it. Uses the same divider as a restored checkpoint.
-  function renderMovedRow(from) {
+  function renderMovedRow(from, partial) {
+    hideWelcome();
     const prev = el.thread.querySelector(".moved-row");
     if (prev) prev.remove();
     const row = document.createElement("div");
     row.className = "restored-row moved-row";
     const label = document.createElement("span");
     label.className = "restored-label";
-    label.textContent = "Continued from " + (from || "another surface");
+    label.textContent = "Continued from " + (from || "another surface")
+      + (partial ? ", earlier messages not shown" : "");
     row.appendChild(Object.assign(document.createElement("span"), { className: "restored-line" }));
     row.appendChild(label);
     row.appendChild(Object.assign(document.createElement("span"), { className: "restored-line" }));
@@ -2477,7 +2499,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     move: "codicon-arrow-right",
     search: "codicon-search",
     execute: "codicon-terminal",
-    think: "codicon-lightbulb",
+    think: "codicon-thinking",
     fetch: "codicon-globe",
     other: "codicon-tools"
   };
@@ -2780,7 +2802,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       const content = document.createElement("div");
       content.className = "subagent-prose-content";
       const thought = m.stream === "thought";
-      insertSubagentItem(sub, content, thought ? "codicon-lightbulb" : "codicon-comment",
+      insertSubagentItem(sub, content, thought ? "codicon-thinking" : "codicon-comment",
         "subagent-prose" + (thought ? " subagent-thought" : ""));
       sub.prose = { stream: m.stream, content, buffer: "" };
     }
@@ -3027,34 +3049,62 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     try { return JSON.stringify(JSON.parse(t), null, 2); } catch { return null; }
   }
   // MCP / custom tool arguments, shown as a labelled, highlighted JSON block.
-  function toolArgsSection(raw) {
+  // Pretty printed JSON for a value that is one: an object, or text that parses
+  // as one. Returns null for anything else, which is then shown as it came.
+  function jsonText(v) {
+    if (v && typeof v === "object") return safeJson(v);
+    return typeof v === "string" ? tryPrettyJson(v) : null;
+  }
+
+  // A code block for tool input and output. JSON is pretty printed and
+  // highlighted, and every block carries the copy action a markdown code block
+  // has. The toolbar is a sibling of the <pre> so a live terminal write, which
+  // replaces the pre's text, cannot wipe it.
+  function toolBlock(value, opts) {
+    const o = opts || {};
+    const wrap = document.createElement("div");
+    wrap.className = "tool-block";
+    const pre = document.createElement("pre");
+    pre.className = "tool-pre" + (o.cls ? " " + o.cls : "");
+    const json = o.json === false ? null : jsonText(value);
+    if (json != null) {
+      pre.classList.add("hljs");
+      pre.innerHTML = renderCode(json, "json");
+    } else if (o.lang) {
+      pre.classList.add("hljs");
+      pre.innerHTML = renderCode(String(value == null ? "" : value), o.lang);
+    } else {
+      pre.textContent = typeof value === "string" ? value : safeJson(value);
+    }
+    const bar = document.createElement("div");
+    bar.className = "tool-toolbar";
+    bar.appendChild(copyButton("Copy", "code-btn", () => pre.textContent || ""));
+    wrap.appendChild(pre);
+    wrap.appendChild(bar);
+    return { wrap, pre };
+  }
+
+  function toolSection(title, value, opts) {
     const sec = document.createElement("div");
     sec.className = "tool-section";
-    const h = document.createElement("div");
-    h.className = "tool-section-title";
-    h.textContent = "Arguments";
-    const pre = document.createElement("pre");
-    pre.className = "tool-pre hljs";
-    if (typeof raw === "string") pre.textContent = raw;
-    else pre.innerHTML = renderCode(safeJson(raw), "json");
-    sec.appendChild(h);
-    sec.appendChild(pre);
-    return sec;
+    if (title) {
+      const h = document.createElement("div");
+      h.className = "tool-section-title";
+      h.textContent = title;
+      sec.appendChild(h);
+    }
+    const { wrap, pre } = toolBlock(value, opts);
+    sec.appendChild(wrap);
+    return { sec, pre };
+  }
+
+  function toolArgsSection(raw) {
+    return toolSection("Arguments", raw).sec;
   }
   // Raw argument JSON, kept only as a last-resort fallback for tools we cannot
   // represent more nicely (mostly MCP / custom tools).
   function toolRawInputSection(raw) {
-    const sec = document.createElement("div");
-    sec.className = "tool-section";
-    const h = document.createElement("div");
-    h.className = "tool-section-title";
-    h.textContent = "Input";
-    const pre = document.createElement("pre");
-    pre.className = "tool-pre";
-    pre.textContent = typeof raw === "string" ? raw : safeJson(raw);
-    sec.appendChild(h);
-    sec.appendChild(pre);
-    return sec;
+    return toolSection("Input", raw).sec;
   }
 
   // Kinds whose input is fully conveyed by the title + file pills / diff, so we
@@ -3120,20 +3170,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         note.textContent = text;
         body.appendChild(note);
       } else {
-        const sec = document.createElement("div");
-        sec.className = "tool-section";
-        const h = document.createElement("div");
-        h.className = "tool-section-title";
-        h.textContent = "Result";
-        const pre = document.createElement("pre");
-        pre.className = "tool-pre";
-        // MCP tools usually return a JSON payload; pretty-print + highlight it.
-        const json = info && (info.type === "mcp" || info.type === "mcp_list") ? tryPrettyJson(text) : null;
-        if (json != null) { pre.classList.add("hljs"); pre.innerHTML = renderCode(json, "json"); }
-        else pre.textContent = text;
-        sec.appendChild(h);
-        sec.appendChild(pre);
-        body.appendChild(sec);
+        // A tool that returns JSON gets it pretty printed and highlighted,
+        // whichever tool it is: MCP servers are the common case, not the only one.
+        body.appendChild(toolSection("Result", text).sec);
       }
     }
 
@@ -3141,14 +3180,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     if (termItems.length) {
       hasContent = true;
       termItems.forEach((c) => {
-        const sec = document.createElement("div");
-        sec.className = "tool-section";
-        const pre = document.createElement("pre");
-        pre.className = "tool-pre terminal-pre";
-        pre.setAttribute("data-terminal", c.terminalId);
         const cached = terminalCache.get(c.terminalId);
-        pre.textContent = (cached && cached.output) || "\u2026";
-        sec.appendChild(pre);
+        const { sec, pre } = toolSection("", (cached && cached.output) || "\u2026", { cls: "terminal-pre", json: false });
+        pre.setAttribute("data-terminal", c.terminalId);
         body.appendChild(sec);
       });
       // Terminal cards are worth showing open by default.
@@ -3405,10 +3439,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     [...new Set(paths)].slice(0, 6).forEach((path) => wrap.appendChild(filePill({ path })));
     const texts = (data.content || []).filter((c) => c && c.type === "text" && c.text).map((c) => c.text);
     if (!wrap.childElementCount && texts.length) {
-      const pre = document.createElement("pre");
-      pre.className = "tool-pre";
-      pre.textContent = texts.join("\n");
-      wrap.appendChild(pre);
+      wrap.appendChild(toolBlock(texts.join("\n")).wrap);
     }
     // Nothing came with the request: name the tool call it belongs to, which is
     // already rendered in the transcript just above.
@@ -3592,6 +3623,12 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         return;
       }
       if (e.ctrlKey || e.metaKey) return;
+      // Enter answers the option it is sitting on before it moves, otherwise a
+      // keyboard user steps past a question and only finds out at Submit.
+      if (t && t.tagName === "INPUT" && (t.type === "radio" || t.type === "checkbox") && !t.checked) {
+        t.checked = true;
+        t.dispatchEvent(new Event("change", { bubbles: true }));
+      }
       if (idx < controls.length - 1) show(idx + 1);
       else submitAll();
     }, true);
@@ -5355,7 +5392,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       case "queued": renderQueued(m.items); break;
       case "attachments": renderAttachments(m.items); break;
       case "draft": applyDraft(m); break;
-      case "moved": renderMovedRow(m.from); break;
+      case "moved": renderMovedRow(m.from, m.partial); break;
       case "implicitContext":
         implicit = m.file ? { path: m.file.path, name: m.file.name, line1: m.file.line1, line2: m.file.line2, enabled: m.enabled !== false } : null;
         renderComposerContext();

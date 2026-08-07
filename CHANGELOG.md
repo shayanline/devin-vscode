@@ -26,6 +26,11 @@ Moving between sessions and surfaces, and keeping what you had typed.
 - Waiting on a subagent reads as agent work, naming the agent and the wait.
 - Reasoning blocks, subagents and agent waits lead with their own icon.
 - The header no longer narrates the tool that is running.
+- JSON in tool input and output is formatted, coloured and can be copied.
+- Terminal output and every tool block carry a copy action.
+- A wrapped command keeps its prompt and Run action on its first line.
+- Staged attachments follow a chat when it moves surfaces.
+- A chat moved mid turn says its earlier messages are not shown.
 - Keeping a change no longer draws its diff as if the whole file were new.
 - A restore no longer winds a kept file back further than the checkpoint.
 - A pending question is no longer duplicated, or left over another chat.

@@ -87,6 +87,8 @@ const BG_BUFFER_MAX = 6000;
 // CLI's session lock, and an in flight turn is not interrupted.
 export interface RuntimeTransfer {
   rt: Runtime;
+  // Files and images staged in the composer but not sent yet.
+  attachments: { id: string; label: string; type: string; block: ContentBlock }[];
   permissions: [string, { resolve: (res: RequestPermissionResult) => void; rid: string }][];
   elicitations: [string, { resolve: (res: unknown) => void; rid: string }][];
   from: string; // where it came from, for the divider in the new surface
@@ -106,6 +108,8 @@ export interface SurfaceHost {
   reveal(controller: ChatController): void;
   // Live session ids held by every surface other than this one.
   elsewhere(except: ChatController): string[];
+  // Half given answers for a request that has moved to another surface.
+  saveAnswerDraft(requestId: string, state: unknown, except: ChatController): void;
 }
 
 // Image file extensions we attach inline (as base64), matching VS Code chat's
@@ -270,13 +274,22 @@ export class ChatController implements AcpHost {
   // the host re-posts, so it is restored by the same path that re-shows the
   // question, and is dropped with it once the question is answered.
   private saveAnswerDraft(requestId: string, state: unknown): void {
+    // The widget flushes its answers as it is torn down, which is also how a
+    // session leaves a surface, so by now the request may belong to another one.
+    if (!this.storeAnswerDraft(requestId, state)) {
+      this.surfaces?.saveAnswerDraft(requestId, state, this);
+    }
+  }
+
+  storeAnswerDraft(requestId: string, state: unknown): boolean {
     for (const rt of this.runtimes.values()) {
       const p = rt.pending.find((x) => x.requestId === requestId);
       if (p) {
         p.payload.answers = state;
-        return;
+        return true;
       }
     }
+    return false;
   }
 
   // The working set is what the visible session changed. Other sessions keep
@@ -494,10 +507,12 @@ export class ChatController implements AcpHost {
     };
     const transfer: RuntimeTransfer = {
       rt,
+      attachments: this.attachments,
       permissions: take(this.permissionResolvers),
       elicitations: take(this.elicitationResolvers),
       from: this.kind === "view" ? "the side panel" : "an editor tab"
     };
+    this.attachments = [];
     // A lock takeover question belongs to a load this surface is abandoning, and
     // its widget goes with the transcript, so settle it rather than leave the load
     // waiting on an answer that can never arrive.
@@ -549,6 +564,12 @@ export class ChatController implements AcpHost {
     this.store.add(rt.id, rt.cwd);
     this.markVisible(rt.id);
     this.ensureIdleTimer();
+    // The agent can die during the handover, when its exit has no listener and is
+    // never emitted again, so the arriving surface has to ask.
+    if (rt.client.hasExited()) {
+      this.onRuntimeExit(rt);
+      return;
+    }
     // A turn that was already running is finished by this surface from now on.
     if (rt.busy && rt.turn) {
       this.adoptTurn(rt, rt.turn);
@@ -556,11 +577,15 @@ export class ChatController implements AcpHost {
     this.post({ type: "body", body: "thread" });
     if (rt.busy) {
       this.post({ type: "clear" });
-      this.post({ type: "moved", from: transfer.from });
+      this.post({ type: "moved", from: transfer.from, partial: true });
       await this.activateSession(rt.id);
     } else {
       await this.doLoadSession(rt.id);
       this.post({ type: "moved", from: transfer.from });
+    }
+    if (transfer.attachments.length) {
+      this.attachments = transfer.attachments;
+      this.postAttachments();
     }
     // A brand new surface announces its own readiness while this is running, so
     // say once more where it should be: showing the chat, not its session list.
