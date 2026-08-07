@@ -4050,6 +4050,21 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     scrollToBottom();
   }
 
+  // The host answers with what was actually resolved, so an edit row says so
+  // however it happened: "Keep all" in the tray, a single Keep, the Source
+  // Control view, or a command. Only the row clicked used to know.
+  function applyResolved(paths, action) {
+    const want = new Set(paths || []);
+    if (!want.size) return;
+    const label = action === "reject" ? "Undone" : "Kept";
+    turns.forEach((t) => {
+      if (!t.editPills) return;
+      t.editPills.forEach((node, key) => {
+        if (want.has(key)) markEditResolved(node, label);
+      });
+    });
+  }
+
   // After keeping/undoing a single edit, reflect the resolved state on its pill.
   function markEditResolved(node, label) {
     node.classList.add("resolved");
@@ -6133,6 +6148,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       case "queued": renderQueued(m.items); break;
       case "attachments": renderAttachments(m.items); break;
       case "draft": applyDraft(m); break;
+      case "changesResolved": applyResolved(m.paths, m.action); break;
       case "mcpProblems": renderMcpProblems(m.servers); break;
       case "turnStats": applyTurnStats(m); break;
       case "elsewhere": hideBoot(); renderElsewhere(m); break;

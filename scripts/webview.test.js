@@ -1610,6 +1610,64 @@ test("a long chain of commands is cut to a scannable length", async () => {
   assert.strictEqual(h.errors().length, 0);
 });
 
+test("keeping every change marks every edit row, not just the one clicked", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "userMessage", text: "do it" });
+  h.post({ type: "fileChange", path: "/w/a.ts", added: 3, removed: 1 });
+  h.post({ type: "fileChange", path: "/w/b.ts", added: 2, removed: 0, created: true });
+  h.post({ type: "workingSet", files: [{ path: "/w/a.ts", name: "a.ts" }, { path: "/w/b.ts", name: "b.ts" }] });
+  await h.settle(20);
+
+  const pills = () => [...h.thread().querySelectorAll(".edit-pill")];
+  assert.strictEqual(pills().length, 2);
+  assert.ok(pills().every((p) => !p.classList.contains("resolved")), "nothing is resolved yet");
+
+  // "Keep all" resolves files nobody clicked, so the rows can only learn of it
+  // from the host.
+  const keepAll = [...h.document.querySelectorAll("#working-set button")].find((b) => b.textContent === "Keep all");
+  assert.ok(keepAll, "the tray offers it");
+  keepAll.click();
+  assert.ok(h.posted.some((m) => m && m.type === "acceptAll"), "the tray asked the host");
+  await h.settle(10);
+  assert.ok(pills().every((p) => !p.classList.contains("resolved")), "and does not guess the answer");
+
+  h.post({ type: "changesResolved", paths: ["/w/a.ts", "/w/b.ts"], action: "accept" });
+  await h.settle(10);
+  assert.ok(pills().every((p) => p.classList.contains("resolved")), "every row says so once it is done");
+  assert.deepStrictEqual(
+    pills().map((p) => p.querySelector(".edit-pill-label").textContent),
+    ["Kept", "Kept"]
+  );
+  assert.strictEqual(h.thread().querySelectorAll(".edit-pill-actions").length, 0, "with nothing left to click");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("undoing every change says undone, and a later report cannot revive it", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "userMessage", text: "do it" });
+  h.post({ type: "fileChange", path: "/w/a.ts", added: 3, removed: 1 });
+  await h.settle(20);
+
+  h.post({ type: "changesResolved", paths: ["/w/a.ts"], action: "reject" });
+  await h.settle(10);
+  const pill = h.thread().querySelector(".edit-pill");
+  assert.strictEqual(pill.querySelector(".edit-pill-label").textContent, "Undone");
+
+  // The same edit arriving again must not put Keep and Undo back on a row that
+  // has already been dealt with.
+  h.post({ type: "fileChange", path: "/w/a.ts", added: 3, removed: 1 });
+  await h.settle(10);
+  assert.strictEqual(h.thread().querySelector(".edit-pill-label").textContent, "Undone");
+  assert.strictEqual(h.thread().querySelectorAll(".edit-pill-actions").length, 0);
+  assert.strictEqual(h.errors().length, 0);
+});
+
 test("reasoning inside a run is text on the chain, not a section to open", async () => {
   const h = createHarness();
   h.post({ type: "ready" });

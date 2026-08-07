@@ -46,9 +46,14 @@ export class ChangeTracker
   private readonly snapshots = new Map<string, Snapshot>();
   private readonly contentChanged = new vscode.EventEmitter<vscode.Uri>();
   private readonly listChanged = new vscode.EventEmitter<string[]>();
+  // A change was kept or undone, wherever from: the chat, the Source Control view
+  // or a command. The chat listens so the edit it drew says so, whichever surface
+  // resolved it.
+  private readonly resolved = new vscode.EventEmitter<{ paths: string[]; action: "accept" | "reject" }>();
 
   readonly onDidChange = this.contentChanged.event;
   readonly onDidChangeList = this.listChanged.event;
+  readonly onDidResolve = this.resolved.event;
 
   private scm?: vscode.SourceControl;
   private group?: vscode.SourceControlResourceGroup;
@@ -283,6 +288,7 @@ export class ChangeTracker
       return;
     }
     snap.resolved = true;
+    this.resolved.fire({ paths: [fsPath as string], action: "accept" });
     this.refreshGroup();
   }
 
@@ -304,6 +310,7 @@ export class ChangeTracker
       // ignore write failures; still drop from the working set
     }
     snap.resolved = true;
+    this.resolved.fire({ paths: [fsPath], action: "reject" });
     this.refreshGroup();
   }
 
