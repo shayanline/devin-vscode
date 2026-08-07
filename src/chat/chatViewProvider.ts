@@ -62,6 +62,10 @@ interface Runtime {
   // The prompt in flight, if any. A session can change surface mid turn, and the
   // surface it lands on has to be the one that ends it.
   turn?: Promise<PromptResult>;
+  // Set when a session arrived on this surface mid turn. Its transcript could not
+  // be replayed then (loading over a live channel aborts the running prompt), so
+  // it is replayed as soon as the turn ends.
+  needsReplay?: boolean;
   // Messages the user submitted while a turn was in flight. The blocks (implicit
   // context + attachments + text) are snapshotted at queue time; the host sends
   // them in order as the session frees up (VS Code's chat queue).
@@ -576,6 +580,9 @@ export class ChatController implements AcpHost {
     }
     this.post({ type: "body", body: "thread" });
     if (rt.busy) {
+      // Nothing can be replayed while the prompt is running, so the transcript
+      // starts at the move and is filled in the moment the turn ends.
+      rt.needsReplay = true;
       this.post({ type: "clear" });
       this.post({ type: "moved", from: transfer.from, partial: true });
       await this.activateSession(rt.id);
@@ -1415,9 +1422,10 @@ export class ChatController implements AcpHost {
     this.activeId = id;
     this.attachments = [];
     // A full reload rebuilds the whole transcript, so any buffered background
-    // stream for this runtime is superseded.
+    // stream for this runtime is superseded, as is any replay it was owed.
     if (already) {
       already.bgBuffer = [];
+      already.needsReplay = false;
     }
     // "Waking session…" while a fresh acp spins up; a live one loads instantly.
     this.post({ type: "clear", loading: true, waking: !already });
@@ -2465,6 +2473,14 @@ export class ChatController implements AcpHost {
     // to leave a visible gap before a queued message went out.
     this.flushQueue(rt);
     void this.refreshSessions();
+    // A chat moved here mid turn has no history on this surface, and now that the
+    // channel is free it can be asked for. Only when the queue did not start
+    // another turn, and it is still what the user is looking at.
+    if (!rt.busy && rt.needsReplay && this.activeId === rt.id) {
+      rt.needsReplay = false;
+      void this.loadSession(rt.id);
+      return;
+    }
     // A live completion's head is on the current expansion: a reliable revert
     // target. Only read it when the session actually went idle, so it never
     // contends with a queued turn we just started.

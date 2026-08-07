@@ -2536,7 +2536,7 @@ test("Enter answers the option it is on before moving to the next question", asy
   assert.strictEqual(h.errors().length, 0);
 });
 
-test("a chat that arrives mid turn says its earlier messages are elsewhere", async () => {
+test("a chat that arrives mid turn says its history is coming", async () => {
   const h = createHarness();
   h.post({ type: "ready" });
   h.post({ type: "body", body: "thread" });
@@ -2545,7 +2545,7 @@ test("a chat that arrives mid turn says its earlier messages are elsewhere", asy
   h.post({ type: "busy", value: true });
   await h.settle(10);
   assert.strictEqual(h.thread().querySelector(".moved-row .restored-label").textContent,
-    "Continued from the side panel, earlier messages not shown");
+    "Continued from the side panel, earlier messages load when this turn ends");
   // The welcome screen must not paint under the divider.
   assert.ok(!h.document.querySelector("#welcome:not(.hidden)"), "no starter prompts over a live chat");
   assert.strictEqual(h.errors().length, 0);
