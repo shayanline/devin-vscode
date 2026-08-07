@@ -18,9 +18,13 @@ class EventEmitter {
   }
 }
 
+const nodeFs = require("fs");
+const nodePath = require("path");
+
 const Uri = {
   file: (p) => ({ scheme: "file", path: p, fsPath: p, query: "", toString: () => "file://" + p }),
-  from: ({ scheme, path: p, query }) => ({ scheme, path: p, fsPath: p, query: query || "", toString: () => `${scheme}://${p}?${query}` })
+  from: ({ scheme, path: p, query }) => ({ scheme, path: p, fsPath: p, query: query || "", toString: () => `${scheme}://${p}?${query}` }),
+  joinPath: (base, ...parts) => Uri.file(nodePath.join(base.fsPath, ...parts))
 };
 
 const Disposable = { from: (...items) => ({ dispose: () => items.forEach((i) => i.dispose && i.dispose()) }) };
@@ -34,8 +38,16 @@ const commands = {
   executeCommand: async () => undefined
 };
 
+// Enough of `workspace.fs` for the working set to be written and read back, which
+// is how it survives a window reload.
 const workspace = {
-  registerTextDocumentContentProvider: () => ({ dispose: () => {} })
+  registerTextDocumentContentProvider: () => ({ dispose: () => {} }),
+  fs: {
+    readFile: async (uri) => nodeFs.promises.readFile(uri.fsPath),
+    writeFile: async (uri, body) => nodeFs.promises.writeFile(uri.fsPath, body),
+    createDirectory: async (uri) => nodeFs.promises.mkdir(uri.fsPath, { recursive: true }),
+    delete: async (uri) => nodeFs.promises.rm(uri.fsPath)
+  }
 };
 
 const scm = {

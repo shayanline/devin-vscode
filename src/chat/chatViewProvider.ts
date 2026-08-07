@@ -24,6 +24,7 @@ import { TerminalManager } from "../acp/terminal";
 import { DevinSession, listSessions } from "../session/sessionList";
 import { SessionStore } from "../session/sessionStore";
 import { ChangeTracker } from "../diff/changeTracker";
+import { diffStat } from "../diff/diffStat";
 import { paintedReplay, recordPainted } from "./transcriptLog";
 import { StatusBar } from "../ui/statusBar";
 import { checkHealth, CliHealth, loginShellEnv } from "../cli/locate";
@@ -322,7 +323,14 @@ export class ChatController implements AcpHost {
   private postWorkingSet(): void {
     this.post({
       type: "workingSet",
-      files: this.changes.pathsFor(this.activeId).map((p) => ({ path: p, name: path.basename(p) }))
+      // The counts travel with the files, so a working set restored after a reload
+      // arrives complete instead of waiting for each edit to be reported again.
+      files: this.changes.changesFor(this.activeId).map((c) => ({
+        path: c.path,
+        name: path.basename(c.path),
+        added: c.added,
+        removed: c.removed
+      }))
     });
   }
 
@@ -3454,7 +3462,7 @@ export class ChatController implements AcpHost {
         // Post the per-file counts before recordDiff fires the working-set list,
         // so the list renders with the deltas already known.
         this.emit(rt, { type: "fileChange", path: c.path, added: s.added, removed: s.removed, created: c.oldText == null || c.oldText === "" });
-        this.changes.recordDiff(c.path, c.oldText ?? null, c.newText ?? "", rt.id);
+        this.changes.recordDiff(c.path, c.oldText ?? null, c.newText ?? "", rt.id, s);
       }
     }
   }
@@ -3662,7 +3670,7 @@ export class ChatController implements AcpHost {
     if (rt) {
       const s = diffStat(original, params.content);
       this.emit(rt, { type: "fileChange", path: full, added: s.added, removed: s.removed, created: original == null });
-      this.changes.recordDiff(full, original, params.content, rt.id);
+      this.changes.recordDiff(full, original, params.content, rt.id, s);
     }
     // The agent's fs/write_text_file expects an (empty) object result; returning
     // null makes it report a spurious "Parse error" even though the write landed.
@@ -3719,30 +3727,6 @@ export class ChatController implements AcpHost {
   }
 }
 
-// Added/removed line counts for a diff, from an LCS over lines (so the edit
-// pills can show +N/-M like VS Code). Capped to avoid O(n*m) blowups on huge
-// files, where it falls back to the net line delta.
-function diffStat(oldText: string | null | undefined, newText: string | null | undefined): { added: number; removed: number } {
-  const a = oldText ? oldText.split("\n") : [];
-  const b = newText ? newText.split("\n") : [];
-  if (!a.length) return { added: b.length, removed: 0 };
-  if (!b.length) return { added: 0, removed: a.length };
-  if (a.length > 4000 || b.length > 4000) {
-    return { added: Math.max(0, b.length - a.length), removed: Math.max(0, a.length - b.length) };
-  }
-  const m = a.length;
-  const n = b.length;
-  let prev = new Array<number>(n + 1).fill(0);
-  for (let i = 1; i <= m; i++) {
-    const cur = new Array<number>(n + 1).fill(0);
-    for (let j = 1; j <= n; j++) {
-      cur[j] = a[i - 1] === b[j - 1] ? prev[j - 1] + 1 : Math.max(prev[j], cur[j - 1]);
-    }
-    prev = cur;
-  }
-  const lcs = prev[n];
-  return { added: n - lcs, removed: m - lcs };
-}
 
 interface ToolContentItem {
   type: string;

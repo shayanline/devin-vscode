@@ -46,6 +46,8 @@ Moving between sessions and surfaces, and keeping what you had typed.
 - Its output opens itself only while it runs, and closes again when it passes.
 - A message typed while a chat is opening waits for it instead of vanishing.
 - Keeping a change then editing again diffs that edit, not the whole session.
+- Changes waiting to be reviewed survive a window reload, counts included.
+- Reopening a chat no longer recounts every edit it ever made.
 - Files and images staged in the composer survive leaving the chat.
 - They survive a window reload too, and a chat started from the list keeps them.
 - Renaming a chat that is open in an editor tab now sticks.
@@ -91,6 +93,8 @@ Moving between sessions and surfaces, and keeping what you had typed.
 - ACP cannot steer a running prompt, so "stop and send" heads the queue.
 - Staged files live in extension storage, per chat: base64 is not settings data.
 - Resource links and embedded resources in a tool result are no longer dropped.
+- The working set is kept in extension storage, so it outlives the agent.
+- Line counts trim what both sides share before the table, not after.
 - A rename goes through the agent holding the chat, and outlives a stale list.
 - An agent whose tab closed mid decision now stops with the rest on the way out.
 - File edits are tracked per session, so a panel lists only its own chat's.

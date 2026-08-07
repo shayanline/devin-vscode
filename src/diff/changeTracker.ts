@@ -12,7 +12,27 @@ interface Snapshot {
   // so an open diff keeps rendering against it. Dropping it outright made the
   // left hand side resolve to empty, which drew the whole file as newly added.
   resolved?: boolean;
+  // Lines the change added and removed, so the working set can say so without
+  // waiting for the edit to be reported again.
+  added?: number;
+  removed?: number;
 }
+
+// One file as it is written to disk, so a window reload does not forget what is
+// waiting to be reviewed.
+interface StoredSnapshot {
+  path: string;
+  original: string | null;
+  sessions: string[];
+  resolved?: boolean;
+  added?: number;
+  removed?: number;
+}
+
+// Past this the working set is not written out. A handful of edited files is
+// kilobytes; a repository's worth of generated output is not worth carrying
+// across a reload.
+const MAX_STORE_BYTES = 8 * 1024 * 1024;
 
 // Tracks agent file edits so the user can review them as native diffs and
 // accept or reject them. Uses a QuickDiffProvider so the editor shows gutter
@@ -32,6 +52,85 @@ export class ChangeTracker
 
   private scm?: vscode.SourceControl;
   private group?: vscode.SourceControlResourceGroup;
+
+  // Where the working set is kept between windows. A `devin acp` agent cannot
+  // outlive the extension host, but a change waiting to be reviewed has nothing to
+  // do with the agent: forgetting it on a reload lost the diffs and left Keep and
+  // Undo with nothing to act on, so the next edit looked like a brand new set.
+  private store?: vscode.Uri;
+  private saveTimer?: NodeJS.Timeout;
+
+  async useStore(dir: vscode.Uri | undefined): Promise<void> {
+    if (!dir) {
+      return;
+    }
+    this.store = vscode.Uri.joinPath(dir, "changes.json");
+    try {
+      const raw = Buffer.from(await vscode.workspace.fs.readFile(this.store)).toString("utf8");
+      const parsed = JSON.parse(raw) as StoredSnapshot[];
+      for (const s of Array.isArray(parsed) ? parsed : []) {
+        // A file that has since gone is nothing to review, and a change with no
+        // session behind it can never be shown in a chat.
+        if (!s || !s.path || !Array.isArray(s.sessions) || !s.sessions.length) {
+          continue;
+        }
+        if (s.original !== null && !fs.existsSync(s.path)) {
+          continue;
+        }
+        this.snapshots.set(s.path, {
+          original: s.original ?? null,
+          sessions: new Set(s.sessions),
+          resolved: s.resolved,
+          added: s.added,
+          removed: s.removed
+        });
+      }
+    } catch {
+      // Nothing kept, or it is unreadable: start with an empty working set.
+    }
+    this.refreshGroup();
+  }
+
+  private scheduleSave(): void {
+    if (!this.store || this.saveTimer) {
+      return;
+    }
+    this.saveTimer = setTimeout(() => {
+      this.saveTimer = undefined;
+      void this.save();
+    }, 400);
+    this.saveTimer.unref?.();
+  }
+
+  private async save(): Promise<void> {
+    if (!this.store) {
+      return;
+    }
+    const out: StoredSnapshot[] = [...this.snapshots]
+      .filter(([, s]) => !s.resolved)
+      .map(([p, s]) => ({
+        path: p,
+        original: s.original,
+        sessions: [...s.sessions],
+        added: s.added,
+        removed: s.removed
+      }));
+    try {
+      if (!out.length) {
+        await vscode.workspace.fs.delete(this.store);
+        return;
+      }
+      const body = Buffer.from(JSON.stringify(out), "utf8");
+      if (body.byteLength > MAX_STORE_BYTES) {
+        return;
+      }
+      await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(this.store, ".."));
+      await vscode.workspace.fs.writeFile(this.store, body);
+    } catch {
+      // Nothing to delete, or the storage is not writable: the working set is
+      // still correct in this window, it just will not survive a reload.
+    }
+  }
 
   register(): vscode.Disposable {
     const disposables: vscode.Disposable[] = [];
@@ -76,9 +175,11 @@ export class ChangeTracker
     return this.snapshots.get(fsPath)?.original ?? "";
   }
 
-  recordDiff(fsPath: string, oldText: string | null, _newText: string, sessionId: string): void {
+  recordDiff(fsPath: string, oldText: string | null, newText: string, sessionId: string, stat?: { added: number; removed: number }): void {
     const snap = this.snapshots.get(fsPath);
     if (snap) {
+      snap.added = stat?.added;
+      snap.removed = stat?.removed;
       snap.sessions.add(sessionId);
       if (snap.resolved) {
         // Kept or undone, and now edited again. The review starts from what was
@@ -90,8 +191,14 @@ export class ChangeTracker
         snap.resolved = false;
       }
     } else {
-      this.snapshots.set(fsPath, { original: oldText, sessions: new Set([sessionId]) });
+      this.snapshots.set(fsPath, {
+        original: oldText,
+        sessions: new Set([sessionId]),
+        added: stat?.added,
+        removed: stat?.removed
+      });
     }
+    void newText;
     this.contentChanged.fire(this.originalUri(fsPath));
     this.refreshGroup();
   }
@@ -108,6 +215,15 @@ export class ChangeTracker
       return [];
     }
     return [...this.snapshots].filter(([, s]) => !s.resolved && s.sessions.has(sessionId)).map(([p]) => p);
+  }
+
+  // What one chat changed, with the line counts, so a working set restored after a
+  // reload arrives complete rather than as bare names.
+  changesFor(sessionId?: string): { path: string; added?: number; removed?: number }[] {
+    return this.pathsFor(sessionId).map((p) => {
+      const s = this.snapshots.get(p);
+      return { path: p, added: s?.added, removed: s?.removed };
+    });
   }
 
   // Whether this file is still awaiting review. A kept or undone one is excluded:
@@ -217,6 +333,7 @@ export class ChangeTracker
       decorations: { tooltip: "Changed by Devin" }
     }));
     this.listChanged.fire(this.changedPaths());
+    this.scheduleSave();
   }
 
   private originalUri(fsPath: string): vscode.Uri {

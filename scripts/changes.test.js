@@ -29,6 +29,18 @@ esbuild.buildSync({
 });
 const { ChangeTracker } = require(outfile);
 
+// The line counting is a pure function, so it is loaded on its own.
+const statFile = path.join(TMP, "diffStat.js");
+esbuild.buildSync({
+  entryPoints: [path.join(ROOT, "src/diff/diffStat.ts")],
+  outfile: statFile,
+  bundle: true,
+  platform: "node",
+  format: "cjs",
+  logLevel: "error"
+});
+const { diffStat } = require(statFile);
+
 function write(name, body) {
   const p = path.join(TMP, name);
   fs.writeFileSync(p, body, "utf8");
@@ -102,6 +114,56 @@ test("editing a kept file again puts it back in the working set", async () => {
   // Reviewing the next edit means reviewing THAT edit: keeping the older text made
   // its diff show every change of the session again, including the kept ones.
   assert.strictEqual(original(tracker, file), "v2\n", "against what was kept, not the whole session");
+});
+
+test("the working set survives a window reload, counts and all", async () => {
+  const dir = fs.mkdtempSync(path.join(TMP, "store-"));
+  const store = { scheme: "file", path: dir, fsPath: dir, query: "", toString: () => "file://" + dir };
+  const file = write("kept-open.ts", "v2\n");
+  const gone = write("deleted-since.ts", "v2\n");
+
+  const before = new ChangeTracker();
+  before.register();
+  await before.useStore(store);
+  before.recordDiff(file, "v1\n", "v2\n", "A", { added: 3, removed: 1 });
+  before.recordDiff(gone, "v1\n", "v2\n", "A", { added: 1, removed: 0 });
+  // The save is debounced, so give it its moment.
+  await new Promise((r) => setTimeout(r, 600));
+  fs.rmSync(gone);
+
+  // A new window: the agent is gone, but a change waiting to be reviewed is not.
+  const after = new ChangeTracker();
+  after.register();
+  await after.useStore(store);
+  assert.deepStrictEqual(after.pathsFor("A"), [file], "what is still there comes back");
+  assert.deepStrictEqual(after.changesFor("A"), [{ path: file, added: 3, removed: 1 }],
+    "with its line counts, so the tray is not a list of bare names");
+  assert.strictEqual(original(after, file), "v1\n", "and its diff still has a left hand side");
+
+  // Keeping it is remembered too: it must not come back a third time.
+  after.accept(file);
+  await new Promise((r) => setTimeout(r, 600));
+  const last = new ChangeTracker();
+  last.register();
+  await last.useStore(store);
+  assert.deepStrictEqual(last.pathsFor("A"), [], "a change already dealt with stays dealt with");
+});
+
+test("a one line change in a large file is counted, and counted quickly", async () => {
+  // The count ran a full table over both sides, so replaying a session's worth of
+  // edits was seconds of work. Trimming what the two sides share at each end makes
+  // it proportional to the change rather than to the file.
+  const big = Array.from({ length: 20000 }, (_, i) => "line " + i).join("\n");
+  const edited = big.replace("line 9000", "line 9000 changed");
+  const started = Date.now();
+  assert.deepStrictEqual(diffStat(big, edited), { added: 1, removed: 1 });
+  assert.ok(Date.now() - started < 250, "and does not take seconds over it");
+
+  // The plain cases still hold.
+  assert.deepStrictEqual(diffStat(null, "a\nb\n"), { added: 3, removed: 0 }, "a new file is all additions");
+  assert.deepStrictEqual(diffStat("a\nb\n", ""), { added: 0, removed: 3 }, "an emptied one is all removals");
+  assert.deepStrictEqual(diffStat("a\nb\n", "a\nb\n"), { added: 0, removed: 0 }, "no change, no counts");
+  assert.deepStrictEqual(diffStat("a\nb\nc\n", "a\nx\ny\nc\n"), { added: 2, removed: 1 });
 });
 
 test("each session gets its own working set, and a revert forgets only its own", async () => {
