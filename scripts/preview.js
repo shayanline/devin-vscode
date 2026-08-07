@@ -100,7 +100,7 @@ const SCENARIOS = {
   full: [
     { type: "ready" },
     { type: "body", body: "thread" },
-    { type: "capabilities", revert: true, editRequests: "inline", checkpoints: true, showFileChanges: true, contextUsage: true },
+    { type: "capabilities", root: "/Users/dev/Projects/web-app", revert: true, editRequests: "inline", checkpoints: true, showFileChanges: true, contextUsage: true },
     options("adaptive"),
     { type: "userMessage", text: "Refactor the auth module to centralise token handling, then run the tests." },
     { type: "busy", value: true },
@@ -117,6 +117,8 @@ const SCENARIOS = {
     { type: "thoughtChunk", text: "The callers still import the old helpers, so those need updating before the tests will pass.", messageId: "t-mid" },
     { type: "fileChange", path: "src/auth/session.ts", added: 4, removed: 2 },
     { type: "toolCall", id: "t2", title: "Edit src/auth/token-service.ts", kind: "edit", status: "completed", rawInput: { path: "src/auth/token-service.ts" }, content: [{ type: "diff", path: "src/auth/token-service.ts", added: 34, removed: 6 }] },
+    { type: "toolCall", id: "t3g", title: "Find files", kind: "search", status: "completed",
+      rawInput: { query: "src/**/*.ts" }, content: [{ type: "link", path: "/Users/dev/Projects/web-app/src/acp/client.ts" }, { type: "link", path: "/Users/dev/Projects/web-app/src/acp/connection.ts" }, { type: "link", path: "/Users/dev/Projects/web-app/src/acp/terminal.ts" }, { type: "link", path: "/Users/dev/Projects/web-app/src/acp/types.ts" }, { type: "link", path: "/Users/dev/Projects/web-app/src/chat/chatManager.ts" }, { type: "link", path: "/Users/dev/Projects/web-app/src/chat/chatViewProvider.ts" }, { type: "link", path: "/Users/dev/Projects/web-app/src/chat/transcriptLog.ts" }, { type: "link", path: "/Users/dev/Projects/web-app/src/cli/locate.ts" }, { type: "link", path: "/Users/dev/Projects/web-app/src/cli/models.ts" }, { type: "link", path: "/Users/dev/Projects/web-app/src/cli/reaper.ts" }, { type: "link", path: "/Users/dev/Projects/web-app/src/cli/sessionLocks.ts" }, { type: "link", path: "/Users/dev/Projects/web-app/src/diff/changeTracker.ts" }, { type: "link", path: "/Users/dev/Projects/web-app/src/diff/diffStat.ts" }, { type: "link", path: "/Users/dev/Projects/web-app/src/extension.ts" }, { type: "link", path: "/Users/dev/Projects/web-app/src/session/sessionList.ts" }, { type: "link", path: "/Users/dev/Projects/web-app/src/session/sessionStore.ts" }, { type: "link", path: "/Users/dev/Projects/web-app/src/ui/statusBar.ts" }] },
     { type: "toolCall", id: "t3h", title: "Run a script", kind: "execute", status: "completed",
       rawInput: { command: "cd /Users/dev/Projects/web-app && python3 - <<'PY'\nimport re\np='src/auth/token.ts'\ns=open(p).read()\nopen(p,'w').write(s)\nPY" },
       content: [{ type: "text", text: "Exited with code 0" }] },

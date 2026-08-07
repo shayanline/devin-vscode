@@ -3295,6 +3295,9 @@ export class ChatController implements AcpHost {
   private postCapabilities(): void {
     this.post({
       type: "capabilities",
+      // So a list of results can name the folder each one is in without repeating
+      // the whole absolute path on every row.
+      root: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
       revert: !!this.active()?.client.supportsRevert(),
       subagentControl: !!this.active()?.client.supportsSubagentControl(),
       editRequests: this.cfg().get<string>("editRequests", "inline"),
