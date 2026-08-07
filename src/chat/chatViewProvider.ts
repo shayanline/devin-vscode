@@ -2343,6 +2343,18 @@ export class ChatController implements AcpHost {
 
   // --- Context attachments -------------------------------------------------
 
+  // What is staged, in the shape the request itself shows it: a label, and for a
+  // picture the picture, so the pill can be a thumbnail of it.
+  private sentAttachments(): { label: string; type: string; thumb?: string }[] {
+    return this.attachments.map((a) => {
+      const b = a.block as { type?: string; mimeType?: string; data?: string };
+      const thumb = a.type === "image" && b?.type === "image" && b.data
+        ? `data:${b.mimeType || "image/png"};base64,${b.data}`
+        : undefined;
+      return { label: a.label, type: a.type, thumb };
+    });
+  }
+
   private postAttachments(save = true): void {
     this.post({
       type: "attachments",
@@ -2774,7 +2786,7 @@ export class ChatController implements AcpHost {
       // started from the list never flashes the welcome while the ACP session
       // spins up.
       this.post({ type: "clear", pendingSend: true });
-      this.post({ type: "userMessage", text });
+      this.post({ type: "userMessage", text, attachments: this.sentAttachments() });
     }
 
     let rt = startNew ? undefined : this.active();
@@ -2804,11 +2816,14 @@ export class ChatController implements AcpHost {
     }
 
     const sent = rt;
-    this.record(sent, { type: "userMessage", text });
+    // What was attached goes with the message, so the request keeps saying what it
+    // was asked about instead of the context vanishing the moment it is sent.
+    const attachments = this.sentAttachments();
+    this.record(sent, { type: "userMessage", text, attachments });
     // For a fresh chat the message was already rendered above; only echo it here
     // for a send within an existing (visible) session.
     if (!startNew) {
-      this.post({ type: "userMessage", text });
+      this.post({ type: "userMessage", text, attachments });
     }
     const blocks: ContentBlock[] = [...this.buildImplicitBlocks(), ...this.attachments.map((a) => a.block), { type: "text", text }];
     this.attachments = [];
@@ -3367,7 +3382,15 @@ export class ChatController implements AcpHost {
         return;
       }
       case "user_message_chunk":
-        this.emit(rt, { type: "userChunk", text: textOf(u.content), messageId: u.messageId });
+        // A replayed request carries what was attached to it as its own content
+        // blocks. Reading only the text out of them lost the attachments on every
+        // reload, so a request that had asked about a screenshot came back bare.
+        this.emit(rt, {
+          type: "userChunk",
+          text: textOf(u.content),
+          messageId: u.messageId,
+          attachments: replayedAttachments(u.content)
+        });
         return;
       case "agent_thought_chunk":
         if (this.cfg().get<boolean>("showThinking", true)) {
@@ -3968,6 +3991,26 @@ function textOf(content: any): string {
     return content.resource.text;
   }
   return "";
+}
+
+// What was attached to a request, read back out of the content blocks it was sent
+// as: a file it pointed at, or a picture, which travels with its data so the pill
+// can show it.
+function replayedAttachments(content: unknown): { label: string; type: string; thumb?: string }[] {
+  const blocks = Array.isArray(content) ? content : [content];
+  const out: { label: string; type: string; thumb?: string }[] = [];
+  for (const b of blocks) {
+    const block = b as { type?: string; uri?: string; name?: string; mimeType?: string; data?: string };
+    if (!block || typeof block !== "object") {
+      continue;
+    }
+    if (block.type === "image" && block.data) {
+      out.push({ label: "Image", type: "image", thumb: `data:${block.mimeType || "image/png"};base64,${block.data}` });
+    } else if (block.type === "resource_link" && block.uri) {
+      out.push({ label: block.name || path.basename(fileFromUri(block.uri) || block.uri), type: "file" });
+    }
+  }
+  return out;
 }
 
 // The terminal this tool call is running in. The agent asks the client to create

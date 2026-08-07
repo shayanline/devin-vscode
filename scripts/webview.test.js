@@ -1552,6 +1552,41 @@ test("an executed command is the command and what it printed, uncaptioned", asyn
   assert.strictEqual(h.errors().length, 0);
 });
 
+test("a request keeps what was attached to it, above the message", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({
+    type: "userMessage",
+    text: "why does this look wrong?",
+    attachments: [
+      { label: "main.css", type: "file" },
+      { label: "Screenshot.png", type: "image", thumb: "data:image/png;base64,iVBORw0KGgo=" }
+    ]
+  });
+  await h.settle(20);
+
+  const req = h.thread().querySelector(".turn-request");
+  const row = req.querySelector(".chat-attached-context");
+  assert.ok(row, "the context came with the message, so it stays with it");
+  assert.ok(row.compareDocumentPosition(req.querySelector(".req-body")) & 4,
+    "above the bubble, where VS Code puts it");
+  const pills = [...row.querySelectorAll(".chat-attached-context-attachment")];
+  assert.deepStrictEqual(pills.map((p) => p.textContent), ["main.css", "Screenshot.png"]);
+  assert.ok(pills[0].querySelector(".attachment-icon"), "a file gets its file glyph");
+  const img = pills[1].querySelector("img.chat-attached-context-pill-image");
+  assert.ok(img, "a picture is its own thumbnail");
+  assert.strictEqual(img.getAttribute("src"), "data:image/png;base64,iVBORw0KGgo=");
+
+  // A replayed request carries them too, so a reload does not strip the context.
+  h.post({ type: "clear" });
+  h.post({ type: "userChunk", text: "again", messageId: "m1", attachments: [{ label: "notes.md", type: "file" }] });
+  await h.settle(20);
+  assert.strictEqual(h.thread().querySelectorAll(".chat-attached-context-attachment").length, 1);
+  assert.strictEqual(h.errors().length, 0);
+});
+
 test("a listing is grouped by folder, not a wall of pills", async () => {
   const h = createHarness();
   h.post({ type: "ready" });
