@@ -1724,6 +1724,44 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     lastUserText = text;
   }
 
+  // What was attached to a request, above the message and aligned with it, the way
+  // VS Code's chat keeps a request's context attached to it (chat-attached-context
+  // in an interactive-request). A picture is its own thumbnail rather than a
+  // generic file glyph, so a screenshot is recognisable at a glance.
+  function setTurnAttachments(turn, items) {
+    const list = (items || []).filter((a) => a && a.label);
+    if (turn.attachRow) turn.attachRow.remove();
+    turn.attachRow = null;
+    if (!list.length) return;
+    const row = document.createElement("div");
+    row.className = "chat-attached-context";
+    list.forEach((a) => {
+      const pill = document.createElement("span");
+      pill.className = "chat-attached-context-attachment";
+      pill.title = a.label;
+      if (a.thumb) {
+        const img = document.createElement("img");
+        img.className = "chat-attached-context-pill-image";
+        img.src = a.thumb;
+        img.alt = "";
+        pill.appendChild(img);
+      } else {
+        const icon = document.createElement("i");
+        icon.className = "codicon " + fileIconFor(a.label) + " attachment-icon";
+        pill.appendChild(icon);
+      }
+      const name = document.createElement("span");
+      name.className = "attachment-name";
+      name.textContent = a.label;
+      pill.appendChild(name);
+      row.appendChild(pill);
+    });
+    // Above the bubble rather than inside it, which is where VS Code puts it: the
+    // context is what the message came with, not part of what was typed.
+    turn.req.insertBefore(row, turn.reqBody);
+    turn.attachRow = row;
+  }
+
   // Request hover toolbar (Copy, Edit) + a persistent response footer toolbar
   // (Copy, Retry) + a hover timestamp + the checkpoint row (Restore). Rebuilt
   // whenever caps or busy state change.
@@ -2573,7 +2611,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
 
   // A user turn streamed during history replay (user_message_chunk): starts a
   // new turn and streams the request text into it.
-  function appendUserChunk(text, mid) {
+  function appendUserChunk(text, mid, attachments) {
     if (!(block && block.kind === "user" && sameMid(block.mid, mid))) {
       finalizeBlock();
       hideWelcome();
@@ -2582,6 +2620,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       buildTurnChrome(turn); // hide edit/restore until (if) a head is known
       block = { kind: "user", mid, turn, buffer: "" };
     }
+    if (attachments && attachments.length) setTurnAttachments(block.turn, attachments);
     block.buffer += text;
     lastUserText = block.buffer;
     // Render the request text synchronously so a finalize between replayed
@@ -2594,7 +2633,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   }
 
   // A user turn we already have in full (live echo from the host).
-  function addUserMessage(text) {
+  function addUserMessage(text, attachments) {
     finalizeBlock();
     hideWelcome();
     // A response is imminent, so enter the busy state BEFORE building the turn:
@@ -2602,7 +2641,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     // Copy/Retry footer until the host's busy=true arrives. The host confirms
     // busy shortly, and clears it on completion/error.
     setBusy(true);
-    newTurn(undefined, text);
+    const turn = newTurn(undefined, text);
+    setTurnAttachments(turn, attachments);
     // A send is an explicit action: snap back to the bottom even if the user
     // had scrolled up while reading.
     forceScrollToBottom();
@@ -6032,9 +6072,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         break;
       case "userMessage":
         if (currentTitle === "Chat") { currentTitle = m.text.slice(0, 40); el.chatTitle.textContent = currentTitle; }
-        addUserMessage(m.text);
+        addUserMessage(m.text, m.attachments);
         break;
-      case "userChunk": appendUserChunk(m.text, m.messageId); break;
+      case "userChunk": appendUserChunk(m.text, m.messageId, m.attachments); break;
       case "assistantStart": finalizeBlock(); showWorking(); break;
       case "assistantChunk": appendAssistant(m.text, m.messageId); break;
       case "assistantImage": appendAssistantImage(m.mime, m.data); break;

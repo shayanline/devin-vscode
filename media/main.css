@@ -1441,6 +1441,53 @@ body {
   align-items: flex-end;
 }
 
+/* What a request came with, above the bubble and aligned with it, mirroring VS
+   Code's chat-attached-context inside an interactive-request. */
+.turn-request .chat-attached-context {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-width: 100%;
+  width: fit-content;
+  justify-content: flex-end;
+  margin-left: auto;
+  padding-bottom: 5px;
+}
+
+.chat-attached-context-attachment {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow: hidden;
+  height: 18px;
+  padding: 0 6px 0 4px;
+  max-width: 100%;
+  width: fit-content;
+  border: 1px solid var(--vscode-chat-requestBorder, var(--vscode-input-background, var(--dv-border)));
+  border-radius: 4px;
+  font-size: 11px;
+}
+
+/* A picture is its own icon, so a screenshot is recognisable without opening it. */
+.chat-attached-context-pill-image {
+  width: 13px;
+  height: 13px;
+  border-radius: 2px;
+  object-fit: cover;
+  flex: 0 0 auto;
+}
+
+.chat-attached-context-attachment .attachment-icon {
+  font-size: 14px;
+  flex: 0 0 auto;
+}
+
+.chat-attached-context-attachment .attachment-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .turn-request .req-body {
   background: var(--vscode-chat-requestBubbleBackground, var(--vscode-chat-requestBackground, rgba(127, 127, 127, 0.12)));
   border: 1px solid var(--vscode-chat-requestBorder, transparent);
