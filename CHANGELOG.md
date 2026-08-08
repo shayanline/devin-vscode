@@ -8,123 +8,33 @@ the commit messages carry the detail.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
-## [0.8.2] - 2026-08-06
+## [0.9.0] - 2026-08-08
 
-Moving between sessions and surfaces, and keeping what you had typed.
+A chat you can move, and a transcript that reads like VS Code's own.
 
 ### Highlights
 - Move a chat between the side panel and an editor tab, live agent and all.
-- A detached chat is only that chat: no session list, no back, no terminate.
-- An editor tab is named after the chat it holds, and follows a rename.
-- Rename a detached chat's session by right clicking its editor tab.
-- A tab restored after a window reload comes back to the chat it was holding.
-- A moved chat keeps the prompt you were part way through writing.
-- A question half answered keeps its answers when the chat changes surface.
-- A chat open on the other surface says so, and offers to bring it over.
-- A chat started in an editor tab shows in the side panel's list right away.
+- A detached chat is only that chat, named after it, and survives a reload.
+- What a chat holds follows it: draft, answers, attachments, plan and edits.
 - The session list keeps itself up to date, so the Refresh button is gone.
-- A chat started, renamed or deleted anywhere shows up on its own.
-- The New Session menu no longer repeats what its own button does.
-- An edit reads the same everywhere: one line with the file and its counts.
-- A created file carries the same pencil as an edited one, not a green tick.
-- An edit in a run of tools is its own row, not buried in a tool section.
-- A file the agent read is one line, and clicking it opens the file itself.
-- Clicking a file opens it even when it lives outside the workspace.
-- A search says what it looked for and where, in one line.
-- Typing while Devin works gives a split Send: queue it, or stop and send.
-- It sits after Stop at the far end, flat, and keeps the send glyph.
-- Alt+Enter takes the other action, and the chevron says what each one does.
-- A setting picks which of the two Enter does.
-- A run of tools says what it did, not "Used N tools", in two clauses.
-- The rows of a run are chained through the middle of each icon, with room.
+- Type while Devin works: queue the message, or stop and send it now.
+- A run of tools says what it did, chained like a chain of thought.
 - Reasoning inside a run reads as text on that chain, with nothing to open.
-- Reasoning on its own keeps its header, since it is a section of its own.
-- A reopened command no longer repeats its input as its output.
-- Settings lists Windsurf's MCP servers, and manages them in place.
-- "Used N references" folds like every other section, chevron and all.
-- A folded plan names the item being worked on, not just how many are done.
-- An MCP server that will not start is named in the chat, and can be dismissed.
-- A notice above the composer is a card again, and stands off the input.
-- A session that fails to open names the MCP servers that stopped it.
-- A finished turn says how long it took, with what it cost on hover.
-- A command shows the output it is producing, not just its exit code.
-- An expanded command is the command and its output, without the captions.
-- The command on a row sits in its own chip, as VS Code's chat sets it.
-- A long command is cut short on the row, and left unhighlighted there.
-- A command's row drops the "cd" that got it there, and shows the command.
-- Action icons are plain: colour is for a state or a count, not an edit.
-- A search keeps the files it found, grouped by folder, instead of losing them.
-- A search row says what it looked for and how many it found.
-- A sent message keeps what was attached to it, a picture as its thumbnail.
-- A run keeps its edits and its reasoning together, under one summary.
-- A screenshot a tool took is shown beside the row, open or shut, and enlarges.
-- A command row reads "Ran" then the command, "Running" while it is going.
-- Files a tool pointed at (a search hit, a listing) are listed and open.
-- Reasoning part way through the work no longer splits it in two.
-- Closing a detached tab: cancel puts the tab back, and dismissing it is safe.
-- A command and what it printed read as an Input and Output pair.
-- A command titles its own row, highlighted, instead of a sentence about it.
-- A command of many lines takes one row, with the rest under Input.
-- Its output opens itself only while it runs, and closes again when it passes.
-- A message typed while a chat is opening waits for it instead of vanishing.
-- Keeping a change then editing again diffs that edit, not the whole session.
-- Keep all and Undo all mark every edit in the transcript, not just one.
+- A command titles its own row and shows its output as it is produced.
 - Changes waiting to be reviewed survive a window reload, counts included.
-- Reopening a chat no longer recounts every edit it ever made.
-- Files and images staged in the composer survive leaving the chat.
-- They survive a window reload too, and a chat started from the list keeps them.
-- Renaming a chat that is open in an editor tab now sticks.
-- A rename shows up everywhere at once, with no refresh.
-- A rename that fails says so instead of looking like it worked.
-- Moving a chat no longer leaves a "Continued from" note in the transcript.
-- A tab says when its agent has stopped: the next message starts it again.
-- Closing a detached tab asks first: stop it, move it to the panel, or cancel.
-- The sessions panel docks on the right by default, or the left, from a setting.
-- Drag the panel by its own header to move it to the other side.
-- Reloading the window puts you back in the chat you were reading.
-- An unsent prompt is kept per chat, through switches, reloads and restarts.
-- Answers given to a question, "Other" text included, survive leaving a session.
-- Enter walks the questions and submits the last one, Shift+Enter for a line.
-- A permission prompt now shows the command it is asking you to allow.
-- Waiting on a subagent reads as agent work, naming the agent and the wait.
-- Reasoning blocks, subagents and agent waits lead with their own icon.
-- The header no longer narrates the tool that is running.
-- JSON in tool input and output is formatted, coloured and can be copied.
-- Terminal output and every tool block carry a copy action.
-- A wrapped command keeps its prompt and Run action on its first line.
-- Staged attachments follow a chat when it moves surfaces.
-- A chat moved while Devin is working takes its transcript with it.
-- Keeping a change no longer draws its diff as if the whole file were new.
-- A restore no longer winds a kept file back further than the checkpoint.
-- A pending question is no longer duplicated, or left over another chat.
-- The question and permission trays scroll instead of hiding the transcript.
-- Switching sessions keeps each chat's plan, changed files and context ring.
-- The mode picker now shows the mode the session is really in.
-- A resumed chat paints its replies with its tool calls, not seconds later.
-- A replayed reasoning block reads "Thought", with the original time on hover.
-- The sessions panel and switcher get the New Session split button.
-- A collapsed plan, reasoning block or subagent takes only its header's height.
-- Panel settings apply as you change them.
+- Keep all and Undo all mark every edit in the transcript, not just one.
+- A sent message keeps what was attached to it, a picture as its thumbnail.
+- An MCP server that will not start is named in the chat, and can be dismissed.
+- Settings lists Windsurf's MCP servers, and manages them in place.
+- A finished turn says how long it took, with what it cost on hover.
+- The sessions panel docks either side, and drags by its own header.
+- A permission prompt shows the command it is asking you to allow.
 
 ### Under the hood
 - A moved chat hands over its live runtime: no process, lock or turn restarts.
-- A chat's page writes its draft and answers back before it changes surface.
-- Every surface is told when another one starts, moves, stops or renames a chat.
-- The CLI has no change feed, so its session store is watched for the rest.
-- Only a list on screen is re-listed, since each listing runs `devin list`.
-- A reloaded transcript can tell a created file from a changed one.
-- ACP cannot steer a running prompt, so "stop and send" heads the queue.
-- Staged files live in extension storage, per chat: base64 is not settings data.
-- Resource links and embedded resources in a tool result are no longer dropped.
+- Every surface is told when another starts, moves, stops or renames a chat.
+- Drafts, attachments and the working set outlive the agent, in storage.
 - Devin's output and turn stats notifications are read, not just logged.
-- A config belonging to another tool is refused if it does not parse.
-- The working set is kept in extension storage, so it outlives the agent.
-- Line counts trim what both sides share before the table, not after.
-- A rename goes through the agent holding the chat, and outlives a stale list.
-- An agent whose tab closed mid decision now stops with the rest on the way out.
-- File edits are tracked per session, so a panel lists only its own chat's.
-- Kept and undone files keep their original text, for open diffs and restores.
-- Drafts live in workspace state, answers ride on the pending request.
 
 ## [0.8.0] - 2026-08-06
 
