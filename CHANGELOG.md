@@ -44,6 +44,7 @@ Moving between sessions and surfaces, and keeping what you had typed.
 - "Used N references" folds like every other section, chevron and all.
 - A folded plan names the item being worked on, not just how many are done.
 - An MCP server that will not start is named in the chat, and can be dismissed.
+- A notice above the composer is a card again, and stands off the input.
 - A session that fails to open names the MCP servers that stopped it.
 - A finished turn says how long it took, with what it cost on hover.
 - A command shows the output it is producing, not just its exit code.
