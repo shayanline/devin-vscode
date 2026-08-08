@@ -2210,12 +2210,12 @@ body {
 
 /* Reasoning inside a run is the text itself, hanging off the run's chain like
    every other step, with no header and nothing to open. */
-.thinking-plain > .dv-collapsible-header {
+.tool-group-body > .thinking-plain > .dv-collapsible-header {
   display: none;
 }
 
-.thinking-plain > .dv-collapsible-anim,
-.thinking-plain > .dv-collapsible-anim-inner {
+.tool-group-body > .thinking-plain > .dv-collapsible-anim,
+.tool-group-body > .thinking-plain > .dv-collapsible-anim-inner {
   max-height: none;
   overflow: visible;
   opacity: 1;
@@ -2223,28 +2223,28 @@ body {
 
 /* Its own inner spine would be a chain within a chain, so the run's line carries
    it and each step keeps only its node. */
-.thinking-plain .thinking-body {
+.tool-group-body > .thinking-plain .thinking-body {
   margin-left: 0;
 }
 
-.thinking-plain .thinking-body::before,
-.thinking-plain .thinking-item::before {
+.tool-group-body > .thinking-plain .thinking-body::before,
+.tool-group-body > .thinking-plain .thinking-item::before {
   display: none;
 }
 
 /* Its node and its text line up with the rows around it, so the run reads as one
    column. VS Code pulls the icon to the edge the same way. */
-.thinking-plain .thinking-item {
+.tool-group-body > .thinking-plain .thinking-item {
   padding-top: 0;
   padding-bottom: var(--dv-space-3);
   padding-left: 20px;
 }
 
-.thinking-plain .thinking-item:last-child {
+.tool-group-body > .thinking-plain .thinking-item:last-child {
   padding-bottom: 0;
 }
 
-.thinking-plain .thinking-icon {
+.tool-group-body > .thinking-plain .thinking-icon {
   left: 1px;
   top: 3px;
 }
