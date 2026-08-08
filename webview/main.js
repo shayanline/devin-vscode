@@ -2586,15 +2586,16 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       // fixedScrolling shows a live, fixed-height peek while streaming (VS
       // Code's chat.agent.thinkingStyle); collapsed starts folded.
       const peek = caps.thinkingStyle === "fixedScrolling";
-      // Inside a run, reasoning is one of the steps rather than a section: it
-      // reads as the text it is, on the same chain as the work it led to, with no
-      // header and nothing to open. VS Code's chat does the same, hiding the
-      // label and leaving the list at max-height:none. "collapsed" is the one
-      // style that asks for a folded section, so that one keeps its header.
+      // Reasoning that lands in a run is one of its steps: it reads as the text
+      // it is, on the same chain as the work it led to, with no header and
+      // nothing to open, which is what VS Code does with a thinking item. On its
+      // own it is a section of its own and keeps its header, so the styling is
+      // left to the stylesheet, which can see whether it ended up in a run.
+      // "collapsed" is the one style that asks for a folded section either way.
       const plain = caps.thinkingStyle !== "collapsed";
       const c = makeCollapsible(
         "thinking thinking-active" + (peek ? " thinking-peek" : "") + (plain ? " thinking-plain" : ""),
-        { startCollapsed: !peek && !plain }
+        { startCollapsed: !peek }
       );
       const chev = document.createElement("i");
       chev.className = "codicon codicon-chevron-right thinking-chevron";

@@ -1680,8 +1680,25 @@ test("reasoning inside a run is text on the chain, not a section to open", async
 
   const think = h.thread().querySelector(".thinking");
   assert.ok(think.classList.contains("thinking-plain"), "no header, nothing to open");
+  // The stylesheet keys the headerless treatment off being inside a run, so this
+  // is the invariant that decides how it is drawn.
   assert.ok(think.closest(".tool-group-body"), "and it sits on the run's chain with the work it led to");
   assert.match(think.textContent, /The callers still import the old helpers/, "the reasoning reads as itself");
+
+  // A thought on its own is a section of its own, and keeps its header: it is
+  // not a step in anything, so headerless text would be a paragraph from nowhere.
+  const h3 = createHarness();
+  h3.post({ type: "ready" });
+  h3.post({ type: "body", body: "thread" });
+  h3.post({ type: "clear" });
+  h3.post({ type: "thoughtChunk", text: "Weighing it up." });
+  h3.post({ type: "assistantChunk", text: "Answer." });
+  h3.post({ type: "assistantEnd" });
+  await h3.settle(30);
+  const lone = h3.thread().querySelector(".thinking");
+  assert.ok(!lone.closest(".tool-group-body"), "not in a run, so the header stays");
+  assert.strictEqual(lone.querySelector(".thinking-label").textContent, "Thought for 1s");
+  assert.strictEqual(h3.errors().length, 0);
 
   // Asking for the folded style still gets a folded section.
   const h2 = createHarness();

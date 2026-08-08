@@ -38,6 +38,7 @@ Moving between sessions and surfaces, and keeping what you had typed.
 - A run of tools says what it did, not "Used N tools", in two clauses.
 - The rows of a run are chained through the middle of each icon, with room.
 - Reasoning inside a run reads as text on that chain, with nothing to open.
+- Reasoning on its own keeps its header, since it is a section of its own.
 - A reopened command no longer repeats its input as its output.
 - Settings lists Windsurf's MCP servers, and manages them in place.
 - "Used N references" folds like every other section, chevron and all.
