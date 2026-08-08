@@ -2744,14 +2744,15 @@ body {
   background: none;
 }
 
-/* Curved connector from the header into the first node, in the shape and size VS
-   Code uses (chatThinkingContent.css: 5px wide, 16px tall, 5px radius, dropping
-   from the header's bottom edge). It hangs off the group rather than off the body
-   so the collapse wrapper cannot clip it. */
+/* Curved corner under the header, exactly as VS Code draws it
+   (chatThinkingContent.css: left 3, 5 wide, 16 tall, 5px radius, from the header's
+   bottom edge). It sits to the left of the chain and stops short of it: it says
+   the run hangs below its header, it is not a joint in the chain. Reaching across
+   to the first node instead drove the line into that node's icon. */
 .tool-group:not(.dv-collapsed)::after {
   content: "";
   position: absolute;
-  left: 18px;
+  left: 3px;
   top: 20px;
   height: 16px;
   width: 5px;
