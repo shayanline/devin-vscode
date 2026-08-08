@@ -1944,6 +1944,17 @@ body {
   color: var(--vscode-editorWarning-foreground, #cca700);
 }
 
+/* A card above the composer: an error, an interrupted turn, or a warning about a
+   server that would not start. It carries the same frame as the confirmation
+   widget, and stands off the input rather than sitting on it. */
+.tray-card {
+  padding: var(--dv-space-3) var(--dv-space-4);
+  margin-bottom: var(--dv-space-3);
+  border: 1px solid var(--dv-border);
+  border-radius: var(--dv-radius-md);
+  background: var(--vscode-chat-requestBubbleBackground, rgba(127, 127, 127, 0.08));
+}
+
 /* An MCP server that would not start is a warning about what this chat can do,
    so it sits above the composer for as long as it is true. */
 .mcp-card {
