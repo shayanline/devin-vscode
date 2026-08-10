@@ -2270,10 +2270,12 @@ body {
   position: relative;
   margin-left: var(--dv-space-3);
   font-size: var(--dv-fs-s);
-  /* The chain's node: a 4px bullet whose middle sits 15px into each step. The
-     steps inherit it, and the elbow above them is measured from it. */
+  /* The chain's node: a 12px glyph whose middle sits 15px into each step, and
+     whose bullet is painted from x = 9. The steps inherit it, and the elbow
+     above them is measured from it. */
   --node-y: 15px;
-  --node-size: 4px;
+  --node-size: 12px;
+  --node-x: 9px;
 }
 
 /* Reasoning inside a run is the text itself, hanging off the run's chain like
@@ -2300,12 +2302,19 @@ body {
   display: none;
 }
 
-/* Its node and its text line up with the rows around it, so the run reads as one
-   column. VS Code pulls the icon to the edge the same way. */
-.tool-group-body > .thinking-plain .thinking-item {
+/* A thought in a run is a row of the run, laid out as one: the same leading
+   glyph in the same column, the same gap to the text, the same line box, and so
+   the same node on the chain. Only the icon differs. Its own headroom belongs to
+   the standalone box's elbow, and there is no elbow here. */
+.tool-group-body > .thinking-plain > .dv-collapsible-anim > .dv-collapsible-anim-inner {
   padding-top: 0;
-  padding-bottom: var(--dv-space-3);
-  padding-left: 20px;
+}
+
+.tool-group-body > .thinking-plain .thinking-item {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--dv-space-3);
+  padding: 0 0 var(--dv-space-3) 0;
 }
 
 .tool-group-body > .thinking-plain .thinking-item:last-child {
@@ -2313,13 +2322,25 @@ body {
 }
 
 .tool-group-body > .thinking-plain .thinking-icon {
-  left: 1px;
-  top: 3px;
+  position: static;
+  flex: 0 0 auto;
+  width: 14px;
+  height: auto;
+  font-size: 14px;
+  /* Reasoning is prose and carries more leading than a one line row, so the
+     glyph takes the row's line rather than the paragraph's: the node is the
+     middle of it, and the chain runs through every row's glyph alike. */
+  line-height: calc(2 * (var(--node-y) - 6px));
+  opacity: 0.8;
+}
+
+.tool-group-body > .thinking-plain .thinking-item-content {
+  min-width: 0;
 }
 
 /* One reasoning step. The node icon is pinned to the connector line and the
-   content is inset to clear it. Its bullet is a 4px dot in a 12px box, centred
-   on the line at x = 11. */
+   content is inset to clear it. Its bullet sits in a 12px box centred on the
+   line at x = 11, as every glyph on this chain does. */
 .thinking-item {
   position: relative;
   padding: var(--dv-space-3) var(--dv-space-6) var(--dv-space-3) 24px;
@@ -2380,7 +2401,9 @@ body {
   left: 3px;
   top: -10px;
   height: calc(10px + var(--node-y));
-  width: calc(8px - var(--node-size) / 2 - var(--dv-node-clear));
+  /* Down to the middle of the first node and across to just short of it. Never
+     less than its own corner radius, or there would be no corner to draw. */
+  width: max(3px, calc(var(--node-x) - 3px - var(--dv-node-clear)));
   border-left: 1px solid var(--dv-border);
   border-bottom: 1px solid var(--dv-border);
   border-bottom-left-radius: 5px;
@@ -2760,28 +2783,23 @@ body {
    (chatThinkingContent.css: padding 6px 12px 6px 24px), which is what leaves room
    for the line between one node and the next.
 
-   `--node-y` is the middle of the row's leading glyph, which is where the line
-   must break. A row carrying a file chip is taller, so its node sits lower. */
+   Every row leads with a 14px glyph in the same column, whatever kind of row it
+   is, so one node describes them all: a thought is a row of the run like any
+   other, wearing a dot instead of a pencil or a terminal. `--node-y` is the
+   middle of that glyph, which is where the line must break. */
 .tool-group-body > * {
   position: relative;
   padding-top: 6px;
   padding-bottom: 6px;
   --node-y: 15.3px;
   --node-size: 14px;
-  /* The left edge of the painted glyph, which is where the elbow stops. */
+  /* The left edge of the glyph, which is where the elbow stops short. */
   --node-x: 0px;
 }
 
+/* A row carrying a file chip is taller, so its glyph sits lower. */
 .tool-group-body > .edit-pill {
   --node-y: 20px;
-}
-
-/* Reasoning's node is its bullet: lower than a row's glyph, and a 4px dot
-   inside its 12px box rather than a full width icon. */
-.tool-group-body > .thinking-plain {
-  --node-y: 25px;
-  --node-size: 4px;
-  --node-x: 5px;
 }
 
 .tool-group-body > *::before {
@@ -3187,6 +3205,9 @@ body {
   margin-left: var(--dv-space-3);
   --node-y: 15px;
   --node-size: 12px;
+  /* Its rows wear full width icons rather than a bullet, which start at the
+     left edge of the same 12px box. */
+  --node-x: 5px;
 }
 
 /* One entry on the timeline: prompt, a tool call, streamed output, the working

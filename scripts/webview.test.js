@@ -2041,6 +2041,13 @@ test("reasoning inside a run is text on the chain, not a section to open", async
   // is the invariant that decides how it is drawn.
   assert.ok(think.closest(".tool-group-body"), "and it sits on the run's chain with the work it led to");
   assert.match(think.textContent, /The callers still import the old helpers/, "the reasoning reads as itself");
+  // A thought is a row of the run like any other, so it leads with a codicon in
+  // the same column as the rows around it, and the chain treats it the same. The
+  // stylesheet measures the node from those, so they are the invariant.
+  const bullet = think.querySelector(".thinking-item > .thinking-icon");
+  assert.ok(bullet, "the row leads with its glyph, before the text");
+  assert.ok(bullet.classList.contains("codicon-circle-small-filled"), "a codicon, not a dot drawn by hand");
+  assert.strictEqual(bullet.nextElementSibling.className, "thinking-item-content", "then what it thought");
 
   // A thought on its own is a section of its own, and keeps its header: it is
   // not a step in anything, so headerless text would be a paragraph from nowhere.
