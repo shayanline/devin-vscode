@@ -2334,7 +2334,8 @@ body {
 /* fixedScrolling peek: while streaming, cap the reasoning to a fixed height,
    auto-scrolled to the latest, with top/bottom fades (VS Code's fixed mode). */
 .thinking-peek .dv-collapsible-anim-inner {
-  max-height: 160px;
+  /* VS Code's THINKING_SCROLL_MAX_HEIGHT. */
+  max-height: 200px;
   overflow-y: auto;
   -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 20px, #000 calc(100% - 16px), transparent 100%);
   mask-image: linear-gradient(to bottom, transparent 0, #000 20px, #000 calc(100% - 16px), transparent 100%);

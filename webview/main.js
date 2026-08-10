@@ -2486,9 +2486,13 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         block.details.classList.remove("thinking-active");
         block.details.classList.remove("thinking-peek");
       }
-      // Settled reasoning is left open: inside a run it is one of the steps, not
-      // a section to go and find, which is how VS Code's chat leaves it too
-      // (chat-thinking-collapsible is max-height:none, overflow:visible).
+      // A thought of its own folds to its header once it is done, as VS Code
+      // folds a finished thinking part. Reasoning inside a run does not: it has
+      // no header to fold to, and the run folding takes it with it.
+      const inRun = !!(block.details && block.details.closest(".tool-group-body"));
+      if (block.peek && block.collapse && !inRun && !block.collapse.userToggled()) {
+        block.collapse.setCollapsed(true);
+      }
       if (block.label) {
         block.label.textContent = block.replayed
           ? "Thought"
@@ -2889,7 +2893,18 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // A run of work (tool calls, edits, and the reasoning between them) collapses
   // under one header that says what the run did, mirroring VS Code's chat. Only
   // the reply itself ends a run: an answer, an image, or handing off to a subagent.
+  // A run is over: it folds to its summary, the way VS Code's chat finalizes a
+  // thinking part (finalizeCurrentThinkingPart -> collapseContent). The work it
+  // did is said on the header, and what it did it with is a click away, which is
+  // the whole point of grouping it. Unlike VS Code we leave alone a run the user
+  // opened by hand: closing something somebody deliberately opened is not tidying.
+  function endToolRun() {
+    const g = currentTurn && currentTurn.toolRun && currentTurn.toolRun.group;
+    if (g && !g.collapse.userToggled()) g.collapse.setCollapsed(true);
+  }
+
   function breakToolGroup() {
+    endToolRun();
     if (currentTurn) currentTurn.toolRun = null;
   }
   function createToolGroup() {
@@ -5638,6 +5653,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       if (wasBusy && currentTurn && !currentTurn.replayed && !currentTurn.completedAt) {
         currentTurn.completedAt = Date.now();
       }
+      // A turn that ends on its work, with no closing word, still ends its run:
+      // otherwise the last one of every turn is the only one left standing open.
+      if (wasBusy) endToolRun();
       // Move the live plan into the transcript as history and undock it.
       if (wasBusy) commitPlanSnapshot();
       finalizeSubagents();

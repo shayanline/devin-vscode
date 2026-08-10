@@ -1668,6 +1668,67 @@ test("undoing every change says undone, and a later report cannot revive it", as
   assert.strictEqual(h.errors().length, 0);
 });
 
+test("a run folds to its summary once it is over", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "userMessage", text: "go" });
+  h.post({ type: "busy", value: true });
+  h.post({ type: "toolCall", id: "a", kind: "read", status: "completed", rawInput: { path: "/w/a.ts" } });
+  h.post({ type: "toolCall", id: "b", kind: "read", status: "completed", rawInput: { path: "/w/b.ts" } });
+  await h.settle(20);
+  const run = () => h.thread().querySelector(".tool-group");
+  assert.ok(run(), "the two calls made a run");
+  assert.ok(!run().classList.contains("dv-collapsed"), "open while the work is going on");
+
+  // A word from the agent ends the run, as it does in VS Code's chat.
+  h.post({ type: "assistantChunk", text: "Both read." });
+  h.post({ type: "assistantEnd" });
+  await h.settle(20);
+  assert.ok(run().classList.contains("dv-collapsed"), "and folds to its summary after");
+  assert.match(run().querySelector(".tool-group-label").textContent, /Read/, "and says what it did");
+
+  // A turn that ends on its work, with no closing word, still ends its run.
+  const h2 = createHarness();
+  h2.post({ type: "ready" });
+  h2.post({ type: "body", body: "thread" });
+  h2.post({ type: "clear" });
+  h2.post({ type: "userMessage", text: "go" });
+  h2.post({ type: "busy", value: true });
+  h2.post({ type: "toolCall", id: "a", kind: "read", status: "completed", rawInput: { path: "/w/a.ts" } });
+  h2.post({ type: "toolCall", id: "b", kind: "read", status: "completed", rawInput: { path: "/w/b.ts" } });
+  await h2.settle(20);
+  assert.ok(!h2.thread().querySelector(".tool-group").classList.contains("dv-collapsed"));
+  h2.post({ type: "busy", value: false });
+  await h2.settle(20);
+  assert.ok(h2.thread().querySelector(".tool-group").classList.contains("dv-collapsed"),
+    "otherwise the last run of every turn is the one left standing open");
+  assert.strictEqual(h.errors().length + h2.errors().length, 0);
+});
+
+test("a run the user opened is left open when it ends", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "userMessage", text: "go" });
+  h.post({ type: "busy", value: true });
+  h.post({ type: "toolCall", id: "a", kind: "read", status: "completed", rawInput: { path: "/w/a.ts" } });
+  h.post({ type: "toolCall", id: "b", kind: "read", status: "completed", rawInput: { path: "/w/b.ts" } });
+  await h.settle(20);
+
+  // Closing something somebody deliberately opened is not tidying up.
+  const run = h.thread().querySelector(".tool-group");
+  run.querySelector(".dv-collapsible-header").click();  // collapse
+  run.querySelector(".dv-collapsible-header").click();  // and open again, by hand
+  await h.settle(10);
+  h.post({ type: "busy", value: false });
+  await h.settle(20);
+  assert.ok(!run.classList.contains("dv-collapsed"), "left as the user left it");
+  assert.strictEqual(h.errors().length, 0);
+});
+
 test("reasoning inside a run is text on the chain, not a section to open", async () => {
   const h = createHarness();
   h.post({ type: "ready" });

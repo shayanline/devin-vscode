@@ -8,6 +8,11 @@ the commit messages carry the detail.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
+## [Unreleased]
+
+### Highlights
+- A run folds to its summary once it is over, and a finished thought with it.
+
 ## [0.9.0] - 2026-08-08
 
 A chat you can move, and a transcript that reads like VS Code's own.
