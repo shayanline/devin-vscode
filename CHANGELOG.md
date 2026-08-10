@@ -15,6 +15,8 @@ the commit messages carry the detail.
 - A reloaded session comes back folded, not laid out end to end.
 - A folded section is out of reach of Tab and of find in page.
 - A section is not folded away while you are reading inside it.
+- A run or a thought you opened by hand stays open when it ends.
+- More of the reasoning stays in view while it is still streaming.
 - A run's chevron appears on hover, like every other one.
 
 ## [0.9.0] - 2026-08-08
