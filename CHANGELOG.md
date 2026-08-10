@@ -8,7 +8,7 @@ the commit messages carry the detail.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
-## [Unreleased]
+## [0.11.0] - 2026-08-10
 
 ### Highlights
 - A running command offers Continue in Background and Focus Terminal.
