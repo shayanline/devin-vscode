@@ -2763,9 +2763,20 @@ export class ChatController implements AcpHost {
     if (!text.trim()) {
       return;
     }
-    // The text has left the composer, so it is no longer a draft.
-    this.store.setDraft(startNew ? undefined : this.activeId, "");
+    // The text has left the composer, so it is no longer a draft. Every way out
+    // of this method from here on either sends it, queues it, or hands it back:
+    // clearing the draft and then returning is how a message disappears.
+    const draftFor = startNew ? undefined : this.activeId;
+    this.store.setDraft(draftFor, "");
+    const giveBack = (why?: string) => {
+      this.store.setDraft(draftFor, text);
+      this.post({ type: "draft", id: draftFor || null, text });
+      if (why) {
+        this.post({ type: "error", text: why });
+      }
+    };
     if (!(await this.ensureReady())) {
+      giveBack();
       return;
     }
     // If the visible session is still coming back to life (a silent background
@@ -2816,11 +2827,13 @@ export class ChatController implements AcpHost {
           rt = await this.createSession();
         }
       } catch (err) {
-        this.post({ type: "error", text: err instanceof Error ? err.message : String(err) });
+        // Waking or creating the session failed, so there is nowhere to send it.
+        giveBack(err instanceof Error ? err.message : String(err));
         return;
       }
     }
     if (!rt) {
+      giveBack("Couldn't open a session to send that to. Your message is back in the box.");
       return;
     }
 

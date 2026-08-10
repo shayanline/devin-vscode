@@ -8,6 +8,11 @@ the commit messages carry the detail.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
+## [Unreleased]
+
+### Highlights
+- A message that cannot be sent goes back in the box, and says why.
+
 ## [0.9.1] - 2026-08-10
 
 Sections that fold themselves, and stay folded when you come back.
