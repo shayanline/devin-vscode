@@ -63,6 +63,9 @@ export class ChangeTracker
   // do with the agent: forgetting it on a reload lost the diffs and left Keep and
   // Undo with nothing to act on, so the next edit looked like a brand new set.
   private store?: vscode.Uri;
+  // Originals being resolved right now, so two clicks do not race each other to
+  // create the same model.
+  private readonly warming = new Map<string, Promise<void>>();
   private saveTimer?: NodeJS.Timeout;
 
   async useStore(dir: vscode.Uri | undefined): Promise<void> {
@@ -259,7 +262,32 @@ export class ChangeTracker
     }
     const left = this.originalUri(fsPath);
     const right = vscode.Uri.file(fsPath);
+    await this.warmOriginal(left);
     await vscode.commands.executeCommand("vscode.diff", left, right, `${path.basename(fsPath)} (Devin)`);
+  }
+
+  // Resolve the original once, before anything else asks for it. The diff
+  // editor's left hand side and the Source Control gutter both want this same
+  // document, and when they ask at the same moment each finds no model and each
+  // sets out to make one, so the second is told it already exists and the editor
+  // fails to open. Opening it here, and waiting, means both find one waiting.
+  private async warmOriginal(uri: vscode.Uri): Promise<void> {
+    const key = uri.toString();
+    const inflight = this.warming.get(key);
+    if (inflight) {
+      await inflight;
+      return;
+    }
+    const p = Promise.resolve(vscode.workspace.openTextDocument(uri)).then(
+      () => undefined,
+      () => undefined
+    );
+    this.warming.set(key, p);
+    try {
+      await p;
+    } finally {
+      this.warming.delete(key);
+    }
   }
 
   // Open every tracked change in a single multi-diff editor, falling back to
@@ -269,6 +297,7 @@ export class ChangeTracker
     if (!paths.length) {
       return;
     }
+    await Promise.all(paths.map((p) => this.warmOriginal(this.originalUri(p))));
     const list = paths.map((p) => [vscode.Uri.file(p), this.originalUri(p), vscode.Uri.file(p)]);
     try {
       await vscode.commands.executeCommand("vscode.changes", "Devin Changes", list);

@@ -42,6 +42,14 @@ const commands = {
 // is how it survives a window reload.
 const workspace = {
   registerTextDocumentContentProvider: () => ({ dispose: () => {} }),
+  // Every resolution of a virtual document is recorded, so a test can prove the
+  // original is only ever created once however many times it is asked for. The
+  // record lives on the global because this stub is bundled into the module under
+  // test, so the test file holds a different copy of it.
+  openTextDocument: async (uri) => {
+    (globalThis.__dvOpened = globalThis.__dvOpened || []).push(uri.toString());
+    return { uri };
+  },
   fs: {
     readFile: async (uri) => nodeFs.promises.readFile(uri.fsPath),
     writeFile: async (uri, body) => nodeFs.promises.writeFile(uri.fsPath, body),

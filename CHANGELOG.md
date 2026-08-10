@@ -14,6 +14,7 @@ the commit messages carry the detail.
 - While Devin works the transcript says so, in a word that shimmers.
 - No spinner beside it: one signal, not two saying the same thing.
 - Reduced motion keeps the word readable instead of washing it out.
+- Opening a new file's diff no longer fails with a model error.
 
 ## [0.9.2] - 2026-08-10
 

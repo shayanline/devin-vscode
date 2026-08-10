@@ -116,6 +116,24 @@ test("editing a kept file again puts it back in the working set", async () => {
   assert.strictEqual(original(tracker, file), "v2\n", "against what was kept, not the whole session");
 });
 
+test("opening the same diff twice resolves its original once", async () => {
+  // The diff editor's left hand side and the Source Control gutter both want the
+  // original, and when they raced to create it VS Code refused the second with
+  // "Cannot add model because it already exists" and opened nothing.
+  const tracker = new ChangeTracker();
+  tracker.register();
+  const file = write("raced.ts", "after\n");
+  tracker.recordDiff(file, "before\n", "after\n", "A");
+
+  globalThis.__dvOpened = [];
+  await Promise.all([tracker.openDiff(file), tracker.openDiff(file)]);
+  const originals = (globalThis.__dvOpened || []).filter((u) => u.startsWith("devin-original"));
+  assert.strictEqual(originals.length, 1, "two clicks, one original: " + JSON.stringify(originals));
+
+  // And it is resolved before the diff is asked for, so nothing else has to.
+  assert.ok(originals[0].includes(file.replace(/\\/g, "/")) || originals[0].includes(file));
+});
+
 test("the working set survives a window reload, counts and all", async () => {
   const dir = fs.mkdtempSync(path.join(TMP, "store-"));
   const store = { scheme: "file", path: dir, fsPath: dir, query: "", toString: () => "file://" + dir };
