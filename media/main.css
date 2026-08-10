@@ -2294,6 +2294,12 @@ body {
    it and each step keeps only its node. */
 .tool-group-body > .thinking-plain .thinking-body {
   margin-left: 0;
+  /* The run's chain owns this row, so the node is the run's, not the box's own:
+     without this the steps inside would measure themselves against a chain that
+     is not drawing them. */
+  --node-y: inherit;
+  --node-size: inherit;
+  --node-x: inherit;
 }
 
 .tool-group-body > .thinking-plain .thinking-body::before,
@@ -2320,7 +2326,7 @@ body {
   padding-bottom: 0;
 }
 
-.tool-group-body > .thinking-plain .thinking-icon {
+.tool-group-body > .thinking-plain .thinking-item > .codicon.thinking-icon {
   position: static;
   flex: 0 0 auto;
   width: 14px;
@@ -2377,7 +2383,11 @@ body {
   background: none;
 }
 
-.thinking-icon {
+/* Three selectors, so this beats the codicon base rule (.codicon[class*=codicon-])
+   outright rather than by which stylesheet loaded last. Its `font` shorthand
+   would otherwise draw a 16px glyph in this 12px box: overflowing it, and
+   sitting low enough to miss the line running through it. */
+.thinking-item > .codicon.thinking-icon {
   position: absolute;
   left: 11px;
   top: 9px;
@@ -3218,7 +3228,8 @@ body {
   padding: var(--dv-space-3) var(--dv-space-6) var(--dv-space-3) 30px;
 }
 
-.subagent-icon {
+/* For the same reason as .thinking-icon above. */
+.subagent-item > .codicon.subagent-icon {
   position: absolute;
   left: 11px;
   top: 9px;
