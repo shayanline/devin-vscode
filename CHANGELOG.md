@@ -8,7 +8,9 @@ the commit messages carry the detail.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
-## [Unreleased]
+## [0.9.2] - 2026-08-10
+
+Nothing you typed or were asked goes missing.
 
 ### Highlights
 - A message that cannot be sent goes back in the box, and says why.
@@ -300,6 +302,7 @@ The foundation of the extension.
 - The agent's whole process group is killed on dispose, so no MCP server leaks.
 - A jsdom webview test harness, and a browser preview for visual iteration.
 
+[0.9.2]: https://github.com/shayanline/devin-vscode/releases/tag/v0.9.2
 [0.9.1]: https://github.com/shayanline/devin-vscode/releases/tag/v0.9.1
 [0.9.0]: https://github.com/shayanline/devin-vscode/releases/tag/v0.9.0
 [0.8.0]: https://github.com/shayanline/devin-vscode/releases/tag/v0.8.0
