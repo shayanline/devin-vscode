@@ -8,6 +8,11 @@ the commit messages carry the detail.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
+## [Unreleased]
+
+### Highlights
+- Every step of a thought in a run is on the chain, not just the first.
+
 ## [0.10.5] - 2026-08-10
 
 ### Highlights

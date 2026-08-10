@@ -2088,6 +2088,28 @@ test("reasoning inside a run is text on the chain, not a section to open", async
   assert.strictEqual(h.errors().length + h2.errors().length, 0);
 });
 
+test("every step of a thought is a node on the run's chain", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "userMessage", text: "go" });
+  h.post({ type: "toolCall", id: "z0", kind: "execute", status: "completed", rawInput: { command: "echo one" } });
+  h.post({ type: "thoughtChunk", text: "First this.\n\nThen that.\n\nAnd finally the other.", messageId: "t1" });
+  h.post({ type: "toolCall", id: "z1", kind: "execute", status: "completed", rawInput: { command: "echo two" } });
+  h.post({ type: "assistantChunk", text: "Done." });
+  h.post({ type: "assistantEnd" });
+  await h.settle(30);
+
+  // The run's line only ever breaks around one node per row, so a thought of
+  // several steps has to chain its own: the stylesheet keys that off the steps
+  // being separate elements, each with its own bullet.
+  const steps = [...h.thread().querySelectorAll(".tool-group-body > .thinking-plain .thinking-item")];
+  assert.strictEqual(steps.length, 3, "one step per paragraph of reasoning");
+  steps.forEach((s) => assert.ok(s.querySelector(".thinking-icon"), "each wearing its own bullet"));
+  assert.strictEqual(h.errors().length, 0);
+});
+
 test("a thought that says nothing is not left on the chain", async () => {
   const h = createHarness();
   h.post({ type: "ready" });

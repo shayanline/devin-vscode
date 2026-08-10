@@ -2297,21 +2297,54 @@ body {
   overflow: visible;
 }
 
-/* Its own inner spine would be a chain within a chain, so the run's line carries
-   it and each step keeps only its node. */
+/* Its own elbow belongs to a box with a header, and there is no header here. */
 .tool-group-body > .thinking-plain .thinking-body {
   margin-left: 0;
-  /* The run's chain owns this row, so the node is the run's, not the box's own:
-     without this the steps inside would measure themselves against a chain that
-     is not drawing them. */
-  --node-y: inherit;
-  --node-size: inherit;
-  --node-x: inherit;
 }
 
-.tool-group-body > .thinking-plain .thinking-body::before,
-.tool-group-body > .thinking-plain .thinking-item::before {
+.tool-group-body > .thinking-plain .thinking-body::before {
   display: none;
+}
+
+/* A thought can be several steps, and they chain to each other exactly as the
+   run's rows do. The run's own line brings the chain down to this row's first
+   bullet and stops there; from there the steps carry it, each breaking around
+   its own bullet. Leaving it all to the run's line only ever joined the first
+   one, which left every bullet after it with no line at all. */
+.tool-group-body > .thinking-plain::before {
+  mask-image: var(--dv-chain-mask-last);
+  -webkit-mask-image: var(--dv-chain-mask-last);
+}
+
+/* Unless the run starts with it, in which case the chain starts at its first
+   bullet and the elbow above is what reaches it. */
+.tool-group-body > .thinking-plain:first-child::before {
+  background: none;
+}
+
+.tool-group-body > .thinking-plain .thinking-item {
+  /* The bullet's middle, inside the step that draws it. */
+  --node-y: 9.3px;
+  --node-size: 14px;
+}
+
+.tool-group-body > .thinking-plain .thinking-item::before {
+  left: 6.5px;
+  mask-image: var(--dv-chain-mask);
+  -webkit-mask-image: var(--dv-chain-mask);
+}
+
+/* The last step carries the chain down through the row's own padding, so it
+   reaches the row below rather than stopping at its last word. The steps before
+   it already end where the next one begins. */
+.tool-group-body > .thinking-plain .thinking-item:last-child::before {
+  bottom: calc(-1 * var(--dv-space-3));
+}
+
+/* The chain ends at the last node of the run, wherever that node happens to be. */
+.tool-group-body > .thinking-plain:last-child .thinking-item:last-child::before {
+  mask-image: var(--dv-chain-mask-last);
+  -webkit-mask-image: var(--dv-chain-mask-last);
 }
 
 /* A thought in a run is a row of the run, laid out as one: the same leading
@@ -2340,9 +2373,9 @@ body {
   height: auto;
   font-size: 14px;
   /* Reasoning is prose and carries more leading than a one line row, so the
-     glyph takes the row's line rather than the paragraph's: the node is the
-     middle of it, and the chain runs through every row's glyph alike. */
-  line-height: calc(2 * (var(--node-y) - 6px));
+     glyph takes a row's line rather than the paragraph's, centred on the node:
+     the chain then runs through every row's glyph alike. */
+  line-height: calc(2 * var(--node-y));
   opacity: 0.8;
 }
 
