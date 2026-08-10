@@ -2341,6 +2341,18 @@ body {
   bottom: calc(-1 * var(--dv-space-3));
 }
 
+/* A thought of a single step still draws its line. On its own, in a box of its
+   own, a lone step has no chain to be part of and blanks it, but here it is a
+   step of the run and the chain has to reach the row below it. */
+.tool-group-body > .thinking-plain .thinking-item:only-child::before {
+  background-color: var(--dv-border);
+}
+
+/* Unless the run is nothing but this thought, when there is no chain at all. */
+.tool-group-body > .thinking-plain:only-child .thinking-item::before {
+  background: none;
+}
+
 /* The chain ends at the last node of the run, wherever that node happens to be. */
 .tool-group-body > .thinking-plain:last-child .thinking-item:last-child::before {
   mask-image: var(--dv-chain-mask-last);
