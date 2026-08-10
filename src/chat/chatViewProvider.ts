@@ -26,6 +26,7 @@ import {
 } from "../acp/types";
 import { TerminalManager } from "../acp/terminal";
 import { VsCodeTerminalRunner } from "../acp/vscodeTerminal";
+import { userConfigDir } from "../settings/configService";
 import { DevinSession, listSessions } from "../session/sessionList";
 import { SessionStore } from "../session/sessionStore";
 import { ChangeTracker } from "../diff/changeTracker";
@@ -850,6 +851,30 @@ export class ChatController implements AcpHost {
     });
   }
 
+  // The skill behind an invocation, opened where it is written. The CLI looks in
+  // the workspace first and then the user's own directories, and takes either
+  // spelling of the folder, so this looks in the same places in the same order.
+  private async openSkill(name: string): Promise<void> {
+    if (!name || /[\\/]/.test(name)) {
+      return;
+    }
+    const roots = [
+      ...(vscode.workspace.workspaceFolders || []).map((f) => f.uri.fsPath),
+      userConfigDir(),
+      os.homedir()
+    ];
+    for (const root of roots) {
+      for (const dir of [".devin", ".agents", ""]) {
+        const file = path.join(root, dir, "skills", name, "SKILL.md");
+        if (fs.existsSync(file)) {
+          await vscode.window.showTextDocument(vscode.Uri.file(file), { preview: true });
+          return;
+        }
+      }
+    }
+    void vscode.window.showWarningMessage(`Couldn't find the skill "${name}" on this machine.`);
+  }
+
   private postMcpProblems(rt: Runtime): void {
     if (this.activeId !== rt.id || !rt.mcpProblems.size) {
       return;
@@ -1115,6 +1140,9 @@ export class ChatController implements AcpHost {
           return;
         case "subagentMode":
           await this.setSubagentMode(String(msg.id || ""), msg.background === true);
+          return;
+        case "openSkill":
+          await this.openSkill(String(msg.name || ""));
           return;
         case "showTerminal": {
           // Reveal and focus the terminal a command is running in, and say so:

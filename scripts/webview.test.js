@@ -2110,6 +2110,45 @@ test("every step of a thought is a node on the run's chain", async () => {
   assert.strictEqual(h.errors().length, 0);
 });
 
+test("invoking a skill is one line, and the skill opens from it", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "userMessage", text: "commit it" });
+  h.post({
+    type: "toolCall",
+    id: "s1",
+    kind: "other",
+    status: "completed",
+    title: "Invoked skill git-workflow",
+    meta: { inferenceToolName: "skill" },
+    rawInput: { skill: "git-workflow" }
+  });
+  await h.settle(30);
+
+  const row = h.thread().querySelector(".tool");
+  // Nothing to open: the body only ever held the skill's own name as JSON.
+  assert.ok(row.classList.contains("dv-nocollapse"), "a skill invocation is a fact, not a step to expand");
+  assert.strictEqual(row.querySelector(".tool-body").innerHTML, "");
+
+  // The name is an inline anchor, as VS Code renders a skill in a tool title.
+  const pill = row.querySelector(".chat-inline-anchor");
+  assert.ok(pill, "the skill is a pill");
+  assert.strictEqual(pill.textContent, "git-workflow");
+  assert.ok(pill.querySelector(".codicon"), "with its icon on the left");
+  assert.match(row.querySelector(".label").textContent, /^Invoked skill/, "after what the agent did with it");
+
+  pill.click();
+  await h.settle(5);
+  assert.deepStrictEqual(
+    h.posted.filter((m) => m.type === "openSkill"),
+    [{ type: "openSkill", name: "git-workflow" }],
+    "and it opens where the skill is written"
+  );
+  assert.strictEqual(h.errors().length, 0);
+});
+
 test("a thought that says nothing is not left on the chain", async () => {
   const h = createHarness();
   h.post({ type: "ready" });

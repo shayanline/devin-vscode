@@ -2996,6 +2996,31 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     return null;
   }
 
+  // The skill a call invoked, if that is what it was. The CLI's own tool, so it
+  // names itself; the argument carries the skill.
+  function skillName(d) {
+    const meta = d.meta || {};
+    const raw = d.rawInput;
+    if (meta.inferenceToolName !== "skill" && meta.toolName !== "skill") return null;
+    const name = raw && typeof raw === "object" ? raw.skill : null;
+    return typeof name === "string" && name ? name : null;
+  }
+
+  // A reference to something, inline in a row: VS Code's chat inline anchor, an
+  // icon and a name in a bordered pill that opens what it names.
+  function anchorPill(icon, text, onClick) {
+    const a = document.createElement("a");
+    a.className = "chat-inline-anchor";
+    const i = document.createElement("i");
+    i.className = "codicon " + icon;
+    const label = document.createElement("span");
+    label.className = "chat-inline-anchor-label";
+    label.textContent = text;
+    a.append(i, label);
+    a.addEventListener("click", (e) => { e.stopPropagation(); onClick(); });
+    return a;
+  }
+
   function statusIcon(status) {
     switch (status) {
       case "in_progress": return "codicon-loading codicon-modifier-spin";
@@ -3729,6 +3754,14 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     // search is one line too, saying what it looked for and where. A tool that
     // came back with a picture or a terminal keeps its body: there is more to it.
     const plain = !(d.content || []).some((c) => c.type === "image" || c.type === "terminal");
+    // Invoking a skill is a fact, not a step to open: the argument is the skill's
+    // own name, which the row already says. VS Code puts the name in an inline
+    // anchor that opens what it names, and nothing else, so this does too.
+    const skill = plain && skillName(d);
+    if (skill) {
+      renderSkillRow(entry, d, skill);
+      return;
+    }
     const fileLine = plain && FILE_LINE_KINDS.includes(d.kind) ? toolFileTarget(d) : null;
     const search = plain && !fileLine && d.kind === "search" ? searchLine(d) : null;
     // A search that found files has something to show, so it keeps its body. Only
@@ -4188,6 +4221,26 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // A file reference rendered as a VS Code style pill: a file-type icon, the
   // name, and (for edits) +added / -removed line counts. Clicking opens a diff
   // for edited files or the file at a line otherwise.
+  // One line: what the agent did, then the skill it did it with, in a pill that
+  // opens the skill's own SKILL.md. Nothing to expand, since the only thing the
+  // body ever held was the name repeated back as JSON.
+  function renderSkillRow(entry, d, skill) {
+    // The agent's own verb, minus the name it ends with, which the pill carries.
+    const title = String(d.title || "Invoked skill").trim();
+    const verb = title.endsWith(skill) ? title.slice(0, -skill.length).trim() : title;
+    setToolLabel(entry.label, verb || "Invoked skill");
+    entry.label.append(" ");
+    // VS Code's own icon for a skill (aiCustomizationIcons registers the skill
+    // icon as the lightbulb). The pill in its chat carries the icon theme's file
+    // glyph, which a webview cannot ask for.
+    entry.label.appendChild(anchorPill("codicon-lightbulb", skill, () =>
+      vscode.postMessage({ type: "openSkill", name: skill })
+    ));
+    entry.node.classList.add("tool-empty", "dv-nocollapse");
+    entry.bodyEl.innerHTML = "";
+    entry.node.querySelector(".dv-collapsible-header").title = title;
+  }
+
   // What a command's row offers, in the order and the wording VS Code uses
   // (chatTerminalToolProgressPart._updateToolbarActions): let it carry on in the
   // background, and open the terminal it is really running in. The third of its

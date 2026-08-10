@@ -2700,6 +2700,36 @@ body {
   transform: rotate(90deg);
 }
 
+/* A reference inline in a row, VS Code's chat inline anchor
+   (chatInlineAnchorWidget.css): a hairline box around an icon and a name, which
+   opens what it names. */
+.chat-inline-anchor {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  border: 0.5px solid var(--vscode-chat-requestBorder, var(--dv-border));
+  border-radius: 4px;
+  margin: 0 1px;
+  padding: 1px 3px;
+  white-space: nowrap;
+  width: fit-content;
+  font-weight: normal;
+  text-decoration: none;
+  color: inherit;
+  cursor: pointer;
+  vertical-align: middle;
+}
+
+.chat-inline-anchor:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.chat-inline-anchor .codicon {
+  font-size: 90%;
+  line-height: 1em;
+  opacity: 0.9;
+}
+
 /* What can be done with the command this row is running, at the end of its
    title, as VS Code's terminal part puts it (chatTerminalToolProgressPart.css:
    flex, 4px apart, pushed right, centred). Icon only, and always there: these

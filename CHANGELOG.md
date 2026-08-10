@@ -8,6 +8,12 @@ the commit messages carry the detail.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
+## [Unreleased]
+
+### Highlights
+- A skill Devin invoked is a pill on one line, not a section to open.
+- Click it to open the skill's own SKILL.md.
+
 ## [0.11.0] - 2026-08-10
 
 ### Highlights
