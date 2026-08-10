@@ -5168,8 +5168,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     const actions = document.createElement("div");
     actions.className = "queued-actions";
     actions.appendChild(iconBtn("codicon-edit", "Edit queued message", (e) => { e.stopPropagation(); startQueuedEdit(q); }));
-    // VS Code's "Send Immediately" (Codicon.newLine): jump this one to the front.
-    actions.appendChild(iconBtn("codicon-newline", "Send immediately", (e) => {
+    // VS Code's "Send Immediately" (Codicon.newLine), and its own words for what
+    // that costs: the turn in flight is ended so this one can go now.
+    actions.appendChild(iconBtn("codicon-newline", "Cancel the current request and send this message immediately", (e) => {
       e.stopPropagation();
       // Commit an in-progress edit of this same message first, so it is sent
       // with what is currently typed rather than the stale text.

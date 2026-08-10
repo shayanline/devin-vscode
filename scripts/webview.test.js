@@ -902,7 +902,9 @@ test("queued messages render as bubbles, edit in place keeps position, remove dr
   const actionBtns = rows[1].querySelector(".queued-actions").querySelectorAll("button");
   assert.strictEqual(actionBtns.length, 3, "edit, send immediately, and remove");
 
-  // Send the second immediately: it jumps to the front of the queue.
+  // Send the second immediately: the host ends the turn in flight and drains
+  // this one into the gap, which its hover says in VS Code's own words.
+  assert.match(actionBtns[1].title, /^Cancel the current request and send this message immediately$/);
   actionBtns[1].click();
   await h.settle(10);
   assert.ok(h.posted.some((m) => m.type === "sendQueuedNow" && m.id === "q2"), "send immediately promotes it");

@@ -17,6 +17,7 @@ the commit messages carry the detail.
 - Editing one shows the same in the composer, and the row keeps saying so.
 - A long file name no longer takes a whole row of pills to itself.
 - A diagram Devin gets wrong stays a code block, and stays in the chat.
+- Send Immediately on a queued message ends the current turn and sends it.
 
 ### Under the hood
 - The published package no longer carries a stray screenshot.

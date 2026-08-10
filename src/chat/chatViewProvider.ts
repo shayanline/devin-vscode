@@ -3118,6 +3118,13 @@ export class ChatController implements AcpHost {
     if (rt.busy || rt.queued.length === 0) {
       return;
     }
+    // A session still replaying its history has its channel busy, and a prompt
+    // sent into that is swallowed: the queue is where a message typed during a
+    // load waits, so it must not be drained back into the load. The load calls
+    // this itself once the replay is over.
+    if (rt.replaying) {
+      return;
+    }
     // Hold only the message being edited, and only once it reaches the head: the
     // ones before it still send, the ones after it wait behind it. Resumes when
     // the edit is committed or cancelled (see the queueEditing message).
@@ -3170,8 +3177,11 @@ export class ChatController implements AcpHost {
     }
   }
 
-  // Move a queued message to the front and send it as soon as the session is
-  // free (VS Code's "Send Immediately" on a pending request).
+  // VS Code's "Send Immediately" on a pending request, which means now rather
+  // than next: it moves the message to the front, cancels the request in flight
+  // and lets the queue drain into the gap (chatServiceImpl's
+  // sendPendingRequestImmediately). Moving it alone did nothing at all, since a
+  // queue only exists while a turn is running and the drain waits for the turn.
   private sendQueuedNow(id: string): void {
     const rt = this.active();
     if (!rt) {
@@ -3184,6 +3194,11 @@ export class ChatController implements AcpHost {
     if (at > 0) {
       rt.queued.unshift(rt.queued.splice(at, 1)[0]);
       this.postQueued(rt);
+    }
+    if (rt.busy) {
+      // The turn ending drains the queue, and this message is now its head.
+      rt.client.cancel(rt.id);
+      return;
     }
     this.flushQueue(rt);
   }
