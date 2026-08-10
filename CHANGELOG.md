@@ -12,6 +12,7 @@ the commit messages carry the detail.
 
 ### Highlights
 - A message that cannot be sent goes back in the box, and says why.
+- Stopping a turn takes its open question with it.
 
 ## [0.9.1] - 2026-08-10
 

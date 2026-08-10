@@ -3243,10 +3243,12 @@ export class ChatController implements AcpHost {
       // if they meant to abandon it).
       rt.client.cancel(rt.id);
       this.settleRequestsFor(rt.id);
-    } else {
-      // No live session, but still close any stray prompt widgets.
-      this.post({ type: "cancelPrompts" });
     }
+    // Whatever the agent was asking is answered now, with "cancelled", so the
+    // question goes with the turn it belonged to. Settling the requests only
+    // tells the agent: the widgets are on the other side and were left on
+    // screen, still offering to answer a question nobody was waiting on.
+    this.post({ type: "cancelPrompts" });
     this.setBusy(false);
   }
 

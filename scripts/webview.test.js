@@ -1707,6 +1707,32 @@ test("a run folds to its summary once it is over", async () => {
   assert.strictEqual(h.errors().length + h2.errors().length, 0);
 });
 
+test("stopping a turn takes the question with it", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "userMessage", text: "go" });
+  h.post({ type: "busy", value: true });
+  h.post({
+    type: "elicitation",
+    requestId: "q1",
+    message: "Which one?",
+    schema: { type: "object", properties: { pick: { type: "string", enum: ["a", "b"] } } }
+  });
+  await h.settle(20);
+  assert.ok(h.document.querySelector("#elicitation-tray").children.length, "the agent asked something");
+
+  // Stop answers it with "cancelled", so the question goes with the turn: leaving
+  // it on screen offers to answer something nobody is waiting on.
+  h.post({ type: "cancelPrompts" });
+  h.post({ type: "busy", value: false });
+  await h.settle(20);
+  assert.strictEqual(h.document.querySelector("#elicitation-tray").children.length, 0, "and stopping clears it");
+  assert.strictEqual(h.document.querySelector("#permission-tray").children.length, 0);
+  assert.strictEqual(h.errors().length, 0);
+});
+
 test("a reloaded session comes back folded, and folded means hidden", async () => {
   const h = createHarness();
   h.replay([{ role: "user", text: "go" }]);
