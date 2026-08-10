@@ -2046,7 +2046,7 @@ test("reasoning inside a run is text on the chain, not a section to open", async
   // stylesheet measures the node from those, so they are the invariant.
   const bullet = think.querySelector(".thinking-item > .thinking-icon");
   assert.ok(bullet, "the row leads with its glyph, before the text");
-  assert.ok(bullet.classList.contains("codicon-circle-small-filled"), "a codicon, not a dot drawn by hand");
+  assert.ok(bullet.classList.contains("codicon-circle-filled"), "a codicon, not a dot drawn by hand");
   assert.strictEqual(bullet.nextElementSibling.className, "thinking-item-content", "then what it thought");
 
   // A thought on its own is a section of its own, and keeps its header: it is

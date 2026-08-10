@@ -2482,7 +2482,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     b.body.innerHTML = steps
       .map(
         (step) =>
-          '<div class="thinking-item"><i class="codicon codicon-circle-small-filled thinking-icon"></i>' +
+          '<div class="thinking-item"><i class="codicon codicon-circle-filled thinking-icon"></i>' +
           '<div class="thinking-item-content">' + renderMarkdown(step) + "</div></div>"
       )
       .join("");

@@ -2270,12 +2270,11 @@ body {
   position: relative;
   margin-left: var(--dv-space-3);
   font-size: var(--dv-fs-s);
-  /* The chain's node: a 12px glyph whose middle sits 15px into each step, and
-     whose bullet is painted from x = 9. The steps inherit it, and the elbow
-     above them is measured from it. */
+  /* The chain's node: a 12px glyph at x = 11 whose middle sits 15px into each
+     step. The steps inherit it, and the elbow above them is measured from it. */
   --node-y: 15px;
   --node-size: 12px;
-  --node-x: 9px;
+  --node-x: 11px;
 }
 
 /* Reasoning inside a run is the text itself, hanging off the run's chain like
@@ -2343,7 +2342,7 @@ body {
    line at x = 11, as every glyph on this chain does. */
 .thinking-item {
   position: relative;
-  padding: var(--dv-space-3) var(--dv-space-6) var(--dv-space-3) 24px;
+  padding: var(--dv-space-3) var(--dv-space-6) var(--dv-space-3) 30px;
 }
 
 /* Vertical connector running through the node icons, with a mask that opens a
@@ -2352,7 +2351,7 @@ body {
 .subagent-item::before {
   content: "";
   position: absolute;
-  left: 10.5px;
+  left: 16.5px;
   top: 0;
   bottom: 0;
   width: 1px;
@@ -2380,7 +2379,7 @@ body {
 
 .thinking-icon {
   position: absolute;
-  left: 5px;
+  left: 11px;
   top: 9px;
   width: 12px;
   height: 12px;
@@ -2401,9 +2400,9 @@ body {
   left: 3px;
   top: -10px;
   height: calc(10px + var(--node-y));
-  /* Down to the middle of the first node and across to just short of it. Never
-     less than its own corner radius, or there would be no corner to draw. */
-  width: max(3px, calc(var(--node-x) - 3px - var(--dv-node-clear)));
+  /* Down to the middle of the first node and across to short of it, never
+     touching: an icon that fills its box has no margin of its own to spare. */
+  width: calc(var(--node-x) - 3px - var(--dv-node-clear));
   border-left: 1px solid var(--dv-border);
   border-bottom: 1px solid var(--dv-border);
   border-bottom-left-radius: 5px;
@@ -3205,9 +3204,10 @@ body {
   margin-left: var(--dv-space-3);
   --node-y: 15px;
   --node-size: 12px;
-  /* Its rows wear full width icons rather than a bullet, which start at the
-     left edge of the same 12px box. */
-  --node-x: 5px;
+  /* Its rows wear icons that fill their box edge to edge (comment, thinking),
+     so the elbow has to stop clear of the box itself, not of some ink inside
+     it. That is what the column is indented for. */
+  --node-x: 11px;
 }
 
 /* One entry on the timeline: prompt, a tool call, streamed output, the working
@@ -3215,12 +3215,12 @@ body {
    12px icon rather than a bullet. */
 .subagent-item {
   position: relative;
-  padding: var(--dv-space-3) var(--dv-space-6) var(--dv-space-3) 24px;
+  padding: var(--dv-space-3) var(--dv-space-6) var(--dv-space-3) 30px;
 }
 
 .subagent-icon {
   position: absolute;
-  left: 5px;
+  left: 11px;
   top: 9px;
   width: 12px;
   height: 12px;

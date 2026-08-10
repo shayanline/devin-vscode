@@ -8,6 +8,12 @@ the commit messages carry the detail.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
+## [Unreleased]
+
+### Highlights
+- A subagent's line stops clear of its icons instead of running into them.
+- A thought's dot is the larger one, so it reads as a node, not a speck.
+
 ## [0.10.1] - 2026-08-10
 
 ### Highlights
