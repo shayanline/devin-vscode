@@ -280,7 +280,8 @@ export class ChatManager implements vscode.WebviewViewProvider, vscode.WebviewPa
   // Ctrl/Cmd+1..9. The panel numbers its own rows, so it is the one that knows
   // which chat a number stands for.
   switchSession(index: number): void {
-    this.sidebar?.pickSession(index);
+    // The chat the shortcut was pressed in, which is not always the side panel's.
+    (ChatController.focusedSurface() ?? this.sidebar)?.pickSession(index);
   }
   cancel(): void {
     this.sidebar?.cancel();

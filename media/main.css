@@ -1467,9 +1467,11 @@ body {
   align-items: flex-end;
 }
 
-/* What a request came with, above the bubble and aligned with it, mirroring VS
-   Code's chat-attached-context inside an interactive-request. */
-.turn-request .chat-attached-context {
+/* What a message came with, above the bubble and aligned with it, mirroring VS
+   Code's chat-attached-context inside an interactive-request. A queued message
+   wears the same row, so this is not scoped to a request that has been sent:
+   scoped, its pills fell back to a stacked column above the queued bubble. */
+.chat-attached-context {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;

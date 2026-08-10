@@ -10,6 +10,12 @@ the commit messages carry the detail.
 
 ## [0.11.5] - 2026-08-10
 
+### Highlights
+- Cmd+1 to Cmd+9 switch chats while the chat has the keyboard.
+- They act on the chat you are in, not always the side panel's.
+- A queued message shows what is attached to it, as a row of pills.
+- Editing one shows the same in the composer, and the row keeps saying so.
+
 ### Under the hood
 - The published package no longer carries a stray screenshot.
 

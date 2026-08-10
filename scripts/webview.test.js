@@ -1606,6 +1606,25 @@ test("an executed command is the command and what it printed, uncaptioned", asyn
   assert.strictEqual(h.errors().length, 0);
 });
 
+test("the chat says when it holds the keyboard, so its shortcuts can", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  await h.settle(10);
+
+  // A keybinding's `when` cannot see into a webview, so Ctrl/Cmd+1..9 would go on
+  // meaning what they mean everywhere else in VS Code unless the panel says this.
+  h.window.dispatchEvent(new h.window.Event("focus"));
+  await h.settle(5);
+  assert.deepStrictEqual(h.posted.filter((m) => m.type === "chatFocus").pop(), { type: "chatFocus", value: true });
+
+  h.window.dispatchEvent(new h.window.Event("blur"));
+  await h.settle(5);
+  assert.deepStrictEqual(h.posted.filter((m) => m.type === "chatFocus").pop(), { type: "chatFocus", value: false });
+  assert.strictEqual(h.errors().length, 0);
+});
+
 test("a queued message shows what it is queued with, and keeps it when sent", async () => {
   const h = createHarness();
   h.post({ type: "ready" });
@@ -1650,11 +1669,16 @@ test("editing a queued message hands its attachments back to the composer", asyn
     h.posted.some((m) => m.type === "queueEditing" && m.id === "q-1"),
     "the host is told which message is being edited, so it can hand its context over"
   );
-  // The host answers by staging them; the composer shows them as removable pills.
+  // The host answers by staging a copy; the composer shows them as removable
+  // pills, and the message keeps its own, so its row still says what it carries.
   h.post({ type: "attachments", items: [{ id: "a1", label: "token.ts", type: "file" }] });
-  h.post({ type: "queued", items: [{ id: "q-1", text: "look at this", attachments: [] }] });
   await h.settle(10);
   assert.strictEqual(h.document.getElementById("attachments").querySelectorAll(".chip").length, 1);
+  assert.strictEqual(
+    h.thread().querySelectorAll(".queued-item .chat-attached-context-attachment").length,
+    1,
+    "and the queued row goes on showing what it will send if this edit is abandoned"
+  );
 
   const input = h.document.getElementById("input");
   input.value = "look at this, closely";

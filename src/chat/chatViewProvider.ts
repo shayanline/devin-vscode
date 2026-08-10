@@ -466,6 +466,8 @@ export class ChatController implements AcpHost {
   // will not fire once it has exited.
   dispose(): void {
     this.stopLocalState();
+    // A surface that has gone cannot be the one holding the keyboard.
+    this.setFocused(false);
     for (const rt of this.runtimes.values()) {
       this.destroyRuntime(rt);
     }
@@ -819,6 +821,32 @@ export class ChatController implements AcpHost {
     }
   }
 
+  // Which chat surfaces currently hold the keyboard. A keybinding cannot ask
+  // whether focus is inside a webview (`focusedView` is the view pane, and it is
+  // not the pane that has focus once the iframe takes it, nor is there a view at
+  // all for a chat in an editor tab), so the panel says so itself and this
+  // publishes it as a context key for the `when` clauses to use.
+  private static readonly focused = new Set<ChatController>();
+
+  // The chat the keyboard is in, for a shortcut that should act on the chat the
+  // user is looking at rather than always on the side panel's.
+  static focusedSurface(): ChatController | undefined {
+    return [...ChatController.focused][0];
+  }
+
+  private setFocused(has: boolean): void {
+    const before = ChatController.focused.size;
+    if (has) {
+      ChatController.focused.add(this);
+    } else {
+      ChatController.focused.delete(this);
+    }
+    const now = ChatController.focused.size;
+    if (!before !== !now) {
+      void vscode.commands.executeCommand("setContext", "devin.chatFocused", now > 0);
+    }
+  }
+
   // Muted for this window only ("not again now"): a restart is a fresh start, so
   // a server that is still broken says so again. Turning it off for good is the
   // setting, which this reads too.
@@ -1140,6 +1168,9 @@ export class ChatController implements AcpHost {
           return;
         case "subagentMode":
           await this.setSubagentMode(String(msg.id || ""), msg.background === true);
+          return;
+        case "chatFocus":
+          this.setFocused(msg.value === true);
           return;
         case "openSkill":
           await this.openSkill(String(msg.name || ""));
@@ -3103,27 +3134,23 @@ export class ChatController implements AcpHost {
     void this.runPrompt(rt, this.messageBlocks(next));
   }
 
-  // Start or stop editing a queued message. Its attachments move with the text:
-  // into the composer so they can be seen and removed while editing, and back
-  // onto the message if the edit is abandoned. A committed edit gets there first
-  // (editQueued takes them), so by then there is nothing staged to give back.
+  // Start or stop editing a queued message. Its attachments are copied into the
+  // composer the way its text is: there to be seen and changed while editing,
+  // and still on the message, whose row goes on saying what it will send if the
+  // edit is abandoned. Committing replaces them with whatever the composer ended
+  // up holding (editQueued), and abandoning drops that copy.
   private setQueueEditing(id?: string): void {
     const rt = this.active();
     const was = this.queueEditingId;
     this.queueEditingId = id;
-    const from = was && rt ? rt.queued.find((q) => q.id === was) : undefined;
-    if (from && this.attachments.length) {
-      from.attachments = this.attachments;
+    if (was && was !== id && this.attachments.length) {
       this.attachments = [];
       this.postAttachments();
-      this.postQueued(rt!);
     }
     const to = id && rt ? rt.queued.find((q) => q.id === id) : undefined;
-    if (to && to.attachments.length) {
-      this.attachments = to.attachments;
-      to.attachments = [];
+    if (to) {
+      this.attachments = to.attachments.map((a) => ({ ...a }));
       this.postAttachments();
-      this.postQueued(rt!);
     }
     if (rt) {
       this.flushQueue(rt);

@@ -778,6 +778,15 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   document.addEventListener("keyup", trackAlt);
   window.addEventListener("blur", () => { if (altHeld) { altHeld = false; updateComposerButtons(); } });
 
+  // Whether this chat holds the keyboard. A keybinding's `when` cannot see into
+  // a webview, so the panel has to say so for the host to publish it: without it
+  // Ctrl/Cmd+1..9 keep meaning what they mean everywhere else in VS Code, even
+  // with the cursor in the composer.
+  const sayFocus = (value) => vscode.postMessage({ type: "chatFocus", value });
+  window.addEventListener("focus", () => sayFocus(true));
+  window.addEventListener("blur", () => sayFocus(false));
+  if (document.hasFocus()) sayFocus(true);
+
   function stopTurn() {
     vscode.postMessage({ type: "cancel" });
     cancelPrompts();
