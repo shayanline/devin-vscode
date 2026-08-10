@@ -12,6 +12,10 @@ the commit messages carry the detail.
 
 ### Highlights
 - A run folds to its summary once it is over, and a finished thought with it.
+- A reloaded session comes back folded, not laid out end to end.
+- A folded section is out of reach of Tab and of find in page.
+- A section is not folded away while you are reading inside it.
+- A run's chevron appears on hover, like every other one.
 
 ## [0.9.0] - 2026-08-08
 

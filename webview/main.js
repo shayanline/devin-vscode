@@ -1648,7 +1648,13 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     root.appendChild(header);
     root.appendChild(anim);
     const sync = () => header.setAttribute("aria-expanded", root.classList.contains("dv-collapsed") ? "false" : "true");
-    const setCollapsed = (v) => { root.classList.toggle("dv-collapsed", !!v); sync(); };
+    const setCollapsed = (v) => {
+      root.classList.toggle("dv-collapsed", !!v);
+      // Hidden means hidden: without this, Tab walks into a folded section and
+      // find in page matches text nobody can see. VS Code marks it inert too.
+      inner.inert = !!v;
+      sync();
+    };
     // `userToggled` records that the user opened/closed this section by hand, so
     // callers never auto-collapse or auto-expand it out from under them (VS
     // Code persists the manual state and gates auto-collapse on it).
@@ -1672,11 +1678,15 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       if (e.key === "Enter" || e.key === " ") { e.preventDefault(); userToggle(); }
     });
     sync();
-    return {
+    const ctrl = {
       root, header, body: inner, setCollapsed,
       isCollapsed: () => root.classList.contains("dv-collapsed"),
       userToggled: () => userToggled
     };
+    // So anything holding the element alone can still fold it (a replay does).
+    root._dvCollapse = ctrl;
+    inner.inert = root.classList.contains("dv-collapsed");
+    return ctrl;
   }
 
   // Create a new turn shell (request container + checkpoint row + response
@@ -2900,7 +2910,23 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // opened by hand: closing something somebody deliberately opened is not tidying.
   function endToolRun() {
     const g = currentTurn && currentTurn.toolRun && currentTurn.toolRun.group;
-    if (g && !g.collapse.userToggled()) g.collapse.setCollapsed(true);
+    if (g && !g.collapse.userToggled() && !holdsFocus(g.root)) g.collapse.setCollapsed(true);
+  }
+
+  // A section being read is not tidied away underneath the reader. VS Code checks
+  // the same thing before it folds a finished turn (keepOpenForFocus).
+  function holdsFocus(node) {
+    const active = document.activeElement;
+    return !!(active && node && node !== active && node.contains(active));
+  }
+
+  // Everything a replay drew is finished work, so it comes back folded rather
+  // than as the whole session laid out end to end.
+  function foldReplayedSections() {
+    el.thread.querySelectorAll(".tool-group, .thinking, .subagent").forEach((node) => {
+      const ctrl = node._dvCollapse;
+      if (ctrl && !ctrl.userToggled() && !holdsFocus(node)) ctrl.setCollapsed(true);
+    });
   }
 
   function breakToolGroup() {
@@ -6127,6 +6153,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         // has to be settled here too.
         finalizeBlock();
         finalizeSubagents(true);
+        // What was replayed is history, and history arrives folded: every run of
+        // it was finished long before the window was reopened.
+        foldReplayedSections();
         { const l = el.thread.querySelector(".thread-loading"); if (l) l.remove(); }
         // Reveal the transcript now the replay has settled, before we scroll.
         stopThreadLoading();

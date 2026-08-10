@@ -1707,6 +1707,32 @@ test("a run folds to its summary once it is over", async () => {
   assert.strictEqual(h.errors().length + h2.errors().length, 0);
 });
 
+test("a reloaded session comes back folded, and folded means hidden", async () => {
+  const h = createHarness();
+  h.replay([{ role: "user", text: "go" }]);
+  h.post({ type: "toolCall", id: "a", kind: "read", status: "completed", rawInput: { path: "/w/a.ts" } });
+  h.post({ type: "toolCall", id: "b", kind: "read", status: "completed", rawInput: { path: "/w/b.ts" } });
+  h.post({ type: "thoughtChunk", text: "A replayed thought.", messageId: "t1", replayed: true });
+  h.post({ type: "assistantChunk", text: "Done.", messageId: "a1" });
+  await h.settle(30);
+
+  // Before "loaded" the replay is still drawing, so nothing is folded yet.
+  h.post({ type: "loaded" });
+  await h.settle(30);
+
+  const run = h.thread().querySelector(".tool-group");
+  assert.ok(run.classList.contains("dv-collapsed"), "a whole session laid out end to end is not history, it is a wall");
+  const think = [...h.thread().querySelectorAll(".thinking")].find((t) => !t.closest(".tool-group-body"));
+  if (think) assert.ok(think.classList.contains("dv-collapsed"), "a replayed thought comes back folded too");
+
+  // Folded is not merely invisible: Tab must not walk into it and find in page
+  // must not match inside it.
+  assert.strictEqual(run.querySelector(".dv-collapsible-anim-inner").inert, true);
+  h.post({ type: "clear" });
+  await h.settle(10);
+  assert.strictEqual(h.errors().length, 0);
+});
+
 test("a run the user opened is left open when it ends", async () => {
   const h = createHarness();
   h.post({ type: "ready" });
