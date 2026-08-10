@@ -8,6 +8,11 @@ the commit messages carry the detail.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
+## [Unreleased]
+
+### Highlights
+- Reasoning that turned out to be blank leaves no gap in a run.
+
 ## [0.10.4] - 2026-08-10
 
 ### Highlights

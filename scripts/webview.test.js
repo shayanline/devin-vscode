@@ -2088,6 +2088,27 @@ test("reasoning inside a run is text on the chain, not a section to open", async
   assert.strictEqual(h.errors().length + h2.errors().length, 0);
 });
 
+test("a thought that says nothing is not left on the chain", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "userMessage", text: "go" });
+  h.post({ type: "toolCall", id: "z0", kind: "execute", status: "completed", rawInput: { command: "echo one" } });
+  // Reasoning that turned out to be whitespace. Left in, it is a step with
+  // nothing beside it and a gap in the run where the reader looks for one.
+  h.post({ type: "thoughtChunk", text: "   \n\n", messageId: "t9" });
+  h.post({ type: "toolCall", id: "z1", kind: "execute", status: "completed", rawInput: { command: "echo two" } });
+  h.post({ type: "assistantChunk", text: "Done." });
+  h.post({ type: "assistantEnd" });
+  await h.settle(30);
+
+  const rows = [...h.thread().querySelectorAll(".tool-group-body > *")];
+  assert.deepStrictEqual(rows.map((r) => r.className.split(" ")[0]), ["tool", "tool"], "two commands, and nothing between them");
+  assert.strictEqual(h.thread().querySelector(".tool-group-label").textContent, "Ran 2 commands");
+  assert.strictEqual(h.errors().length, 0);
+});
+
 test("a reloaded command does not report its own input as its output", async () => {
   const h = createHarness();
   h.post({ type: "ready" });

@@ -2529,6 +2529,14 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         block.details.classList.remove("thinking-active");
         block.details.classList.remove("thinking-peek");
       }
+      // A thought that turned out to say nothing is not a step: left in, it is a
+      // node on the chain with nothing beside it, and a gap in the run where the
+      // reader looks for something that was never there.
+      if (block.details && !block.body.textContent.trim()) {
+        dropStep(block.details);
+        block = null;
+        return;
+      }
       // A thought of its own folds to its header once it is done, as VS Code
       // folds a finished thinking part. Reasoning inside a run does not: it has
       // no header to fold to, and the run folding takes it with it.
@@ -3103,6 +3111,20 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // folded, and would otherwise be a row of nothing with a line drawn to it.
   function openInRun(node) {
     if (inRun(node) && node._dvCollapse) node._dvCollapse.setCollapsed(false);
+  }
+
+  // Take a step back out of the transcript, and out of the run's bookkeeping: a
+  // run still waiting to see a second step must forget this one, or it would
+  // later try to group around a node that is no longer there.
+  function dropStep(node) {
+    const run = currentTurn && currentTurn.toolRun;
+    if (run && run.first && run.first.node === node) run.first = null;
+    node.remove();
+    const group = run && run.group;
+    if (group) {
+      if (group.body.children.length) updateToolGroup(group);
+      else group.root.remove();
+    }
   }
 
   function breakToolGroup() {
