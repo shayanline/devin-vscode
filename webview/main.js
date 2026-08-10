@@ -2942,6 +2942,53 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     if (g && !g.collapse.userToggled() && !holdsFocus(g.root)) g.collapse.setCollapsed(true);
   }
 
+
+  // Everything a finished turn did, behind one line, leaving the answer itself in
+  // the open: VS Code's completed response disclosure. The work is a click away,
+  // which is what a transcript you can scan needs.
+  function foldCompletedWork(turn) {
+    if (!turn || !turn.resp || turn.folded) return;
+    // The answer has to exist and has to come last: without one there is nothing
+    // left in the open, and folding the whole turn would hide all of it.
+    const kids = [...turn.resp.children];
+    const lastAnswer = kids.filter((n) => n.classList.contains("resp-text")).pop();
+    if (!lastAnswer) return;
+    // Everything before it goes in, prose the agent said along the way included,
+    // as VS Code folds every node before the final response. Taking only the tool
+    // rows would lift them out from around that prose and reorder the turn.
+    const work = kids.slice(0, kids.indexOf(lastAnswer)).filter((n) => !n.classList.contains("hidden") && n.offsetParent !== null || n.textContent.trim());
+    // One step reads better as itself than behind a line saying there is one step.
+    if (work.length < 2) return;
+    // Never fold away what somebody is reading or has tabbed into.
+    if (work.some((n) => holdsFocus(n) || n === document.activeElement)) return;
+
+    const box = document.createElement("details");
+    box.className = "completed-work";
+    const head = document.createElement("summary");
+    head.className = "completed-work-summary";
+    const chev = document.createElement("i");
+    chev.className = "codicon codicon-chevron-right completed-work-chevron";
+    const label = document.createElement("span");
+    label.textContent = completedWorkLabel(work.length, turn.tookMs);
+    head.append(label, chev);
+    box.appendChild(head);
+    turn.resp.insertBefore(box, work[0]);
+    work.forEach((n) => box.appendChild(n));
+    const sync = () => head.setAttribute("aria-expanded", String(box.open));
+    sync();
+    box.addEventListener("toggle", sync);
+    turn.folded = box;
+  }
+
+  // "Completed 6 steps in 1m 23s". VS Code drops anything under a second rather
+  // than reporting "in 0s".
+  function completedWorkLabel(steps, ms) {
+    const n = steps === 1 ? "Completed 1 step" : "Completed " + steps + " steps";
+    if (!ms || ms < 1000) return n;
+    const secs = Math.floor(ms / 1000);
+    return n + " in " + (secs < 60 ? secs + "s" : Math.floor(secs / 60) + "m " + (secs % 60) + "s");
+  }
+
   // A section being read is not tidied away underneath the reader. VS Code checks
   // the same thing before it folds a finished turn (keepOpenForFocus).
   function holdsFocus(node) {
@@ -5711,6 +5758,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       // A turn that ends on its work, with no closing word, still ends its run:
       // otherwise the last one of every turn is the only one left standing open.
       if (wasBusy) endToolRun();
+      if (wasBusy) foldCompletedWork(currentTurn);
       // Move the live plan into the transcript as history and undock it.
       if (wasBusy) commitPlanSnapshot();
       finalizeSubagents();

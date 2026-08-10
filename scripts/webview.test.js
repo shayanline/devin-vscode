@@ -1707,6 +1707,69 @@ test("a run folds to its summary once it is over", async () => {
   assert.strictEqual(h.errors().length + h2.errors().length, 0);
 });
 
+test("a finished turn puts its work behind one line, and keeps the answer out", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "userMessage", text: "go" });
+  h.post({ type: "busy", value: true });
+  h.post({ type: "toolCall", id: "a", kind: "read", status: "completed", rawInput: { path: "/w/a.ts" } });
+  h.post({ type: "assistantChunk", text: "Reading first." });
+  h.post({ type: "assistantEnd" });
+  h.post({ type: "toolCall", id: "b", kind: "read", status: "completed", rawInput: { path: "/w/b.ts" } });
+  h.post({ type: "assistantChunk", text: "Here is the answer." });
+  h.post({ type: "assistantEnd" });
+  h.post({ type: "turnStats", totalTimeMs: 83000, dimensions: [] });
+  h.post({ type: "busy", value: false });
+  await h.settle(30);
+
+  const box = h.thread().querySelector("details.completed-work");
+  assert.ok(box, "the work of a finished turn folds away");
+  assert.strictEqual(
+    box.querySelector(".completed-work-summary span").textContent,
+    "Completed 3 steps in 1m 23s",
+    "every node before the answer, counted and timed as VS Code does"
+  );
+  // The answer itself must never end up inside: folding it would hide the point.
+  const answers = [...h.thread().querySelectorAll(".resp-text")];
+  const last = answers[answers.length - 1];
+  assert.ok(!box.contains(last), "the answer stays in the open");
+  assert.match(last.textContent, /Here is the answer/);
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("one step is left as itself, and a turn with no answer is left alone", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "userMessage", text: "go" });
+  h.post({ type: "busy", value: true });
+  h.post({ type: "toolCall", id: "a", kind: "read", status: "completed", rawInput: { path: "/w/a.ts" } });
+  h.post({ type: "assistantChunk", text: "Done." });
+  h.post({ type: "assistantEnd" });
+  h.post({ type: "busy", value: false });
+  await h.settle(30);
+  assert.strictEqual(h.thread().querySelector("details.completed-work"), null,
+    "one step reads better than a line saying there is one step");
+
+  // A turn that ends on its work has no answer to keep out, so folding it all
+  // away would leave the turn showing nothing at all.
+  const h2 = createHarness();
+  h2.post({ type: "ready" });
+  h2.post({ type: "body", body: "thread" });
+  h2.post({ type: "clear" });
+  h2.post({ type: "userMessage", text: "go" });
+  h2.post({ type: "busy", value: true });
+  h2.post({ type: "toolCall", id: "a", kind: "read", status: "completed", rawInput: { path: "/w/a.ts" } });
+  h2.post({ type: "toolCall", id: "b", kind: "read", status: "completed", rawInput: { path: "/w/b.ts" } });
+  h2.post({ type: "busy", value: false });
+  await h2.settle(30);
+  assert.strictEqual(h2.thread().querySelector("details.completed-work"), null, "nothing would be left showing");
+  assert.strictEqual(h.errors().length + h2.errors().length, 0);
+});
+
 test("the working row shimmers a word, with no spinner beside it", async () => {
   const h = createHarness();
   h.post({ type: "ready" });

@@ -5103,3 +5103,51 @@ body.dv-resizing #sessions-resizer {
   opacity: 0.6;
   vertical-align: middle;
 }
+
+/* Everything a finished turn did, behind one line, with the answer left in the
+   open. VS Code's completed response disclosure, in its own wording. */
+.completed-work {
+  margin-bottom: var(--dv-space-3);
+}
+
+.completed-work-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  padding: 2px 0;
+  cursor: pointer;
+  color: var(--dv-dim);
+  font-size: var(--dv-fs-s);
+  list-style: none;
+}
+
+.completed-work-summary::-webkit-details-marker {
+  display: none;
+}
+
+.completed-work-summary:hover {
+  color: var(--vscode-foreground);
+}
+
+.completed-work-summary:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+/* Same as every other disclosure here: shown on hover, or while it is open. */
+.completed-work-chevron {
+  font-size: 12px;
+  opacity: 0;
+  transition: opacity 100ms ease-in-out, transform 180ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+.completed-work-summary:hover .completed-work-chevron,
+.completed-work[open] .completed-work-chevron {
+  opacity: 0.7;
+}
+
+.completed-work[open] .completed-work-chevron {
+  transform: rotate(90deg);
+}
