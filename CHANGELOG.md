@@ -8,6 +8,11 @@ the commit messages carry the detail.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
+## [0.11.5] - 2026-08-10
+
+### Under the hood
+- The published package no longer carries a stray screenshot.
+
 ## [0.11.4] - 2026-08-10
 
 ### Highlights
