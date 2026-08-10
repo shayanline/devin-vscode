@@ -7,7 +7,11 @@
 
 const test = require("node:test");
 const assert = require("node:assert");
+const fs = require("node:fs");
+const path = require("node:path");
 const { createHarness } = require("./webview-harness");
+
+const ROOT = path.resolve(__dirname, "..");
 
 test("session load replays user request bubbles with their text", async () => {
   const h = createHarness();
@@ -631,6 +635,18 @@ test("mermaid fences render as a source block (upgraded lazily)", async () => {
   // No data-mermaid-src is set in the harness, so the lazy load no-ops; the
   // source block must simply survive without throwing.
   assert.strictEqual(h.errors().length, 0, "mermaid rendering threw: " + JSON.stringify(h.errors()));
+});
+
+test("mermaid is told to keep its errors to itself", async () => {
+  // A diagram it cannot parse draws a bomb and "Syntax error in text" into a
+  // node it hangs off document.body, and leaves it there: outside the
+  // transcript, under the whole panel. Suppressing that is what makes it throw
+  // instead, which is how the source block survives in its place.
+  const bundle = fs.readFileSync(path.join(ROOT, "dist", "webview.js"), "utf8");
+  assert.ok(
+    /suppressErrorRendering\s*:\s*!0|suppressErrorRendering\s*:\s*true/.test(bundle),
+    "mermaid must be initialised with suppressErrorRendering"
+  );
 });
 
 // Helper: two completed live turns with known heads.

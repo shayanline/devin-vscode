@@ -2411,7 +2411,19 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         if (!m) { reject(new Error("mermaid failed to load")); return; }
         const dark = document.body.classList.contains("vscode-dark") ||
           document.body.classList.contains("vscode-high-contrast");
-        try { m.initialize({ startOnLoad: false, securityLevel: "strict", theme: dark ? "dark" : "default" }); } catch (e) { /* keep going */ }
+        try {
+          m.initialize({
+            startOnLoad: false,
+            securityLevel: "strict",
+            theme: dark ? "dark" : "default",
+            // A diagram it cannot parse must throw and clean up after itself.
+            // Left to draw its own error, it paints a bomb and "Syntax error in
+            // text" into the temporary node it hung off document.body and then
+            // leaves it there, which lands under the whole panel, outside the
+            // transcript entirely. We keep the source block instead.
+            suppressErrorRendering: true
+          });
+        } catch (e) { /* keep going */ }
         resolve(m);
       };
       s.onerror = () => reject(new Error("mermaid script error"));
