@@ -2283,11 +2283,18 @@ body {
   display: none;
 }
 
-.tool-group-body > .thinking-plain > .dv-collapsible-anim,
-.tool-group-body > .thinking-plain > .dv-collapsible-anim-inner {
-  max-height: none;
-  overflow: visible;
+/* And nothing folds it away: it is a row of the run, and it has no header of
+   its own left to unfold it with. Written against the grid collapse the
+   disclosure actually uses, or a fold would leave the row on the chain at no
+   height, drawing a line to a step nobody can see. */
+.tool-group-body > .thinking-plain > .dv-collapsible-anim {
+  grid-template-rows: 1fr;
   opacity: 1;
+  visibility: visible;
+}
+
+.tool-group-body > .thinking-plain > .dv-collapsible-anim > .dv-collapsible-anim-inner {
+  overflow: visible;
 }
 
 /* Its own inner spine would be a chain within a chain, so the run's line carries

@@ -2532,8 +2532,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       // A thought of its own folds to its header once it is done, as VS Code
       // folds a finished thinking part. Reasoning inside a run does not: it has
       // no header to fold to, and the run folding takes it with it.
-      const inRun = !!(block.details && block.details.closest(".tool-group-body"));
-      if (block.peek && block.collapse && !inRun && !block.collapse.userToggled()) {
+      if (block.peek && block.collapse && block.details && !inRun(block.details) && !block.collapse.userToggled()) {
         block.collapse.setCollapsed(true);
       }
       if (block.label) {
@@ -3084,9 +3083,26 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // than as the whole session laid out end to end.
   function foldReplayedSections() {
     el.thread.querySelectorAll(".tool-group, .thinking, .subagent").forEach((node) => {
+      // Everything except the reasoning inside a run, which has no header to
+      // fold to: folding it puts its text out of reach for good and leaves an
+      // empty row on the run's chain, which then draws a line to nothing. The
+      // run folding takes it with it anyway.
+      if (inRun(node)) return;
       const ctrl = node._dvCollapse;
       if (ctrl && !ctrl.userToggled() && !holdsFocus(node)) ctrl.setCollapsed(true);
     });
+  }
+
+  // A reasoning block that is a row of a run rather than a section of its own.
+  function inRun(node) {
+    return node.classList.contains("thinking-plain") && !!node.closest(".tool-group-body");
+  }
+
+  // Joining a run costs a thought its header, which is the only thing that could
+  // have unfolded it, so it is opened on the way in. A replayed one arrives
+  // folded, and would otherwise be a row of nothing with a line drawn to it.
+  function openInRun(node) {
+    if (inRun(node) && node._dvCollapse) node._dvCollapse.setCollapsed(false);
   }
 
   function breakToolGroup() {
@@ -3221,6 +3237,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     const run = turn.toolRun || (turn.toolRun = { first: null, group: null });
     if (run.group) {
       run.group.body.appendChild(node);
+      openInRun(node);
       if (id) run.group.ids.add(id);
       updateToolGroup(run.group);
       return run.group;
@@ -3234,6 +3251,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     respTarget().insertBefore(g.root, run.first.node);
     g.body.appendChild(run.first.node);
     g.body.appendChild(node);
+    openInRun(run.first.node);
+    openInRun(node);
     for (const each of [run.first.id, id]) {
       if (each) g.ids.add(each);
     }

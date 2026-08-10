@@ -1994,6 +1994,12 @@ test("a reloaded session comes back folded, and folded means hidden", async () =
   assert.ok(run.classList.contains("dv-collapsed"), "a whole session laid out end to end is not history, it is a wall");
   const think = [...h.thread().querySelectorAll(".thinking")].find((t) => !t.closest(".tool-group-body"));
   if (think) assert.ok(think.classList.contains("dv-collapsed"), "a replayed thought comes back folded too");
+  // Except the reasoning inside the run, which folds to nothing rather than to a
+  // header: an empty row on the chain, with its text beyond reach.
+  const inRun = h.thread().querySelector(".tool-group-body > .thinking-plain");
+  assert.ok(inRun, "the replayed thought joined the run it led to");
+  assert.ok(!inRun.classList.contains("dv-collapsed"), "and opening the run shows it, rather than a line to nowhere");
+  assert.strictEqual(inRun.querySelector(".dv-collapsible-anim-inner").inert, false, "so it is readable and searchable");
 
   // Folded is not merely invisible: Tab must not walk into it and find in page
   // must not match inside it.
@@ -2048,6 +2054,7 @@ test("reasoning inside a run is text on the chain, not a section to open", async
   assert.ok(bullet, "the row leads with its glyph, before the text");
   assert.ok(bullet.classList.contains("codicon-circle-filled"), "a codicon, not a dot drawn by hand");
   assert.strictEqual(bullet.nextElementSibling.className, "thinking-item-content", "then what it thought");
+  assert.ok(!think.classList.contains("dv-collapsed"), "and it is open: there is no header left to open it with");
 
   // A thought on its own is a section of its own, and keeps its header: it is
   // not a step in anything, so headerless text would be a paragraph from nowhere.
