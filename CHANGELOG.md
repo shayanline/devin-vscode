@@ -8,6 +8,11 @@ the commit messages carry the detail.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
+## [0.11.2] - 2026-08-10
+
+### Highlights
+- A run's line and elbow keep further clear of each icon.
+
 ## [0.11.1] - 2026-08-10
 
 ### Highlights

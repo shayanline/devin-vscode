@@ -2874,6 +2874,10 @@ body {
    running alongside them. Every row leads with a glyph at the same offset, so the
    line can pass behind them all. */
 .tool-group-body {
+  /* A run's glyphs are the full width ones (a terminal, a pencil, a search), so
+     they need more air around them than the smaller timeline icons do: the line
+     breaks, and the elbow stops, two pixels further out here. */
+  --dv-node-clear: 5px;
   position: relative;
   margin-left: 6px;
   padding-left: 10px;
