@@ -1491,9 +1491,18 @@ body {
   padding: 0 6px 0 4px;
   max-width: 100%;
   width: fit-content;
+  flex: 0 1 auto;
   border: 1px solid var(--vscode-chat-requestBorder, var(--vscode-input-background, var(--dv-border)));
   border-radius: 4px;
   font-size: 11px;
+}
+
+/* With company, no pill takes more than its half of the row: one long file name
+   used to fill a line on its own and push the rest onto the next, leaving the
+   row half empty. It keeps the whole row when it is the only one, since there is
+   nothing to make space for and the name is worth reading in full. */
+.chat-attached-context-attachment:not(:only-child) {
+  max-width: calc(50% - 2px);
 }
 
 /* A picture is its own icon, so a screenshot is recognisable without opening it. */

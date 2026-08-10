@@ -15,6 +15,7 @@ the commit messages carry the detail.
 - They act on the chat you are in, not always the side panel's.
 - A queued message shows what is attached to it, as a row of pills.
 - Editing one shows the same in the composer, and the row keeps saying so.
+- A long file name no longer takes a whole row of pills to itself.
 
 ### Under the hood
 - The published package no longer carries a stray screenshot.
