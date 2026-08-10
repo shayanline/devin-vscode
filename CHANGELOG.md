@@ -8,7 +8,9 @@ the commit messages carry the detail.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
-## [Unreleased]
+## [0.9.3] - 2026-08-10
+
+Saying what the agent is doing, and opening what it made.
 
 ### Highlights
 - While Devin works the transcript says so, in a word that shimmers.
@@ -310,6 +312,7 @@ The foundation of the extension.
 - The agent's whole process group is killed on dispose, so no MCP server leaks.
 - A jsdom webview test harness, and a browser preview for visual iteration.
 
+[0.9.3]: https://github.com/shayanline/devin-vscode/releases/tag/v0.9.3
 [0.9.2]: https://github.com/shayanline/devin-vscode/releases/tag/v0.9.2
 [0.9.1]: https://github.com/shayanline/devin-vscode/releases/tag/v0.9.1
 [0.9.0]: https://github.com/shayanline/devin-vscode/releases/tag/v0.9.0
