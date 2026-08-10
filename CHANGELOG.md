@@ -13,6 +13,7 @@ the commit messages carry the detail.
 ### Highlights
 - Cmd+K Cmd+D opens the session list, Ctrl+K Ctrl+D on Windows and Linux.
 - It is in the command palette as "Devin: Session List".
+- Folded work keeps its spacing when you open it, instead of cramming.
 
 ## [0.9.3] - 2026-08-10
 

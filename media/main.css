@@ -5110,6 +5110,16 @@ body.dv-resizing #sessions-resizer {
   margin-bottom: var(--dv-space-3);
 }
 
+/* Moving the work in here took it out of .turn-response's flex column, and with
+   it the 8px of rhythm between the parts, so they arrived stacked flush against
+   each other. The browser lays the folded content out in its own box, which is
+   what has to carry the column, not the details element. */
+.completed-work::details-content {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 .completed-work-summary {
   display: flex;
   align-items: center;
@@ -5150,4 +5160,10 @@ body.dv-resizing #sessions-resizer {
 
 .completed-work[open] .completed-work-chevron {
   transform: rotate(90deg);
+}
+
+/* The summary is not inside the folded content's box, so the first item needs
+   its own air. Only when open: closed, the line stands on its own. */
+.completed-work[open] .completed-work-summary {
+  margin-bottom: 8px;
 }
