@@ -91,7 +91,7 @@
       },
       {
         "command": "devin.showSessions",
-        "title": "Show Sessions",
+        "title": "Session List",
         "category": "Devin",
         "icon": "$(history)"
       },
@@ -154,6 +154,13 @@
         "title": "Open Diff",
         "category": "Devin",
         "icon": "$(diff)"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "devin.showSessions",
+        "key": "ctrl+k ctrl+d",
+        "mac": "cmd+k cmd+d"
       }
     ],
     "menus": {
@@ -264,7 +271,7 @@
             "fixedScrolling"
           ],
           "enumDescriptions": [
-            "Show a collapsed 'Thinking…' header; expand to read the reasoning",
+            "Show a collapsed 'Thinking\u2026' header; expand to read the reasoning",
             "Show a live, fixed-height peek of the latest reasoning while it streams, then collapse it"
           ],
           "default": "fixedScrolling",
