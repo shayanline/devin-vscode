@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import * as fs from "fs";
+import * as os from "os";
 import * as path from "path";
 import * as crypto from "crypto";
 import { AcpClient, AcpHost } from "../acp/client";
@@ -24,6 +25,7 @@ import {
   WriteTextFileParams
 } from "../acp/types";
 import { TerminalManager } from "../acp/terminal";
+import { VsCodeTerminalRunner } from "../acp/vscodeTerminal";
 import { DevinSession, listSessions } from "../session/sessionList";
 import { SessionStore } from "../session/sessionStore";
 import { ChangeTracker } from "../diff/changeTracker";
@@ -67,6 +69,9 @@ interface Runtime {
   // The prompt in flight, if any. A session can change surface mid turn, and the
   // surface it lands on has to be the one that ends it.
   turn?: Promise<PromptResult>;
+  // How many prompts this session has run, which is what an edit row belongs to:
+  // one row per file per turn, and the row's diff is that turn's work on it.
+  turnCount: number;
   // Set when a session arrived on this surface mid turn and its own record of the
   // transcript was incomplete, so the rest is fetched from the CLI once the turn
   // ends and the channel is free.
@@ -77,10 +82,11 @@ interface Runtime {
   log: Record<string, unknown>[];
   // False once the oldest entries were dropped, which makes a rebuild partial.
   logFull: boolean;
-  // Messages the user submitted while a turn was in flight. The blocks (implicit
-  // context + attachments + text) are snapshotted at queue time; the host sends
-  // them in order as the session frees up (VS Code's chat queue).
-  queued: { id: string; text: string; blocks: ContentBlock[] }[];
+  // Messages the user submitted while a turn was in flight. The implicit context
+  // is snapshotted at queue time and the attachments travel with the message, so
+  // editing one can hand them back to the composer and take them again. The host
+  // sends them in order as the session frees up (VS Code's chat queue).
+  queued: { id: string; text: string; implicit: ContentBlock[]; attachments: Staged[] }[];
   // Webview messages a background turn produced while this session was not the
   // visible one. Replayed when the session is reopened so its progress is shown
   // even for a turn that is still running (capped so it can't grow unbounded).
@@ -107,6 +113,15 @@ const BG_BUFFER_MAX = 6000;
 // to the output channel, which the notification points at.
 const OPEN_FAILED = "Couldn't open this chat. See the Devin output for details.";
 
+// A file or image attached to a message: staged in the composer, then travelling
+// with the message it was attached to.
+export interface Staged {
+  id: string;
+  label: string;
+  type: string;
+  block: ContentBlock;
+}
+
 // A live session handed from one chat surface to another (the side panel to an
 // editor tab, or back). The `devin acp` process, its terminals and any request it
 // is still waiting on all travel together, so the agent never restarts, keeps the
@@ -114,7 +129,7 @@ const OPEN_FAILED = "Couldn't open this chat. See the Devin output for details."
 export interface RuntimeTransfer {
   rt: Runtime;
   // Files and images staged in the composer but not sent yet.
-  attachments: { id: string; label: string; type: string; block: ContentBlock }[];
+  attachments: Staged[];
   permissions: [string, { resolve: (res: RequestPermissionResult) => void; rid: string }][];
   elicitations: [string, { resolve: (res: unknown) => void; rid: string }][];
   from: string; // where it came from, for the log line the handover leaves
@@ -208,7 +223,7 @@ export class ChatController implements AcpHost {
   // the requests it is waiting on) moves from one surface to another.
   private static permissionSeq = 0;
 
-  private attachments: { id: string; label: string; type: string; block: ContentBlock }[] = [];
+  private attachments: Staged[] = [];
   private attachSeq = 0;
 
   // Whether the active editor file is sent as implicit context (VS Code's
@@ -660,7 +675,7 @@ export class ChatController implements AcpHost {
     rt.terminals.retarget(
       (terminalId, output, exitStatus) => {
         if (this.activeId === rt.id) {
-          this.post({ type: "terminalOutput", terminalId, output, exitStatus });
+          this.postTerminal(rt.terminals, terminalId, output, exitStatus);
         }
       },
       (line) => this.log(line)
@@ -750,10 +765,11 @@ export class ChatController implements AcpHost {
       (terminalId, output, exitStatus) => {
         // Only the visible session streams terminal output to the webview.
         if (ref && this.activeId === ref.id) {
-          this.post({ type: "terminalOutput", terminalId, output, exitStatus });
+          this.postTerminal(terminals, terminalId, output, exitStatus);
         }
       },
-      (line) => this.log(line)
+      (line) => this.log(line),
+      new VsCodeTerminalRunner(cwd, this.clientEnv(), (line) => this.log(line))
     );
     const rt: Runtime = {
       id: "",
@@ -764,6 +780,7 @@ export class ChatController implements AcpHost {
       busy: false,
       awaiting: 0,
       replaying: false,
+      turnCount: 0,
       lastActivityAt: Date.now(),
       pending: [],
       queued: [],
@@ -801,8 +818,42 @@ export class ChatController implements AcpHost {
     }
   }
 
+  // Muted for this window only ("not again now"): a restart is a fresh start, so
+  // a server that is still broken says so again. Turning it off for good is the
+  // setting, which this reads too.
+  private static mcpMutedHere = false;
+
+  private muteMcpWarnings(scope: string): void {
+    if (scope === "always") {
+      void this.cfg().update("showMcpWarnings", false, vscode.ConfigurationTarget.Global);
+    } else {
+      ChatController.mcpMutedHere = true;
+    }
+  }
+
+  // A command's output, with what can be done about it: opened in the terminal
+  // it is really running in, and left running so the agent stops waiting on it.
+  private postTerminal(
+    terminals: TerminalManager,
+    terminalId: string,
+    output: string,
+    exitStatus: TerminalExitStatus | null
+  ): void {
+    this.post({
+      type: "terminalOutput",
+      terminalId,
+      output,
+      exitStatus,
+      integrated: terminals.isIntegrated(terminalId),
+      skipped: terminals.isSkipped(terminalId)
+    });
+  }
+
   private postMcpProblems(rt: Runtime): void {
     if (this.activeId !== rt.id || !rt.mcpProblems.size) {
+      return;
+    }
+    if (ChatController.mcpMutedHere || !this.cfg().get<boolean>("showMcpWarnings", true)) {
       return;
     }
     this.post({
@@ -975,16 +1026,11 @@ export class ChatController implements AcpHost {
         case "sendQueuedNow":
           this.sendQueuedNow(String(msg.id || ""));
           return;
-        case "queueEditing": {
+        case "queueEditing":
           // Which queued message (if any) the composer is editing. Changing it can
           // unblock a flush a completed turn deferred, so re-run the drain.
-          this.queueEditingId = msg.id ? String(msg.id) : undefined;
-          const rt = this.active();
-          if (rt) {
-            this.flushQueue(rt);
-          }
+          this.setQueueEditing(msg.id ? String(msg.id) : undefined);
           return;
-        }
         case "cancel":
           this.cancel();
           return;
@@ -1069,8 +1115,30 @@ export class ChatController implements AcpHost {
         case "subagentMode":
           await this.setSubagentMode(String(msg.id || ""), msg.background === true);
           return;
+        case "showTerminal":
+          this.active()?.terminals.show(String(msg.terminalId || ""));
+          return;
+        case "skipTerminal": {
+          // The command keeps running; the agent stops waiting for it. Its row
+          // says so as soon as the host confirms.
+          const rt = this.active();
+          const id = String(msg.terminalId || "");
+          if (rt && rt.terminals.skip(id)) {
+            this.postTerminal(rt.terminals, id, rt.terminals.output(id).output, null);
+          }
+          return;
+        }
+        case "muteMcpWarnings":
+          this.muteMcpWarnings(String(msg.scope || "window"));
+          return;
         case "openDiff":
-          await this.changes.openDiff(String(msg.path || ""));
+          // An edit row opens what that edit did; the working set opens what the
+          // file is still holding, which is every edit not yet reviewed.
+          if (msg.editId) {
+            await this.changes.openEdit(String(msg.editId), String(msg.path || ""));
+          } else {
+            await this.changes.openDiff(String(msg.path || ""));
+          }
           return;
         case "openFile":
           await this.openFile(String(msg.path || ""), typeof msg.line === "number" ? msg.line : undefined);
@@ -1262,7 +1330,9 @@ export class ChatController implements AcpHost {
   }
 
   private cwd(): string {
-    return this.folders()[0] || process.env.HOME || process.cwd();
+    // Never process.cwd(): for the extension host that is the VS Code install
+    // directory, which nothing may write to.
+    return this.folders()[0] || os.homedir();
   }
 
   // A multi-root workspace has no single root, so a new session belongs to the
@@ -2352,10 +2422,10 @@ export class ChatController implements AcpHost {
 
   // --- Context attachments -------------------------------------------------
 
-  // What is staged, in the shape the request itself shows it: a label, and for a
+  // Attachments in the shape the request itself shows them: a label, and for a
   // picture the picture, so the pill can be a thumbnail of it.
-  private sentAttachments(): { label: string; type: string; thumb?: string }[] {
-    return this.attachments.map((a) => {
+  private shownAttachments(list: Staged[]): { label: string; type: string; thumb?: string }[] {
+    return list.map((a) => {
       const b = a.block as { type?: string; mimeType?: string; data?: string };
       const thumb = a.type === "image" && b?.type === "image" && b.data
         ? `data:${b.mimeType || "image/png"};base64,${b.data}`
@@ -2575,7 +2645,9 @@ export class ChatController implements AcpHost {
     term.sendText(text, false);
   }
 
-  private async addFile(fsPath: string): Promise<void> {
+  // The path or, from a drop, the file URI that names it.
+  private async addFile(dropped: string): Promise<void> {
+    const fsPath = fileFromUri(dropped);
     const ext = path.extname(fsPath).toLowerCase().replace(/^\./, "");
     const imageMime = IMAGE_MIME_BY_EXT[ext];
     try {
@@ -2806,7 +2878,7 @@ export class ChatController implements AcpHost {
       // started from the list never flashes the welcome while the ACP session
       // spins up.
       this.post({ type: "clear", pendingSend: true });
-      this.post({ type: "userMessage", text, attachments: this.sentAttachments() });
+      this.post({ type: "userMessage", text, attachments: this.shownAttachments(this.attachments) });
     }
 
     let rt = startNew ? undefined : this.active();
@@ -2840,7 +2912,7 @@ export class ChatController implements AcpHost {
     const sent = rt;
     // What was attached goes with the message, so the request keeps saying what it
     // was asked about instead of the context vanishing the moment it is sent.
-    const attachments = this.sentAttachments();
+    const attachments = this.shownAttachments(this.attachments);
     this.record(sent, { type: "userMessage", text, attachments });
     // For a fresh chat the message was already rendered above; only echo it here
     // for a send within an existing (visible) session.
@@ -2862,6 +2934,7 @@ export class ChatController implements AcpHost {
     if (this.activeId === rt.id) {
       this.post({ type: "assistantStart" });
     }
+    rt.turnCount++;
     const turn = rt.client.prompt(rt.id, blocks);
     rt.turn = turn;
     try {
@@ -2941,8 +3014,7 @@ export class ChatController implements AcpHost {
   // Snapshot a message (implicit context + attachments + text) and add it to the
   // runtime's queue, then reflect the queue in the composer.
   private enqueueMessage(rt: Runtime, text: string, first = false): void {
-    const blocks: ContentBlock[] = [...this.buildImplicitBlocks(), ...this.attachments.map((a) => a.block), { type: "text", text }];
-    const message = { id: `q-${++this.queueSeq}`, text, blocks };
+    const message = { id: `q-${++this.queueSeq}`, text, implicit: this.buildImplicitBlocks(), attachments: this.attachments };
     if (first) {
       rt.queued.unshift(message);
     } else {
@@ -2988,9 +3060,37 @@ export class ChatController implements AcpHost {
     this.postQueued(rt);
     // Route the echo through emit so a flush that happens while the session is
     // backgrounded is buffered and replays (its user bubble shows on return),
-    // instead of being dropped like the old active-only post.
-    this.emit(rt, { type: "userMessage", text: next.text });
-    void this.runPrompt(rt, next.blocks);
+    // instead of being dropped like the old active-only post. What was attached
+    // goes with it, as it does for a message sent straight away.
+    this.emit(rt, { type: "userMessage", text: next.text, attachments: this.shownAttachments(next.attachments) });
+    void this.runPrompt(rt, this.messageBlocks(next));
+  }
+
+  // Start or stop editing a queued message. Its attachments move with the text:
+  // into the composer so they can be seen and removed while editing, and back
+  // onto the message if the edit is abandoned. A committed edit gets there first
+  // (editQueued takes them), so by then there is nothing staged to give back.
+  private setQueueEditing(id?: string): void {
+    const rt = this.active();
+    const was = this.queueEditingId;
+    this.queueEditingId = id;
+    const from = was && rt ? rt.queued.find((q) => q.id === was) : undefined;
+    if (from && this.attachments.length) {
+      from.attachments = this.attachments;
+      this.attachments = [];
+      this.postAttachments();
+      this.postQueued(rt!);
+    }
+    const to = id && rt ? rt.queued.find((q) => q.id === id) : undefined;
+    if (to && to.attachments.length) {
+      this.attachments = to.attachments;
+      to.attachments = [];
+      this.postAttachments();
+      this.postQueued(rt!);
+    }
+    if (rt) {
+      this.flushQueue(rt);
+    }
   }
 
   // Remove a queued message the user dropped or moved back to the composer.
@@ -3024,8 +3124,16 @@ export class ChatController implements AcpHost {
     this.flushQueue(rt);
   }
 
+  // What a queued message finally sends: the context it was queued with, then
+  // whatever is attached to it, then the message itself.
+  private messageBlocks(q: { text: string; implicit: ContentBlock[]; attachments: Staged[] }): ContentBlock[] {
+    return [...q.implicit, ...q.attachments.map((a) => a.block), { type: "text", text: q.text }];
+  }
+
   // Update a queued message's text in place, keeping its position in the queue
-  // (editing must not move it to the end).
+  // (editing must not move it to the end). Editing borrowed the composer, so
+  // whatever is staged there is now this message's context: that is both what
+  // the edit started with and anything attached while editing.
   private editQueued(id: string, text: string): void {
     const rt = this.active();
     if (!rt || !text.trim()) {
@@ -3036,14 +3144,9 @@ export class ChatController implements AcpHost {
       return;
     }
     q.text = text;
-    // The text block is the last block built at enqueue time; update it, keeping
-    // the snapshotted implicit-context and attachment blocks before it.
-    const tail = q.blocks[q.blocks.length - 1];
-    if (tail && tail.type === "text") {
-      tail.text = text;
-    } else {
-      q.blocks.push({ type: "text", text });
-    }
+    q.attachments = this.attachments;
+    this.attachments = [];
+    this.postAttachments();
     this.postQueued(rt);
   }
 
@@ -3095,7 +3198,10 @@ export class ChatController implements AcpHost {
   // composer only ever shows the active session's queue).
   private postQueued(rt: Runtime): void {
     if (this.activeId === rt.id) {
-      this.post({ type: "queued", items: rt.queued.map((q) => ({ id: q.id, text: q.text })) });
+      this.post({
+        type: "queued",
+        items: rt.queued.map((q) => ({ id: q.id, text: q.text, attachments: this.shownAttachments(q.attachments) }))
+      });
     }
   }
 
@@ -3182,7 +3288,7 @@ export class ChatController implements AcpHost {
       return;
     }
     for (const a of actions) {
-      const p = typeof a.path === "string" ? a.path : undefined;
+      const p = typeof a.path === "string" ? this.resolvePath(a.path) : undefined;
       if (!p) {
         continue;
       }
@@ -3287,6 +3393,12 @@ export class ChatController implements AcpHost {
     this.leaveToList();
     this.post({ type: "body", body: "list" });
     await this.refreshSessionsFast();
+  }
+
+  // Open the chat wearing this number in the list (Ctrl/Cmd+1..9).
+  pickSession(index: number): void {
+    this.focus();
+    this.post({ type: "pickSession", index });
   }
 
   // Returning to the list should be instant: paint the cached listing at any age,
@@ -3447,7 +3559,7 @@ export class ChatController implements AcpHost {
           meta: toolMeta(u),
           status: u.status || "pending",
           rawInput: u.rawInput,
-          content: normalizeToolContent(u.content),
+          content: normalizeToolContent(u.content, rt ? (p) => this.editId(rt, p) : undefined),
           locations: normalizeLocations(u.locations),
           terminalId: claimTerminal(rt, u)
         });
@@ -3463,7 +3575,7 @@ export class ChatController implements AcpHost {
           meta: toolMeta(u),
           status: u.status,
           rawInput: u.rawInput,
-          content: normalizeToolContent(u.content),
+          content: normalizeToolContent(u.content, rt ? (p) => this.editId(rt, p) : undefined),
           locations: normalizeLocations(u.locations)
         });
         this.recordDiffs(u, rt);
@@ -3566,6 +3678,13 @@ export class ChatController implements AcpHost {
     return rt.subagentIds.get(agentId) || agentId;
   }
 
+  // The edit row a file's change belongs to. There is one row per file per turn,
+  // so that is what the row's own diff covers: what this turn did to this file,
+  // as against the working set, which is everything still awaiting review.
+  private editId(rt: Runtime, fsPath: string): string {
+    return `${rt.id}#${rt.turnCount}#${fsPath}`;
+  }
+
   private recordDiffs(u: any, rt?: Runtime): void {
     // Historical diffs from a session/load replay are already resolved, so they
     // are not part of an actionable working set. A background session's edits
@@ -3577,9 +3696,11 @@ export class ChatController implements AcpHost {
     for (const c of content) {
       if (c && c.type === "diff" && typeof c.path === "string") {
         const s = diffStat(c.oldText, c.newText);
+        const editId = this.editId(rt, c.path);
+        this.changes.recordEdit(editId, c.path, c.oldText ?? null, c.newText ?? "");
         // Post the per-file counts before recordDiff fires the working-set list,
         // so the list renders with the deltas already known.
-        this.emit(rt, { type: "fileChange", path: c.path, added: s.added, removed: s.removed, created: c.oldText == null || c.oldText === "" });
+        this.emit(rt, { type: "fileChange", path: c.path, added: s.added, removed: s.removed, created: c.oldText == null || c.oldText === "", editId });
         this.changes.recordDiff(c.path, c.oldText ?? null, c.newText ?? "", rt.id, s);
       }
     }
@@ -3793,14 +3914,21 @@ export class ChatController implements AcpHost {
       original = null;
     }
     await fs.promises.mkdir(path.dirname(full), { recursive: true });
-    await fs.promises.writeFile(full, params.content, "utf8");
+    // Keep the file's own line endings: the agent writes LF, and rewriting a
+    // CRLF file with it would show every line as changed in git.
+    const content = original && /\r\n/.test(original) && !/\r\n/.test(params.content)
+      ? params.content.replace(/\n/g, "\r\n")
+      : params.content;
+    await fs.promises.writeFile(full, content, "utf8");
     // The edit is tracked against the session that made it, so a background
     // session's working set is waiting for it when it is next opened.
     const rt = this.runtimeBySessionId(params.sessionId);
     if (rt) {
-      const s = diffStat(original, params.content);
-      this.emit(rt, { type: "fileChange", path: full, added: s.added, removed: s.removed, created: original == null });
-      this.changes.recordDiff(full, original, params.content, rt.id, s);
+      const s = diffStat(original, content);
+      const editId = this.editId(rt, full);
+      this.changes.recordEdit(editId, full, original, content);
+      this.emit(rt, { type: "fileChange", path: full, added: s.added, removed: s.removed, created: original == null, editId });
+      this.changes.recordDiff(full, original, content, rt.id, s);
     }
     // The agent's fs/write_text_file expects an (empty) object result; returning
     // null makes it report a spurious "Parse error" even though the write landed.
@@ -3867,12 +3995,14 @@ interface ToolContentItem {
   created?: boolean;
   mime?: string;
   data?: string;
+  // Which edit this diff belongs to, so its row can open just that edit.
+  editId?: string;
   // A file a tool pointed at rather than quoted: rendered as a pill that opens it.
   link?: boolean;
 }
 
 // Flatten ACP tool-call content into renderable items for the webview.
-function normalizeToolContent(content: any): ToolContentItem[] {
+function normalizeToolContent(content: any, editId?: (path: string) => string): ToolContentItem[] {
   if (!Array.isArray(content)) {
     return [];
   }
@@ -3890,7 +4020,8 @@ function normalizeToolContent(content: any): ToolContentItem[] {
         path: c.path,
         added: s.added,
         removed: s.removed,
-        created: c.oldText == null || c.oldText === ""
+        created: c.oldText == null || c.oldText === "",
+        editId: editId ? editId(c.path) : undefined
       });
     } else if (c.type === "terminal" && typeof c.terminalId === "string") {
       out.push({ type: "terminal", terminalId: c.terminalId });

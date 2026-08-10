@@ -78,13 +78,19 @@ export function writeMcpServer(file: string, name: string, def: Record<string, u
   fs.writeFileSync(file, JSON.stringify(current, null, 2) + "\n", "utf8");
 }
 
-// MCP OAuth tokens are stored per server under the data dir; their presence
-// tells us a server is logged in.
-export function mcpOauthDir(): string {
+// Where the CLI keeps its own state: XDG on macOS/Linux, %LOCALAPPDATA% on
+// Windows.
+export function devinDataDir(): string {
   const dataHome = process.platform === "win32"
     ? (process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"))
     : (process.env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share"));
-  return path.join(dataHome, "devin", "mcp", "oauth");
+  return path.join(dataHome, "devin");
+}
+
+// MCP OAuth tokens are stored per server under the data dir; their presence
+// tells us a server is logged in.
+export function mcpOauthDir(): string {
+  return path.join(devinDataDir(), "mcp", "oauth");
 }
 
 export function projectConfigPath(root: string): string {

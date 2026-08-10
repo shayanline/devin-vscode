@@ -1,4 +1,5 @@
 import { execFile } from "child_process";
+import { cliCommand } from "./locate";
 
 export interface ModelVariant {
   value: string; // model uid the ACP `model` option accepts
@@ -87,10 +88,11 @@ function effortRank(name: string): number {
 
 function run(cliPath: string, env?: NodeJS.ProcessEnv): Promise<ModelFamily[]> {
   return new Promise((resolve) => {
+    const cmd = cliCommand(cliPath, ["models", "list", "--format", "json"]);
     execFile(
-      cliPath,
-      ["models", "list", "--format", "json"],
-      { env, windowsHide: true, timeout: 15000, maxBuffer: 8 * 1024 * 1024 },
+      cmd.file,
+      cmd.args,
+      { env, windowsHide: true, timeout: 15000, maxBuffer: 8 * 1024 * 1024, shell: cmd.shell },
       (err, stdout) => {
         if (err && !stdout) {
           resolve([]);

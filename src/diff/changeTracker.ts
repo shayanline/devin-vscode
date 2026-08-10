@@ -3,6 +3,9 @@ import * as fs from "fs";
 import * as path from "path";
 
 interface Snapshot {
+  // The file as it was named when it was first recorded. The map is keyed on a
+  // normalised form of it (see `key`), so this is the one to show and write to.
+  path: string;
   original: string | null; // null means the file did not exist before the session
   // Sessions that have edited this file. The original content belongs to the
   // file, but the working set is per session: each chat shows what it changed,
@@ -34,6 +37,14 @@ interface StoredSnapshot {
 // across a reload.
 const MAX_STORE_BYTES = 8 * 1024 * 1024;
 
+// The same file arrives written two ways: as the agent wrote it, and as VS Code
+// hands it back from a URI (which lower cases a Windows drive letter and always
+// uses backslashes). One key for both, so a lookup finds what was recorded.
+function key(fsPath: string): string {
+  const resolved = path.resolve(fsPath);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
 // Tracks agent file edits so the user can review them as native diffs and
 // accept or reject them. Uses a QuickDiffProvider so the editor shows gutter
 // change markers with inline per-hunk "Revert Change" actions for free, plus a
@@ -42,6 +53,8 @@ export class ChangeTracker
   implements vscode.TextDocumentContentProvider, vscode.QuickDiffProvider
 {
   static readonly scheme = "devin-original";
+  // Either side of a single edit, so an edit row can show just what it did.
+  static readonly editScheme = "devin-edit";
 
   private readonly snapshots = new Map<string, Snapshot>();
   private readonly contentChanged = new vscode.EventEmitter<vscode.Uri>();
@@ -85,7 +98,8 @@ export class ChangeTracker
         if (s.original !== null && !fs.existsSync(s.path)) {
           continue;
         }
-        this.snapshots.set(s.path, {
+        this.snapshots.set(key(s.path), {
+          path: s.path,
           original: s.original ?? null,
           sessions: new Set(s.sessions),
           resolved: s.resolved,
@@ -114,10 +128,10 @@ export class ChangeTracker
     if (!this.store) {
       return;
     }
-    const out: StoredSnapshot[] = [...this.snapshots]
-      .filter(([, s]) => !s.resolved)
-      .map(([p, s]) => ({
-        path: p,
+    const out: StoredSnapshot[] = [...this.snapshots.values()]
+      .filter((s) => !s.resolved)
+      .map((s) => ({
+        path: s.path,
         original: s.original,
         sessions: [...s.sessions],
         added: s.added,
@@ -143,7 +157,8 @@ export class ChangeTracker
   register(): vscode.Disposable {
     const disposables: vscode.Disposable[] = [];
     disposables.push(
-      vscode.workspace.registerTextDocumentContentProvider(ChangeTracker.scheme, this)
+      vscode.workspace.registerTextDocumentContentProvider(ChangeTracker.scheme, this),
+      vscode.workspace.registerTextDocumentContentProvider(ChangeTracker.editScheme, this)
     );
 
     this.scm = vscode.scm.createSourceControl("devin", "Devin");
@@ -172,19 +187,75 @@ export class ChangeTracker
   // whose change has been kept or undone has nothing left to review, so it gets
   // no gutter markers.
   provideOriginalResource(uri: vscode.Uri): vscode.Uri | undefined {
-    const snap = this.snapshots.get(uri.fsPath);
-    return snap && !snap.resolved ? this.originalUri(uri.fsPath) : undefined;
+    const snap = this.snapshots.get(key(uri.fsPath));
+    return snap && !snap.resolved ? this.originalUri(snap.path) : undefined;
   }
 
   // The original text, including for a resolved file, so a diff the user still
-  // has open keeps rendering against what the file really was.
+  // has open keeps rendering against what the file really was, and either side
+  // of a single edit, for the diff an edit row opens.
   provideTextDocumentContent(uri: vscode.Uri): string {
-    const fsPath = uri.query || uri.fsPath;
-    return this.snapshots.get(fsPath)?.original ?? "";
+    if (uri.scheme === ChangeTracker.editScheme) {
+      const [id, side] = uri.query.split("\u0000");
+      const edit = this.edits.get(id);
+      return (side === "after" ? edit?.after : edit?.before) ?? "";
+    }
+    return this.snapshots.get(key(uri.query || uri.fsPath))?.original ?? "";
+  }
+
+  // --- One edit's own diff ---------------------------------------------------
+
+  // What a single edit did, as opposed to what the file is still holding: the
+  // working set answers "what has Devin changed here", an edit row answers "what
+  // did this change do". Keyed by the row that reports it, and capped: this is
+  // two copies of a file's text per edit, kept only to show a diff nobody has to
+  // ask for twice.
+  private readonly edits = new Map<string, { path: string; before: string; after: string }>();
+  private editBytes = 0;
+  private static readonly MAX_EDIT_BYTES = 8 * 1024 * 1024;
+
+  // Extend the edit under `id` (the first call sets what it started from, later
+  // ones move its end), so a row that reports a file several times still opens
+  // everything that row stands for.
+  recordEdit(id: string, fsPath: string, before: string | null, after: string): void {
+    const existing = this.edits.get(id);
+    if (existing) {
+      this.editBytes += after.length - existing.after.length;
+      existing.after = after;
+    } else {
+      this.edits.set(id, { path: fsPath, before: before ?? "", after });
+      this.editBytes += (before?.length ?? 0) + after.length;
+    }
+    for (const [k, e] of this.edits) {
+      if (this.editBytes <= ChangeTracker.MAX_EDIT_BYTES) {
+        break;
+      }
+      this.edits.delete(k);
+      this.editBytes -= e.before.length + e.after.length;
+    }
+  }
+
+  // Open what one edit did. Falls back to the file's working set diff when the
+  // text behind it has been dropped (a reloaded transcript, or a long session).
+  async openEdit(id: string, fsPath?: string): Promise<void> {
+    const edit = this.edits.get(id);
+    if (!edit) {
+      await this.openDiff(fsPath);
+      return;
+    }
+    const side = (s: "before" | "after") =>
+      vscode.Uri.from({
+        scheme: ChangeTracker.editScheme,
+        path: "/" + edit.path.replace(/\\/g, "/").replace(/^\/+/, ""),
+        query: `${id}\u0000${s}`
+      });
+    const left = side("before");
+    await this.warmOriginal(left);
+    await vscode.commands.executeCommand("vscode.diff", left, side("after"), `${path.basename(edit.path)} (this edit)`);
   }
 
   recordDiff(fsPath: string, oldText: string | null, newText: string, sessionId: string, stat?: { added: number; removed: number }): void {
-    const snap = this.snapshots.get(fsPath);
+    const snap = this.snapshots.get(key(fsPath));
     if (snap) {
       snap.added = stat?.added;
       snap.removed = stat?.removed;
@@ -199,7 +270,8 @@ export class ChangeTracker
         snap.resolved = false;
       }
     } else {
-      this.snapshots.set(fsPath, {
+      this.snapshots.set(key(fsPath), {
+        path: fsPath,
         original: oldText,
         sessions: new Set([sessionId]),
         added: stat?.added,
@@ -214,24 +286,25 @@ export class ChangeTracker
   // Every file still awaiting review, whichever chat changed it: what the Source
   // Control view and "Open all" work on.
   changedPaths(): string[] {
-    return [...this.snapshots].filter(([, s]) => !s.resolved).map(([p]) => p);
+    return [...this.snapshots.values()].filter((s) => !s.resolved).map((s) => s.path);
   }
 
   // What one chat changed and has not resolved, which is its working set.
   pathsFor(sessionId?: string): string[] {
-    if (!sessionId) {
-      return [];
-    }
-    return [...this.snapshots].filter(([, s]) => !s.resolved && s.sessions.has(sessionId)).map(([p]) => p);
+    return this.unresolvedFor(sessionId).map((s) => s.path);
   }
 
   // What one chat changed, with the line counts, so a working set restored after a
   // reload arrives complete rather than as bare names.
   changesFor(sessionId?: string): { path: string; added?: number; removed?: number }[] {
-    return this.pathsFor(sessionId).map((p) => {
-      const s = this.snapshots.get(p);
-      return { path: p, added: s?.added, removed: s?.removed };
-    });
+    return this.unresolvedFor(sessionId).map((s) => ({ path: s.path, added: s.added, removed: s.removed }));
+  }
+
+  private unresolvedFor(sessionId?: string): Snapshot[] {
+    if (!sessionId) {
+      return [];
+    }
+    return [...this.snapshots.values()].filter((s) => !s.resolved && s.sessions.has(sessionId));
   }
 
   // Whether this file is still awaiting review. A kept or undone one is excluded:
@@ -239,19 +312,19 @@ export class ChangeTracker
   // older than any checkpoint taken since, so a revert must use the agent's own
   // plan for it rather than winding the file all the way back.
   hasUnresolvedChange(fsPath: string): boolean {
-    const snap = this.snapshots.get(fsPath);
+    const snap = this.snapshots.get(key(fsPath));
     return !!snap && !snap.resolved;
   }
 
   // Forget one chat's files entirely, leaving them on disk as they are (used
   // after a revert, which has already put the files back itself).
   clearFor(sessionId: string): void {
-    for (const [p, snap] of [...this.snapshots]) {
+    for (const [k, snap] of [...this.snapshots]) {
       if (!snap.sessions.has(sessionId)) {
         continue;
       }
-      this.snapshots.delete(p);
-      this.contentChanged.fire(this.originalUri(p));
+      this.snapshots.delete(k);
+      this.contentChanged.fire(this.originalUri(snap.path));
     }
     this.refreshGroup();
   }
@@ -312,12 +385,12 @@ export class ChangeTracker
   // set. The original text stays held (see provideTextDocumentContent), and no
   // content change is fired because nothing about the original changed.
   accept(fsPath?: string): void {
-    const snap = fsPath ? this.snapshots.get(fsPath) : undefined;
+    const snap = fsPath ? this.snapshots.get(key(fsPath)) : undefined;
     if (!snap) {
       return;
     }
     snap.resolved = true;
-    this.resolved.fire({ paths: [fsPath as string], action: "accept" });
+    this.resolved.fire({ paths: [snap.path], action: "accept" });
     this.refreshGroup();
   }
 
@@ -325,21 +398,21 @@ export class ChangeTracker
   // drop it from the working set. The original stays held so an open diff renders
   // against it, now showing no difference, rather than the whole file as added.
   async reject(fsPath?: string): Promise<void> {
-    const snap = fsPath ? this.snapshots.get(fsPath) : undefined;
-    if (!fsPath || !snap) {
+    const snap = fsPath ? this.snapshots.get(key(fsPath)) : undefined;
+    if (!snap) {
       return;
     }
     try {
       if (snap.original === null) {
-        await fs.promises.rm(fsPath, { force: true });
+        await fs.promises.rm(snap.path, { force: true });
       } else {
-        await fs.promises.writeFile(fsPath, snap.original, "utf8");
+        await fs.promises.writeFile(snap.path, snap.original, "utf8");
       }
     } catch {
       // ignore write failures; still drop from the working set
     }
     snap.resolved = true;
-    this.resolved.fire({ paths: [fsPath], action: "reject" });
+    this.resolved.fire({ paths: [snap.path], action: "reject" });
     this.refreshGroup();
   }
 

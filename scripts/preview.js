@@ -14,6 +14,16 @@
 
 const fs = require("fs");
 const path = require("path");
+const { pathToFileURL } = require("url");
+
+// An href is a URL, not a path, so it keeps forward slashes on Windows too, and
+// it carries the file's modification time so a reload picks up the stylesheet or
+// bundle just built rather than a cached copy.
+const href = (from, to) => {
+  const rel = path.relative(from, to).split(path.sep).join("/");
+  const stamp = fs.existsSync(to) ? fs.statSync(to).mtimeMs : 0;
+  return rel + "?v=" + Math.round(stamp);
+};
 
 const ROOT = path.resolve(__dirname, "..");
 const OUT_DIR = path.join(ROOT, "scripts", ".preview");
@@ -124,6 +134,9 @@ const SCENARIOS = {
     { type: "toolCall", id: "t3h", title: "Run a script", kind: "execute", status: "completed",
       rawInput: { command: "cd /Users/dev/Projects/web-app && python3 - <<'PY'\nimport re\np='src/auth/token.ts'\ns=open(p).read()\nopen(p,'w').write(s)\nPY" },
       content: [{ type: "text", text: "Exited with code 0" }] },
+    { type: "toolCall", id: "t3d", title: "Run npm run dev", kind: "execute", status: "in_progress",
+      rawInput: { command: "npm run dev" }, terminalId: "term-dev" },
+    { type: "terminalOutput", terminalId: "term-dev", output: "ready on http://localhost:3000\n", integrated: true },
     { type: "toolCall", id: "t3", title: "Run npm test", kind: "execute", status: "completed",
       rawInput: { command: "npm test --workspace=packages/auth -- --coverage --runInBand --reporters=default --reporters=jest-junit" },
       content: [{ type: "text", text: "PASS  auth.test.ts\n  \u2713 issues a token (12 ms)\n  \u2713 rejects an expired token (4 ms)\n\nTests: 2 passed, 2 total" }] },
@@ -269,10 +282,10 @@ const SCENARIOS = {
 function build(scenarioName) {
   const scenario = SCENARIOS[scenarioName] || SCENARIOS.full;
   const body = fs.readFileSync(path.join(MEDIA, "webview-body.html"), "utf8");
-  const cssMain = path.relative(OUT_DIR, path.join(MEDIA, "main.css"));
-  const cssCodicon = path.relative(OUT_DIR, path.join(MEDIA, "codicon", "codicon.css"));
-  const bundle = path.relative(OUT_DIR, path.join(ROOT, "dist", "webview.js"));
-  const mermaid = path.relative(OUT_DIR, path.join(ROOT, "dist", "mermaid.js"));
+  const cssMain = href(OUT_DIR, path.join(MEDIA, "main.css"));
+  const cssCodicon = href(OUT_DIR, path.join(MEDIA, "codicon", "codicon.css"));
+  const bundle = href(OUT_DIR, path.join(ROOT, "dist", "webview.js"));
+  const mermaid = href(OUT_DIR, path.join(ROOT, "dist", "mermaid.js"));
 
   const html = `<!DOCTYPE html>
 <html lang="en">
@@ -327,4 +340,4 @@ const scenarioName = flagIdx >= 0 ? process.argv[flagIdx + 1] : "full";
 const out = build(scenarioName);
 
 console.log("Preview written to:", out);
-console.log("Open with: playwright-cli open \"file://" + out + "\"");
+console.log("Open with: playwright-cli open \"" + pathToFileURL(out).href + "\"");

@@ -33,10 +33,14 @@ export function loginShellEnv(): Promise<NodeJS.ProcessEnv> {
     return Promise.resolve(cachedEnv);
   }
   return new Promise((resolve) => {
-    const shell = process.env.SHELL || "/bin/zsh";
+    const shell = process.env.SHELL || "/bin/sh";
+    // In fish `$PATH` is a list, so quoting it yields space separated garbage.
+    const script = /(^|\/)fish$/.test(shell)
+      ? "printf '__PATH__=%s' (string join : $PATH)"
+      : "printf '__PATH__=%s' \"$PATH\"";
     execFile(
       shell,
-      ["-lic", "printf '__PATH__=%s' \"$PATH\""],
+      ["-lic", script],
       { timeout: 5000, windowsHide: true },
       (_err, stdout) => {
         const match = /__PATH__=([^\n]*)/.exec(stdout || "");
@@ -83,14 +87,16 @@ function commonLocations(): string[] {
 // heavy shell profile can add several seconds to startup.
 function which(binary: string, env: NodeJS.ProcessEnv): Promise<string | undefined> {
   const isWin = process.platform === "win32";
-  const exts = isWin ? (env.PATHEXT || ".EXE;.CMD;.BAT").split(";") : [""];
+  const exts = isWin ? (env.PATHEXT || ".COM;.EXE;.CMD;.BAT").split(";") : [""];
   const dirs = String(env.PATH || process.env.PATH || "").split(isWin ? ";" : ":");
   for (const dir of dirs) {
     if (!dir) {
       continue;
     }
+    // Windows PATH entries are often quoted, and the quotes are not part of the
+    // directory name.
     for (const ext of exts) {
-      const candidate = path.join(dir, binary + ext);
+      const candidate = path.join(isWin ? dir.replace(/^"|"$/g, "") : dir, binary + ext);
       try {
         if (fs.existsSync(candidate)) {
           return Promise.resolve(candidate);
@@ -134,9 +140,22 @@ export async function resolveCliPath(setting: string): Promise<string | undefine
   return configured && configured !== "devin" ? configured : undefined;
 }
 
+// npm installs a CLI on Windows as a `.cmd` shim, and since Node 18.20 a shim
+// cannot be spawned directly (CVE-2024-27980): it has to go through the command
+// interpreter. Once a shell is in the way the quoting is ours to do, so every
+// spawn of the CLI is built here and the quirk lives in one place.
+export function cliCommand(bin: string, args: string[]): { file: string; args: string[]; shell: boolean } {
+  if (process.platform !== "win32" || !/\.(cmd|bat)$/i.test(bin)) {
+    return { file: bin, args, shell: false };
+  }
+  const quote = (s: string) => (/[\s"^&|<>()]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s);
+  return { file: quote(bin), args: args.map(quote), shell: true };
+}
+
 function run(bin: string, args: string[], env: NodeJS.ProcessEnv): Promise<{ ok: boolean; out: string }> {
   return new Promise((resolve) => {
-    execFile(bin, args, { timeout: 8000, env, windowsHide: true }, (err, stdout, stderr) => {
+    const cmd = cliCommand(bin, args);
+    execFile(cmd.file, cmd.args, { timeout: 8000, env, windowsHide: true, shell: cmd.shell }, (err, stdout, stderr) => {
       resolve({ ok: !err, out: String(stdout || stderr || "").trim() });
     });
   });

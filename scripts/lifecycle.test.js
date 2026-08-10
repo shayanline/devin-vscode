@@ -29,12 +29,17 @@ function load(rel, name) {
     bundle: true,
     platform: "node",
     format: "cjs",
-    logLevel: "error"
+    logLevel: "error",
+    alias: { vscode: path.join(__dirname, "vscode-stub.js") }
   });
   return require(outfile);
 }
 const { AcpClient } = load("src/acp/client.ts", "client");
 const { TerminalManager } = load("src/acp/terminal.ts", "terminal");
+const { cliCommand } = load("src/cli/locate.ts", "locate");
+const { VsCodeTerminalRunner, OutputCleaner, stripAnsi } = load("src/acp/vscodeTerminal.ts", "vscodeTerminal");
+// The copy of the stub the bundle above loaded, which is the one it will call.
+const vscode = globalThis.__dvVscode;
 
 const PID_FILE = path.join(TMP, "agent.pid");
 
@@ -176,6 +181,159 @@ test("an exiting host leaves no running command behind", { skip: process.platfor
   assert.ok(alive(child), "the fixture must survive SIGTERM, or this proves nothing");
   terms.forceStopAll();
   assert.ok(await waitGone(child), "a stubborn command's children must not be left running");
+});
+
+// --- Commands in the user's own terminal -----------------------------------
+
+// Stands in for a shell that reports what it runs. `chunks` are written into the
+// execution's stream, and the test decides when it ends and with what.
+function fakeShell(terminal) {
+  const state = { execution: null, push: null, close: null, commands: [] };
+  terminal.shellIntegration = {
+    executeCommand: (commandLine) => {
+      state.commands.push(commandLine);
+      const queue = [];
+      let waiting = null;
+      let ended = false;
+      state.push = (text) => {
+        if (waiting) { const w = waiting; waiting = null; w({ value: text, done: false }); }
+        else queue.push(text);
+      };
+      state.close = () => {
+        ended = true;
+        if (waiting) { const w = waiting; waiting = null; w({ value: undefined, done: true }); }
+      };
+      state.execution = {
+        commandLine,
+        read: () => ({
+          [Symbol.asyncIterator]: () => ({
+            next: () => {
+              if (queue.length) return Promise.resolve({ value: queue.shift(), done: false });
+              if (ended) return Promise.resolve({ value: undefined, done: true });
+              return new Promise((resolve) => { waiting = resolve; });
+            }
+          })
+        })
+      };
+      return state.execution;
+    }
+  };
+  return state;
+}
+
+const tick = () => new Promise((r) => setTimeout(r, 5));
+
+test("a command runs in the user's own terminal, and its output is readable", async () => {
+  globalThis.__dvConfig = { useIntegratedTerminal: true };
+  vscode.window.terminals.length = 0;
+  const runner = new VsCodeTerminalRunner("/tmp", {}, () => {});
+  const seen = [];
+  const started = runner.run("npm test", undefined, (t) => seen.push(t));
+  await tick();
+
+  const terminal = vscode.window.terminals[0];
+  assert.ok(terminal, "it opens a terminal of its own");
+  assert.strictEqual(terminal.options.name, "Devin");
+  assert.strictEqual(terminal.options.hideFromUser, true, "out of the way until it is wanted");
+  assert.strictEqual(terminal.options.env.GIT_PAGER, "cat", "or git diff would wait for a keypress for ever");
+
+  // The shell reports itself, so the command can be run through it.
+  const shell = fakeShell(terminal);
+  vscode.window.__fire.shellIntegrationChanged.fire({ terminal });
+  const run = await started;
+  assert.ok(run, "with shell integration the command is the terminal's");
+  assert.deepStrictEqual(shell.commands, ["npm test"]);
+
+  // Raw terminal output: colours, and a progress bar redrawing one line.
+  shell.push("\u001b[32mpassed\u001b[0m\n");
+  shell.push("50%\r75%\r100%\n");
+  await tick();
+  assert.strictEqual(seen.join(""), "passed\n100%\n", "cleaned of colour, and only the last draw of a line");
+
+  run.show();
+  assert.strictEqual(terminal.shown, 1, "Show Terminal opens the real one");
+
+  vscode.window.__fire.shellExecutionEnded.fire({ execution: shell.execution, exitCode: 0 });
+  assert.deepStrictEqual(await run.exit, { exitCode: 0, signal: null });
+});
+
+test("a command the terminal cannot report is run in the background instead", async () => {
+  globalThis.__dvConfig = { useIntegratedTerminal: true };
+  vscode.window.terminals.length = 0;
+  const runner = new VsCodeTerminalRunner("/tmp", {}, () => {});
+  assert.strictEqual(
+    await runner.run("python3 - <<'PY'\nprint(1)\nPY", undefined, () => {}),
+    undefined,
+    "a script over several lines is never reported back line by line, so it is not run here"
+  );
+  assert.strictEqual(
+    await runner.run("ls", "/somewhere/else", () => {}),
+    undefined,
+    "nor is one that has to run somewhere else"
+  );
+  globalThis.__dvConfig = { useIntegratedTerminal: false };
+  assert.strictEqual(await runner.run("ls", undefined, () => {}), undefined, "nor when it is switched off");
+  assert.strictEqual(vscode.window.terminals.length, 0, "and none of that opens a terminal");
+});
+
+test("a command left running lets the agent move on, and keeps going", async () => {
+  const terms = new TerminalManager(process.env, TMP, undefined, undefined, {
+    run: async () => undefined,
+    dispose: () => {}
+  });
+  const { terminalId } = terms.create({ sessionId: "s1", command: "sleep 5" });
+  await tick();
+  let settled = null;
+  void terms.waitForExit(terminalId).then((s) => { settled = s; });
+
+  assert.strictEqual(terms.skip(terminalId), true);
+  await tick();
+  assert.deepStrictEqual(settled, { exitCode: null, signal: null }, "the agent stops waiting on it");
+  assert.strictEqual(terms.isSkipped(terminalId), true);
+  assert.strictEqual(terms.skip(terminalId), false, "and only once");
+  assert.strictEqual(terms.output(terminalId).exitStatus, null, "the command itself is still going");
+  terms.disposeAll();
+});
+
+test("output is cleaned the way a terminal would have drawn it", async () => {
+  assert.strictEqual(stripAnsi("\u001b[31mred\u001b[0m"), "red");
+  assert.strictEqual(stripAnsi("\u001b]633;C\u0007done"), "done", "and the shell's own markers go too");
+  const seen = [];
+  const cleaner = new OutputCleaner((t) => seen.push(t));
+  cleaner.write("one\r\ntw");
+  cleaner.write("o\n[  ] 0%\r[==] 100%\n");
+  cleaner.write("no newline yet");
+  assert.strictEqual(seen.join(""), "one\ntwo\n[==] 100%\n", "CRLF, split lines, and a progress bar");
+  cleaner.flush();
+  assert.strictEqual(seen.join(""), "one\ntwo\n[==] 100%\nno newline yet\n", "and what was left over when it ended");
+});
+
+test("a Windows .cmd shim is run through the interpreter, quoting and all", async () => {
+  // npm installs the CLI as a .cmd on Windows, which Node refuses to spawn
+  // directly, so it goes through a shell and the quoting becomes ours.
+  const plain = cliCommand("/usr/local/bin/devin", ["acp", "--flag"]);
+  assert.deepStrictEqual(plain, { file: "/usr/local/bin/devin", args: ["acp", "--flag"], shell: false });
+
+  const win = { value: process.platform };
+  Object.defineProperty(process, "platform", { value: "win32" });
+  try {
+    assert.deepStrictEqual(
+      cliCommand("C:\\Program Files\\devin\\devin.cmd", ["acp", "--dir", "C:\\my code"]),
+      {
+        file: '"C:\\Program Files\\devin\\devin.cmd"',
+        args: ["acp", "--dir", '"C:\\my code"'],
+        shell: true
+      },
+      "a path with a space cannot reach the shell bare"
+    );
+    assert.strictEqual(
+      cliCommand("C:\\tools\\devin.exe", ["acp"]).shell,
+      false,
+      "a real executable still spawns directly"
+    );
+  } finally {
+    Object.defineProperty(process, "platform", win);
+  }
 });
 
 test.after(() => {

@@ -2,8 +2,10 @@
 // pills can show +N/-M like VS Code). Capped to avoid O(n*m) blowups on huge
 // files, where it falls back to the net line delta.
 export function diffStat(oldText: string | null | undefined, newText: string | null | undefined): { added: number; removed: number } {
-  let a = oldText ? oldText.split("\n") : [];
-  let b = newText ? newText.split("\n") : [];
+  // Split on either ending: a CRLF file rewritten with LF line endings is not a
+  // file where every line changed.
+  let a = oldText ? oldText.split(/\r?\n/) : [];
+  let b = newText ? newText.split(/\r?\n/) : [];
   if (!a.length) return { added: b.length, removed: 0 };
   if (!b.length) return { added: 0, removed: a.length };
   // Trim what both sides share at each end first. An edit is nearly always a few

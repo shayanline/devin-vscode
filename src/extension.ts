@@ -58,6 +58,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("devin.newSessionTerminal", () => chat.newSessionTerminal()),
     vscode.commands.registerCommand("devin.renameTabSession", () => chat.renameTabSession()),
     vscode.commands.registerCommand("devin.showSessions", () => chat.showSessions()),
+    vscode.commands.registerCommand("devin.switchSession", (index: number) => chat.switchSession(index)),
     vscode.commands.registerCommand("devin.cancel", () => chat.cancel()),
     vscode.commands.registerCommand("devin.runSetup", () => chat.runSetup()),
     vscode.commands.registerCommand("devin.showInfo", () => chat.showInfo()),

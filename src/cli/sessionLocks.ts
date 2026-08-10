@@ -1,24 +1,20 @@
 import * as fs from "fs";
-import * as os from "os";
 import * as path from "path";
+import { devinDataDir } from "../settings/configService";
 
 // The Devin CLI guards each session with an advisory lock file at
-// `$XDG_DATA_HOME/devin/cli/session_locks/<id>.lock`, whose contents are the
-// PID of the process that owns it. Resuming a session held by a live process
-// fails with "... cannot be resumed because it is currently running.". The CLI
-// never cleans these files, so thousands of stale ones accumulate; the mere
-// presence of a `.lock` file therefore means nothing, only whether its PID is
-// alive and holding it.
-
-function dataHome(): string {
-  return process.env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share");
-}
+// `<data dir>/devin/cli/session_locks/<id>.lock`, whose contents are the PID of
+// the process that owns it. Resuming a session held by a live process fails
+// with "... cannot be resumed because it is currently running.". The CLI never
+// cleans these files, so thousands of stale ones accumulate; the mere presence
+// of a `.lock` file therefore means nothing, only whether its PID is alive and
+// holding it.
 
 // Where the CLI keeps its own state, including `sessions.db`, the store every
 // session lives in. Writing to it is the only outward sign the CLI gives that the
 // session list has changed, from any process.
 export function cliDataDir(): string {
-  return path.join(dataHome(), "devin", "cli");
+  return path.join(devinDataDir(), "cli");
 }
 
 export function sessionLocksDir(): string {

@@ -66,4 +66,50 @@ const scm = {
   })
 };
 
-module.exports = { EventEmitter, Uri, Disposable, commands, workspace, scm };
+// Enough of the terminal API to drive src/acp/vscodeTerminal.ts: a test builds a
+// fake terminal, decides whether it reports shell integration, and pushes chunks
+// into the execution's stream. `window.terminals` is what a test inspects.
+const shellIntegrationChanged = new EventEmitter();
+const shellExecutionEnded = new EventEmitter();
+const terminalClosed = new EventEmitter();
+
+const window = {
+  terminals: [],
+  createTerminal(options) {
+    const terminal = {
+      options,
+      shown: 0,
+      sent: [],
+      shellIntegration: undefined,
+      exitStatus: undefined,
+      show: () => { terminal.shown++; },
+      sendText: (t) => terminal.sent.push(t),
+      dispose: () => { terminal.exitStatus = { code: 0 }; terminalClosed.fire(terminal); }
+    };
+    window.terminals.push(terminal);
+    return terminal;
+  },
+  onDidChangeTerminalShellIntegration: shellIntegrationChanged.event,
+  onDidEndTerminalShellExecution: shellExecutionEnded.event,
+  onDidCloseTerminal: terminalClosed.event,
+  // Test-side helpers, not part of the real API.
+  __fire: { shellIntegrationChanged, shellExecutionEnded, terminalClosed }
+};
+
+class ThemeIcon {
+  constructor(id) {
+    this.id = id;
+  }
+}
+
+workspace.getConfiguration = () => ({
+  get: (_key, fallback) => (globalThis.__dvConfig && _key in globalThis.__dvConfig ? globalThis.__dvConfig[_key] : fallback),
+  update: async () => undefined
+});
+
+module.exports = { EventEmitter, Uri, Disposable, commands, workspace, scm, window, ThemeIcon };
+
+// The module under test is bundled with its own copy of this stub, so a test
+// that requires it directly would be holding a different one. The copy the
+// bundle loaded is published here, and that is the one to drive.
+globalThis.__dvVscode = module.exports;

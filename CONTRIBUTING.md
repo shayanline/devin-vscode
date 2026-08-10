@@ -4,7 +4,8 @@ Thanks for your interest. Issues and pull requests are welcome.
 
 ## Building and running
 
-- `npm install` to install dependencies.
+- `npm install` to install dependencies. Node 22 or newer (`npm test` leaves its
+  glob to Node, which only expands one from Node 21).
 - `npm run watch` (or `npm run compile`), then press F5 in VS Code to launch an Extension Development Host with the extension loaded.
 - `npm run check-types` type checks and `npm test` runs the webview unit tests.
 - `npm run package` builds a `.vsix` you can install with `code --install-extension`.
@@ -19,7 +20,7 @@ Releases are automated. To cut one:
 2. Bump the version and create the tag: `npm version patch` (or `minor` / `major`).
 3. Push it: `git push --follow-tags`.
 
-The [release workflow](.github/workflows/release.yml) then type checks, tests, builds the extension, creates a GitHub Release with the `.vsix` attached, and publishes to the VS Code Marketplace (and Open VSX). The release body is the matching `CHANGELOG.md` section (via `scripts/changelog-notes.js`) with GitHub's "Full Changelog" link appended, so if the entry is missing the notes fall back to a link to the changelog. The [CI workflow](.github/workflows/ci.yml) runs the same checks on every push and pull request.
+The [release workflow](.github/workflows/release.yml) then type checks, tests, builds the extension, creates a GitHub Release with the `.vsix` attached, and publishes to the VS Code Marketplace (and Open VSX). The release body is the matching `CHANGELOG.md` section (via `scripts/changelog-notes.js`) with GitHub's "Full Changelog" link appended, so if the entry is missing the notes fall back to a link to the changelog. The [CI workflow](.github/workflows/ci.yml) runs the same checks on every push and pull request, and the type check and tests again on Windows and macOS, since the extension runs wherever VS Code does.
 
 One time setup for Marketplace publishing:
 

@@ -1,4 +1,5 @@
 import { execFile } from "child_process";
+import { cliCommand } from "../cli/locate";
 
 // Thin wrappers around the Devin CLI customization verbs used by the settings
 // surface. Reads use `<cmd> list` (JSON when supported, text otherwise); MCP
@@ -12,10 +13,11 @@ export interface CliContext {
 
 function run(ctx: CliContext, args: string[]): Promise<{ ok: boolean; out: string; err: string }> {
   return new Promise((resolve) => {
+    const cmd = cliCommand(ctx.cliPath, args);
     execFile(
-      ctx.cliPath,
-      args,
-      { env: ctx.env, cwd: ctx.cwd, windowsHide: true, timeout: 20000, maxBuffer: 8 * 1024 * 1024 },
+      cmd.file,
+      cmd.args,
+      { env: ctx.env, cwd: ctx.cwd, windowsHide: true, timeout: 20000, maxBuffer: 8 * 1024 * 1024, shell: cmd.shell },
       (error, stdout, stderr) => {
         resolve({ ok: !error, out: String(stdout || ""), err: String(stderr || (error ? error.message : "")) });
       }

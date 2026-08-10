@@ -10,10 +10,34 @@ the commit messages carry the detail.
 
 ## [Unreleased]
 
+Commands you can watch, and a panel that keeps saying what it is doing.
+
 ### Highlights
+- Commands run in a real terminal you can open, watch and take over.
+- Show Terminal opens it, Skip leaves it running and lets Devin move on.
+- The gap between one action and the next says the agent is still working.
+- When something is waiting on you, it says that instead.
+- A delegated task's header follows its work, not the last tool it ran.
+- An edit row opens what that edit did, the tray still opens the whole file.
+- A queued message keeps what you attached to it, and shows it.
+- Editing a queued one hands its attachments back to the composer.
+- The MCP warning can be turned off, for this window or for good.
+- Cmd+1 to Cmd+9 open your nine most recent chats from the panel.
+- Each of those chats wears the shortcut that opens it in the list.
 - Cmd+K Cmd+D opens the session list, Ctrl+K Ctrl+D on Windows and Linux.
 - It is in the command palette as "Devin: Session List".
 - Folded work keeps its spacing when you open it, instead of cramming.
+- A run's line joins its first step instead of stopping short of it.
+- Every step's line breaks around its own glyph, by the same margin.
+- Windows: the CLI is found and run even when npm installed it as a shim.
+- Windows: sessions, locks and take over read the right data directory.
+- Windows: a dropped file attaches, and its diff and Undo find it.
+- A file's own line endings survive an edit, so git sees the real change.
+- Linux: an agent stranded by a crash is cleaned up on a systemd desktop.
+
+### Under the hood
+- VS Code 1.93 or newer, for the terminal shell integration API.
+- The tests and the type check now run on Windows and macOS too.
 
 ## [0.9.3] - 2026-08-10
 

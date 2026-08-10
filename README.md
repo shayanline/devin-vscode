@@ -24,7 +24,7 @@ Copilot.
    `devin auth login`.
 
 The extension runs the Devin CLI for you. On first run it finds `devin` on your
-PATH and helps you finish setup.
+PATH and helps you finish setup. It needs VS Code 1.93 or newer.
 
 ## What you get
 
@@ -32,7 +32,10 @@ PATH and helps you finish setup.
 - Work Devin hands to a subagent shown as its own collapsible block: the brief it
   was given, what it did and said, and the report it came back with. Move a
   running one between the foreground and the background from its header.
-- Every file edit shown as a native VS Code diff, kept or undone per file.
+- Commands run in a real VS Code terminal you can open, watch and take over,
+  streamed into the chat as they go. Leave a long one running and Devin moves on.
+- Every file edit shown as a native VS Code diff, kept or undone per file: an
+  edit row opens what that edit did, the changed files tray the whole change.
 - Approve or decline the tools Devin runs, and answer its questions, inline in
   the chat.
 - Open a chat in the sidebar, the editor area, a new window, or a terminal, from
@@ -40,7 +43,8 @@ PATH and helps you finish setup.
 - Move a chat between the side panel and an editor tab, live agent and all: an
   editor tab is that one chat, named after it, and renamed from its tab menu.
 - Sessions saved per workspace that survive restarts, listed in a built in panel
-  grouped by workspace, with search and a status filter.
+  grouped by workspace, with search and a status filter. `Cmd+K Cmd+D` opens the
+  list, and `Cmd+1` to `Cmd+9` open your nine most recent chats.
 - The Devin model and mode (code, ask, plan, or bypass) picked from the composer.
 - The Devin CLI's own settings edited natively in a built in editor, no config
   files by hand: instructions, skills, plugins, MCP servers, hooks, permissions,

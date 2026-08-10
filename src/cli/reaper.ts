@@ -4,15 +4,16 @@ import { execFile } from "child_process";
 // children) left behind by a previously crashed or force-quit VS Code.
 //
 // Safety: we only ever touch ORPHANS, i.e. a `devin acp` whose parent has died
-// so it was reparented to init (ppid == 1). A live window's agent has a live
-// extension-host parent, a terminal `devin` TUI is not `devin acp`, and this
-// (or any) session's MCP servers hang off a live agent, so none of those are
-// ever matched. macOS/Linux only (no-op on Windows).
+// so it was reparented to init, or on a systemd desktop to the user manager
+// that reaps in init's place. A live window's agent has a live extension-host
+// parent, a terminal `devin` TUI is not `devin acp`, and this (or any) session's
+// MCP servers hang off a live agent, so none of those are ever matched.
+// macOS/Linux only (no-op on Windows).
 export function reapOrphanedAgents(log: (line: string) => void): void {
   if (process.platform === "win32") {
     return;
   }
-  execFile("ps", ["-ax", "-o", "pid=,ppid=,command="], { maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => {
+  execFile("ps", ["-eo", "pid=,ppid=,args="], { maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => {
     if (err || !stdout) {
       return;
     }
@@ -32,9 +33,14 @@ export function reapOrphanedAgents(log: (line: string) => void): void {
         childrenOf.set(r.ppid, [r.pid]);
       }
     }
-    // An orphaned agent: reparented to init and the command is `.../devin acp`.
+    // An orphaned agent: `.../devin acp` that has been reparented. That is init
+    // (pid 1), except on a systemd desktop, where VS Code runs inside the user
+    // manager and the user manager is the subreaper that inherits it. Nothing
+    // else is ever a parent of a live agent, so this cannot match one.
+    const cmdOf = new Map(rows.map((r) => [r.pid, r.cmd]));
+    const reaped = (ppid: number) => ppid === 1 || /systemd\s+--user/.test(cmdOf.get(ppid) || "");
     const orphans = rows.filter(
-      (r) => r.ppid === 1 && /(^|\/)devin acp(\s|$)/.test(r.cmd)
+      (r) => reaped(r.ppid) && /(^|\/)devin acp(\s|$)/.test(r.cmd)
     );
     if (orphans.length === 0) {
       return;

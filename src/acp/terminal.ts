@@ -1,4 +1,6 @@
 import { spawn, execFile, ChildProcess } from "child_process";
+import * as fs from "fs";
+import * as path from "path";
 import { StringDecoder } from "string_decoder";
 
 export interface EnvVariable {
@@ -20,13 +22,60 @@ export interface TerminalExitStatus {
   signal: string | null;
 }
 
+// The shell a bare command line is run through on Windows, resolved once.
+// The agent writes POSIX one liners (`cd x && ls -la`, pipes, `$(...)`, single
+// quotes), and `cmd.exe` chokes on most of them, so Git Bash comes first when
+// it is installed and PowerShell after it. `cmd.exe` is only the last resort.
+let winShell: { file: string; args: string[] } | undefined;
+
+function windowsShell(env: NodeJS.ProcessEnv): { file: string; args: string[] } {
+  if (winShell) {
+    return winShell;
+  }
+  const programFiles = [env.ProgramFiles, env["ProgramFiles(x86)"], env.LOCALAPPDATA && path.join(env.LOCALAPPDATA, "Programs")];
+  for (const base of programFiles) {
+    const bash = base && path.join(base, "Git", "bin", "bash.exe");
+    if (bash && fs.existsSync(bash)) {
+      winShell = { file: bash, args: ["-c"] };
+      return winShell;
+    }
+  }
+  const system32 = path.join(env.SystemRoot || "C:\\Windows", "System32");
+  const pwsh = path.join(system32, "WindowsPowerShell", "v1.0", "powershell.exe");
+  winShell = fs.existsSync(pwsh)
+    ? { file: pwsh, args: ["-NoProfile", "-NonInteractive", "-Command"] }
+    : { file: env.ComSpec || "cmd.exe", args: ["/d", "/s", "/c"] };
+  return winShell;
+}
+
+// A command running in a real terminal somewhere else (see vscodeTerminal.ts).
+// The manager owns the output and the waiting either way; this is only what it
+// cannot do itself.
+export interface TerminalRun {
+  // Settles when the command ends, with what it ended with.
+  exit: Promise<TerminalExitStatus>;
+  show(): void;
+  kill(): void;
+}
+
+export interface TerminalRunner {
+  // Answers undefined when it cannot take this command, and the manager runs it
+  // as a child process instead.
+  run(command: string, cwd: string | undefined, onData: (text: string) => void): Promise<TerminalRun | undefined>;
+  dispose(): void;
+}
+
 interface Term {
-  child: ChildProcess;
+  child?: ChildProcess;
+  run?: TerminalRun;
   output: string;
   limit: number;
   truncated: boolean;
   exitStatus: TerminalExitStatus | null;
   waiters: ((status: TerminalExitStatus) => void)[];
+  // Left running on purpose: the agent stopped waiting for it (see `skip`), so
+  // its exit is nobody's business but the transcript's.
+  skipped?: boolean;
 }
 
 // Runs shell commands on behalf of the agent and exposes the ACP terminal
@@ -41,7 +90,10 @@ export class TerminalManager {
     private readonly baseEnv: NodeJS.ProcessEnv,
     private readonly defaultCwd: string,
     private onOutput?: (terminalId: string, output: string, exitStatus: TerminalExitStatus | null) => void,
-    private log?: (line: string) => void
+    private log?: (line: string) => void,
+    // Where a command runs when it can: a real terminal. Absent, or declining a
+    // particular command, and it is run as a child process here.
+    private readonly runner?: TerminalRunner
   ) {}
 
   // Re-point the listeners when the session this manager belongs to moves to
@@ -57,6 +109,66 @@ export class TerminalManager {
 
   create(params: CreateTerminalParams): { terminalId: string } {
     const terminalId = `term-${++this.seq}`;
+    const term: Term = {
+      output: "",
+      limit: params.outputByteLimit && params.outputByteLimit > 0 ? params.outputByteLimit : 1_048_576,
+      truncated: false,
+      exitStatus: null,
+      waiters: []
+    };
+    this.terminals.set(terminalId, term);
+    // Starting is asynchronous (a real terminal has to report its shell
+    // integration first) but creating one is not: the agent gets its id now and
+    // asks for the output and the exit separately, both of which wait properly.
+    void this.start(terminalId, term, params);
+    return { terminalId };
+  }
+
+  private async start(terminalId: string, term: Term, params: CreateTerminalParams): Promise<void> {
+    const append = (text: string) => {
+      term.output += text;
+      while (Buffer.byteLength(term.output, "utf8") > term.limit) {
+        term.truncated = true;
+        term.output = term.output.slice(Math.ceil(term.output.length * 0.1) || 1);
+      }
+      this.onOutput?.(terminalId, term.output, term.exitStatus);
+    };
+    const settle = (status: TerminalExitStatus) => {
+      term.exitStatus = status;
+      for (const w of term.waiters.splice(0)) {
+        w(status);
+      }
+      this.onOutput?.(terminalId, term.output, status);
+      this.log?.(`[terminal] ${terminalId} exited code=${status.exitCode} signal=${status.signal || ""}`);
+    };
+
+    // A program with its own arguments, or its own environment, is not something
+    // to type into the user's shell: those run as a child process, as they
+    // always did. Everything else is the command line the agent would have typed.
+    const own = (params.args && params.args.length) || (params.env && params.env.length);
+    if (this.runner && !own) {
+      const run = await this.runner.run(params.command, params.cwd, append).catch(() => undefined);
+      if (run) {
+        term.run = run;
+        this.log?.(`[terminal] ${terminalId} start (integrated): ${params.command}`);
+        void run.exit.then(settle);
+        // Say it is running before it has printed anything, so its row can offer
+        // the terminal it is in and the chance to leave it running.
+        this.onOutput?.(terminalId, term.output, null);
+        return;
+      }
+    }
+    this.spawn(terminalId, term, params, append, settle);
+    this.onOutput?.(terminalId, term.output, null);
+  }
+
+  private spawn(
+    terminalId: string,
+    term: Term,
+    params: CreateTerminalParams,
+    append: (text: string) => void,
+    settle: (status: TerminalExitStatus) => void
+  ): void {
     const env: NodeJS.ProcessEnv = { ...this.baseEnv };
     for (const e of params.env || []) {
       env[e.name] = e.value;
@@ -76,8 +188,9 @@ export class TerminalManager {
       file = params.command;
       args = params.args as string[];
     } else if (win) {
-      file = process.env.ComSpec || "cmd.exe";
-      args = ["/d", "/s", "/c", params.command];
+      const shell = windowsShell(env);
+      file = shell.file;
+      args = [...shell.args, params.command];
     } else {
       file = this.baseEnv.SHELL || "/bin/bash";
       args = ["-c", params.command];
@@ -92,24 +205,7 @@ export class TerminalManager {
       detached: !win
     });
 
-    const term: Term = {
-      child,
-      output: "",
-      limit: params.outputByteLimit && params.outputByteLimit > 0 ? params.outputByteLimit : 1_048_576,
-      truncated: false,
-      exitStatus: null,
-      waiters: []
-    };
-    this.terminals.set(terminalId, term);
-
-    const append = (text: string) => {
-      term.output += text;
-      while (Buffer.byteLength(term.output, "utf8") > term.limit) {
-        term.truncated = true;
-        term.output = term.output.slice(Math.ceil(term.output.length * 0.1) || 1);
-      }
-      this.onOutput?.(terminalId, term.output, term.exitStatus);
-    };
+    term.child = child;
 
     // Decode each stream through its own StringDecoder so a multi-byte UTF-8
     // sequence split across chunk boundaries is not corrupted.
@@ -121,17 +217,9 @@ export class TerminalManager {
       term.output += `\n[spawn error] ${err.message}\n`;
       this.onOutput?.(terminalId, term.output, term.exitStatus);
     });
-    child.on("close", (code, signal) => {
-      term.exitStatus = { exitCode: code, signal: signal ? String(signal) : null };
-      for (const w of term.waiters.splice(0)) {
-        w(term.exitStatus);
-      }
-      this.onOutput?.(terminalId, term.output, term.exitStatus);
-      this.log?.(`[terminal] ${terminalId} exited code=${code} signal=${signal || ""}`);
-    });
+    child.on("close", (code, signal) => settle({ exitCode: code, signal: signal ? String(signal) : null }));
 
     this.log?.(`[terminal] ${terminalId} start: ${params.command} ${(params.args || []).join(" ")}`);
-    return { terminalId };
   }
 
   output(terminalId: string): { output: string; truncated: boolean; exitStatus: TerminalExitStatus | null } {
@@ -157,6 +245,37 @@ export class TerminalManager {
     this.signal(this.terminals.get(terminalId), "SIGTERM");
   }
 
+  // Bring up the real terminal a command is running in, if it is running in one.
+  show(terminalId: string): void {
+    this.terminals.get(terminalId)?.run?.show();
+  }
+
+  // Stop waiting on a command without stopping the command: the agent is told it
+  // is over so it can get on, and the transcript keeps showing where it gets to.
+  // Only for a command still running, and only once.
+  skip(terminalId: string): boolean {
+    const term = this.terminals.get(terminalId);
+    if (!term || term.exitStatus || term.skipped) {
+      return false;
+    }
+    term.skipped = true;
+    for (const w of term.waiters.splice(0)) {
+      w({ exitCode: null, signal: null });
+    }
+    this.log?.(`[terminal] ${terminalId} left running, the agent moved on`);
+    return true;
+  }
+
+  // Whether this command is one the agent is no longer waiting for.
+  isSkipped(terminalId: string): boolean {
+    return !!this.terminals.get(terminalId)?.skipped;
+  }
+
+  // Whether it is running somewhere the user could go and look at.
+  isIntegrated(terminalId: string): boolean {
+    return !!this.terminals.get(terminalId)?.run;
+  }
+
   // Signal one terminal's whole process tree. The commands run here are children
   // of the extension host, so anything left alive when the host exits would be
   // orphaned (the agent reaper only looks for `devin acp`), which is why every
@@ -165,13 +284,25 @@ export class TerminalManager {
     if (!term || term.exitStatus) {
       return;
     }
+    if (term.run) {
+      // The user's own terminal: interrupt the command, leave the terminal.
+      term.run.kill();
+      return;
+    }
+    if (!term.child) {
+      return;
+    }
     const pid = term.child.pid;
     if (process.platform === "win32") {
-      // Windows has no process groups, so end the tree with taskkill.
+      // Windows has no process groups or signals, so end the tree with
+      // taskkill, and let `/F` be the escalation a SIGKILL asks for.
+      const force = sig === "SIGKILL" ? ["/F"] : [];
       if (pid) {
-        try { execFile("taskkill", ["/PID", String(pid), "/T", "/F"], () => {}); } catch { /* ignore */ }
+        try { execFile("taskkill", ["/PID", String(pid), "/T", ...force], () => {}); } catch { /* ignore */ }
       }
-      try { term.child.kill(); } catch { /* already gone */ }
+      if (force.length) {
+        try { term.child.kill(); } catch { /* already gone */ }
+      }
       return;
     }
     try {
@@ -200,6 +331,7 @@ export class TerminalManager {
     for (const id of [...this.terminals.keys()]) {
       this.release(id);
     }
+    this.runner?.dispose();
   }
 
   // Shutdown, step one: ask every running command to stop, keeping the entries so

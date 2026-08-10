@@ -425,7 +425,7 @@ export class SettingsPanel {
 
   private async openFile(p: string): Promise<void> {
     if (!p) return;
-    if (p.startsWith("~/")) p = path.join(os.homedir(), p.slice(2));
+    if (p.startsWith("~/") || p.startsWith("~\\")) p = path.join(os.homedir(), p.slice(2));
     try {
       // Open the file as a tab in the settings panel's own editor group (next to
       // the settings tab), not as a split pane or a separate window.
@@ -705,10 +705,11 @@ export class SettingsPanel {
       let dir = s.path || "";
       if (dir === "~") {
         dir = home;
-      } else if (dir.startsWith("~/")) {
+      } else if (dir.startsWith("~/") || dir.startsWith("~\\")) {
         dir = path.join(home, dir.slice(2));
       } else if (dir && !path.isAbsolute(dir)) {
-        const rel = dir.replace(/^\.\//, "");
+        // Windows separators first, so the test below reads one kind of path.
+        const rel = dir.replace(/\\/g, "/").replace(/^\.\//, "");
         // .devin/skills is project-relative; .config/devin/skills and
         // .agents/skills are home-relative.
         dir = rel.startsWith(".devin/") && root ? path.join(root, rel) : path.join(home, rel);

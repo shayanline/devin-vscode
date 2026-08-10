@@ -15,6 +15,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const { pathToFileURL } = require("url");
 const { buildData } = require("./settings-fixture");
 
 const ROOT = path.resolve(__dirname, "..");
@@ -82,7 +83,8 @@ const DATA = buildData({ multiRoot, empty: bare });
 // Reference each asset with its modification time, so a browser reload always
 // picks up the stylesheet and bundle just built rather than a cached copy.
 function asset(file) {
-  const rel = path.relative(OUT_DIR, file);
+  // An href is a URL, not a path, so it keeps forward slashes on Windows too.
+  const rel = path.relative(OUT_DIR, file).split(path.sep).join("/");
   const stamp = fs.existsSync(file) ? fs.statSync(file).mtimeMs : 0;
   return rel + "?v=" + Math.round(stamp);
 }
@@ -127,4 +129,4 @@ fs.mkdirSync(OUT_DIR, { recursive: true });
 const outFile = path.join(OUT_DIR, "settings.html");
 fs.writeFileSync(outFile, html, "utf8");
 console.log("Preview written to:", outFile);
-console.log("Open with: playwright-cli open \"file://" + outFile + "\"");
+console.log("Open with: playwright-cli open \"" + pathToFileURL(outFile).href + "\"");

@@ -1,5 +1,6 @@
 import { spawn, execFile, ChildProcessWithoutNullStreams } from "child_process";
 import { EventEmitter } from "events";
+import { cliCommand } from "../cli/locate";
 import { JsonRpcConnection } from "./connection";
 import {
   AgentStopped,
@@ -60,11 +61,13 @@ export class AcpClient extends EventEmitter {
   }
 
   start(): void {
-    const args = ["acp", ...(this.options.extraArgs || [])];
-    const child = spawn(this.options.cliPath, args, {
+    const cmd = cliCommand(this.options.cliPath, ["acp", ...(this.options.extraArgs || [])]);
+    const child = spawn(cmd.file, cmd.args, {
       cwd: this.options.cwd,
       env: this.options.env ? { ...this.options.env } : { ...process.env },
       stdio: ["pipe", "pipe", "pipe"],
+      shell: cmd.shell,
+      windowsHide: true,
       // Own process group so we can signal the whole tree (the agent spawns
       // MCP servers as children that do NOT die when only the agent is killed).
       detached: process.platform !== "win32"
@@ -314,16 +317,7 @@ export class AcpClient extends EventEmitter {
     // SIGTERM the whole group (lets the agent + docker-based MCP shut down
     // cleanly), then SIGKILL any stragglers shortly after.
     this.killTree("SIGTERM");
-    const pid = this.child?.pid;
-    if (pid) {
-      setTimeout(() => {
-        try {
-          process.kill(-pid, "SIGKILL");
-        } catch {
-          // group already gone
-        }
-      }, 1500).unref?.();
-    }
+    setTimeout(() => this.killTree("SIGKILL"), 1500).unref?.();
   }
 
   // Stop the agent for good and resolve only once it is really gone, so a caller
@@ -388,15 +382,20 @@ export class AcpClient extends EventEmitter {
       return;
     }
     if (process.platform === "win32") {
+      // Windows has no signals: `taskkill /T` asks the tree to close, and only
+      // `/F` forces it, so the escalation is the flag rather than the signal.
+      const force = signal === "SIGKILL" ? ["/F"] : [];
       try {
-        execFile("taskkill", ["/PID", String(pid), "/T", "/F"], () => {});
+        execFile("taskkill", ["/PID", String(pid), "/T", ...force], () => {});
       } catch {
         // taskkill missing; fall through to the direct kill below
       }
-      try {
-        this.child?.kill();
-      } catch {
-        // already gone
+      if (force.length) {
+        try {
+          this.child?.kill();
+        } catch {
+          // already gone
+        }
       }
       return;
     }

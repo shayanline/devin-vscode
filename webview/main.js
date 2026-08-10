@@ -68,6 +68,10 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   let lastSessions = [];
   let lastActiveId = null;
   let lastFolders = [];
+  // The nine most recent chats answer to Ctrl/Cmd+1..9 and wear that number in
+  // the list. Recency, not row position, so a number means the same chat
+  // whichever way the list is sorted, grouped or filtered.
+  let numberedIds = [];
   // Per-session liveness for the status dots: id -> "running" | "idle" |
   // "starting". Absent means dead (gray). Sent by the host.
   let sessionStatuses = {};
@@ -1179,15 +1183,12 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   function dropPaths(dt) {
     const out = [];
     const get = (t) => { try { return (dt.getData && dt.getData(t)) || ""; } catch { return ""; } };
+    // A file URI travels as it is: only the host can turn one into a path, since
+    // a Windows URI (file:///c%3A/...) is not a path with the scheme cut off.
     const addUri = (line) => {
       const s = String(line || "").trim();
       if (!s || s.charAt(0) === "#" || /^https?:/i.test(s)) return;
-      let p = s;
-      if (/^file:\/\//i.test(s)) {
-        const stripped = s.replace(/^file:\/\//i, "");
-        try { p = decodeURIComponent(stripped); } catch { p = stripped; }
-      }
-      if (p) out.push(p);
+      out.push(s);
     };
     const internal = get("application/vnd.code.uri-list");
     if (internal) internal.split(/\r?\n/).forEach(addUri);
@@ -1739,10 +1740,18 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // in an interactive-request). A picture is its own thumbnail rather than a
   // generic file glyph, so a screenshot is recognisable at a glance.
   function setTurnAttachments(turn, items) {
-    const list = (items || []).filter((a) => a && a.label);
     if (turn.attachRow) turn.attachRow.remove();
-    turn.attachRow = null;
-    if (!list.length) return;
+    turn.attachRow = attachedContextRow(items);
+    if (!turn.attachRow) return;
+    // Above the bubble rather than inside it, which is where VS Code puts it: the
+    // context is what the message came with, not part of what was typed.
+    turn.req.insertBefore(turn.attachRow, turn.reqBody);
+  }
+
+  // The row of pills itself, shared by a sent request and a queued one.
+  function attachedContextRow(items) {
+    const list = (items || []).filter((a) => a && a.label);
+    if (!list.length) return null;
     const row = document.createElement("div");
     row.className = "chat-attached-context";
     list.forEach((a) => {
@@ -1766,10 +1775,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       pill.appendChild(name);
       row.appendChild(pill);
     });
-    // Above the bubble rather than inside it, which is where VS Code puts it: the
-    // context is what the message came with, not part of what was typed.
-    turn.req.insertBefore(row, turn.reqBody);
-    turn.attachRow = row;
+    return row;
   }
 
   // Request hover toolbar (Copy, Edit) + a persistent response footer toolbar
@@ -1839,9 +1845,12 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   }
 
   // True when the turn's response actually rendered something (text, tool card,
-  // image, plan, ...), so we don't show a Copy button on an empty answer.
+  // image, plan, ...), so we don't show a Copy button on an empty answer. The
+  // working row is the panel talking, not the answer, so it does not count.
   function turnHasResponse(turn) {
-    return !!turn.resp && (turn.resp.childElementCount > 0 || turn.resp.textContent.trim().length > 0);
+    if (!turn.resp) return false;
+    const real = [...turn.resp.children].filter((c) => !c.classList.contains("working"));
+    return real.length > 0 || real.map((c) => c.textContent).join("").trim().length > 0;
   }
 
   function buildTurnFooter(turn) {
@@ -2053,6 +2062,30 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     detail.className = "mcp-detail muted";
     detail.textContent = list.map((s) => s.message).join("\n");
     box.appendChild(detail);
+    // Dismiss sends this one away. These two say how much longer than that: the
+    // rest of this window, or for good (the devin.showMcpWarnings setting).
+    const mute = document.createElement("div");
+    mute.className = "mcp-mute";
+    mute.append(
+      linkBtn("Don't show again in this window", () => {
+        vscode.postMessage({ type: "muteMcpWarnings", scope: "window" });
+        box.remove();
+      }),
+      linkBtn("Don't show again", () => {
+        vscode.postMessage({ type: "muteMcpWarnings", scope: "always" });
+        box.remove();
+      })
+    );
+    box.appendChild(mute);
+  }
+
+  // A plain text action, VS Code's inline link button.
+  function linkBtn(text, onClick) {
+    const b = document.createElement("button");
+    b.className = "dv-link-btn";
+    b.textContent = text;
+    b.addEventListener("click", (e) => { e.stopPropagation(); onClick(); });
+    return b;
   }
 
   // What the turn cost, from the CLI's own figures. It supplies the labels, so the
@@ -2512,36 +2545,86 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     block = null;
   }
 
-  // A subtle "Working…" placeholder shown after send, until the first token,
-  // thought, tool or plan arrives (mirrors VS Code's pending indicator).
+  // A subtle "Working…" placeholder shown whenever a turn is running with
+  // nothing of its own to show: after send until the first token, and again in
+  // every gap between one action finishing and the next starting, which is where
+  // a working agent used to look like a stopped one (VS Code's
+  // ChatWorkingProgressContentPart).
   let workingEl = null;
-  // What the agent says it is up to while there is nothing else to show. VS Code's
-  // pool, and its wording: one verb, no ellipsis, and no spinner beside it, since
-  // the shimmer is the thing that says it is alive.
-  const WORKING_WORDS = ["Thinking", "Reasoning", "Considering", "Analyzing", "Evaluating", "Working"];
+  // What the agent says it is up to. VS Code's pool, and its wording: one verb,
+  // no ellipsis, and no spinner beside it, since the shimmer is the thing that
+  // says it is alive.
   const WORKING_DWELL_MS = 1200;
+  // Streamed text pauses constantly between tokens, so the row only appears once
+  // the text has actually stopped (VS Code's WORKING_CAUGHT_UP_DEBOUNCE_MS).
+  const WORKING_DEBOUNCE_MS = 750;
+  const workingBag = {};
   let workingWord = null;
   let workingWordAt = 0;
+  let lastProseAt = 0;
+  let workingTimer = null;
   function pickWorkingWord() {
     // The row is rebuilt constantly while a turn streams. Without a dwell the
     // word would flicker through the list instead of reading as one thought.
     if (workingWord && now() - workingWordAt < WORKING_DWELL_MS) return workingWord;
-    workingWord = WORKING_WORDS[Math.floor(Math.random() * WORKING_WORDS.length)];
+    workingWord = nextWord(workingBag, "think");
     workingWordAt = now();
     return workingWord;
   }
 
-  function showWorking() {
+  // Whether the panel should be saying the agent is working, and what it should
+  // say. Nothing is added while something else already speaks for the turn: a
+  // running tool has its own state, a thought its own shimmering header, a
+  // subagent its own working row, and a question is waiting on the user, which
+  // is worth saying rather than calling it work.
+  function workingLabel() {
+    if (!busy || body !== "thread" || !currentTurn) return null;
+    const pending = el.permissionTray.children.length + el.elicitationTray.children.length;
+    if (pending) return pending === 1 ? "1 confirmation pending" : pending + " confirmations pending";
+    if (currentTurn.resp.querySelector(".tool.in_progress, .tool.pending, .subagent-active")) return null;
+    if (block && block.kind === "thinking") return null;
+    // Mid sentence: the text itself is the sign of life until it stops.
+    if (proseSettlesIn() > 0) return null;
+    return pickWorkingWord();
+  }
+
+  // How long the streamed text still has to be quiet before a pause in it counts
+  // as one, or 0 when nothing is streaming.
+  function proseSettlesIn() {
+    if (!busy || !block || block.kind !== "assistant") return 0;
+    return Math.max(0, WORKING_DEBOUNCE_MS - (now() - lastProseAt));
+  }
+
+  // Re-decide after anything the host says, and again once a pause in the text
+  // has lasted long enough to count as one.
+  function refreshWorking() {
+    if (workingTimer) { clearTimeout(workingTimer); workingTimer = null; }
+    const label = workingLabel();
+    if (label) showWorking(label); else hideWorking();
+    const wait = label ? 0 : proseSettlesIn();
+    if (wait) {
+      workingTimer = setTimeout(() => { workingTimer = null; refreshWorking(); }, wait);
+    }
+  }
+
+  function showWorking(label) {
+    // Already saying it, and still at the end of the turn: leave the row alone so
+    // its sweep runs on rather than restarting.
+    if (workingEl && workingEl.parentElement === respTarget() && workingEl.nextSibling === null) {
+      const span = workingEl.firstChild;
+      if (label && span.textContent !== label) span.textContent = label;
+      return;
+    }
     hideWorking();
     ensureTurn();
     const w = document.createElement("div");
     w.className = "working";
-    const label = document.createElement("span");
-    label.className = "dv-shimmer";
-    label.textContent = pickWorkingWord();
-    w.appendChild(label);
+    const span = document.createElement("span");
+    span.className = "dv-shimmer";
+    span.textContent = label || pickWorkingWord();
+    w.appendChild(span);
     respTarget().appendChild(w);
-    syncShimmer(label);
+    syncShimmer(span);
     workingEl = w;
     scrollToBottom();
   }
@@ -2563,6 +2646,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
 
   function appendAssistant(text, mid) {
     hideWorking();
+    lastProseAt = now();
     let opened = false;
     if (!(block && block.kind === "assistant" && sameMid(block.mid, mid))) {
       finalizeBlock();
@@ -3178,9 +3262,23 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // not a group. Keyed by the agentId the ACP `subagent_started` tag carries.
   const subagentEls = new Map();
 
-  // VS Code's rotating-but-picked-once spinner labels (chatSubagentContentPart).
-  const SUBAGENT_WORKING = ["Processing", "Preparing", "Loading", "Analyzing", "Evaluating"];
   const SUBAGENT_MAX_TITLE = 100;
+
+  // What the panel says an agent is doing when it has nothing else to show yet.
+  // VS Code's own pools, one per kind of work (chatThinkingContentPart.ts:
+  // defaultThinkingMessages, toolMessages, terminalMessages, and
+  // chatSubagentContentPart's subagentWorkingMessages), drawn without
+  // replacement so the same word never comes round twice in a row.
+  const WORK_WORDS = {
+    think: ["Thinking", "Reasoning", "Considering", "Analyzing", "Evaluating", "Working"],
+    tool: ["Processing", "Preparing", "Loading", "Analyzing", "Evaluating"],
+    terminal: ["Executing", "Running", "Processing"]
+  };
+
+  function nextWord(bag, kind) {
+    const pool = bag[kind] && bag[kind].length ? bag[kind] : (bag[kind] = WORK_WORDS[kind].slice());
+    return pool.splice(Math.floor(Math.random() * pool.length), 1)[0];
+  }
 
   function capitalise(s) {
     return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
@@ -3243,7 +3341,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     const d = sub.data;
     const prefix = capitalise(d.profile || "Subagent");
     sub.titleEl.textContent = prefix + ": " + d.title;
-    sub.detailEl.textContent = d.active && d.lastTool ? " \u2014 " + d.lastTool : "";
+    const doing = d.lastTool || d.working;
+    sub.detailEl.textContent = d.active && doing ? " \u2014 " + doing : "";
     sub.header.setAttribute("aria-label", sub.titleEl.textContent + sub.detailEl.textContent);
   }
 
@@ -3272,10 +3371,22 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
 
   function ensureSubagentSpinner(sub) {
     if (sub.spinnerRow || !sub.data.active) return;
-    const label = document.createElement("span");
-    label.className = "subagent-spinner-label dv-shimmer";
-    label.textContent = SUBAGENT_WORKING[Math.floor(Math.random() * SUBAGENT_WORKING.length)];
-    sub.spinnerRow = insertSubagentItem(sub, label, "codicon-circle-filled", "subagent-spinner").row;
+    sub.spinnerLabel = document.createElement("span");
+    sub.spinnerLabel.className = "subagent-spinner-label dv-shimmer";
+    sub.spinnerRow = insertSubagentItem(sub, sub.spinnerLabel, "codicon-circle-filled", "subagent-spinner").row;
+    subagentWorkingOn(sub, "tool");
+  }
+
+  // What the subagent is doing now, in its header and on its spinner. A tool
+  // names itself while it runs; between tools the word rotates as each piece of
+  // work lands, which is how VS Code keeps a delegated task from looking stuck
+  // on the last thing it ran.
+  function subagentWorkingOn(sub, kind) {
+    if (!sub.data.active) return;
+    sub.data.lastTool = "";
+    sub.data.working = nextWord(sub.words || (sub.words = {}), kind);
+    if (sub.spinnerLabel) sub.spinnerLabel.textContent = sub.data.working;
+    updateSubagentTitle(sub);
   }
 
   function startSubagent(m) {
@@ -3347,6 +3458,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       insertSubagentItem(sub, content, thought ? "codicon-thinking" : "codicon-comment",
         "subagent-prose" + (thought ? " subagent-thought" : ""));
       sub.prose = { stream: m.stream, content, buffer: "" };
+      // It has moved off whatever tool it last ran, so say what it is doing now.
+      subagentWorkingOn(sub, thought ? "think" : "tool");
     }
     sub.prose.buffer += m.text;
     sub.prose.content.innerHTML = renderMarkdown(sub.prose.buffer);
@@ -3361,6 +3474,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     if (!sub || (!sub.data.active && !m.summary)) return;
     sub.data.active = false;
     sub.data.lastTool = "";
+    sub.data.working = "";
     // With nothing of its own to show for it, say so the way the CLI does.
     if (!sub.data.titleFromAgent) sub.data.title = "Ran subagent";
     sub.node.classList.remove("subagent-active");
@@ -3411,7 +3525,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // or the argument it was given, whichever it has.
   function toolFileTarget(d) {
     const diff = (d.content || []).find((c) => c.type === "diff" && c.path);
-    if (diff) return { path: diff.path, added: diff.added, removed: diff.removed, created: diff.created };
+    if (diff) return { path: diff.path, added: diff.added, removed: diff.removed, created: diff.created, editId: diff.editId };
     const loc = (d.locations || []).find((l) => l && l.path);
     if (loc) return { path: loc.path, line: loc.line };
     const raw = d.rawInput;
@@ -3621,6 +3735,10 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       if (d.status === "in_progress" && d.title) {
         entry.sub.data.lastTool = String(d.title).replace(/\s+/g, " ").trim();
         updateSubagentTitle(entry.sub);
+      } else if (d.status && d.status !== "in_progress" && d.status !== "pending") {
+        // The tool it was naming is over, so the header stops naming it and goes
+        // back to saying it is working, rather than reading as stuck on it.
+        subagentWorkingOn(entry.sub, d.kind === "execute" ? "terminal" : "tool");
       }
       scrollToBottom();
       return;
@@ -3901,6 +4019,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         const title = d.kind === "execute" ? "" : "Output";
         const { sec, pre } = toolSection(title, (cached && cached.output) || "\u2026", { cls: "terminal-pre", json: false });
         pre.setAttribute("data-terminal", c.terminalId);
+        sec.appendChild(terminalActions(c.terminalId));
         body.appendChild(sec);
       });
       // A command that finishes in a moment should not have flashed its output on
@@ -4004,6 +4123,38 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // A file reference rendered as a VS Code style pill: a file-type icon, the
   // name, and (for edits) +added / -removed line counts. Clicking opens a diff
   // for edited files or the file at a line otherwise.
+  // Beside a command's output: the terminal it is really running in, and a way
+  // to stop waiting for it. Both belong to a live command in a real terminal, so
+  // the row is rebuilt from the terminal's own state as it changes.
+  function terminalActions(terminalId) {
+    const row = document.createElement("div");
+    row.className = "terminal-actions";
+    row.dataset.terminalActions = terminalId;
+    updateTerminalActions(row, terminalCache.get(terminalId));
+    return row;
+  }
+
+  function updateTerminalActions(row, state) {
+    const id = row.dataset.terminalActions;
+    // Nothing said about it yet means it has only just started.
+    const running = !state || (!state.exitStatus && !state.skipped);
+    row.innerHTML = "";
+    if (state && state.integrated) {
+      row.appendChild(linkBtn("Show Terminal", () => vscode.postMessage({ type: "showTerminal", terminalId: id })));
+    }
+    if (running) {
+      // VS Code's "Continue in Background": the command carries on, the agent
+      // stops waiting on it and gets on with the next thing.
+      row.appendChild(linkBtn("Skip", () => vscode.postMessage({ type: "skipTerminal", terminalId: id })));
+    } else if (state && state.skipped) {
+      const note = document.createElement("span");
+      note.className = "muted";
+      note.textContent = "Left running";
+      row.appendChild(note);
+    }
+    row.classList.toggle("hidden", !row.children.length);
+  }
+
   function filePills(rows) {
     const sec = document.createElement("div");
     sec.className = "tool-section tool-files";
@@ -4016,10 +4167,13 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   function folderOf(p) {
     const parts = String(p).split(/[\\/]/);
     parts.pop();
-    let dir = parts.join("/");
-    const root = caps.root ? String(caps.root).replace(/[\\/]+$/, "") : "";
-    if (root && dir.startsWith(root)) dir = dir.slice(root.length).replace(/^[\\/]+/, "");
-    return dir || ".";
+    const dir = parts.join("/");
+    // The workspace root comes from the host with its native separators, and on
+    // Windows its drive letter may be cased differently from the agent's path,
+    // so both sides are levelled before one is cut off the other.
+    const root = caps.root ? String(caps.root).replace(/\\/g, "/").replace(/\/+$/, "") : "";
+    const under = root && dir.slice(0, root.length).toLowerCase() === root.toLowerCase();
+    return (under ? dir.slice(root.length).replace(/^\/+/, "") : dir) || ".";
   }
 
   // A listing, as rows grouped by folder. The folder is named once, each file is
@@ -4081,7 +4235,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       link.appendChild(r);
     }
     link.addEventListener("click", () => {
-      if (f.diff) vscode.postMessage({ type: "openDiff", path: f.path });
+      if (f.diff) vscode.postMessage({ type: "openDiff", path: f.path, editId: f.editId });
       else vscode.postMessage({ type: "openFile", path: f.path, line: f.line });
     });
     return link;
@@ -4102,7 +4256,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     const created = typeof m === "object" && m.created;
     if (path) wsCounts.set(path, { added: added || 0, removed: removed || 0 });
     // A live edit is part of the working set, so it can be kept or undone here.
-    renderEdit({ path, added, removed, created, actionable: true });
+    renderEdit({ path, added, removed, created, editId: typeof m === "object" ? m.editId : undefined, actionable: true });
   }
 
   // The one way an edit is ever shown: the pencil, what happened to the file, and
@@ -4133,6 +4287,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     const actionable = e.actionable || node.dataset.actionable === "1";
     if (actionable && path) node.dataset.actionable = "1";
     if (e.created) node.dataset.created = "1";
+    // The row stands for this turn's work on the file, and opens exactly that.
+    if (e.editId) node.dataset.editId = e.editId;
     node.innerHTML = "";
     const icon = document.createElement("i");
     // The same pencil whether the file was created or changed: it is the same
@@ -4143,7 +4299,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     label.textContent = node.dataset.created ? "Created" : "Edited";
     node.appendChild(icon);
     node.appendChild(label);
-    node.appendChild(filePill({ path: path || e.name, diff: !!path, added: e.added, removed: e.removed }));
+    node.appendChild(filePill({ path: path || e.name, diff: !!path, added: e.added, removed: e.removed, editId: node.dataset.editId }));
     // Inline Keep / Undo for this edit (VS Code shows accept/reject per edit),
     // in addition to the Keep all / Undo all in the docked working set.
     if (actionable && path) {
@@ -4866,6 +5022,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     const item = document.createElement("div");
     item.className = "queued-item" + (q.id === editingQueuedId ? " editing" : "");
     item.dataset.id = q.id;
+    // What it is queued with, above it, as on a request that has been sent.
+    const context = attachedContextRow(q.attachments);
+    if (context) item.appendChild(context);
     const bubble = document.createElement("div");
     bubble.className = "queued-bubble bubble";
     bubble.textContent = q.text;
@@ -5087,12 +5246,16 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     const folderNames = new Map((folders || []).map((f) => [f.path, f.name]));
     const groups = new Map();
     const orderedKeys = [];
+    // The CLI reports a session's directory as it was given, and VS Code reports
+    // the folder's own way (a lower cased drive letter on Windows), so the two
+    // are compared without case rather than character by character.
     const keyFor = (s) => {
-      const wd = s.working_directory || "";
+      const wd = (s.working_directory || "").toLowerCase();
       for (const f of folders || []) {
-        if (wd === f.path || wd.startsWith(f.path + "/") || wd.startsWith(f.path + "\\")) return f.path;
+        const dir = f.path.toLowerCase();
+        if (wd === dir || wd.startsWith(dir + "/") || wd.startsWith(dir + "\\")) return f.path;
       }
-      return wd || "__workspace__";
+      return s.working_directory || "__workspace__";
     };
     sessions.forEach((s) => {
       const key = keyFor(s);
@@ -5364,6 +5527,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     lastSessions = sessions || [];
     lastActiveId = activeId;
     lastFolders = folders || [];
+    numberedIds = sortSessions(lastSessions, "activity").slice(0, 9).map((s) => s.id);
     if (!listCtrl) {
       listCtrl = mountSessionList(el.sessionsList, {});
     } else {
@@ -5669,8 +5833,22 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     actions.appendChild(rename);
     actions.appendChild(del);
     item.appendChild(main);
+    // The shortcut that opens this chat, in the slot the row's actions take over
+    // on hover.
+    const n = numberedIds.indexOf(s.id) + 1;
+    if (n) {
+      const shortcut = document.createElement("span");
+      shortcut.className = "session-key";
+      shortcut.textContent = sessionShortcut(n);
+      shortcut.title = "Open with " + sessionShortcut(n);
+      item.appendChild(shortcut);
+    }
     item.appendChild(actions);
     return item;
+  }
+
+  function sessionShortcut(n) {
+    return (navigator.platform || "").startsWith("Mac") ? "\u2318" + n : "Ctrl+" + n;
   }
 
   // --- Setup panel ---------------------------------------------------------
@@ -6070,11 +6248,14 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       const sig = m.exitStatus.signal;
       text += `\n[exited ${sig ? "signal " + sig : "code " + (code == null ? "?" : code)}]`;
     }
-    terminalCache.set(m.terminalId, { output: text, exitStatus: m.exitStatus });
+    const state = { output: text, exitStatus: m.exitStatus, integrated: !!m.integrated, skipped: !!m.skipped };
+    terminalCache.set(m.terminalId, state);
     el.thread.querySelectorAll(`pre[data-terminal="${cssEscape(m.terminalId)}"]`).forEach((pre) => {
       pre.textContent = text || "\u2026";
       scrollToBottom();
     });
+    el.thread.querySelectorAll(`[data-terminal-actions="${cssEscape(m.terminalId)}"]`)
+      .forEach((row) => updateTerminalActions(row, state));
   }
   function shorten(p) { return p.split(/[\\/]/).slice(-2).join("/"); }
   function baseName(p) { return p.split(/[\\/]/).filter(Boolean).pop() || p; }
@@ -6093,6 +6274,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     const m = event.data;
     try {
       handleMessage(m);
+      // Whatever just happened may have left the turn with nothing to show, which
+      // is exactly when the panel has to say the agent is still working.
+      refreshWorking();
     } catch (err) {
       // A bug in one handler must never wedge the whole UI (e.g. leaving the
       // sessions list stuck on its loading spinner). Surface it and recover.
@@ -6157,6 +6341,14 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
           switchToSession(m.id, s && s.title);
         }
         break;
+      case "pickSession": {
+        // Ctrl/Cmd+1..9: the number is the one shown on the row, so it resolves
+        // against the same recency order the badges come from.
+        const id = numberedIds[(m.index || 0) - 1];
+        const s = id && (lastSessions || []).find((x) => x.id === id);
+        if (s) { setView("chat"); switchToSession(s.id, s.title); }
+        break;
+      }
       case "lockConflict": showLockConflict(m); break;
       case "sessionReady":
         if (m.title) { currentTitle = m.title; el.chatTitle.textContent = currentTitle; }
@@ -6256,7 +6448,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         addUserMessage(m.text, m.attachments);
         break;
       case "userChunk": appendUserChunk(m.text, m.messageId, m.attachments); break;
-      case "assistantStart": finalizeBlock(); showWorking(); break;
+      case "assistantStart": finalizeBlock(); break;
       case "assistantChunk": appendAssistant(m.text, m.messageId); break;
       case "assistantImage": appendAssistantImage(m.mime, m.data); break;
       case "thoughtChunk": appendThought(m.text, m.messageId, m.replayed, m.at); break;

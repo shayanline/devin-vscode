@@ -21,7 +21,7 @@
     "theme": "dark"
   },
   "engines": {
-    "vscode": "^1.92.0"
+    "vscode": "^1.93.0"
   },
   "categories": [
     "AI",
@@ -161,6 +161,69 @@
         "command": "devin.showSessions",
         "key": "ctrl+k ctrl+d",
         "mac": "cmd+k cmd+d"
+      },
+      {
+        "command": "devin.switchSession",
+        "key": "ctrl+1",
+        "mac": "cmd+1",
+        "args": 1,
+        "when": "focusedView == devin.chatView"
+      },
+      {
+        "command": "devin.switchSession",
+        "key": "ctrl+2",
+        "mac": "cmd+2",
+        "args": 2,
+        "when": "focusedView == devin.chatView"
+      },
+      {
+        "command": "devin.switchSession",
+        "key": "ctrl+3",
+        "mac": "cmd+3",
+        "args": 3,
+        "when": "focusedView == devin.chatView"
+      },
+      {
+        "command": "devin.switchSession",
+        "key": "ctrl+4",
+        "mac": "cmd+4",
+        "args": 4,
+        "when": "focusedView == devin.chatView"
+      },
+      {
+        "command": "devin.switchSession",
+        "key": "ctrl+5",
+        "mac": "cmd+5",
+        "args": 5,
+        "when": "focusedView == devin.chatView"
+      },
+      {
+        "command": "devin.switchSession",
+        "key": "ctrl+6",
+        "mac": "cmd+6",
+        "args": 6,
+        "when": "focusedView == devin.chatView"
+      },
+      {
+        "command": "devin.switchSession",
+        "key": "ctrl+7",
+        "mac": "cmd+7",
+        "args": 7,
+        "when": "focusedView == devin.chatView"
+      },
+      {
+        "command": "devin.switchSession",
+        "key": "ctrl+8",
+        "mac": "cmd+8",
+        "args": 8,
+        "when": "focusedView == devin.chatView"
+      },
+      {
+        "command": "devin.switchSession",
+        "key": "ctrl+9",
+        "mac": "cmd+9",
+        "args": 9,
+        "when": "focusedView == devin.chatView"
       }
     ],
     "menus": {
@@ -259,6 +322,16 @@
           "minimum": 0,
           "description": "How long to keep an idle live session (waiting for you) alive before it is automatically exited. Running sessions are never auto-exited. Set to 0 to keep idle sessions alive indefinitely."
         },
+        "devin.useIntegratedTerminal": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Run the agent's commands in a real VS Code terminal, so you can watch them, open them and take them over. Needs [shell integration](https://code.visualstudio.com/docs/terminal/shell-integration), which is on by default for bash, zsh, fish, pwsh and Git Bash. Commands fall back to running in the background when it is unavailable."
+        },
+        "devin.showMcpWarnings": {
+          "type": "boolean",
+          "default": true,
+          "description": "Warn in the chat when an MCP server fails to start, so it is clear which tools the agent does not have."
+        },
         "devin.showThinking": {
           "type": "boolean",
           "default": true,
@@ -271,7 +344,7 @@
             "fixedScrolling"
           ],
           "enumDescriptions": [
-            "Show a collapsed 'Thinking\u2026' header; expand to read the reasoning",
+            "Show a collapsed 'Thinking…' header; expand to read the reasoning",
             "Show a live, fixed-height peek of the latest reasoning while it streams, then collapse it"
           ],
           "default": "fixedScrolling",
@@ -407,7 +480,7 @@
     "compile": "node esbuild.js",
     "check-types": "tsc --noEmit",
     "pretest": "npm run compile",
-    "test": "node --test scripts/*.test.js",
+    "test": "node --test \"scripts/*.test.js\"",
     "harness": "node scripts/webview-harness.js",
     "probe": "node scripts/acp-probe.js",
     "preview": "npm run compile && node scripts/preview.js",
@@ -419,7 +492,7 @@
   "devDependencies": {
     "@types/markdown-it": "^14.1.2",
     "@types/node": "^20.14.0",
-    "@types/vscode": "^1.92.0",
+    "@types/vscode": "^1.93.0",
     "@vscode/codicons": "^0.0.46-23",
     "@vscode/vsce": "^3.9.2",
     "esbuild": "^0.23.1",

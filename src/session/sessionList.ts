@@ -1,4 +1,5 @@
 import { execFile } from "child_process";
+import { cliCommand } from "../cli/locate";
 
 export interface DevinSession {
   id: string;
@@ -95,10 +96,11 @@ interface RunResult {
 
 function runList(cliPath: string, cwd: string, env?: NodeJS.ProcessEnv): Promise<RunResult> {
   return new Promise((resolve) => {
+    const cmd = cliCommand(cliPath, ["list", "--format", "json"]);
     execFile(
-      cliPath,
-      ["list", "--format", "json"],
-      { cwd, env, windowsHide: true, timeout: 15000, maxBuffer: 8 * 1024 * 1024 },
+      cmd.file,
+      cmd.args,
+      { cwd, env, windowsHide: true, timeout: 15000, maxBuffer: 8 * 1024 * 1024, shell: cmd.shell },
       (err, stdout) => {
         if (err && !stdout) {
           resolve({ ok: false, sessions: [] });

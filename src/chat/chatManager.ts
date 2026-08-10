@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import * as fs from "fs";
+import * as os from "os";
 import { ChatController, SurfaceHost } from "./chatViewProvider";
 import { cliDataDir } from "../cli/sessionLocks";
 import { ChangeTracker } from "../diff/changeTracker";
@@ -276,6 +277,11 @@ export class ChatManager implements vscode.WebviewViewProvider, vscode.WebviewPa
   showSessions(): void {
     void this.sidebar?.showSessionsView();
   }
+  // Ctrl/Cmd+1..9. The panel numbers its own rows, so it is the one that knows
+  // which chat a number stands for.
+  switchSession(index: number): void {
+    this.sidebar?.pickSession(index);
+  }
   cancel(): void {
     this.sidebar?.cancel();
   }
@@ -441,7 +447,7 @@ export class ChatManager implements vscode.WebviewViewProvider, vscode.WebviewPa
         return folder.uri.fsPath;
       }
     }
-    return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.env.HOME || process.cwd();
+    return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || os.homedir();
   }
 
   // Whichever stop path runs first wins, so the fallback dispose after an awaited

@@ -184,6 +184,65 @@ test("a one line change in a large file is counted, and counted quickly", async 
   assert.deepStrictEqual(diffStat("a\nb\nc\n", "a\nx\ny\nc\n"), { added: 2, removed: 1 });
 });
 
+test("a CRLF file rewritten with LF is not counted as every line changed", async () => {
+  assert.deepStrictEqual(
+    diffStat("a\r\nb\r\nc\r\n", "a\nb\nc\n"),
+    { added: 0, removed: 0 },
+    "the endings are not the change"
+  );
+  assert.deepStrictEqual(diffStat("a\r\nb\r\nc\r\n", "a\nx\nc\n"), { added: 1, removed: 1 }, "only the line that changed");
+});
+
+test("an edit row opens what that edit did, not the whole file", async () => {
+  const tracker = new ChangeTracker();
+  tracker.register();
+  const file = write("twice.ts", "one\ntwo\nthree\n");
+
+  // Two turns touching the same file: the working set spans both, each row only
+  // its own.
+  tracker.recordEdit("turn1", file, "one\n", "one\ntwo\n");
+  tracker.recordDiff(file, "one\n", "one\ntwo\n", "A");
+  tracker.recordEdit("turn2", file, "one\ntwo\n", "one\ntwo\nthree\n");
+  tracker.recordDiff(file, "one\ntwo\n", "one\ntwo\nthree\n", "A");
+
+  const read = (id, side) =>
+    tracker.provideTextDocumentContent({ scheme: "devin-edit", query: id + "\u0000" + side, fsPath: file });
+  assert.strictEqual(read("turn2", "before"), "one\ntwo\n", "the second row starts where the first left off");
+  assert.strictEqual(read("turn2", "after"), "one\ntwo\nthree\n");
+  assert.strictEqual(read("turn1", "before"), "one\n", "and the first still shows its own");
+
+  globalThis.__dvOpened = [];
+  await tracker.openEdit("turn2", file);
+  assert.ok(
+    (globalThis.__dvOpened || []).some((u) => u.startsWith("devin-edit")),
+    "the row opens its own two sides: " + JSON.stringify(globalThis.__dvOpened)
+  );
+  // The working set is still the whole change, which is what the tray opens.
+  assert.strictEqual(original(tracker, file), "one\n");
+
+  // An edit whose text is no longer held falls back to the file's own diff.
+  globalThis.__dvOpened = [];
+  await tracker.openEdit("forgotten", file);
+  assert.ok((globalThis.__dvOpened || []).some((u) => u.startsWith("devin-original")));
+});
+
+test("a file is the same file however its path is spelled", async () => {
+  const tracker = new ChangeTracker();
+  tracker.register();
+  const file = write("spelled.ts", "after\n");
+  // What the agent reports and what VS Code hands back from a URI are the same
+  // file written two ways: an unresolved path, and (on Windows) another casing.
+  const roundabout = path.join(TMP, ".", "spelled.ts");
+
+  tracker.recordDiff(file, "before\n", "after\n", "A");
+  assert.strictEqual(tracker.hasUnresolvedChange(roundabout), true, "it is found by either spelling");
+  assert.ok(tracker.provideOriginalResource({ fsPath: roundabout }), "and keeps its gutter markers");
+  assert.deepStrictEqual(tracker.pathsFor("A"), [file], "the working set keeps the path as it was reported");
+
+  await tracker.reject(roundabout);
+  assert.strictEqual(fs.readFileSync(file, "utf8"), "before\n", "and Undo puts the one file back");
+});
+
 test("each session gets its own working set, and a revert forgets only its own", async () => {
   const tracker = new ChangeTracker();
   tracker.register();

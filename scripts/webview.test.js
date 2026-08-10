@@ -502,6 +502,22 @@ test("a subagent nests its prompt, tools, output and report on one timeline", as
   assert.strictEqual(h.document.querySelectorAll("#thread > .turn .tool-group").length, 0,
     "a subagent's tools do not join the turn's tool run");
 
+  // The tool it was naming finishes and it thinks again: the header has to move
+  // on with it, or a working subagent reads as stuck on the last thing it ran.
+  const working = /^ \u2014 (Processing|Preparing|Loading|Analyzing|Evaluating|Thinking|Reasoning|Considering|Working|Executing|Running)$/;
+  h.post({ type: "toolCallUpdate", id: "sa1-t1", parentId: "sa1", status: "completed" });
+  await h.settle(10);
+  assert.match(sub.querySelector(".subagent-detail").textContent, working,
+    "with no tool running it says it is working, not which tool it last ran");
+  h.post({ type: "subagentChunk", parentId: "sa1", stream: "thought", text: "Now the write path." });
+  await h.settle(10);
+  assert.match(sub.querySelector(".subagent-detail").textContent, working);
+  assert.strictEqual(
+    sub.querySelector(".subagent-spinner .subagent-spinner-label").textContent,
+    sub.querySelector(".subagent-detail").textContent.replace(" \u2014 ", ""),
+    "and its own working row says the same thing"
+  );
+
   // The control flips optimistically and tells the host.
   sub.querySelector(".subagent-action").dispatchEvent(new h.window.MouseEvent("click", { bubbles: true }));
   await h.settle(5);
@@ -928,6 +944,37 @@ test("a backgrounded session waiting on input shows the attention dot", async ()
   assert.strictEqual(h.errors().length, 0);
 });
 
+test("the nine most recent chats wear the number that opens them", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({
+    type: "sessions",
+    sessions: [
+      { id: "aaa", short_id: "aaa", title: "Oldest", working_directory: "/w", last_activity_at: 100 },
+      { id: "bbb", short_id: "bbb", title: "Newest", working_directory: "/w", last_activity_at: 300 },
+      { id: "ccc", short_id: "ccc", title: "Middle", working_directory: "/w", last_activity_at: 200 }
+    ],
+    activeId: null,
+    statuses: { aaa: "idle", bbb: "idle", ccc: "idle" },
+    folders: [{ path: "/w", name: "w" }]
+  });
+  await h.settle(20);
+
+  const keyOf = (code) => [...h.document.querySelectorAll("#sessions-list .session-item")]
+    .find((r) => r.querySelector(".session-code").textContent === code)
+    .querySelector(".session-key").textContent;
+  // Numbered by recency, whatever order the rows come out in.
+  assert.ok(/1$/.test(keyOf("bbb")), "the most recent chat is number 1");
+  assert.ok(/2$/.test(keyOf("ccc")), "the next most recent is number 2");
+  assert.ok(/3$/.test(keyOf("aaa")), "the oldest of the three is number 3");
+
+  // The host's Ctrl/Cmd+2 opens the chat wearing 2.
+  h.post({ type: "pickSession", index: 2 });
+  await h.settle(10);
+  assert.ok(h.posted.some((m) => m.type === "loadSession" && m.id === "ccc"), "Ctrl/Cmd+2 opens that chat");
+  assert.strictEqual(h.errors().length, 0);
+});
+
 test("keyboard shortcuts: Ctrl/Cmd+Esc stops, ArrowUp recalls, Ctrl/Cmd+. opens pickers", async () => {
   const h = createHarness();
   h.post({ type: "ready" });
@@ -1239,8 +1286,8 @@ test("dragging shows the attach overlay and dropping a file URI attaches it", as
   await h.settle(10);
   assert.ok(!overlay.classList.contains("visible"), "the overlay hides after the drop");
   assert.ok(
-    h.posted.some((m) => m.type === "addMention" && m.path === "/Users/me/src/app one.ts"),
-    "the dropped file is attached by its decoded path"
+    h.posted.some((m) => m.type === "addMention" && m.path === "file:///Users/me/src/app%20one.ts"),
+    "the dropped file is attached by its URI, which only the host can decode"
   );
   assert.deepStrictEqual(host, [], "no drag event escapes to VS Code's host listeners");
   assert.strictEqual(h.errors().length, 0);
@@ -1326,7 +1373,11 @@ test("an internal multi file drag attaches every file, not just the first", asyn
   await h.settle(10);
 
   const added = h.posted.filter((m) => m.type === "addMention").map((m) => m.path);
-  assert.deepStrictEqual(added, ["/w/a.ts", "/w/b.ts", "/w/c.ts"], "all three dragged files are attached");
+  assert.deepStrictEqual(
+    added,
+    ["file:///w/a.ts", "file:///w/b.ts", "file:///w/c.ts"],
+    "all three dragged files are attached"
+  );
   assert.strictEqual(h.errors().length, 0);
 });
 
@@ -1552,6 +1603,68 @@ test("an executed command is the command and what it printed, uncaptioned", asyn
   assert.strictEqual(h.thread().querySelector(".tool-command code").textContent, "npm test");
   // The row is titled by the command itself, highlighted, not by a sentence.
   assert.strictEqual(h.thread().querySelector(".tool .tool-label-code").textContent, "npm test");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a queued message shows what it is queued with, and keeps it when sent", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "busy", value: true });
+  h.post({
+    type: "queued",
+    items: [{ id: "q-1", text: "look at this too", attachments: [{ label: "token.ts", type: "file" }] }]
+  });
+  await h.settle(20);
+
+  const row = h.thread().querySelector(".queued-item .chat-attached-context");
+  assert.ok(row, "the queued row says what is attached to it");
+  assert.strictEqual(row.querySelector(".chat-attached-context-attachment").textContent, "token.ts");
+
+  // The queue drains: the message becomes a request, still carrying its context.
+  h.post({ type: "queued", items: [] });
+  h.post({ type: "userMessage", text: "look at this too", attachments: [{ label: "token.ts", type: "file" }] });
+  await h.settle(20);
+  const sent = h.thread().querySelector(".turn-request .chat-attached-context-attachment");
+  assert.ok(sent, "and the sent request still shows it");
+  assert.strictEqual(sent.textContent, "token.ts");
+  assert.strictEqual(h.document.getElementById("attachments").children.length, 0, "the composer is left empty");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("editing a queued message hands its attachments back to the composer", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "busy", value: true });
+  h.post({ type: "queued", items: [{ id: "q-1", text: "look at this", attachments: [{ label: "token.ts", type: "file" }] }] });
+  await h.settle(20);
+
+  h.thread().querySelector(".queued-item .codicon-edit").parentElement.click();
+  await h.settle(10);
+  assert.ok(
+    h.posted.some((m) => m.type === "queueEditing" && m.id === "q-1"),
+    "the host is told which message is being edited, so it can hand its context over"
+  );
+  // The host answers by staging them; the composer shows them as removable pills.
+  h.post({ type: "attachments", items: [{ id: "a1", label: "token.ts", type: "file" }] });
+  h.post({ type: "queued", items: [{ id: "q-1", text: "look at this", attachments: [] }] });
+  await h.settle(10);
+  assert.strictEqual(h.document.getElementById("attachments").querySelectorAll(".chip").length, 1);
+
+  const input = h.document.getElementById("input");
+  input.value = "look at this, closely";
+  input.dispatchEvent(new h.window.Event("input", { bubbles: true }));
+  h.document.getElementById("send").click();
+  await h.settle(10);
+  assert.ok(
+    h.posted.some((m) => m.type === "editQueued" && m.id === "q-1" && m.text === "look at this, closely"),
+    "committing the edit updates the message in place"
+  );
   assert.strictEqual(h.errors().length, 0);
 });
 
@@ -1799,6 +1912,45 @@ test("the working row shimmers a word, with no spinner beside it", async () => {
   assert.strictEqual(h.errors().length, 0);
 });
 
+test("the gap between one action and the next still says the agent is working", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "userMessage", text: "go" });
+  h.post({ type: "busy", value: true });
+  h.post({ type: "assistantStart" });
+  h.post({ type: "toolCall", id: "t1", title: "Run npm test", kind: "execute", status: "in_progress" });
+  await h.settle(20);
+  assert.strictEqual(h.thread().querySelector(".working"), null,
+    "a running command speaks for itself, so nothing is added beside it");
+
+  // The command finishes and the agent goes quiet while it decides what is next.
+  // That silence is exactly where the panel used to look like it had stopped.
+  h.post({ type: "toolCallUpdate", id: "t1", status: "completed", content: [{ type: "text", text: "ok" }] });
+  await h.settle(20);
+  const row = h.thread().querySelector(".working");
+  assert.ok(row, "the gap after a finished command says the agent is still working");
+  assert.ok(row.previousElementSibling, "below the work it has done, at the end of the turn");
+  assert.match(row.textContent, /^(Thinking|Reasoning|Considering|Analyzing|Evaluating|Working)$/);
+
+  // A question is not work: say what is actually being waited on, as VS Code does.
+  h.post({ type: "permission", requestId: "p1", title: "Devin wants to run a command", options: [{ optionId: "allow", name: "Allow", kind: "allow" }] });
+  await h.settle(20);
+  assert.strictEqual(h.thread().querySelector(".working").textContent, "1 confirmation pending");
+
+  h.post({ type: "cancelPrompts" });
+  h.post({ type: "assistantChunk", text: "All done." });
+  await h.settle(20);
+  assert.strictEqual(h.thread().querySelector(".working"), null, "streamed text speaks for itself");
+
+  h.post({ type: "assistantEnd" });
+  h.post({ type: "busy", value: false });
+  await h.settle(20);
+  assert.strictEqual(h.thread().querySelector(".working"), null, "and the turn ending takes it away");
+  assert.strictEqual(h.errors().length, 0);
+});
+
 test("stopping a turn takes the question with it", async () => {
   const h = createHarness();
   h.post({ type: "ready" });
@@ -2024,6 +2176,34 @@ test("a listing is grouped by folder, not a wall of pills", async () => {
   assert.strictEqual(h.errors().length, 0);
 });
 
+test("a Windows listing is grouped under the workspace, not under its full path", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  // VS Code lower cases the drive letter and uses backslashes; the agent answers
+  // with the drive as the user typed it and forward slashes. Same folder.
+  h.post({ type: "capabilities", root: "c:\\repo" });
+  const files = [
+    "C:/repo/src/acp/client.ts", "C:/repo/src/acp/types.ts", "C:/repo/src/acp/terminal.ts",
+    "C:/repo/src/chat/chatManager.ts", "C:/repo/src/chat/chatViewProvider.ts",
+    "C:/repo/src/cli/locate.ts", "C:/repo/extension.ts"
+  ];
+  h.post({
+    type: "toolCall",
+    id: "w1",
+    kind: "search",
+    status: "completed",
+    rawInput: { query: "src/**/*.ts" },
+    content: files.map((path) => ({ type: "link", path }))
+  });
+  await h.settle(20);
+
+  const heads = [...h.thread().querySelectorAll(".file-group-name")].map((n) => n.textContent);
+  assert.deepStrictEqual(heads, ["src/acp", "src/chat", "src/cli", "."], "folders relative to the workspace");
+  assert.strictEqual(h.errors().length, 0);
+});
+
 test("a command spanning many lines still takes one row", async () => {
   const h = createHarness();
   h.post({ type: "ready" });
@@ -2220,6 +2400,43 @@ test("a command shows the output it is producing, not just its exit code", async
   assert.strictEqual(h.errors().length, 0);
 });
 
+test("a command running in a real terminal can be opened, or left running", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "toolCall", id: "c1", kind: "execute", status: "in_progress", rawInput: { command: "npm run dev" }, terminalId: "term-9" });
+  h.post({ type: "terminalOutput", terminalId: "term-9", output: "listening on 3000\n", integrated: true });
+  await h.settle(20);
+
+  const actions = () => [...h.thread().querySelectorAll('[data-terminal-actions="term-9"] .dv-link-btn')].map((b) => b.textContent);
+  assert.deepStrictEqual(actions(), ["Show Terminal", "Skip"], "the real terminal is one click away, and so is moving on");
+
+  h.thread().querySelector('[data-terminal-actions="term-9"] .dv-link-btn').click();
+  await h.settle(5);
+  assert.ok(h.posted.some((m) => m.type === "showTerminal" && m.terminalId === "term-9"));
+
+  [...h.thread().querySelectorAll('[data-terminal-actions="term-9"] .dv-link-btn')][1].click();
+  await h.settle(5);
+  assert.ok(h.posted.some((m) => m.type === "skipTerminal" && m.terminalId === "term-9"), "Skip tells the host to stop waiting");
+
+  // The host confirms: the command is still going, the agent is not waiting.
+  h.post({ type: "terminalOutput", terminalId: "term-9", output: "listening on 3000\n", integrated: true, skipped: true });
+  await h.settle(10);
+  assert.deepStrictEqual(actions(), ["Show Terminal"], "with nothing left to skip");
+  assert.match(h.thread().querySelector('[data-terminal-actions="term-9"]').textContent, /Left running/);
+
+  // A command that never had a terminal of its own has nothing to open.
+  h.post({ type: "toolCall", id: "c2", kind: "execute", status: "in_progress", rawInput: { command: "ls" }, terminalId: "term-10" });
+  h.post({ type: "terminalOutput", terminalId: "term-10", output: "a.ts\n" });
+  await h.settle(10);
+  assert.deepStrictEqual(
+    [...h.thread().querySelectorAll('[data-terminal-actions="term-10"] .dv-link-btn')].map((b) => b.textContent),
+    ["Skip"]
+  );
+  assert.strictEqual(h.errors().length, 0);
+});
+
 test("an MCP server that would not start is said out loud", async () => {
   const h = createHarness();
   h.post({ type: "ready" });
@@ -2262,6 +2479,19 @@ test("an MCP server that would not start is said out loud", async () => {
   });
   await h.settle(10);
   assert.strictEqual(h.document.getElementById("mcp-problems"), null, "and does not come back on its own");
+
+  // Dismiss is for this one. The other two say how much longer than that.
+  h.post({ type: "mcpProblems", servers: [{ name: "fetch", message: "MCP server 'fetch' failed" }] });
+  await h.settle(10);
+  const mutes = [...h.document.querySelectorAll("#mcp-problems .dv-link-btn")];
+  assert.deepStrictEqual(mutes.map((b) => b.textContent), ["Don't show again in this window", "Don't show again"]);
+  mutes[1].click();
+  await h.settle(10);
+  assert.ok(
+    h.posted.some((m) => m.type === "muteMcpWarnings" && m.scope === "always"),
+    "turning it off for good is a setting, so the host owns it"
+  );
+  assert.strictEqual(h.document.getElementById("mcp-problems"), null, "and the card goes with it");
 
   // A server that fails afterwards is news again.
   h.post({

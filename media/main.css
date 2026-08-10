@@ -30,6 +30,27 @@
   --dv-dim: var(--vscode-descriptionForeground, #9d9d9d);
   /* Highlight swept across the "Thinking…" label while the model reasons. */
   --dv-thinking-shimmer: var(--vscode-chat-thinkingShimmer, var(--vscode-foreground, #ffffff));
+
+  /* Clearance left around a node where the chain breaks (see below). */
+  --dv-node-clear: 3px;
+}
+
+/* A chain of thought: one line threaded through a column of glyphs, broken
+   around each one. A node says where its glyph's middle sits (--node-y) and how
+   much of it is painted (--node-size, a 14px icon or a 4px bullet), and the
+   break leaves the same clearance around either, so a bullet is not left
+   floating in a gap an icon's worth of line wide. The three masks follow from
+   those two, and are declared here rather than on :root because a custom
+   property is substituted where it is declared: on :root there is no node to
+   measure, and the whole thing would resolve to nothing. */
+.tool-group-body > *,
+.thinking-item,
+.subagent-item {
+  --dv-node-start: calc(var(--node-y) - var(--node-size) / 2 - var(--dv-node-clear));
+  --dv-node-end: calc(var(--node-y) + var(--node-size) / 2 + var(--dv-node-clear));
+  --dv-chain-mask: linear-gradient(to bottom, #000 0 var(--dv-node-start), transparent var(--dv-node-start) var(--dv-node-end), #000 var(--dv-node-end) 100%);
+  --dv-chain-mask-first: linear-gradient(to bottom, transparent 0 var(--dv-node-end), #000 var(--dv-node-end) 100%);
+  --dv-chain-mask-last: linear-gradient(to bottom, #000 0 var(--dv-node-start), transparent var(--dv-node-start) 100%);
 }
 
 @keyframes dv-thinking-shimmer {
@@ -1983,6 +2004,33 @@ body {
   overflow-y: auto;
 }
 
+/* How long to stop saying it: the rest of this window, or for good. */
+.mcp-mute {
+  display: flex;
+  gap: var(--dv-space-4);
+  margin-top: var(--dv-space-2);
+}
+
+.dv-link-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-size: var(--dv-fs-s);
+  color: var(--vscode-textLink-foreground);
+  cursor: pointer;
+}
+
+.dv-link-btn:hover {
+  color: var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground));
+  text-decoration: underline;
+}
+
+.dv-link-btn:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 2px;
+}
+
 .bubble p {
   margin: 0 0 16px;
 }
@@ -2222,6 +2270,10 @@ body {
   position: relative;
   margin-left: var(--dv-space-3);
   font-size: var(--dv-fs-s);
+  /* The chain's node: a 4px bullet whose middle sits 15px into each step. The
+     steps inherit it, and the elbow above them is measured from it. */
+  --node-y: 15px;
+  --node-size: 4px;
 }
 
 /* Reasoning inside a run is the text itself, hanging off the run's chain like
@@ -2266,7 +2318,8 @@ body {
 }
 
 /* One reasoning step. The node icon is pinned to the connector line and the
-   content is inset to clear it. */
+   content is inset to clear it. Its bullet is a 4px dot in a 12px box, centred
+   on the line at x = 11. */
 .thinking-item {
   position: relative;
   padding: var(--dv-space-3) var(--dv-space-6) var(--dv-space-3) 24px;
@@ -2274,7 +2327,8 @@ body {
 
 /* Vertical connector running through the node icons, with a mask that opens a
    gap around each node so the line reads as a chain rather than a solid rule. */
-.thinking-item::before {
+.thinking-item::before,
+.subagent-item::before {
   content: "";
   position: absolute;
   left: 10.5px;
@@ -2282,24 +2336,25 @@ body {
   bottom: 0;
   width: 1px;
   background-color: var(--dv-border);
-  mask-image: linear-gradient(to bottom, #000 0 5px, transparent 5px 25px, #000 24px 100%);
-  -webkit-mask-image: linear-gradient(to bottom, #000 0 5px, transparent 5px 25px, #000 24px 100%);
+  mask-image: var(--dv-chain-mask);
+  -webkit-mask-image: var(--dv-chain-mask);
 }
 
-.thinking-item:first-child::before {
-  mask-image: linear-gradient(to bottom, transparent 0 25px, #000 25px 100%);
-  -webkit-mask-image: linear-gradient(to bottom, transparent 0 25px, #000 25px 100%);
+.thinking-item:first-child::before,
+.subagent-item:first-child::before {
+  mask-image: var(--dv-chain-mask-first);
+  -webkit-mask-image: var(--dv-chain-mask-first);
 }
 
-.thinking-item:last-child::before {
-  mask-image: linear-gradient(to bottom, #000 0 5px, transparent 5px 100%);
-  -webkit-mask-image: linear-gradient(to bottom, #000 0 5px, transparent 5px 100%);
+.thinking-item:last-child::before,
+.subagent-item:last-child::before {
+  mask-image: var(--dv-chain-mask-last);
+  -webkit-mask-image: var(--dv-chain-mask-last);
 }
 
-.thinking-item:only-child::before {
+.thinking-item:only-child::before,
+.subagent-item:only-child::before {
   background: none;
-  mask-image: none;
-  -webkit-mask-image: none;
 }
 
 .thinking-icon {
@@ -2315,14 +2370,17 @@ body {
 }
 
 /* Curved connector dropping from the header into the first node, matching the
-   VS Code rounded corner (only while the box is expanded). */
-.thinking:not(.dv-collapsed) .thinking-body::before {
+   VS Code rounded corner (only while the box is expanded). It runs from the
+   header's bottom edge (the body sits 10px below it) down to the middle of the
+   first node, and stops short of the bullet rather than running under it. */
+.thinking:not(.dv-collapsed) .thinking-body::before,
+.subagent:not(.dv-collapsed) .subagent-body::before {
   content: "";
   position: absolute;
   left: 3px;
   top: -10px;
-  height: 16px;
-  width: 7.5px;
+  height: calc(10px + var(--node-y));
+  width: calc(8px - var(--node-size) / 2 - var(--dv-node-clear));
   border-left: 1px solid var(--dv-border);
   border-bottom: 1px solid var(--dv-border);
   border-bottom-left-radius: 5px;
@@ -2709,66 +2767,69 @@ body {
   padding-top: 6px;
   padding-bottom: 6px;
   --node-y: 15.3px;
+  --node-size: 14px;
+  /* The left edge of the painted glyph, which is where the elbow stops. */
+  --node-x: 0px;
 }
 
 .tool-group-body > .edit-pill {
   --node-y: 20px;
 }
 
-/* Reasoning's node is its first bullet, which sits lower than a row's glyph. */
+/* Reasoning's node is its bullet: lower than a row's glyph, and a 4px dot
+   inside its 12px box rather than a full width icon. */
 .tool-group-body > .thinking-plain {
-  --node-y: 23px;
+  --node-y: 25px;
+  --node-size: 4px;
+  --node-x: 5px;
 }
 
 .tool-group-body > *::before {
   content: "";
   position: absolute;
-  left: 7px;
+  /* Centred on the glyph, whose middle is at x = 7. */
+  left: 6.5px;
   /* Exactly the row, as VS Code draws each segment (top:0, bottom:0). Reaching
      past the row made consecutive segments overlap, drawing the join twice. */
   top: 0;
   bottom: 0;
   width: 1px;
   background-color: var(--dv-border);
-  mask-image: linear-gradient(to bottom, #000 0 calc(var(--node-y) - 10px), transparent calc(var(--node-y) - 10px) calc(var(--node-y) + 10px), #000 calc(var(--node-y) + 10px) 100%);
-  -webkit-mask-image: linear-gradient(to bottom, #000 0 calc(var(--node-y) - 10px), transparent calc(var(--node-y) - 10px) calc(var(--node-y) + 10px), #000 calc(var(--node-y) + 10px) 100%);
+  mask-image: var(--dv-chain-mask);
+  -webkit-mask-image: var(--dv-chain-mask);
 }
 
 /* The chain starts at the first node and ends at the last, so it never hangs
    past either end of the run. */
 .tool-group-body > *:first-child::before {
-  mask-image: linear-gradient(to bottom, transparent 0 calc(var(--node-y) + 10px), #000 calc(var(--node-y) + 10px) 100%);
-  -webkit-mask-image: linear-gradient(to bottom, transparent 0 calc(var(--node-y) + 10px), #000 calc(var(--node-y) + 10px) 100%);
+  mask-image: var(--dv-chain-mask-first);
+  -webkit-mask-image: var(--dv-chain-mask-first);
 }
 
 .tool-group-body > *:last-child::before {
-  mask-image: linear-gradient(to bottom, #000 0 calc(var(--node-y) - 10px), transparent calc(var(--node-y) - 10px) 100%);
-  -webkit-mask-image: linear-gradient(to bottom, #000 0 calc(var(--node-y) - 10px), transparent calc(var(--node-y) - 10px) 100%);
+  mask-image: var(--dv-chain-mask-last);
+  -webkit-mask-image: var(--dv-chain-mask-last);
 }
 
 .tool-group-body > *:only-child::before {
   background: none;
 }
 
-/* Curved corner under the header, exactly as VS Code draws it
-   (chatThinkingContent.css: left 3, 5 wide, 16 tall, 5px radius, from the header's
-   bottom edge). It sits to the left of the chain and stops short of it: it says
-   the run hangs below its header, it is not a joint in the chain. Reaching across
-   to the first node instead drove the line into that node's icon. */
-.tool-group:not(.dv-collapsed)::after {
+/* Curved corner from the header into the first node, as VS Code draws it
+   (chatThinkingContent.css: left 3, 5px radius, from the header's bottom edge).
+   It is drawn by the first row, so it drops to the middle of that row's own
+   node and stops the same 3px short of it as the chain does above and below,
+   whichever kind of row leads the run. */
+.tool-group:not(.dv-collapsed) .tool-group-body > *:first-child::after {
   content: "";
   position: absolute;
-  left: 3px;
-  top: 20px;
-  height: 16px;
-  width: 5px;
+  left: -13px;
+  top: 0;
+  height: var(--node-y);
+  width: calc(13px + var(--node-x) - var(--dv-node-clear));
   border-left: 1px solid var(--dv-border);
   border-bottom: 1px solid var(--dv-border);
   border-bottom-left-radius: 5px;
-}
-
-.tool-group {
-  position: relative;
 }
 
 .tool-body {
@@ -2979,6 +3040,15 @@ body {
   max-height: 300px;
 }
 
+/* Under a command's output: open the terminal it is running in, or leave it
+   running and let the agent get on. */
+.terminal-actions {
+  display: flex;
+  gap: var(--dv-space-4);
+  margin-top: var(--dv-space-1);
+  font-size: var(--dv-fs-s);
+}
+
 .tool.in_progress .tool-status {
   color: var(--vscode-progressBar-background);
   opacity: 1;
@@ -3115,53 +3185,16 @@ body {
 .subagent-body {
   position: relative;
   margin-left: var(--dv-space-3);
-}
-
-.subagent:not(.dv-collapsed) .subagent-body::before {
-  content: "";
-  position: absolute;
-  left: 3px;
-  top: -10px;
-  height: 16px;
-  width: 7.5px;
-  border-left: 1px solid var(--dv-border);
-  border-bottom: 1px solid var(--dv-border);
-  border-bottom-left-radius: 5px;
+  --node-y: 15px;
+  --node-size: 12px;
 }
 
 /* One entry on the timeline: prompt, a tool call, streamed output, the working
-   spinner, or the report. Same masked connector as the thinking chain. */
+   spinner, or the report. Same masked connector as the thinking chain, on a
+   12px icon rather than a bullet. */
 .subagent-item {
   position: relative;
   padding: var(--dv-space-3) var(--dv-space-6) var(--dv-space-3) 24px;
-}
-
-.subagent-item::before {
-  content: "";
-  position: absolute;
-  left: 10.5px;
-  top: 0;
-  bottom: 0;
-  width: 1px;
-  background-color: var(--dv-border);
-  mask-image: linear-gradient(to bottom, #000 0 5px, transparent 5px 25px, #000 24px 100%);
-  -webkit-mask-image: linear-gradient(to bottom, #000 0 5px, transparent 5px 25px, #000 24px 100%);
-}
-
-.subagent-item:first-child::before {
-  mask-image: linear-gradient(to bottom, transparent 0 25px, #000 25px 100%);
-  -webkit-mask-image: linear-gradient(to bottom, transparent 0 25px, #000 25px 100%);
-}
-
-.subagent-item:last-child::before {
-  mask-image: linear-gradient(to bottom, #000 0 5px, transparent 5px 100%);
-  -webkit-mask-image: linear-gradient(to bottom, #000 0 5px, transparent 5px 100%);
-}
-
-.subagent-item:only-child::before {
-  background: none;
-  mask-image: none;
-  -webkit-mask-image: none;
 }
 
 .subagent-icon {
@@ -4122,6 +4155,26 @@ body.dv-resizing #sessions-resizer {
 
 .session-item:hover .session-actions {
   display: flex;
+}
+
+/* The Ctrl/Cmd+N that opens this chat, drawn as a keybinding label and given up
+   to the row's actions on hover. */
+.session-key {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 0.78em;
+  line-height: 1.4;
+  background: var(--vscode-keybindingLabel-background, rgba(127, 127, 127, 0.16));
+  color: var(--vscode-keybindingLabel-foreground, var(--vscode-descriptionForeground));
+  border: 1px solid var(--vscode-keybindingLabel-border, transparent);
+  border-bottom-color: var(--vscode-keybindingLabel-bottomBorder, transparent);
+  opacity: 0.75;
+  white-space: nowrap;
+}
+
+.session-item:hover .session-key {
+  display: none;
 }
 
 /* Setup */
