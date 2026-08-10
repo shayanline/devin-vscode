@@ -1707,6 +1707,35 @@ test("a run folds to its summary once it is over", async () => {
   assert.strictEqual(h.errors().length + h2.errors().length, 0);
 });
 
+test("the working row shimmers a word, with no spinner beside it", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "userMessage", text: "go" });
+  h.post({ type: "busy", value: true });
+  h.post({ type: "assistantStart" });
+  await h.settle(20);
+
+  const row = h.thread().querySelector(".working");
+  assert.ok(row, "something has to say the agent is alive");
+  const label = row.querySelector(".dv-shimmer");
+  assert.match(label.textContent, /^(Thinking|Reasoning|Considering|Analyzing|Evaluating|Working)$/,
+    "one of VS Code's words, and no ellipsis: " + label.textContent);
+  assert.strictEqual(row.querySelector(".codicon-modifier-spin"), null,
+    "the shimmer is the signal, so a spinner beside it says the same thing twice");
+  // The row is rebuilt as the turn streams, so its sweep is pinned to a shared
+  // clock: without this every rebuild restarts at 0% and reads as frozen.
+  assert.match(label.style.animationDelay, /^-\d+ms$/);
+
+  h.post({ type: "assistantChunk", text: "Here." });
+  h.post({ type: "assistantEnd" });
+  h.post({ type: "busy", value: false });
+  await h.settle(20);
+  assert.strictEqual(h.thread().querySelector(".working"), null, "and it goes when the turn does");
+  assert.strictEqual(h.errors().length, 0);
+});
+
 test("stopping a turn takes the question with it", async () => {
   const h = createHarness();
   h.post({ type: "ready" });

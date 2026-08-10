@@ -67,7 +67,12 @@
 @media (prefers-reduced-motion: reduce) {
   .dv-shimmer,
   .thinking.thinking-active .thinking-label {
+    /* Stopping the sweep is not enough: the text is painted by the gradient, so
+       without giving it its colour back it stays washed out or invisible. */
     animation: none;
+    background: none;
+    -webkit-text-fill-color: currentColor;
+    color: var(--dv-dim);
   }
 }
 

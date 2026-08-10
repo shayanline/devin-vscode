@@ -2515,16 +2515,45 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // A subtle "Working…" placeholder shown after send, until the first token,
   // thought, tool or plan arrives (mirrors VS Code's pending indicator).
   let workingEl = null;
+  // What the agent says it is up to while there is nothing else to show. VS Code's
+  // pool, and its wording: one verb, no ellipsis, and no spinner beside it, since
+  // the shimmer is the thing that says it is alive.
+  const WORKING_WORDS = ["Thinking", "Reasoning", "Considering", "Analyzing", "Evaluating", "Working"];
+  const WORKING_DWELL_MS = 1200;
+  let workingWord = null;
+  let workingWordAt = 0;
+  function pickWorkingWord() {
+    // The row is rebuilt constantly while a turn streams. Without a dwell the
+    // word would flicker through the list instead of reading as one thought.
+    if (workingWord && now() - workingWordAt < WORKING_DWELL_MS) return workingWord;
+    workingWord = WORKING_WORDS[Math.floor(Math.random() * WORKING_WORDS.length)];
+    workingWordAt = now();
+    return workingWord;
+  }
+
   function showWorking() {
     hideWorking();
     ensureTurn();
     const w = document.createElement("div");
     w.className = "working";
-    w.innerHTML = '<i class="codicon codicon-loading codicon-modifier-spin"></i><span class="dv-shimmer">Working\u2026</span>';
+    const label = document.createElement("span");
+    label.className = "dv-shimmer";
+    label.textContent = pickWorkingWord();
+    w.appendChild(label);
     respTarget().appendChild(w);
+    syncShimmer(label);
     workingEl = w;
     scrollToBottom();
   }
+  // Every shimmer runs off one clock. The row is recreated as the turn streams,
+  // and a fresh element restarts the sweep at 0%, which reads as frozen rather
+  // than as moving. A negative delay drops it back into the phase of the rest.
+  const SHIMMER_MS = 2000;
+  const shimmerEpoch = now();
+  function syncShimmer(node) {
+    if (node) node.style.animationDelay = "-" + Math.round((now() - shimmerEpoch) % SHIMMER_MS) + "ms";
+  }
+
   function hideWorking() {
     if (workingEl) { workingEl.remove(); workingEl = null; }
     // A retained transcript can bring back a "Working…" line this module no

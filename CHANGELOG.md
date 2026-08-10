@@ -8,6 +8,13 @@ the commit messages carry the detail.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
+## [Unreleased]
+
+### Highlights
+- While Devin works the transcript says so, in a word that shimmers.
+- No spinner beside it: one signal, not two saying the same thing.
+- Reduced motion keeps the word readable instead of washing it out.
+
 ## [0.9.2] - 2026-08-10
 
 Nothing you typed or were asked goes missing.
