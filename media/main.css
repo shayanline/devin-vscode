@@ -2887,9 +2887,9 @@ body {
    line can pass behind them all. */
 .tool-group-body {
   /* A run's glyphs are the full width ones (a terminal, a pencil, a search), so
-     they need more air around them than the smaller timeline icons do: the line
-     breaks, and the elbow stops, two pixels further out here. */
-  --dv-node-clear: 5px;
+     they need a little more air around them than the smaller timeline icons do:
+     the line breaks, and the elbow stops, one pixel further out here. */
+  --dv-node-clear: 4px;
   position: relative;
   margin-left: 6px;
   padding-left: 10px;
