@@ -8,6 +8,14 @@ the commit messages carry the detail.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
+## [Unreleased]
+
+### Highlights
+- A running command offers Continue in Background and Focus Terminal.
+- Both sit at the end of its row, as icons, where VS Code puts them.
+- The row says "in background" once the agent has moved on from it.
+- Two commands at once no longer land in the same shell.
+
 ## [0.10.6] - 2026-08-10
 
 ### Highlights

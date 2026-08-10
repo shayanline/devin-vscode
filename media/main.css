@@ -2700,6 +2700,29 @@ body {
   transform: rotate(90deg);
 }
 
+/* What can be done with the command this row is running, at the end of its
+   title, as VS Code's terminal part puts it (chatTerminalToolProgressPart.css:
+   flex, 4px apart, pushed right, centred). Icon only, and always there: these
+   are the only way to reach a command once it is running. */
+.tool-actions {
+  order: 1;
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+  align-self: center;
+}
+
+.tool-actions:empty {
+  display: none;
+}
+
+/* The icon carries the action, so it is drawn as an icon is (VS Code leaves
+   these at the icon foreground rather than dimming them with the row). */
+.tool-actions .msg-action .codicon {
+  font-size: 14px;
+  opacity: 1;
+}
+
 /* Completed tools show nothing (like VS Code); only active/failed get an icon. */
 .tool .tool-status {
   flex: 0 0 auto;

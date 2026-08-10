@@ -76,6 +76,8 @@ interface Term {
   // Left running on purpose: the agent stopped waiting for it (see `skip`), so
   // its exit is nobody's business but the transcript's.
   skipped?: boolean;
+  // Its terminal has been shown, so it is no longer hidden from the user.
+  revealed?: boolean;
 }
 
 // Runs shell commands on behalf of the agent and exposes the ACP terminal
@@ -245,9 +247,20 @@ export class TerminalManager {
     this.signal(this.terminals.get(terminalId), "SIGTERM");
   }
 
-  // Bring up the real terminal a command is running in, if it is running in one.
+  // Bring up the real terminal a command is running in, if it is running in one,
+  // and remember that it is no longer hidden: the action that reveals it is
+  // named for what it does, and after the first time it only focuses.
   show(terminalId: string): void {
-    this.terminals.get(terminalId)?.run?.show();
+    const term = this.terminals.get(terminalId);
+    if (term?.run) {
+      term.run.show();
+      term.revealed = true;
+    }
+  }
+
+  // Whether its terminal has been brought up at least once.
+  isRevealed(terminalId: string): boolean {
+    return !!this.terminals.get(terminalId)?.revealed;
   }
 
   // Stop waiting on a command without stopping the command: the agent is told it

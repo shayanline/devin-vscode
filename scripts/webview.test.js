@@ -2457,7 +2457,7 @@ test("a command shows the output it is producing, not just its exit code", async
   assert.strictEqual(h.errors().length, 0);
 });
 
-test("a command running in a real terminal can be opened, or left running", async () => {
+test("a command running in a real terminal offers what VS Code offers", async () => {
   const h = createHarness();
   h.post({ type: "ready" });
   h.post({ type: "body", body: "thread" });
@@ -2466,31 +2466,49 @@ test("a command running in a real terminal can be opened, or left running", asyn
   h.post({ type: "terminalOutput", terminalId: "term-9", output: "listening on 3000\n", integrated: true });
   await h.settle(20);
 
-  const actions = () => [...h.thread().querySelectorAll('[data-terminal-actions="term-9"] .dv-link-btn')].map((b) => b.textContent);
-  assert.deepStrictEqual(actions(), ["Show Terminal", "Skip"], "the real terminal is one click away, and so is moving on");
+  // The row's own title carries them, icon only, in VS Code's order and wording
+  // (chatTerminalToolProgressPart: Continue in Background, then focus).
+  const bar = () => h.thread().querySelector("#thread .tool .tool-actions");
+  const actions = () => [...bar().querySelectorAll("button")].map((b) => [b.title, b.querySelector("i").className.split(" ")[1]]);
+  assert.deepStrictEqual(actions(), [
+    ["Continue in Background", "codicon-debug-continue-small"],
+    ["Show and Focus Terminal", "codicon-open-in-product"]
+  ]);
+  // And the disclosure is the third of them, named for what it would do.
+  assert.strictEqual(h.thread().querySelector(".tool .tool-chevron").title, "Show Output");
 
-  h.thread().querySelector('[data-terminal-actions="term-9"] .dv-link-btn').click();
+  bar().querySelectorAll("button")[1].click();
   await h.settle(5);
   assert.ok(h.posted.some((m) => m.type === "showTerminal" && m.terminalId === "term-9"));
-
-  [...h.thread().querySelectorAll('[data-terminal-actions="term-9"] .dv-link-btn')][1].click();
-  await h.settle(5);
-  assert.ok(h.posted.some((m) => m.type === "skipTerminal" && m.terminalId === "term-9"), "Skip tells the host to stop waiting");
-
-  // The host confirms: the command is still going, the agent is not waiting.
-  h.post({ type: "terminalOutput", terminalId: "term-9", output: "listening on 3000\n", integrated: true, skipped: true });
+  // Once shown it is no longer hidden, so the action stops offering to show it.
+  h.post({ type: "terminalOutput", terminalId: "term-9", output: "listening on 3000\n", integrated: true, revealed: true });
   await h.settle(10);
-  assert.deepStrictEqual(actions(), ["Show Terminal"], "with nothing left to skip");
-  assert.match(h.thread().querySelector('[data-terminal-actions="term-9"]').textContent, /Left running/);
+  assert.deepStrictEqual(actions().map((a) => a[0]), ["Continue in Background", "Focus Terminal"]);
 
-  // A command that never had a terminal of its own has nothing to open.
+  bar().querySelectorAll("button")[0].click();
+  await h.settle(5);
+  assert.ok(
+    h.posted.some((m) => m.type === "continueInBackground" && m.terminalId === "term-9"),
+    "backgrounding it tells the host to stop waiting"
+  );
+
+  // The host confirms: the command is still going, the agent is not waiting, and
+  // there is nothing left to background.
+  h.post({ type: "terminalOutput", terminalId: "term-9", output: "listening on 3000\n", integrated: true, revealed: true, skipped: true });
+  await h.settle(10);
+  assert.deepStrictEqual(actions().map((a) => a[0]), ["Focus Terminal"]);
+  assert.match(
+    h.thread().querySelector("#thread .tool .label").textContent,
+    /^Running.*npm run dev in background$/,
+    "and the row says it is still going, as VS Code titles it"
+  );
+
+  // A command that never had a terminal of its own has nothing to offer.
   h.post({ type: "toolCall", id: "c2", kind: "execute", status: "in_progress", rawInput: { command: "ls" }, terminalId: "term-10" });
   h.post({ type: "terminalOutput", terminalId: "term-10", output: "a.ts\n" });
   await h.settle(10);
-  assert.deepStrictEqual(
-    [...h.thread().querySelectorAll('[data-terminal-actions="term-10"] .dv-link-btn')].map((b) => b.textContent),
-    ["Skip"]
-  );
+  const rows = [...h.thread().querySelectorAll("#thread .tool")];
+  assert.strictEqual(rows[rows.length - 1].querySelector(".tool-actions").children.length, 0);
   assert.strictEqual(h.errors().length, 0);
 });
 

@@ -257,6 +257,40 @@ test("a command runs in the user's own terminal, and its output is readable", as
   assert.deepStrictEqual(await run.exit, { exitCode: 0, signal: null });
 });
 
+test("a second command while the first is still running gets its own terminal", async () => {
+  globalThis.__dvConfig = { useIntegratedTerminal: true };
+  vscode.window.terminals.length = 0;
+  const runner = new VsCodeTerminalRunner("/tmp", {}, () => {});
+
+  const first = runner.run("npm run dev", undefined, () => {});
+  await tick();
+  const shellA = fakeShell(vscode.window.terminals[0]);
+  vscode.window.__fire.shellIntegrationChanged.fire({ terminal: vscode.window.terminals[0] });
+  const runA = await first;
+
+  // The first command is still going, so typing the second into the same shell
+  // would put one command on top of the other.
+  const second = runner.run("npm test", undefined, () => {});
+  await tick();
+  assert.strictEqual(vscode.window.terminals.length, 2, "so it opens another terminal");
+  const shellB = fakeShell(vscode.window.terminals[1]);
+  vscode.window.__fire.shellIntegrationChanged.fire({ terminal: vscode.window.terminals[1] });
+  await second;
+  assert.deepStrictEqual(shellA.commands, ["npm run dev"]);
+  assert.deepStrictEqual(shellB.commands, ["npm test"]);
+
+  // Once a command ends, its terminal takes the next one rather than piling up.
+  vscode.window.__fire.shellExecutionEnded.fire({ execution: shellA.execution, exitCode: 0 });
+  await runA.exit;
+  await tick();
+  const third = runner.run("git status", undefined, () => {});
+  await tick();
+  assert.strictEqual(vscode.window.terminals.length, 2, "the free one is reused");
+  await third;
+  assert.deepStrictEqual(shellA.commands, ["npm run dev", "git status"]);
+  runner.dispose();
+});
+
 test("a command the terminal cannot report is run in the background instead", async () => {
   globalThis.__dvConfig = { useIntegratedTerminal: true };
   vscode.window.terminals.length = 0;

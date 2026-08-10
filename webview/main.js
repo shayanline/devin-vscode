@@ -1648,7 +1648,14 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     anim.appendChild(inner);
     root.appendChild(header);
     root.appendChild(anim);
-    const sync = () => header.setAttribute("aria-expanded", root.classList.contains("dv-collapsed") ? "false" : "true");
+    const sync = () => {
+      const collapsed = root.classList.contains("dv-collapsed");
+      header.setAttribute("aria-expanded", collapsed ? "false" : "true");
+      // The disclosure names what it would do, which for a command row is
+      // VS Code's Show Output / Hide Output.
+      const chevron = header.querySelector(".tool-chevron");
+      if (chevron) chevron.title = collapsed ? "Show Output" : "Hide Output";
+    };
     const setCollapsed = (v) => {
       root.classList.toggle("dv-collapsed", !!v);
       // Hidden means hidden: without this, Tab walks into a folded section and
@@ -3651,6 +3658,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       const node = c.root;
       const chev = document.createElement("i");
       chev.className = "codicon codicon-chevron-right tool-chevron";
+      // VS Code's third terminal action, which for us is the disclosure itself.
+      chev.title = "Show Output";
       const kindIcon = document.createElement("i");
       kindIcon.className = "codicon tool-kind";
       const label = document.createElement("span");
@@ -3661,6 +3670,11 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       c.header.appendChild(kindIcon);
       c.header.appendChild(label);
       c.header.appendChild(statEl);
+      // What can be done with the command this row is running, in the row's own
+      // title, as VS Code puts it (chatTerminalToolProgressPart's action bar).
+      const actions = document.createElement("div");
+      actions.className = "tool-actions";
+      c.header.appendChild(actions);
       const bodyEl = document.createElement("div");
       bodyEl.className = "tool-body";
       c.body.appendChild(bodyEl);
@@ -3675,7 +3689,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       } else {
         group = placeInRun(node, m.id);
       }
-      entry = { node, kindIcon, label, statEl, bodyEl, data: {}, collapse: c, group, sub, railIcon };
+      entry = { node, kindIcon, label, statEl, bodyEl, actions, data: {}, collapse: c, group, sub, railIcon };
       toolEls.set(m.id, entry);
     }
     // Merge incrementally: updates may carry only some fields.
@@ -3744,13 +3758,23 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         entry.label.textContent = "";
         const verb = document.createElement("span");
         verb.className = "tool-verb";
-        verb.textContent = d.status === "in_progress" || d.status === "pending" ? "Running" : "Ran";
+        const running = d.status === "in_progress" || d.status === "pending";
+        verb.textContent = running ? "Running" : "Ran";
         const code = document.createElement("code");
         // Plain text, not highlighted: on the row the command is a label, and VS
         // Code only colours it in the block you get by expanding it.
         code.className = "tool-label-code";
         code.textContent = commandDisplayText(cmd);
         entry.label.append(verb, code);
+        // Left running while the agent went on: "Running X in background", as
+        // VS Code titles it, so the row does not read as still being waited on.
+        const term = d.terminalId && terminalCache.get(d.terminalId);
+        if (running && term && term.skipped) {
+          const suffix = document.createElement("span");
+          suffix.className = "tool-detail";
+          suffix.textContent = " in background";
+          entry.label.append(suffix);
+        }
         entry.node.querySelector(".dv-collapsible-header").title = cmd;
       } else if (search) {
         // What it looked for, and how many it found, the way VS Code's chat titles
@@ -4060,7 +4084,6 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         const title = d.kind === "execute" ? "" : "Output";
         const { sec, pre } = toolSection(title, (cached && cached.output) || "\u2026", { cls: "terminal-pre", json: false });
         pre.setAttribute("data-terminal", c.terminalId);
-        sec.appendChild(terminalActions(c.terminalId));
         body.appendChild(sec);
       });
       // A command that finishes in a moment should not have flashed its output on
@@ -4070,6 +4093,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       // failure stays open (below), and a section opened by hand is left alone.
       watchTerminalOutput(entry);
     }
+    renderTerminalActions(entry);
 
     const diffItems = (d.content || []).filter((c) => c.type === "diff" && c.path);
     const locs = (d.locations || []).slice();
@@ -4164,36 +4188,34 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // A file reference rendered as a VS Code style pill: a file-type icon, the
   // name, and (for edits) +added / -removed line counts. Clicking opens a diff
   // for edited files or the file at a line otherwise.
-  // Beside a command's output: the terminal it is really running in, and a way
-  // to stop waiting for it. Both belong to a live command in a real terminal, so
-  // the row is rebuilt from the terminal's own state as it changes.
-  function terminalActions(terminalId) {
-    const row = document.createElement("div");
-    row.className = "terminal-actions";
-    row.dataset.terminalActions = terminalId;
-    updateTerminalActions(row, terminalCache.get(terminalId));
-    return row;
-  }
-
-  function updateTerminalActions(row, state) {
-    const id = row.dataset.terminalActions;
+  // What a command's row offers, in the order and the wording VS Code uses
+  // (chatTerminalToolProgressPart._updateToolbarActions): let it carry on in the
+  // background, and open the terminal it is really running in. The third of its
+  // actions, showing the output, is this row's own chevron.
+  function renderTerminalActions(entry) {
+    const bar = entry.actions;
+    const id = entry.data.terminalId;
+    if (!bar) return;
+    bar.innerHTML = "";
+    if (!id) return;
+    const state = terminalCache.get(id);
     // Nothing said about it yet means it has only just started.
     const running = !state || (!state.exitStatus && !state.skipped);
-    row.innerHTML = "";
+    if (running && state && state.integrated) {
+      bar.appendChild(iconBtn("codicon-debug-continue-small", "Continue in Background", (e) => {
+        e.stopPropagation();
+        vscode.postMessage({ type: "continueInBackground", terminalId: id });
+      }));
+    }
     if (state && state.integrated) {
-      row.appendChild(linkBtn("Show Terminal", () => vscode.postMessage({ type: "showTerminal", terminalId: id })));
+      // Hidden until it is shown once, which is the difference between the two
+      // labels VS Code uses for the same action.
+      const label = state.revealed ? "Focus Terminal" : "Show and Focus Terminal";
+      bar.appendChild(iconBtn("codicon-open-in-product", label, (e) => {
+        e.stopPropagation();
+        vscode.postMessage({ type: "showTerminal", terminalId: id });
+      }));
     }
-    if (running) {
-      // VS Code's "Continue in Background": the command carries on, the agent
-      // stops waiting on it and gets on with the next thing.
-      row.appendChild(linkBtn("Skip", () => vscode.postMessage({ type: "skipTerminal", terminalId: id })));
-    } else if (state && state.skipped) {
-      const note = document.createElement("span");
-      note.className = "muted";
-      note.textContent = "Left running";
-      row.appendChild(note);
-    }
-    row.classList.toggle("hidden", !row.children.length);
   }
 
   function filePills(rows) {
@@ -6289,14 +6311,26 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       const sig = m.exitStatus.signal;
       text += `\n[exited ${sig ? "signal " + sig : "code " + (code == null ? "?" : code)}]`;
     }
-    const state = { output: text, exitStatus: m.exitStatus, integrated: !!m.integrated, skipped: !!m.skipped };
+    const state = {
+      output: text,
+      exitStatus: m.exitStatus,
+      integrated: !!m.integrated,
+      skipped: !!m.skipped,
+      revealed: !!m.revealed
+    };
     terminalCache.set(m.terminalId, state);
     el.thread.querySelectorAll(`pre[data-terminal="${cssEscape(m.terminalId)}"]`).forEach((pre) => {
       pre.textContent = text || "\u2026";
       scrollToBottom();
     });
-    el.thread.querySelectorAll(`[data-terminal-actions="${cssEscape(m.terminalId)}"]`)
-      .forEach((row) => updateTerminalActions(row, state));
+    // The row is titled and actioned by the state of its command, so redraw the
+    // rows bound to this terminal: what it says ("in background") and what it
+    // offers (backgrounding it, showing it) both follow from this.
+    const bound = [];
+    toolEls.forEach((entry, id) => {
+      if (entry.data && entry.data.terminalId === m.terminalId) bound.push(id);
+    });
+    bound.forEach((id) => upsertTool({ id }));
   }
   function shorten(p) { return p.split(/[\\/]/).slice(-2).join("/"); }
   function baseName(p) { return p.split(/[\\/]/).filter(Boolean).pop() || p; }

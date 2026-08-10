@@ -845,7 +845,8 @@ export class ChatController implements AcpHost {
       output,
       exitStatus,
       integrated: terminals.isIntegrated(terminalId),
-      skipped: terminals.isSkipped(terminalId)
+      skipped: terminals.isSkipped(terminalId),
+      revealed: terminals.isRevealed(terminalId)
     });
   }
 
@@ -1115,10 +1116,18 @@ export class ChatController implements AcpHost {
         case "subagentMode":
           await this.setSubagentMode(String(msg.id || ""), msg.background === true);
           return;
-        case "showTerminal":
-          this.active()?.terminals.show(String(msg.terminalId || ""));
+        case "showTerminal": {
+          // Reveal and focus the terminal a command is running in, and say so:
+          // the action is named for whether it is hidden.
+          const rt = this.active();
+          const id = String(msg.terminalId || "");
+          if (rt) {
+            rt.terminals.show(id);
+            this.postTerminal(rt.terminals, id, rt.terminals.output(id).output, rt.terminals.output(id).exitStatus);
+          }
           return;
-        case "skipTerminal": {
+        }
+        case "continueInBackground": {
           // The command keeps running; the agent stops waiting for it. Its row
           // says so as soon as the host confirms.
           const rt = this.active();

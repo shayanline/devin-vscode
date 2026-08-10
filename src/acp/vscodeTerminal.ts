@@ -22,8 +22,14 @@ const INTEGRATION_MS = 5000;
 const PAGERS = { GIT_PAGER: "cat", PAGER: "cat" };
 
 export class VsCodeTerminalRunner implements TerminalRunner {
-  private terminal?: vscode.Terminal;
-  private ready?: Promise<boolean>;
+  // Terminals waiting for their next command, and every one we have opened. A
+  // terminal is only reused once the command it was running has ended, which is
+  // what VS Code does (runInTerminalTool reuses the session's terminal unless it
+  // has been left running). Two commands at once would otherwise be typed into
+  // the same shell, one on top of the other.
+  private readonly free: vscode.Terminal[] = [];
+  private readonly opened: vscode.Terminal[] = [];
+  private readonly ready = new WeakMap<vscode.Terminal, Promise<boolean>>();
   // Set once a terminal has come up without shell integration: waiting the full
   // 5s again for every command after that is just a slow way to fail.
   private unsupported = false;
@@ -76,6 +82,10 @@ export class VsCodeTerminalRunner implements TerminalRunner {
       done = true;
       clean.flush();
       listeners.forEach((l) => l.dispose());
+      // Its terminal is free for the next command, unless it has gone.
+      if (!terminal.exitStatus && this.opened.includes(terminal)) {
+        this.free.push(terminal);
+      }
       settle(status);
     };
     const listeners = [
@@ -88,8 +98,7 @@ export class VsCodeTerminalRunner implements TerminalRunner {
       // and without this the agent waits on it for ever.
       vscode.window.onDidCloseTerminal((t) => {
         if (t === terminal) {
-          this.terminal = undefined;
-          this.ready = undefined;
+          this.forget(terminal);
           finish({ exitCode: null, signal: "SIGHUP" });
         }
       })
@@ -114,8 +123,12 @@ export class VsCodeTerminalRunner implements TerminalRunner {
   }
 
   private async terminalWithIntegration(): Promise<vscode.Terminal | undefined> {
-    if (!this.terminal || this.terminal.exitStatus) {
-      this.terminal = vscode.window.createTerminal({
+    let terminal = this.free.pop();
+    while (terminal && terminal.exitStatus) {
+      terminal = this.free.pop();
+    }
+    if (!terminal) {
+      terminal = vscode.window.createTerminal({
         name: "Devin",
         iconPath: new vscode.ThemeIcon("sparkle"),
         cwd: this.cwd,
@@ -125,20 +138,29 @@ export class VsCodeTerminalRunner implements TerminalRunner {
         hideFromUser: true,
         isTransient: true
       });
-      this.ready = undefined;
+      this.opened.push(terminal);
     }
-    const terminal = this.terminal;
     if (terminal.shellIntegration) {
       return terminal;
     }
-    this.ready = this.ready || waitForIntegration(terminal);
-    await this.ready;
+    const ready = this.ready.get(terminal) || waitForIntegration(terminal);
+    this.ready.set(terminal, ready);
+    await ready;
     return terminal;
   }
 
+  private forget(terminal: vscode.Terminal): void {
+    for (const list of [this.free, this.opened]) {
+      const i = list.indexOf(terminal);
+      if (i !== -1) {
+        list.splice(i, 1);
+      }
+    }
+  }
+
   dispose(): void {
-    this.terminal?.dispose();
-    this.terminal = undefined;
+    this.opened.splice(0).forEach((t) => t.dispose());
+    this.free.length = 0;
   }
 }
 
