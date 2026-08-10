@@ -8,16 +8,12 @@ the commit messages carry the detail.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
-## [Unreleased]
+## [0.9.3] - 2026-08-10
+
+Saying what the agent is doing, and folding it away once it is done.
 
 ### Highlights
 - A finished turn folds its work behind one line, leaving the answer out.
-
-## [0.9.3] - 2026-08-10
-
-Saying what the agent is doing, and opening what it made.
-
-### Highlights
 - While Devin works the transcript says so, in a word that shimmers.
 - No spinner beside it: one signal, not two saying the same thing.
 - Reduced motion keeps the word readable instead of washing it out.
