@@ -2620,8 +2620,7 @@ body {
 }
 
 .plan-docked-title {
-  flex: 1;
-  min-width: 0;
+  flex: 0 0 auto;
   margin-bottom: 0;
   text-transform: none;
   letter-spacing: normal;
@@ -2639,13 +2638,25 @@ body {
 /* Where the plan has got to, shown on the header so a folded plan is not just a
    count. It takes the rest of the row and gives way before the count does. */
 .plan-at {
-  flex: 0 1 auto;
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--dv-dim);
   font-size: var(--dv-fs-s);
+}
+
+/* Open, the header is not all there is to read, so the step runs on over as
+   many lines as it needs, and the title, count and chevron sit against its
+   first line rather than the middle of the block. */
+.plan-docked:not(.dv-collapsed) > .dv-collapsible-header {
+  align-items: flex-start;
+}
+
+.plan-docked:not(.dv-collapsed) .plan-at {
+  overflow: visible;
+  white-space: normal;
 }
 
 /* Nothing is under way, so the header names what is waiting instead. */

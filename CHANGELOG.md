@@ -8,6 +8,13 @@ the commit messages carry the detail.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
+## [0.11.7] - 2026-08-13
+
+### Highlights
+- The word Plan no longer prints over the count beside it.
+- A long step is cut short with an ellipsis while the plan is folded.
+- Opening the plan shows the step it is on in full, over several lines.
+
 ## [0.11.6] - 2026-08-13
 
 ### Highlights
