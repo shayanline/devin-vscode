@@ -1346,6 +1346,63 @@ test("a folder dropped from outside VS Code attaches as a listing, not silently 
   assert.strictEqual(h.errors().length, 0);
 });
 
+test("an image the agent cannot decode is attached as a file, never as an image", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  await h.settle(10);
+
+  // An svg sent as an image block has the whole request rejected, and the block
+  // stays in the session, so every later message in that chat is rejected too.
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg"><rect width="8" height="8"/></svg>';
+  const files = [
+    new h.window.File([svg], "icon.svg", { type: "image/svg+xml" }),
+    new h.window.File(["\u0089PNG"], "shot.png", { type: "image/png" })
+  ];
+  const drop = new h.window.Event("drop", { bubbles: true, cancelable: true });
+  Object.defineProperty(drop, "dataTransfer", {
+    value: {
+      types: ["Files"],
+      files,
+      items: files.map((f) => ({ kind: "file", webkitGetAsEntry: () => null, getAsFile: () => f })),
+      getData: () => ""
+    }
+  });
+  h.document.getElementById("chat-main").dispatchEvent(drop);
+  await h.settle(30);
+
+  const images = h.posted.filter((m) => m.type === "attachImage");
+  assert.deepStrictEqual(images.map((m) => m.name), ["shot.png"], "only the png goes inline as an image");
+  const text = h.posted.find((m) => m.type === "attachDroppedText");
+  assert.ok(text, "the svg is attached as a file instead of being dropped");
+  assert.strictEqual(text.name, "icon.svg");
+  assert.ok(text.text.includes("<svg"), "its source is what gets attached");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a pasted image the agent cannot decode is attached as a file too", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  await h.settle(10);
+
+  const file = new h.window.File(["<svg xmlns='http://www.w3.org/2000/svg'/>"], "logo.svg", { type: "image/svg+xml" });
+  const paste = new h.window.Event("paste", { bubbles: true, cancelable: true });
+  Object.defineProperty(paste, "clipboardData", {
+    value: { items: [{ kind: "file", type: "image/svg+xml", getAsFile: () => file }] }
+  });
+  h.document.getElementById("input").dispatchEvent(paste);
+  await h.settle(30);
+
+  assert.ok(!h.posted.some((m) => m.type === "attachImage"), "it does not go inline as an image");
+  const text = h.posted.find((m) => m.type === "attachDroppedText");
+  assert.ok(text, "the pasted svg is attached as a file");
+  assert.strictEqual(text.name, "logo.svg");
+  assert.strictEqual(h.errors().length, 0);
+});
+
 test("a drag anywhere in the panel, not just the chat column, is a drop target", async () => {
   const h = createHarness();
   h.post({ type: "ready" });

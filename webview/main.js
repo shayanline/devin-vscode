@@ -964,6 +964,32 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     if (!split && sendFloater) sendFloater.close();
   }
 
+  // The image types the agent can decode. One it cannot (svg, heic, avif) has to
+  // be attached as a file: as an image block the whole request is rejected, and
+  // the block stays in the session, so every later message in that chat is
+  // rejected too.
+  const IMAGE_TYPES = [
+    "image/png", "image/jpeg", "image/gif", "image/webp",
+    "image/bmp", "image/tiff", "image/x-icon", "image/vnd.microsoft.icon"
+  ];
+
+  // A file handed over as bytes with no path (a paste, or an OS drop): an image
+  // goes inline as base64 so the model can see it, anything else as its text.
+  function attachRawFile(file, fallbackName) {
+    const name = file.name || fallbackName;
+    const reader = new FileReader();
+    if (IMAGE_TYPES.indexOf(file.type) !== -1) {
+      reader.onload = () => {
+        const result = String(reader.result || "");
+        vscode.postMessage({ type: "attachImage", name, mime: file.type, data: result.slice(result.indexOf(",") + 1) });
+      };
+      reader.readAsDataURL(file);
+      return;
+    }
+    reader.onload = () => vscode.postMessage({ type: "attachDroppedText", name, text: String(reader.result || "") });
+    reader.readAsText(file);
+  }
+
   el.input.addEventListener("paste", (e) => {
     const items = (e.clipboardData && e.clipboardData.items) || [];
     for (const it of items) {
@@ -971,13 +997,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         const file = it.getAsFile();
         if (!file) continue;
         e.preventDefault();
-        const reader = new FileReader();
-        reader.onload = () => {
-          const result = String(reader.result || "");
-          const base64 = result.slice(result.indexOf(",") + 1);
-          vscode.postMessage({ type: "attachImage", name: file.name || "pasted-image", mime: it.type, data: base64 });
-        };
-        reader.readAsDataURL(file);
+        attachRawFile(file, "pasted-image");
       }
     }
   });
@@ -1288,18 +1308,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         attachDroppedFolder(dir);
         return;
       }
-      if (!file) return;
-      const reader = new FileReader();
-      if (file.type && file.type.indexOf("image/") === 0) {
-        reader.onload = () => {
-          const result = String(reader.result || "");
-          vscode.postMessage({ type: "attachImage", name: file.name || "image", mime: file.type, data: result.slice(result.indexOf(",") + 1) });
-        };
-        reader.readAsDataURL(file);
-      } else {
-        reader.onload = () => vscode.postMessage({ type: "attachDroppedText", name: file.name || "file", text: String(reader.result || "") });
-        reader.readAsText(file);
-      }
+      if (file) attachRawFile(file, "file");
     });
   }
 

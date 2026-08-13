@@ -8,6 +8,13 @@ the commit messages carry the detail.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
+## [0.11.6] - 2026-08-13
+
+### Highlights
+- An SVG pasted or dropped in attaches as its source, not as an image.
+- A HEIC or AVIF attaches as a file instead of breaking the chat for good.
+- A TIFF or ICO attaches inline as an image.
+
 ## [0.11.5] - 2026-08-10
 
 ### Highlights

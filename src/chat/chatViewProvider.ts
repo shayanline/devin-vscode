@@ -160,15 +160,19 @@ export interface SurfaceHost {
   titlesChanged(): void;
 }
 
-// Image file extensions we attach inline (as base64), matching VS Code chat's
-// attachable image types. Anything else is attached as text.
+// Image file extensions we attach inline (as base64): the formats the agent can
+// decode. Anything else is attached as text, including an image it cannot read
+// (svg, heic, avif), which as an image block gets the whole request rejected.
 const IMAGE_MIME_BY_EXT: Record<string, string> = {
   png: "image/png",
   jpg: "image/jpeg",
   jpeg: "image/jpeg",
   gif: "image/gif",
   webp: "image/webp",
-  bmp: "image/bmp"
+  bmp: "image/bmp",
+  tif: "image/tiff",
+  tiff: "image/tiff",
+  ico: "image/x-icon"
 };
 
 // Match VS Code chat's cap on an attached image (it refuses larger ones).
