@@ -928,6 +928,10 @@ export class ChatController implements AcpHost {
 
   private destroyRuntime(rt: Runtime): void {
     try {
+      // Stop listening before stopping the process: everything this runtime could
+      // still say is about a session we have finished with, and its exit is about
+      // to arrive late enough to be mistaken for a live one's.
+      rt.client.removeAllListeners();
       rt.client.dispose();
     } catch {
       // ignore
@@ -1127,6 +1131,17 @@ export class ChatController implements AcpHost {
   // A runtime's `devin acp` exited (crash, kill, or idle exit). Drop it from
   // the pool and, if it was the visible one, reflect the disconnected state.
   private onRuntimeExit(rt: Runtime): void {
+    // A disposed agent is SIGKILLed on a timer, so its exit can arrive up to a
+    // second and a half after we stopped caring, by which time the user may have
+    // reopened the session and a NEW runtime holds this id. Deleting by id alone
+    // removed that one instead: the live agent kept the CLI's session lock while
+    // being invisible to the pool, so the row went gray, Terminate disappeared,
+    // the next send met its own lock, and shutdown never stopped it.
+    const current = rt.id ? this.runtimes.get(rt.id) : undefined;
+    if (current && current !== rt) {
+      this.log(`[exit] a replaced agent for ${rt.id} exited, keeping the live one`);
+      return;
+    }
     if (rt.id) {
       // Settle any prompt the agent was still waiting on so its client-side
       // call does not hang and no dead widget is left on screen.
