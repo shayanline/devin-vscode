@@ -488,7 +488,12 @@
     return keyRow(key, label, textInput(val(key) || "", placeholder, (v) => setPath(key, v || undefined)), hint);
   }
   function keyList(key, label, placeholder, hint) {
-    const current = (val(key) || []).join(", ");
+    // Whatever the file holds, the way every other control here takes it. A list
+    // written as a bare string threw, and the throw came after the pane had been
+    // emptied to be redrawn, so the section rendered nothing at all, and search,
+    // which renders every section, blanked the whole page.
+    const v = val(key);
+    const current = Array.isArray(v) ? v.join(", ") : v == null ? "" : String(v);
     return keyRow(key, label, textInput(current, placeholder, (v) => setPath(key, splitList(v))), hint);
   }
   // Reset the keys of one group, in the active scope only. Absent when that scope

@@ -27,6 +27,27 @@ const REQUIRED_ACTIONS = {
   Advanced: ["Open this config file"]
 };
 
+test("a value of the wrong shape is shown, not left as a blank page", () => {
+  // The panel renders what is in the file, and a hand edited config can hold a
+  // string where a list belongs. Every other control coerces whatever it is given.
+  const h = createSettings();
+  const data = JSON.parse(JSON.stringify(h.data));
+  for (const g of data.valuesByScope) {
+    g.values["sandbox.allowed_domains"] = "github.com";
+  }
+  h.send({ type: "settings:data", data });
+  h.openSection("Advanced");
+
+  assert.ok(h.row("sandbox.allowed_domains"), "the row is still rendered");
+  assert.strictEqual(h.control("sandbox.allowed_domains").value, "github.com", "with the value the file holds");
+  assert.ok(h.rowKeys().length > 1, "and so is the rest of the section");
+
+  // Search renders every section, so one bad value there took the results with it.
+  h.search("domains");
+  assert.ok(h.visibleRows().length > 0, "search still finds it");
+  assert.deepStrictEqual(h.consoleErrors, [], "nothing threw");
+});
+
 test("the sidebar lists every section once", () => {
   const h = createSettings();
   assert.deepStrictEqual(h.sections(), SECTIONS);
