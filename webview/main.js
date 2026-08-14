@@ -2122,6 +2122,13 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // Restore: rewind to before this turn and drop the prompt text back into the
   // composer (do not auto-run), matching VS Code.
   function doRestore(turn) {
+    // A rewind during a running turn fights the prompt for the channel, and the
+    // keyboard path already refuses it. The mouse path can still reach a stale
+    // button: the controls of a turn holding focus are left alone until focus moves,
+    // so its row can outlive the state it was drawn for.
+    if (busy || !turnRevertable(turn)) {
+      return;
+    }
     if (turn.headBefore == null) {
       // No prior node: the host starts a fresh session and posts "clear",
       // which resets the transcript for us (no trim needed here).
