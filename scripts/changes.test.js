@@ -167,6 +167,30 @@ test("the working set survives a window reload, counts and all", async () => {
   assert.deepStrictEqual(last.pathsFor("A"), [], "a change already dealt with stays dealt with");
 });
 
+test("one original too big to keep does not take the others with it", async () => {
+  // The working set is written out whole, and past a cap it was deleted outright,
+  // cap included: one generated file, lock file or data fixture the agent rewrote
+  // and every other original went with it, so after a reload nothing at all could
+  // be undone and nothing said so.
+  const dir = fs.mkdtempSync(path.join(TMP, "big-"));
+  const store = { scheme: "file", path: dir, fsPath: dir, query: "", toString: () => "file://" + dir };
+  const small = write("small.ts", "v2\n");
+  const huge = write("generated.json", "v2\n");
+
+  const before = new ChangeTracker();
+  before.register();
+  await before.useStore(store);
+  before.recordDiff(small, "v1\n", "v2\n", "A", { added: 1, removed: 1 });
+  before.recordDiff(huge, "x".repeat(9 * 1024 * 1024), "v2\n", "A", { added: 1, removed: 1 });
+  await new Promise((r) => setTimeout(r, 600));
+
+  const after = new ChangeTracker();
+  after.register();
+  await after.useStore(store);
+  assert.deepStrictEqual(after.pathsFor("A"), [small], "the ones that fit come back");
+  assert.strictEqual(original(after, small), "v1\n", "with the text an undo needs");
+});
+
 test("a one line change in a large file is counted, and counted quickly", async () => {
   // The count ran a full table over both sides, so replaying a session's worth of
   // edits was seconds of work. Trimming what the two sides share at each end makes

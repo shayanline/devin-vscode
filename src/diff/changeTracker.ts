@@ -166,16 +166,25 @@ export class ChangeTracker
         added: s.added,
         removed: s.removed
       }));
+    // The cap is on the whole file, so the biggest originals are what has to go
+    // when it is exceeded, one at a time. Dropping the lot instead meant a single
+    // generated file the agent rewrote took every other original with it, and a
+    // reload came back with nothing to undo.
+    const encode = () => Buffer.from(JSON.stringify(out), "utf8");
+    let body = encode();
+    while (out.length && body.byteLength > MAX_STORE_BYTES) {
+      let biggest = 0;
+      for (let i = 1; i < out.length; i++) {
+        if ((out[i].original?.length ?? 0) > (out[biggest].original?.length ?? 0)) {
+          biggest = i;
+        }
+      }
+      out.splice(biggest, 1);
+      body = encode();
+    }
     try {
       if (!out.length) {
         await vscode.workspace.fs.delete(this.store);
-        return;
-      }
-      const body = Buffer.from(JSON.stringify(out), "utf8");
-      if (body.byteLength > MAX_STORE_BYTES) {
-        // Too big to keep, and a stale file would restore older originals than the
-        // ones held now, so it goes rather than being left behind.
-        await vscode.workspace.fs.delete(this.store).then(undefined, () => undefined);
         return;
       }
       await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(this.store, ".."));
