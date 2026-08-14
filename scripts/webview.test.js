@@ -2215,6 +2215,45 @@ test("a run the user opened is left open when it ends", async () => {
   assert.strictEqual(h.errors().length, 0);
 });
 
+test("scrolling back through a thought is not undone by the next one", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "busy", value: true });
+  h.post({ type: "thoughtChunk", text: "First, the callers still import the old helpers." });
+  await h.settle(30);
+
+  // The peek is a fixed height box with its own scrollbar. jsdom has no layout, so
+  // the geometry the pin reads is stated here.
+  const box = h.thread().querySelector(".thinking .dv-collapsible-anim-inner");
+  assert.ok(box, "the thought has a box of its own");
+  Object.defineProperty(box, "scrollHeight", { value: 1000, configurable: true });
+  Object.defineProperty(box, "clientHeight", { value: 200, configurable: true });
+
+  // The reader scrolls up inside it to read back through the chain.
+  box.scrollTop = 300;
+  h.post({ type: "thoughtChunk", text: "\n\nSecond, that means the rename has to cover them too." });
+  await h.settle(30);
+  const afterScrollingUp = box.scrollTop;
+
+  // And back at the bottom, where it should follow the newest thought again.
+  box.scrollTop = 800;
+  h.post({ type: "thoughtChunk", text: "\n\nThird, the tests pin the old names." });
+  await h.settle(30);
+  const afterReturning = box.scrollTop;
+
+  // Ending the thought stops the timer ticking its label, which is what keeps the
+  // runner's event loop alive, so it happens before anything can throw.
+  h.post({ type: "assistantEnd" });
+  h.post({ type: "busy", value: false });
+  await h.settle(10);
+
+  assert.strictEqual(afterScrollingUp, 300, "the box stays where the reader left it");
+  assert.strictEqual(afterReturning, 1000, "and follows again once they are back at the bottom");
+  assert.strictEqual(h.errors().length, 0);
+});
+
 test("reasoning inside a run is text on the chain, not a section to open", async () => {
   const h = createHarness();
   h.post({ type: "ready" });

@@ -2674,10 +2674,19 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   function renderOpenBlock() {
     if (!block) return;
     if (block.kind === "thinking") {
+      // Keep the fixed-height peek pinned to the latest reasoning, unless the user
+      // has expanded it to read back through the chain of thought, or has scrolled
+      // up inside it, which is the same intention and was not being honoured: every
+      // thought that arrived took them back to the bottom of a section they were
+      // reading. Measured before the items are redrawn, like the box a command's
+      // output goes into.
+      const box = block.scrollEl;
+      const at = box ? box.scrollTop : 0;
+      const pinned = !box || box.scrollHeight - at - box.clientHeight < 24;
       renderThinkingItems(block);
-      // Keep the fixed-height peek pinned to the latest reasoning, unless the
-      // user has expanded it to read back through the chain of thought.
-      if (block.peek && block.scrollEl && !block.collapse.userToggled()) block.scrollEl.scrollTop = block.scrollEl.scrollHeight;
+      if (box && block.peek && !block.collapse.userToggled()) {
+        box.scrollTop = pinned ? box.scrollHeight : at;
+      }
     } else if (block.kind === "user") {
       if (block.turn) { block.turn.text = block.buffer; block.turn.reqText.innerHTML = renderMarkdown(block.buffer); }
     } else {
