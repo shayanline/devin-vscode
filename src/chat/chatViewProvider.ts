@@ -2343,7 +2343,13 @@ export class ChatController implements AcpHost {
       const res = await this.loadWithTakeover(rt, id, cwd);
       rt.lastActivityAt = Date.now();
       this.store.add(id, cwd);
-      this.markVisible(id);
+      // A wake takes seconds too, so this only speaks for the panel while the panel
+      // is still showing this chat, the same as loading one does. Recording it as
+      // the chat being viewed regardless sent the next window reload to the chat the
+      // user had left rather than the one they were reading.
+      if (this.activeId === id) {
+        this.markVisible(id);
+      }
       if (res && (res.configOptions || res.modes)) {
         this.publishOptions(rt, res.configOptions, res.modes?.currentModeId);
       } else {
@@ -2828,12 +2834,19 @@ export class ChatController implements AcpHost {
     // the pool yet to receive it, and a session that already starts in the
     // configured mode would otherwise have no mode recorded at all.
     rt.mode = currentMode || rt.mode;
-    this.currentMode = rt.mode || this.currentMode;
+    // The mode and model belong to this runtime, but the pickers, the status bar and
+    // `currentMode`/`currentModel` speak for whatever the panel is showing. Starting
+    // a chat takes seconds and the user can open another one while it runs, so a
+    // chat that arrives in the background would otherwise flip their pickers to its
+    // own defaults and leave the mode picker naming a mode their agent is not in.
+    const showing = () => this.activeId === rt.id;
+    if (showing()) {
+      this.currentMode = rt.mode || this.currentMode;
+    }
     try {
       if (mode && mode !== currentMode) {
         await rt.client.setConfigOption(rt.id, "mode", mode);
         rt.mode = mode;
-        this.currentMode = mode;
       }
       // Only re-apply a remembered model if it's still an available model
       // (when we know the list); otherwise keep the session's own default.
@@ -2841,8 +2854,12 @@ export class ChatController implements AcpHost {
       if (model && modelKnown) {
         await rt.client.setConfigOption(rt.id, "model", model);
         rt.model = model;
-        this.currentModel = model;
       }
+      if (!showing()) {
+        return;
+      }
+      this.currentMode = rt.mode || this.currentMode;
+      this.currentModel = rt.model || this.currentModel;
       this.statusBar?.set({ connected: true, mode: this.currentMode, model: this.currentModel });
       this.post({ type: "mode", mode: this.currentMode });
       if (this.currentModel) {
