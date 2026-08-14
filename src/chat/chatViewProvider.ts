@@ -1824,10 +1824,10 @@ export class ChatController implements AcpHost {
           // with it, belong to this chat now.
           this.store.setDraft(undefined, "");
           const carried = this.stagedFor(undefined);
-          await this.dropStaged(undefined);
           if (carried.length) {
             this.staged.set(this.stagedKey(rt.id), carried);
           }
+          await this.dropStaged(undefined);
           this.stagedChanged(rt.id);
           this.post({ type: "sessionReady", sessionId: rt.id });
         }
@@ -2700,6 +2700,10 @@ export class ChatController implements AcpHost {
       this.log(`[delete-failed] ${err instanceof Error ? err.message : String(err)}`);
     }
     this.store.remove(id);
+    // A deleted chat has nothing left to stage for, and what it was holding can be
+    // images: kilobytes to megabytes of base64 that would otherwise sit in the
+    // workspace's storage for good, since nothing else ever looks at that file again.
+    void this.dropStaged(id);
     if (this.activeId === id) {
       this.activeId = undefined;
       this.post({ type: "clear" });
@@ -3007,16 +3011,35 @@ export class ChatController implements AcpHost {
     }
   }
 
-  // Nothing is staged for this chat any more, because it has just been sent.
-  private clearStaged(id?: string): void {
-    this.staged.set(this.stagedKey(id), []);
-    this.stagedChanged(id);
+  // The files a message is being sent with. Taken rather than read, and taken before
+  // anything is awaited: a second message written while this one is still waiting for
+  // its chat to open would otherwise find the same files still staged and carry them
+  // too, so one image went to the agent twice.
+  private takeStaged(id?: string): Staged[] {
+    const held = this.stagedFor(id);
+    if (held.length) {
+      this.staged.set(this.stagedKey(id), []);
+      this.stagedChanged(id);
+    }
+    return held;
+  }
+
+  // Put them back, for a send that could not go through: the text is handed back to
+  // the composer the same way, and the two belong together.
+  private restoreStaged(id: string | undefined, items: Staged[]): void {
+    if (items.length) {
+      this.staged.set(this.stagedKey(id), items);
+      this.stagedChanged(id);
+    }
   }
 
   private postStaged(): void {
     this.post({
       type: "attachments",
-      items: this.stagedFor(this.activeId).map((a) => {
+      // Not `stagedFor`, which would insert an entry: a read must not create one, or a
+      // chat handed to another surface gets an empty entry here that then shadows the
+      // files still on disk, and they are never read back.
+      items: (this.staged.get(this.stagedKey(this.activeId)) || []).map((a) => {
         const item: { id: string; label: string; type: string; thumb?: string } = { id: a.id, label: a.label, type: a.type };
         const b = a.block as { type?: string; mimeType?: string; data?: string };
         if (a.type === "image" && b && b.type === "image" && b.data) {
@@ -3047,6 +3070,9 @@ export class ChatController implements AcpHost {
       const body = Buffer.from(JSON.stringify(items), "utf8");
       if (body.byteLength > ChatController.MAX_ATTACHMENT_BYTES) {
         this.log(`[attachments] ${body.byteLength} bytes staged, too much to keep past this window`);
+        // And the older, smaller set that is still on disk is not the answer either: it
+        // would come back after a reload as though it were what the composer holds.
+        await vscode.workspace.fs.delete(file).then(undefined, () => {});
         return;
       }
       await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(file, ".."));
@@ -3513,12 +3539,14 @@ export class ChatController implements AcpHost {
     // clearing the draft and then returning is how a message disappears.
     const draftFor = startNew ? undefined : this.activeId;
     this.store.setDraft(draftFor, "");
-    // What was staged for the chat this message was written in, which is not
-    // necessarily the chat on screen by the time it goes out: waking a chat and
-    // creating one both take seconds, and the user can open another one while they run.
-    const staged = this.stagedFor(draftFor);
+    // Taken from the chat this message was written in, not from whatever is on screen
+    // by the time it goes out: waking a chat and creating one both take seconds, and the
+    // user can open another one while they run. Taken now rather than cleared later, so a
+    // second message written in the meantime cannot pick up the same files.
+    const staged = this.takeStaged(draftFor);
     const giveBack = (why?: string) => {
       this.store.setDraft(draftFor, text);
+      this.restoreStaged(draftFor, staged);
       this.post({ type: "draft", id: draftFor || null, text });
       if (why) {
         this.post({ type: "error", text: why });
@@ -3613,14 +3641,6 @@ export class ChatController implements AcpHost {
       this.post({ type: "userMessage", text, attachments });
     }
     const blocks: ContentBlock[] = [...this.buildImplicitBlocks(), ...staged.map((a) => a.block), { type: "text", text }];
-    // They went with the message, so they are no longer staged. Which chat is on
-    // screen does not come into it. For a brand new chat that means both the box they
-    // were staged in and the chat that box just became, since starting a chat carries
-    // what was waiting in the box into it.
-    this.clearStaged(draftFor);
-    if (startNew) {
-      this.clearStaged(sent.id);
-    }
     await this.runPrompt(sent, blocks);
   }
 
@@ -3727,8 +3747,6 @@ export class ChatController implements AcpHost {
     } else {
       rt.queued.push(message);
     }
-    // The queued message is holding them now.
-    this.clearStaged(rt.id);
     this.postQueued(rt);
   }
 
@@ -3747,7 +3765,7 @@ export class ChatController implements AcpHost {
       return;
     }
     this.store.setDraft(this.activeId, "");
-    this.enqueueMessage(rt, text, this.stagedFor(this.activeId), true);
+    this.enqueueMessage(rt, text, this.takeStaged(this.activeId), true);
     rt.client.cancel(rt.id);
   }
 
@@ -3790,7 +3808,9 @@ export class ChatController implements AcpHost {
     const was = this.queueEditingId;
     this.queueEditingId = id;
     if (was && was !== id && this.stagedFor(this.activeId).length) {
-      this.clearStaged(this.activeId);
+      // Abandoning an edit drops the copy of that message's files it was given.
+      this.staged.set(this.stagedKey(this.activeId), []);
+      this.stagedChanged(this.activeId);
     }
     const to = id && rt ? rt.queued.find((q) => q.id === id) : undefined;
     if (to) {
@@ -3879,8 +3899,7 @@ export class ChatController implements AcpHost {
       return;
     }
     q.text = text;
-    q.attachments = this.stagedFor(this.activeId);
-    this.clearStaged(this.activeId);
+    q.attachments = this.takeStaged(this.activeId);
     this.postQueued(rt);
   }
 

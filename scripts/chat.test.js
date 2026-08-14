@@ -186,6 +186,32 @@ test("messages queued behind a turn come back as a draft when the surface goes",
   await h.dispose();
 });
 
+test("a staged file goes with one message, not with both of them", async () => {
+  // The message written first owns what was staged when it was written. A second one
+  // written while the first is still waiting for its chat to open must not find the
+  // same files still staged: they belong to a message that has already gone.
+  const h = createChat({ promptDelay: 60000 });
+  await h.ready();
+  h.send({ type: "attachImage", name: "one-message-only.png", mime: "image/png", data: PNG });
+  await h.until(() => ((h.last("attachments") || {}).items || []).length === 1);
+
+  // Sent from the list, so the chat has to be created first, which is the window the
+  // second message is written in.
+  h.setDelays({ newDelay: 900 });
+  h.send({ type: "send", text: "first message", newSession: true });
+  await h.settle(200);
+  h.send({ type: "send", text: "second message" });
+  await h.settle(2500);
+
+  // The first message went out with it. The second is waiting behind that turn, and
+  // must not be holding the same file: it would be sent again when the queue drains.
+  const sent = prompts(h).reduce((n, p) => n + p.images, 0);
+  const waiting = (h.last("queued").items || []).reduce((n, q) => n + (q.attachments || []).length, 0);
+  assert.strictEqual(sent, 1, "the message that was written with it carried it: " + JSON.stringify(prompts(h)));
+  assert.strictEqual(waiting, 0, "and the one written after it is not holding it too");
+  await h.dispose();
+});
+
 test("a second send never puts a second prompt on the same channel", async () => {
   // Opening a chat drains whatever was typed while it opened, so the turn that starts
   // can be in flight exactly when the send that asked for the wake resumes. ACP has no
