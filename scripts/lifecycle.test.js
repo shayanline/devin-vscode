@@ -183,6 +183,78 @@ test("an exiting host leaves no running command behind", { skip: process.platfor
   assert.ok(await waitGone(child), "a stubborn command's children must not be left running");
 });
 
+test("terminating a chat escalates past a command that ignores SIGTERM", { skip: process.platform === "win32" }, async () => {
+  // The shutdown path escalates, and this one did not: terminating a chat, an idle
+  // exit and a surface going away all went through dispose, which asked once and
+  // then dropped the entry, so a command that traps SIGTERM was left running with
+  // nothing left able to find it.
+  const terms = new TerminalManager(process.env, TMP);
+  const { terminalId } = terms.create({
+    sessionId: "s1",
+    command: "trap '' TERM; sh -c 'trap \"\" TERM; echo ready; while true; do sleep 1; done' & echo child=$!; wait"
+  });
+  let child = 0;
+  for (let i = 0; i < 250; i++) {
+    const out = terms.output(terminalId).output;
+    const m = /child=(\d+)/.exec(out);
+    if (m && out.includes("ready")) { child = Number(m[1]); break; }
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  assert.ok(child > 0 && alive(child), "the fixture must be running and trapping first");
+
+  terms.disposeAll();
+  assert.ok(await waitGone(child), "a chat that goes away takes its commands with it");
+});
+
+test("a command stopped while its terminal is still starting is stopped for real", async () => {
+  // Waiting for a real terminal's shell integration takes seconds, and a Stop
+  // pressed in that window used to signal a terminal with nothing to signal yet,
+  // so the command the user had just cancelled started anyway and ran to
+  // completion. The wait is stood in for here by a runner that answers when the
+  // test says so.
+  let handOver = () => {};
+  let killed = 0;
+  const run = { exit: new Promise(() => {}), show() {}, kill() { killed++; } };
+  const runner = {
+    run: () => new Promise((resolve) => { handOver = () => resolve(run); }),
+    dispose() {}
+  };
+  const terms = new TerminalManager(process.env, TMP, undefined, undefined, runner);
+
+  const { terminalId } = terms.create({ sessionId: "s1", command: "npm test" });
+  // Stop lands while the terminal is still being made.
+  terms.kill(terminalId);
+  // Only now does the terminal become available.
+  handOver();
+  const status = await terms.waitForExit(terminalId);
+
+  assert.strictEqual(killed, 1, "the command is stopped as soon as there is something to stop");
+  assert.ok(status, "and the agent is told it is over instead of waiting for ever");
+});
+
+test("a command left running in the background survives the agent releasing it", async () => {
+  // "Continue in Background" is a promise to the user, and the agent releases the
+  // terminal as soon as it stops waiting. The protocol says a release kills what is
+  // still running, so honouring that typed Ctrl+C into the user's own terminal and
+  // killed the command they had just asked to keep.
+  let killed = 0;
+  const run = { exit: new Promise(() => {}), show() {}, kill() { killed++; } };
+  const runner = { run: async () => run, dispose() {} };
+  const terms = new TerminalManager(process.env, TMP, undefined, undefined, runner);
+
+  const { terminalId } = terms.create({ sessionId: "s1", command: "npm run dev" });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.strictEqual(terms.skip(terminalId), true, "the user leaves it running");
+
+  terms.release(terminalId);
+  assert.strictEqual(killed, 0, "releasing it must not stop it");
+  assert.strictEqual(terms.isSkipped(terminalId), true, "and it is still tracked, so shutdown can reach it");
+
+  // Which it does, because nothing may outlive the host.
+  terms.forceStopAll();
+  assert.strictEqual(killed, 1, "the way out still stops it");
+});
+
 // --- Commands in the user's own terminal -----------------------------------
 
 // Stands in for a shell that reports what it runs. `chunks` are written into the

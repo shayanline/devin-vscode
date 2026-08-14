@@ -78,6 +78,11 @@ interface Term {
   skipped?: boolean;
   // Its terminal has been shown, so it is no longer hidden from the user.
   revealed?: boolean;
+  // Asked to stop before it had anything to stop. Starting is asynchronous (a real
+  // terminal reports its shell integration first, which can take seconds), and a
+  // Stop pressed in that window used to signal nothing at all, so the command the
+  // user had just cancelled started anyway.
+  stopRequested?: boolean;
 }
 
 // Runs shell commands on behalf of the agent and exposes the ACP terminal
@@ -122,7 +127,18 @@ export class TerminalManager {
     // Starting is asynchronous (a real terminal has to report its shell
     // integration first) but creating one is not: the agent gets its id now and
     // asks for the output and the exit separately, both of which wait properly.
-    void this.start(terminalId, term, params);
+    //
+    // A failure to start has to end as an exit, not as a rejected promise nobody
+    // is holding: the agent is waiting on this terminal, and an unhandled rejection
+    // in the extension host is a crash rather than a failed command.
+    this.start(terminalId, term, params).catch((err) => {
+      this.log?.(`[terminal] ${terminalId} could not start: ${err instanceof Error ? err.message : String(err)}`);
+      term.exitStatus = term.exitStatus || { exitCode: null, signal: null };
+      for (const w of term.waiters.splice(0)) {
+        w(term.exitStatus);
+      }
+      this.onOutput?.(terminalId, term.output, term.exitStatus);
+    });
     return { terminalId };
   }
 
@@ -144,6 +160,21 @@ export class TerminalManager {
       this.log?.(`[terminal] ${terminalId} exited code=${status.exitCode} signal=${status.signal || ""}`);
     };
 
+    // Stopped before it began, which is the Stop button landing while the terminal
+    // was still being made. Nothing has run, so there is nothing to signal: say it
+    // is over so the agent stops waiting.
+    const stoppedEarly = (): boolean => {
+      if (!term.stopRequested) {
+        return false;
+      }
+      this.log?.(`[terminal] ${terminalId} was stopped before it started`);
+      settle({ exitCode: null, signal: "SIGTERM" });
+      return true;
+    };
+    if (stoppedEarly()) {
+      return;
+    }
+
     // A program with its own arguments, or its own environment, is not something
     // to type into the user's shell: those run as a child process, as they
     // always did. Everything else is the command line the agent would have typed.
@@ -152,11 +183,22 @@ export class TerminalManager {
       const run = await this.runner.run(params.command, params.cwd, append).catch(() => undefined);
       if (run) {
         term.run = run;
+        // The wait for shell integration is the widest part of the window, so ask
+        // again now that there is something to ask.
+        if (term.stopRequested) {
+          try { run.kill(); } catch { /* the shell may already be gone */ }
+          this.log?.(`[terminal] ${terminalId} was stopped while its terminal was starting`);
+          settle({ exitCode: null, signal: "SIGTERM" });
+          return;
+        }
         this.log?.(`[terminal] ${terminalId} start (integrated): ${params.command}`);
         void run.exit.then(settle);
         // Say it is running before it has printed anything, so its row can offer
         // the terminal it is in and the chance to leave it running.
         this.onOutput?.(terminalId, term.output, null);
+        return;
+      }
+      if (stoppedEarly()) {
         return;
       }
     }
@@ -297,6 +339,12 @@ export class TerminalManager {
     if (!term || term.exitStatus) {
       return;
     }
+    if (!term.run && !term.child) {
+      // Nothing to signal yet: it is still being started. Remember, so whichever
+      // half of `start` gets there next stops instead of carrying on.
+      term.stopRequested = true;
+      return;
+    }
     if (term.run) {
       // The user's own terminal: interrupt the command, leave the terminal.
       term.run.kill();
@@ -335,15 +383,37 @@ export class TerminalManager {
     }
   }
 
+  // The agent releases a terminal once it is done with it, and the protocol says a
+  // release kills whatever is still running. That is right for a command it waited
+  // for, and wrong for one the user chose to leave running: "Continue in
+  // Background" is a promise, and the agent releases the terminal the moment it
+  // stops waiting, so honouring the kill typed Ctrl+C into the user's own terminal
+  // and stopped the very command they had asked to keep. It stays tracked, so the
+  // shutdown paths can still reach it.
   release(terminalId: string): void {
+    const term = this.terminals.get(terminalId);
+    if (term && term.skipped && !term.exitStatus) {
+      this.log?.(`[terminal] ${terminalId} released while left running, so it keeps going`);
+      return;
+    }
     this.kill(terminalId);
     this.terminals.delete(terminalId);
   }
 
+  // Everything this chat was running, on the way out (terminating it, an idle
+  // exit, a surface going away). The polite pass cannot win against a command that
+  // traps SIGTERM, so it escalates on a timer, the way the agent's own dispose
+  // does: this path runs while the host is still alive to fire it.
   disposeAll(): void {
-    for (const id of [...this.terminals.keys()]) {
-      this.release(id);
-    }
+    const terms = [...this.terminals.values()];
+    this.requestStopAll();
+    const t = setTimeout(() => {
+      for (const term of terms) {
+        this.signal(term, "SIGKILL");
+      }
+    }, 1500);
+    t.unref?.();
+    this.terminals.clear();
     this.runner?.dispose();
   }
 
@@ -362,5 +432,10 @@ export class TerminalManager {
       this.signal(term, "SIGKILL");
     }
     this.terminals.clear();
+    // A command running in the user's own terminal cannot be signalled past an
+    // interrupt, so the last word is disposing the terminal itself, which takes its
+    // shell and everything under it. This is the end of the shutdown sequence, so
+    // there is nothing left that needs the runner.
+    this.runner?.dispose();
   }
 }
