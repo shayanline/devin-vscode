@@ -316,11 +316,14 @@ export class ChangeTracker
     return !!snap && !snap.resolved;
   }
 
-  // Forget one chat's files entirely, leaving them on disk as they are (used
-  // after a revert, which has already put the files back itself).
-  clearFor(sessionId: string): void {
+  // Forget files this chat changed, leaving them on disk as they are. `paths`
+  // limits it to the ones a revert actually put back: anything else is still on
+  // disk holding the agent's content, and dropping it would take away the only
+  // way left to undo it.
+  clearFor(sessionId: string, paths?: string[]): void {
+    const only = paths ? new Set(paths.map((p) => key(p))) : undefined;
     for (const [k, snap] of [...this.snapshots]) {
-      if (!snap.sessions.has(sessionId)) {
+      if (!snap.sessions.has(sessionId) || (only && !only.has(k))) {
         continue;
       }
       this.snapshots.delete(k);

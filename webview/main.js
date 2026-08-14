@@ -2018,21 +2018,30 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     cancel.className = "checkpoint-cancel hidden";
     cancel.innerHTML = '<i class="codicon codicon-close"></i>';
     cancel.title = "Cancel restoring this checkpoint";
+    // How many of this chat's file edits the rewind will leave on disk, so the
+    // confirmation can say what really happens instead of promising a workspace
+    // that goes back with the conversation.
+    let staying = 0;
     const setConfirming = (v) => {
       confirming = v;
       row.classList.toggle("confirming", v);
       cancel.classList.toggle("hidden", !v);
       const span = btn.querySelector("span");
-      span.textContent = v ? "Discard Edits" : "Restore Checkpoint";
+      const files = staying === 1 ? "1 file edit" : staying + " file edits";
+      span.textContent = v ? (staying ? "Rewind Chat" : "Discard Edits") : "Restore Checkpoint";
       span.classList.toggle("dv-shimmer", v);
-      btn.title = v ? "Confirm restoring this checkpoint and discarding later edits" : "Restores workspace and chat to this point";
+      btn.title = v
+        ? (staying
+          ? `Rewinds the chat to this point. ${files} stay on disk, listed under changed files to keep or undo.`
+          : "Confirm restoring this checkpoint and discarding later edits")
+        : "Restores this chat to this point";
     };
     cancel.addEventListener("click", (e) => { e.stopPropagation(); setConfirming(false); });
     btn.addEventListener("click", async (e) => {
       e.stopPropagation();
       if (confirming) { setConfirming(false); doRestore(turn); return; }
       const needs = await revertNeedsConfirm(turn);
-      if (needs) setConfirming(true);
+      if (needs) { staying = needs.staying || 0; setConfirming(true); }
       else doRestore(turn);
     });
     row.appendChild(left);
@@ -2204,10 +2213,16 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     const token = "pv" + (++previewSeq);
     return new Promise((resolve) => {
       previewWaiters.set(token, (msg) => {
-        if (msg.error || !msg.result) { resolve(false); return; }
+        // Files this chat has changed that the agent's plan does not cover. They
+        // stay on disk through the rewind, so this is the case most worth stopping
+        // for, and it is the one the agent reports nothing about.
+        const staying = msg.pendingFiles || 0;
+        if (msg.error || !msg.result) { resolve(staying > 0 ? { staying } : false); return; }
         const r = msg.result;
-        const has = (r.fileActions && r.fileActions.length) || (r.irreversibleWarnings && r.irreversibleWarnings.length);
-        resolve(!!has);
+        const planned = (r.fileActions && r.fileActions.length) || 0;
+        const warnings = (r.irreversibleWarnings && r.irreversibleWarnings.length) || 0;
+        if (!planned && !warnings && !staying) { resolve(false); return; }
+        resolve({ staying: planned ? 0 : staying });
       });
       vscode.postMessage({ type: "revertPreview", head: turn.headBefore, token });
       setTimeout(() => { if (previewWaiters.has(token)) { previewWaiters.delete(token); resolve(false); } }, 4000);

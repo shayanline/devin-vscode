@@ -267,6 +267,30 @@ test("each session gets its own working set, and a revert forgets only its own",
   assert.strictEqual(tracker.hasUnresolvedChange(mine), false, "and nothing of A's is held any more");
 });
 
+test("a rewind only forgets the files it really put back", async () => {
+  // The agent's revert reports a file plan that is empty even for files it edited
+  // through us, and its own rewind leaves the disk alone. So forgetting the whole
+  // chat would strand the edits on disk with no way left to undo them.
+  const tracker = new ChangeTracker();
+  tracker.register();
+  const putBack = write("restored.ts", "agent wrote this\n");
+  const stillThere = write("untouched.ts", "agent wrote this too\n");
+
+  tracker.recordDiff(putBack, "original\n", "agent wrote this\n", "A");
+  tracker.recordDiff(stillThere, "original\n", "agent wrote this too\n", "A");
+
+  tracker.clearFor("A", [putBack]);
+
+  assert.deepStrictEqual(tracker.pathsFor("A"), [stillThere],
+    "the file the rewind did not touch stays reviewable");
+  assert.strictEqual(tracker.hasUnresolvedChange(putBack), false, "the restored one is done with");
+  assert.strictEqual(tracker.hasUnresolvedChange(stillThere), true, "and the other can still be undone");
+
+  // Undoing it afterwards still works, which is the whole point of keeping it.
+  await tracker.reject(stillThere);
+  assert.strictEqual(fs.readFileSync(stillThere, "utf8"), "original\n");
+});
+
 test("a kept file is no longer offered for review, but can still be put back", async () => {
   const tracker = new ChangeTracker();
   tracker.register();

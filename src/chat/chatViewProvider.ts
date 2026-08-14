@@ -3810,11 +3810,15 @@ export class ChatController implements AcpHost {
     if (!rt || !Number.isFinite(head)) {
       return;
     }
+    // The agent's plan is only half the answer: it reports no file actions for the
+    // edits it made through us, so the count of this chat's unreviewed files is
+    // what tells the user their edits are staying on disk.
+    const pendingFiles = this.changes.changesFor(rt.id).length;
     try {
       const result = await rt.client.revertPreview(rt.id, head);
-      this.post({ type: "revertPreview", head, token, result });
+      this.post({ type: "revertPreview", head, token, result, pendingFiles });
     } catch (err) {
-      this.post({ type: "revertPreview", head, token, error: err instanceof Error ? err.message : String(err) });
+      this.post({ type: "revertPreview", head, token, pendingFiles, error: err instanceof Error ? err.message : String(err) });
     }
   }
 
@@ -3837,16 +3841,18 @@ export class ChatController implements AcpHost {
       return;
     }
     try {
-      // The agent truncates the conversation but does NOT touch the client's
-      // disk: revert/preview returns the file undo it expects us to apply. So
-      // read the plan first, then rewind, then restore/delete each file so a
-      // "Discard edits" actually removes the changes (e.g. a newly created file).
+      // The agent truncates the conversation but does NOT touch the client's disk,
+      // and it does not tell us what to put back either: probing a real agent, the
+      // file plan is empty even for files it edited through us. So read the plan,
+      // rewind, apply whatever it did ask for, and keep everything it did not.
       const preview = await rt.client.revertPreview(rt.id, head).catch(() => undefined);
       await rt.client.revertExecute(rt.id, head);
-      await this.applyRevertFileUndo(preview);
-      // The working set now matches the reverted state; drop this session's.
-      this.changes.clearFor(rt.id);
-      this.post({ type: "reverted", head });
+      const restored = await this.applyRevertFileUndo(preview, rt);
+      // Only the files that were really put back leave the working set. The rest
+      // still hold the agent's edits, so they stay listed and undoable rather than
+      // being silently abandoned on disk with no way back.
+      this.changes.clearFor(rt.id, restored);
+      this.post({ type: "reverted", head, filesLeft: this.changes.changesFor(rt.id).length });
     } catch (err) {
       this.post({ type: "error", text: err instanceof Error ? err.message : String(err) });
       return;
@@ -3856,32 +3862,50 @@ export class ChatController implements AcpHost {
     }
   }
 
-  // Apply the file undo the agent planned in revert/preview. For a file we know
-  // we created this session, delete it (VS Code removes created files rather
-  // than leaving them empty); otherwise write back its original content.
-  private async applyRevertFileUndo(preview?: RevertPreviewResult): Promise<void> {
+  // Apply the file undo the agent planned in revert/preview, and report which
+  // files it actually put back.
+  //
+  // The agent's own content is preferred over the working set's, because they are
+  // not the same text: the working set holds what the file was before this chat
+  // FIRST touched it, which for a file edited in two turns is older than the
+  // checkpoint being restored, so using it would discard the earlier turn's work
+  // as well (and delete a file that turn had created).
+  //
+  // Probed against a real agent: `fileActions` comes back empty even for a file
+  // the agent edited through our own fs/write_text_file, and `revert/execute`
+  // leaves the disk alone (`outcomes: []`). So in practice this restores nothing,
+  // which is why the caller must keep whatever is left reviewable.
+  private async applyRevertFileUndo(preview: RevertPreviewResult | undefined, rt: Runtime): Promise<string[]> {
     const actions = preview?.fileActions;
-    if (!Array.isArray(actions)) {
-      return;
+    if (!Array.isArray(actions) || !actions.length) {
+      return [];
     }
+    const restored: string[] = [];
     for (const a of actions) {
-      const p = typeof a.path === "string" ? this.resolvePath(a.path) : undefined;
+      const p = typeof a.path === "string" ? this.resolvePath(a.path, rt.id) : undefined;
       if (!p) {
-        continue;
-      }
-      if (this.changes.hasUnresolvedChange(p)) {
-        await this.changes.reject(p); // restores original, or deletes if created
         continue;
       }
       const original = (a.kind as { originalContent?: string } | undefined)?.originalContent;
       try {
         if (typeof original === "string") {
           await fs.promises.writeFile(p, original, "utf8");
+          restored.push(p);
+        } else if (this.changes.hasUnresolvedChange(p)) {
+          // No content to write, so this is the agent asking for the file to go.
+          // The working set knows whether it existed before, and deletes it if not.
+          await this.changes.reject(p);
+          restored.push(p);
+        } else {
+          this.log(`[revert] no content for ${p}, left as it is`);
         }
-      } catch {
-        // best-effort: a failed restore should not abort the rewind
+      } catch (err) {
+        // A failed restore must not abort the rewind, but it must not be silent
+        // either: the file still holds the agent's content.
+        this.log(`[revert-failed] ${p}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
+    return restored;
   }
 
   // Settle every outstanding permission/elicitation request owned by a session

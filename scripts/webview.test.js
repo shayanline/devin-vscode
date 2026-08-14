@@ -4335,6 +4335,48 @@ test("a turn can be forked into a new chat without discarding anything", async (
   assert.strictEqual(h.errors().length, 0);
 });
 
+test("a rewind says the file edits it cannot undo are staying", async () => {
+  // Probed against a real agent: the revert plan is empty even for files it edited
+  // through us, and its own rewind leaves the disk alone. So "Discard Edits" would
+  // be a promise the rewind does not keep.
+  const h = createHarness();
+  h.replay([{ role: "user", text: "first" }, { role: "assistant", text: "answer" }]);
+  await h.settle(20);
+  h.post({ type: "turnHead", head: 31, reliable: true });
+  h.post({ type: "userChunk", text: "second" });
+  h.post({ type: "assistantChunk", text: "answer 2" });
+  h.post({ type: "assistantEnd", stopReason: "end_turn" });
+  await h.settle(20);
+
+  const btn = h.document.querySelector(".checkpoint-restore");
+  assert.ok(btn, "the turn offers a restore");
+  btn.dispatchEvent(new h.window.MouseEvent("click", { bubbles: true }));
+  await h.settle(10);
+
+  const asked = h.posted.filter((m) => m.type === "revertPreview").pop();
+  assert.ok(asked, "it asks what the rewind would do before doing it");
+  // What a real agent answers, plus the two files this chat changed itself.
+  h.post({
+    type: "revertPreview",
+    token: asked.token,
+    head: asked.head,
+    result: { fileActions: [], irreversibleWarnings: [], conflicts: [] },
+    pendingFiles: 2
+  });
+  await h.settle(10);
+
+  assert.strictEqual(h.posted.filter((m) => m.type === "revertExecute").length, 0,
+    "nothing is rewound until the second click");
+  const label = btn.querySelector("span").textContent;
+  assert.strictEqual(label, "Rewind Chat", "so it does not offer to discard what it will leave behind");
+  assert.match(btn.title, /2 file edits stay on disk/, "and says where those edits went: " + btn.title);
+
+  btn.dispatchEvent(new h.window.MouseEvent("click", { bubbles: true }));
+  await h.settle(10);
+  assert.ok(h.posted.some((m) => m.type === "revertExecute" && m.head === 31), "confirming rewinds");
+  assert.strictEqual(h.errors().length, 0);
+});
+
 test("the mode picker offers whatever modes the agent reports", async () => {
   const h = createHarness();
   h.post({ type: "ready" });
