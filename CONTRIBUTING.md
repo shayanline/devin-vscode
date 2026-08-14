@@ -7,7 +7,7 @@ Thanks for your interest. Issues and pull requests are welcome.
 - `npm install` to install dependencies. Node 22 or newer (`npm test` leaves its
   glob to Node, which only expands one from Node 21).
 - `npm run watch` (or `npm run compile`), then press F5 in VS Code to launch an Extension Development Host with the extension loaded.
-- `npm run check-types` type checks and `npm test` runs the webview unit tests.
+- `npm run check-types` type checks and `npm test` runs every suite: the webview, the settings panel, the chat controller, the working set, the ACP client, and the CLI helpers.
 - `npm run package` builds a `.vsix` you can install with `code --install-extension`.
 - `npm run preview -- --scenario full` opens a mock chat in a browser for fast UI iteration without the CLI. See [the screenshots guide](docs/screenshots.md) for the scenarios behind the README images and how to regenerate them.
 - `npm run preview:settings` does the same for the settings panel. It takes `--section <id>`, `--multi-root` (two workspace folders, so the scope tabs show both), and `--empty` (nothing configured, for the empty states). The mock payload lives in `scripts/settings-fixture.js` and is shared with the tests.

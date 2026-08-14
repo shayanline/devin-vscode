@@ -158,7 +158,6 @@ const docSaved = new EventEmitter();
 
 Object.assign(window, {
   activeTextEditor: undefined,
-  visibleTextEditors: [],
   onDidChangeActiveTextEditor: editorChanged.event,
   onDidChangeTextEditorSelection: selectionChanged.event,
   showTextDocument: async () => undefined,
@@ -167,8 +166,7 @@ Object.assign(window, {
   answer: undefined,
   showInputBox: async () => window.answer,
   showQuickPick: async () => window.answer,
-  showOpenDialog: async () => undefined,
-  createStatusBarItem: () => ({ show() {}, hide() {}, dispose() {}, text: "", tooltip: "", command: undefined })
+  showOpenDialog: async () => undefined
 });
 window.showWarningMessage = (m) => { window.shown.warning.push(String(m)); return Promise.resolve(window.answer); };
 window.showInformationMessage = (m) => { window.shown.info.push(String(m)); return Promise.resolve(window.answer); };

@@ -13,8 +13,7 @@ import { RequestDiagnosticsResult, TerminalExitStatus, TerminalRef } from "./typ
 // is listed the moment it is created and leaving debris in the user's own session
 // list to answer a settings panel would be its own bug.
 //
-// Prefer an already running agent where there is one (`ChatController` hands its
-// client over): this exists for the cold case, not to be the normal path.
+
 // Every agent opened for a question and not yet closed. A `devin acp` cannot outlive
 // the extension host any more than a chat's can, and this one is nobody's chat, so it
 // is in no surface's pool and no shutdown pass walked it: closing the window during

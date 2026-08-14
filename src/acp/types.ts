@@ -1,5 +1,5 @@
 // Types for the Agent Client Protocol (ACP) as spoken by `devin acp`.
-// Only the subset we use is modelled here. See https://agentclientprotocol.com
+// Only the subset we use is modelled here, from the spec at agentclientprotocol.com.
 
 export type ContentBlock =
   | { type: "text"; text: string }
@@ -15,7 +15,6 @@ export interface InitializeResult {
     sessionCapabilities?: Record<string, unknown>;
     [k: string]: unknown;
   };
-  authMethods?: { id: string; name: string; description?: string }[];
   agentInfo?: { name?: string; title?: string; version?: string };
   _meta?: Record<string, unknown>;
 }

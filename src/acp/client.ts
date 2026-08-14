@@ -263,10 +263,6 @@ export class AcpClient extends EventEmitter {
     return meta?.[key] === true;
   }
 
-  authenticate(methodId: string): Promise<unknown> {
-    return this.rpc("authenticate", { methodId }, QUERY_TIMEOUT_MS);
-  }
-
   newSession(cwd: string, additionalDirectories: string[] = [], mcpServers: unknown[] = []): Promise<NewSessionResult> {
     return this.rpc<NewSessionResult>("session/new", {
       cwd: cwd || this.options.cwd,

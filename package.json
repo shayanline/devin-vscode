@@ -405,8 +405,8 @@
             "fixedScrolling"
           ],
           "enumDescriptions": [
-            "Show a collapsed 'Thinking…' header; expand to read the reasoning",
-            "Show a live, fixed-height peek of the latest reasoning while it streams, then collapse it"
+            "Show a collapsed 'Thinking…' header, and expand to read the reasoning",
+            "Show a live, fixed height peek of the latest reasoning while it streams, then collapse it"
           ],
           "default": "fixedScrolling",
           "description": "How the reasoning stream is displayed while the agent is thinking."
@@ -434,7 +434,7 @@
           ],
           "enumDescriptions": [
             "Click a sent message to edit it in place",
-            "Show an edit button on hover; editing happens in place",
+            "Show an edit button on hover, and editing happens in place",
             "Edit a sent message in the main composer at the bottom",
             "Disable editing sent messages"
           ],
@@ -469,7 +469,7 @@
         "devin.contextUsage.enabled": {
           "type": "boolean",
           "default": true,
-          "description": "Show the context-window usage indicator in the input toolbar."
+          "description": "Show the context window usage indicator in the input toolbar."
         },
         "devin.implicitContext.enabled": {
           "type": "boolean",

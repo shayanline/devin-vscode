@@ -21,9 +21,11 @@ Open VSX under the `shayanline` publisher.
   - `extension.ts` activates the extension, wires up commands, and shuts every
     agent down cleanly on the way out.
   - `acp/` speaks the Agent Client Protocol to a `devin acp` process: the
-    connection, the client, terminal handling, and the shared types.
+    connection, the client, terminal handling, diagnostics, the throwaway agent the
+    settings panel asks questions of, and the shared types.
   - `chat/` holds the `ChatManager` (one controller per chat surface: sidebar,
-    editor tab, or window) and the webview provider that renders each chat.
+    editor tab, or window), the webview provider that renders each chat, and the
+    transcript log each chat is replayed from.
   - `session/` stores sessions per workspace and lists them.
   - `diff/` tracks the working set of edits and exposes keep and undo.
   - `settings/` is the Devin customisations editor and the config read and write
@@ -33,12 +35,13 @@ Open VSX under the `shayanline` publisher.
   - `ui/` is the status bar.
 - **`webview/`** is the browser side that runs inside the chat panel: `main.js`,
   markdown rendering, the Mermaid entry point, and the settings panel script.
-- **`scripts/`** holds the test harnesses, the browser previews, and the ACP
-  probe (see the commands below). Three harnesses, one per side: `webview-harness.js`
-  mounts the chat page in jsdom, `settings-harness.js` does the same for the settings
-  panel, and `chat-harness.js` runs the real chat controller against a real ACP
-  agent (see "Testing the host" below).
-- **`media/`, `resources/`** are icons and static assets. **`docs/`** holds the
+- **`scripts/`** holds the tests, the harnesses they run on, the browser previews, the
+  ACP probe and the release notes helper. Three harnesses, one per surface:
+  `webview-harness.js` mounts the chat page in jsdom, `settings-harness.js` does the
+  same for the settings panel, and `chat-harness.js` runs the real chat controller
+  against a real ACP agent (see "Testing the host" below).
+- **`media/`** is what the webviews are built from: the panel markup, the stylesheet,
+  and the icons. **`resources/`** is the extension's own icons. **`docs/`** holds the
   README screenshots and the guide for regenerating them.
 - Build output goes to **`dist/`** (bundled by esbuild, do not edit by hand).
 
@@ -57,6 +60,8 @@ Everything runs through npm scripts. Prefer these over ad hoc commands.
 | Package a `.vsix` | `npm run package` |
 | Preview the chat UI in a browser | `npm run preview -- --scenario full` |
 | Preview the settings panel | `npm run preview:settings` |
+| Drive the chat page by hand | `npm run harness` |
+| Ask a real agent what it supports | `node scripts/acp-probe.js --caps-report --no-prompt` |
 
 To run the extension itself, `npm run watch` and then press F5 in VS Code to
 launch an Extension Development Host with the extension loaded.
@@ -110,7 +115,7 @@ noted, and the leading `_` is part of the wire name:
 | `_cognition.ai/hooks/list` | Every loaded hook with `sourcePath`, `events`, `scope`, `format`. **Needs a sessionId** |
 | `_cognition.ai/plugins/list` | Only exists once `plugins` is declared, and `{sessionId}` alone is not the right params |
 | `_cognition.ai/session/share` | Errors with "Nothing to share yet" until the session has content |
-| `_cognition.ai/command/revise` | Edit a command before approving it. `CommandReviseParams` has 3 fields; the names are still unconfirmed, and finding them needs a probe that holds a permission request open instead of answering it |
+| `_cognition.ai/command/revise` | Edit a command before approving it. `CommandReviseParams` has 3 fields, and the names are still unconfirmed, and finding them needs a probe that holds a permission request open instead of answering it |
 | `_cognition.ai/reads/promptHistory` | Prompt history across sessions |
 | `_cognition.ai/terminal/killBackgroundShell` | Kill a background command for real |
 

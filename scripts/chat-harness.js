@@ -114,7 +114,7 @@ process.stdin.on("data", async (chunk) => {
         break;
       case "session/new":
         await delay(num("DV_NEW_DELAY"));
-        reply({ sessionId: process.env.DV_SESSION_ID || idBase + "-" + ++seq, modes: { currentModeId: process.env.DV_MODE || "default", availableModes: [{ id: "default", name: "Default" }, { id: "plan", name: "Plan" }] } });
+        reply({ sessionId: idBase + "-" + ++seq, modes: { currentModeId: process.env.DV_MODE || "default", availableModes: [{ id: "default", name: "Default" }, { id: "plan", name: "Plan" }] } });
         break;
       case "session/load":
         await delay(num("DV_LOAD_DELAY"));

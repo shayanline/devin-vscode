@@ -103,12 +103,12 @@ export class JsonRpcConnection {
     }
   }
 
-  // `timeoutMs` bounds the wait for calls that have no business taking long: the
-  // handshake, opening a session, and the short queries. A reply is otherwise only
-  // settled by the agent answering or its process closing, so an agent that is
-  // alive and silent (a blocking MCP server, a token refresh) leaves the caller
-  // waiting for the rest of the window. It is deliberately not the default: a
-  // prompt is a whole turn and can legitimately run for many minutes.
+  // `timeoutMs` bounds the wait. Every call the client makes passes one except a prompt,
+  // and a test reads that rule off its source. A reply is otherwise only settled by the
+  // agent answering or its process closing, so an agent that is alive and silent (a
+  // blocking MCP server, a token refresh) leaves the caller waiting for the rest of the
+  // window. It is not the default here because a prompt is a whole turn and can
+  // legitimately run for many minutes.
   request<T = unknown>(method: string, params?: unknown, timeoutMs?: number): Promise<T> {
     if (this.closed) {
       return Promise.reject(new Error("ACP connection is closed"));

@@ -839,8 +839,9 @@ export class ChatController implements AcpHost {
       modelImages: [...this.modelImageSupport],
       from: this.kind === "view" ? "the side panel" : "an editor tab"
     };
-    // Held by the surface it is going to now. The file on disk stays: it is that
-    // chat's, and the arriving surface reads it back the same way a reload does.
+    // Held by the surface it is going to now. The file on disk stays: it is that chat's,
+    // and whichever surface shows it next reads it back the same way a reload does, which
+    // is why the post below must not put an empty entry back in its place.
     this.staged.delete(this.stagedKey(id));
     if (visible) {
       this.postStaged();
@@ -2387,7 +2388,7 @@ export class ChatController implements AcpHost {
       this.broadcastStatuses();
       if (wakeFailed) {
         // The agent could not reload this session: return to the list rather
-        // than leaving a stale, non-interactive transcript on screen. Only if the
+        // than leaving a stale, non interactive transcript on screen. Only if the
         // user is still on it, though. A wake takes seconds, and closing out after
         // they have moved to another chat rips them out of the one they are reading
         // to report a failure in the one they left.
@@ -2714,13 +2715,11 @@ export class ChatController implements AcpHost {
 
   // --- Mode + model --------------------------------------------------------
 
-  // `rt` is the session the options came from: its mode and model are recorded
-  // on it so switching back to the session later restores the pickers to what
-  // that session is actually set to, rather than the last session's or a default.
   // What the pickers and the status bar are showing. A chat's own mode and model live
-  // on its runtime, and this is only what is on screen, so every write goes through
-  // here: a chat that is not the one being shown records its own settings and may not
-  // paint them. That rule used to be written out again at each of these sites, and the
+  // on its runtime, and this is only what is on screen, so every write that crossed an
+  // await goes through here: a chat that is not the one being shown records its own
+  // settings and may not paint them. The synchronous writers, taking a new chat and the
+  // user's own pickers, set it directly, since the panel cannot have moved on under them. That rule used to be written out again at each of these sites, and the
   // one that left it out flipped the pickers of the chat the user was reading to a
   // background chat's, which matters most on the mode, since it says whether permission
   // is asked for before anything runs. Answers whether the panel is really showing this
@@ -2735,6 +2734,9 @@ export class ChatController implements AcpHost {
     return true;
   }
 
+  // `rt` is the session the options came from: its mode and model are recorded on it so
+  // switching back to it later restores the pickers to what that session is actually set
+  // to, rather than to the last session's or to a default.
   private publishOptions(rt: Runtime | undefined, options: ConfigOption[] | undefined, currentModeId?: string): void {
     const byId = new Map((options || []).map((o) => [o.id, o]));
     const modeOpt = byId.get("mode");
@@ -3002,8 +3004,7 @@ export class ChatController implements AcpHost {
   }
 
   // Something staged for a chat changed: remember it, and show it if that chat is the
-  // one on screen. Every path that stages, unstages or sends goes through here, so
-  // there is one place that decides what the composer shows and what is written down.
+  // one on screen. One place decides what the composer shows and what is written down.
   private stagedChanged(id?: string): void {
     void this.saveStaged(id);
     if (this.stagedKey(id) === this.stagedKey(this.activeId)) {
@@ -3083,8 +3084,8 @@ export class ChatController implements AcpHost {
     }
   }
 
-  // Forget what was staged for a chat, here and on disk. For a chat that has gone, or
-  // for the "new chat" box once what was in it has been carried into a real chat.
+  // Forget what was staged for a chat, here and on disk: a chat that has been deleted, or
+  // the "new chat" box once what was in it has been carried into a real chat.
   private async dropStaged(id?: string): Promise<void> {
     this.staged.delete(this.stagedKey(id));
     const file = this.attachmentsFile(id);
@@ -3573,9 +3574,8 @@ export class ChatController implements AcpHost {
         return;
       }
     }
-    // Starting a fresh chat leaves the previous session alive in the background.
-    // Whatever is staged in the composer was staged for THIS message, so it goes
-    // with it: clearing here dropped a screenshot attached in the sessions list.
+    // Starting a fresh chat leaves the previous session alive in the background. What was
+    // staged in the sessions list was staged for THIS message, so it goes with it.
     if (startNew) {
       this.activeId = undefined;
       // `pendingSend` tells the webview not to show the welcome screen on this
@@ -3947,8 +3947,6 @@ export class ChatController implements AcpHost {
     }
   }
 
-  // Mirror a runtime's queue to the webview, but only while it is visible (the
-  // composer only ever shows the active session's queue).
   // A chat losing its agent, however it lost it. Anything waiting behind the turn is
   // the user's own writing and only ever lived on the runtime, so it goes back to
   // that chat's draft, where an unsent draft in the same box already survives. The
@@ -3966,6 +3964,8 @@ export class ChatController implements AcpHost {
     }
   }
 
+  // Mirror a runtime's queue to the webview, but only while it is visible: the composer
+  // only ever shows the active session's queue.
   private postQueued(rt: Runtime): void {
     if (this.activeId === rt.id) {
       this.post({

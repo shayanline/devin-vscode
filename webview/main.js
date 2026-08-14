@@ -2674,7 +2674,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   function renderOpenBlock() {
     if (!block) return;
     if (block.kind === "thinking") {
-      // Keep the fixed-height peek pinned to the latest reasoning, unless the user
+      // Keep the fixed height peek pinned to the latest reasoning, unless the user
       // has expanded it to read back through the chain of thought, or has scrolled
       // up inside it, which is the same intention and was not being honoured: every
       // thought that arrived took them back to the bottom of a section they were
