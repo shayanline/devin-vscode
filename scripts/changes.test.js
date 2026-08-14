@@ -167,6 +167,47 @@ test("the working set survives a window reload, counts and all", async () => {
   assert.deepStrictEqual(last.pathsFor("A"), [], "a change already dealt with stays dealt with");
 });
 
+test("two saves of the working set do not write over each other", async () => {
+  // The scratch file is named for the process, which stops two windows colliding,
+  // and both saves of one window still shared it. A save takes as long as it takes
+  // to write megabytes of held text, so the next one can start while it is running,
+  // and then one write lands inside the other's file and a half written one is
+  // renamed into place. That reads back as unparseable, and an unparseable store is
+  // dropped whole: every pending undo, gone.
+  const vscode = globalThis.__dvVscode;
+  const realWrite = vscode.workspace.fs.writeFile;
+  // A write that takes long enough to still be running when the next save begins,
+  // and lands in two halves the way a real one does.
+  vscode.workspace.fs.writeFile = async (uri, body) => {
+    const half = Math.ceil(body.length / 2);
+    await fs.promises.writeFile(uri.fsPath, body.slice(0, half));
+    await new Promise((r) => setTimeout(r, 600));
+    await fs.promises.appendFile(uri.fsPath, body.slice(half));
+  };
+  try {
+    const dir = fs.mkdtempSync(path.join(TMP, "race-"));
+    const store = { scheme: "file", path: dir, fsPath: dir, query: "", toString: () => "file://" + dir };
+    const one = write("race-one.ts", "v2\n");
+    const two = write("race-two.ts", "v2\n");
+
+    const before = new ChangeTracker();
+    before.register();
+    await before.useStore(store);
+    before.recordDiff(one, "v1\n", "v2\n", "A", { added: 1, removed: 1 });
+    // Long enough for the first save to be in the middle of its write.
+    await new Promise((r) => setTimeout(r, 450));
+    before.recordDiff(two, "v1\n", "v2\n", "A", { added: 1, removed: 1 });
+    await new Promise((r) => setTimeout(r, 2500));
+
+    const after = new ChangeTracker();
+    after.register();
+    await after.useStore(store);
+    assert.deepStrictEqual(after.pathsFor("A").sort(), [one, two].sort(), "both are still there to undo");
+  } finally {
+    vscode.workspace.fs.writeFile = realWrite;
+  }
+});
+
 test("one original too big to keep does not take the others with it", async () => {
   // The working set is written out whole, and past a cap it was deleted outright,
   // cap included: one generated file, lock file or data fixture the agent rewrote

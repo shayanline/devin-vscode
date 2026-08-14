@@ -109,6 +109,7 @@ export class ChangeTracker
   // create the same model.
   private readonly warming = new Map<string, Promise<void>>();
   private saveTimer?: NodeJS.Timeout;
+  private saving?: Promise<void>;
 
   async useStore(dir: vscode.Uri | undefined): Promise<void> {
     if (!dir) {
@@ -153,7 +154,16 @@ export class ChangeTracker
     this.saveTimer.unref?.();
   }
 
+  // One at a time. Both saves of one window shared a scratch file, and a save takes
+  // as long as writing every held original takes, so the next one could start while
+  // it was running: one write landed inside the other's file, a half written one was
+  // renamed into place, and an unparseable store is dropped whole.
   private async save(): Promise<void> {
+    this.saving = (this.saving ?? Promise.resolve()).then(() => this.writeStore());
+    return this.saving;
+  }
+
+  private async writeStore(): Promise<void> {
     if (!this.store) {
       return;
     }
