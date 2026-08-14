@@ -164,17 +164,21 @@ function webviewDouble(posted) {
 /**
  * Build a chat surface with an agent behind it.
  *
- * `opts.newDelay` / `opts.loadDelay` / `opts.promptDelay` are the agent's delays in
- * ms, which is how a test gets inside the window between asking for something and
- * it arriving. `opts.folders` sets the workspace.
+ * `opts.newDelay` / `opts.loadDelay` / `opts.promptDelay` are the agent's delays in ms,
+ * which is how a test gets inside the window between asking for something and it
+ * arriving. `opts.storage` and `opts.cwd` reuse another harness's directories, which is
+ * how a reload is written. `opts.config` overrides the settings the controller reads.
  */
 function createChat(opts = {}) {
   const { ChatController, SessionStore, ChangeTracker } = load();
   const vscode = globalThis.__dvVscode;
   agentPath = agentPath || writeAgent();
 
-  const dir = fs.mkdtempSync(path.join(TMP, "ws-"));
-  const storage = fs.mkdtempSync(path.join(TMP, "store-"));
+  const dir = opts.cwd || fs.mkdtempSync(path.join(TMP, "ws-"));
+  // Pass another harness's `storage` to stand in for a window reload, or for a second
+  // surface: the extension's storage directory is per workspace, not per window, and it
+  // is where anything that outlives an agent is kept.
+  const storage = opts.storage || fs.mkdtempSync(path.join(TMP, "store-"));
   const agentLog = path.join(dir, "agent-requests.jsonl");
   globalThis.__dvFolders = [{ name: path.basename(dir), uri: vscode.Uri.file(dir), index: 0 }];
   // How the agent is told what to do. It goes through the `devin.env` setting rather
@@ -229,6 +233,9 @@ function createChat(opts = {}) {
     logs,
     webview,
     cwd: dir,
+    // Where anything that outlives the agent is kept. Hand it to another `createChat` to
+    // write what a window reload does.
+    storage,
     // What the user did. The real page posts these, and the host cannot tell the
     // difference: this is the same handler VS Code would call.
     send: (msg) => { void toHost(msg); return api; },

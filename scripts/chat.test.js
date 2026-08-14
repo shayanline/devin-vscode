@@ -121,6 +121,65 @@ test("a file sent with the first message is not left staged in the chat it start
   await h.dispose();
 });
 
+test("a file staged and not sent is still there after a reload", posixOnly, async () => {
+  // A staged file belongs to a prompt that has not been sent, so it outlives the agent:
+  // an image pasted into the composer has no source file to attach again, and nothing
+  // else in the extension can put it back. Written down per chat, and read back for a
+  // chat this window has not staged anything for yet.
+  const first = createChat();
+  await first.ready();
+  const id = await first.startChat("before the reload");
+  first.send({ type: "attachImage", name: "survives-a-reload.png", mime: "image/png", data: PNG });
+  await first.until(() => ((first.last("attachments") || {}).items || []).length === 1);
+  await first.settle(150);
+  await first.dispose();
+
+  // A new window over the same workspace: a fresh controller, the same storage.
+  const next = createChat({ storage: first.storage, cwd: first.cwd });
+  await next.ready();
+  next.send({ type: "loadSession", id });
+  await next.until(() => next.activeId() === id, 8000);
+  await next.until(() => ((next.last("attachments") || {}).items || []).length === 1, 4000);
+
+  const staged = next.last("attachments").items;
+  assert.strictEqual(staged.length, 1, "it is staged again");
+  assert.strictEqual(staged[0].label, "survives-a-reload.png");
+  assert.ok(staged[0].thumb.startsWith("data:image/png;base64,"), "with the image itself, not just its name");
+  await next.dispose();
+});
+
+test("a chat handed to another surface leaves its staged files readable", posixOnly, async () => {
+  // Moving a chat to an editor tab hands the staged files over and deliberately leaves
+  // the copy on disk, because whichever surface shows the chat next reads it back the
+  // same way a reload does. So this surface must let go of it completely: an entry left
+  // behind here, even an empty one, is what stops that file ever being read again.
+  const h = createChat();
+  await h.ready();
+  const id = await h.startChat("moving out");
+  h.send({ type: "attachImage", name: "goes-with-the-chat.png", mime: "image/png", data: PNG });
+  await h.until(() => ((h.last("attachments") || {}).items || []).length === 1);
+  await h.settle(150);
+
+  const transfer = h.controller.exportRuntime(id);
+  assert.ok(transfer, "the chat was handed over");
+  assert.strictEqual(transfer.attachments.length, 1, "with what was staged for it");
+  // Handing a chat over means giving up responsibility for its agent, so in production
+  // the arriving surface stops it. Here nobody does, and an agent nothing can stop keeps
+  // the test runner alive for ever, so this test owns it.
+  await transfer.rt.client.shutdown().catch(() => {});
+
+  // Later, the chat is opened here again: the tab was closed, or it was terminated.
+  h.send({ type: "loadSession", id });
+  await h.until(() => h.activeId() === id, 8000);
+  await h.until(() => ((h.last("attachments") || {}).items || []).length === 1, 4000);
+  assert.strictEqual(
+    h.last("attachments").items[0].label,
+    "goes-with-the-chat.png",
+    "and the file it left on disk is read back"
+  );
+  await h.dispose();
+});
+
 test("a chat that finishes starting in the background does not take the panel", posixOnly, async () => {
   // No configured default mode, so each chat keeps the mode its own agent reports and
   // the two can be told apart.
@@ -139,9 +198,12 @@ test("a chat that finishes starting in the background does not take the panel", 
   // The background chat really did finish starting: without this every assertion below
   // is satisfied by it never having got there. Waiting on the request being logged is
   // not enough, since the agent logs it before it answers.
+  // Generous, because the whole suite runs in parallel and this waits on a process being
+  // spawned: the budget is not the thing under test, so it says why if it runs out.
   assert.ok(
-    await h.until(() => h.liveChats() === 2, 8000),
-    "the second chat finished opening"
+    await h.until(() => h.liveChats() === 2, 20000),
+    `the second chat finished opening. asked: ${h.agentSaw("session/new").length}, open: ${h.liveChats()},` +
+      ` errors: ${JSON.stringify(h.postsOf("error"))}, log: ${h.logs.slice(-3).join(" | ")}`
   );
   await h.settle(300);
 
