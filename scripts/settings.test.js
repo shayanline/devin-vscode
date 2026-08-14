@@ -363,6 +363,25 @@ test("an action that hands work to the host shows itself running", () => {
   assert.ok(!disable.querySelector(".codicon-loading"));
 });
 
+test("every action the panel counts as work is answered by the host", () => {
+  // The panel and the host each keep a list of what counts as work, and they
+  // disagreed: the panel treated an OAuth login as work and the host answered only
+  // for writes, so the key button span for fifteen seconds until a timer gave up.
+  // The host now answers every message, so the two lists cannot drift apart again.
+  const h = createSettings();
+  h.openSection("MCP");
+  const login = h.all("#settings-content .settings-icon-btn").find((b) => b.getAttribute("aria-label") === "Log in (OAuth)");
+  assert.ok(login, "the OAuth login action is there");
+  login.click();
+  assert.ok(h.last("settings:mcpLogin"), "it hands the work to the host");
+  assert.ok(login.classList.contains("busy"), "and shows itself running");
+
+  // What the host now sends for every message, whether or not it wrote anything.
+  h.send({ type: "settings:idle" });
+  assert.ok(!login.classList.contains("busy"), "so the button is released");
+  assert.strictEqual(login.disabled, false);
+});
+
 test("every kind of control shows it, and only when work was really started", () => {
   const h = createSettings();
   // A toggle writes, so it shows the write running.

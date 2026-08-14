@@ -321,11 +321,13 @@ export class SettingsPanel {
     } catch (err) {
       this.post({ type: "settings:error", text: err instanceof Error ? err.message : String(err) });
     } finally {
-      // Every mutating message is answered, so the control that started it always
-      // stops showing itself as running. Most paths already answered with fresh
-      // data; this covers the ones that changed nothing, such as a confirmation
-      // the user declined.
-      if (mutating) this.post({ type: "settings:idle" });
+      // Every message is answered, so the control that started it always stops
+      // showing itself as running. Most paths already answered with fresh data, and
+      // this covers the ones that changed nothing: a confirmation the user
+      // declined, or an action that does its work elsewhere, like opening a login
+      // terminal. Answering only for writes left that one spinning until a timer
+      // gave up on it, because the panel counts it as work and the host did not.
+      this.post({ type: "settings:idle" });
     }
   }
 
@@ -490,8 +492,14 @@ export class SettingsPanel {
           if (msg.matcher !== undefined && (g.matcher || "") !== msg.matcher) continue;
           g.hooks = g.hooks.filter((h: any) => (h?.command ?? h?.prompt) !== (msg.command ?? msg.prompt));
         }
-        (hooksObj as Record<string, unknown>)[String(msg.event)] = groups.filter((g) => Array.isArray(g.hooks) && g.hooks.length);
-        if (!(hooksObj as Record<string, unknown>)[String(msg.event)] || (groups.length === 0)) {
+        // Drop the groups this emptied, and the event with them when it has none
+        // left. The old test asked whether the array existed, which it always does,
+        // and whether the pre-filter list was empty, which it never is by then, so
+        // removing the last hook for an event left `"PreToolUse": []` behind.
+        const kept = groups.filter((g) => Array.isArray(g.hooks) && g.hooks.length);
+        if (kept.length) {
+          (hooksObj as Record<string, unknown>)[String(msg.event)] = kept;
+        } else {
           delete (hooksObj as Record<string, unknown>)[String(msg.event)];
         }
       }
@@ -638,18 +646,24 @@ export class SettingsPanel {
   // agent answers both and is then closed. Cached until a file changes, which is
   // the only thing that can change the answer: a write here, or an outside edit
   // the watcher picks up.
-  private loaded?: { rules: LoadedRule[]; hooks: LoadedHook[] };
+  // Held against the folder it was asked in: which rules and hooks are in force
+  // depends on where the agent is looking, so a multi root workspace has a
+  // different answer per folder, and switching folder has to ask again.
+  private loaded?: { root: string; rules: LoadedRule[]; hooks: LoadedHook[] };
 
   private async loadFromAgent(): Promise<{ rules: LoadedRule[]; hooks: LoadedHook[] } | undefined> {
-    if (this.loaded) {
+    // The folder the panel is pointed at, not simply the first one: the sections
+    // that show this are per scope, so with two folders open the second one was
+    // being told the first one's rules governed it.
+    const root = this.root() || userConfigDir();
+    if (this.loaded && this.loaded.root === root) {
       return this.loaded;
     }
-    const root = this.folders()[0]?.path || userConfigDir();
     const result = await withQuerySession(this.cli.cliPath, root, this.cli.env, async (client, sessionId) => ({
       rules: await client.listRules(sessionId),
       hooks: await client.listHooks(sessionId)
     }));
-    this.loaded = result;
+    this.loaded = result ? { root, ...result } : undefined;
     return result;
   }
 

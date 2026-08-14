@@ -55,12 +55,14 @@ export async function listSkills(ctx: CliContext): Promise<NamedItem[]> {
 // `devin plugins list` prints installed plugins (name, version, blocked status).
 export async function listPlugins(ctx: CliContext): Promise<NamedItem[]> {
   const r = await run(ctx, ["plugins", "list"]);
-  if (!r.out.trim() || /no plugins/i.test(r.out)) return [];
+  if (!r.ok || !r.out.trim() || /no plugins/i.test(r.out)) return [];
   const items: NamedItem[] = [];
+  // Only the bullet rows the CLI prints (`  • story-skills v0.3.1`). Taking any
+  // line meant an error, a hint, or a reworded header became a plugin, complete
+  // with Update and Remove buttons: `Error: not authenticated` turned into a
+  // plugin named "Error:" that could be uninstalled.
   for (const line of r.out.split(/\r?\n/)) {
-    const t = line.trim().replace(/^[•*-]\s*/, "");
-    if (!t || /^installed plugins/i.test(t)) continue;
-    const m = t.match(/^(\S+)\s*(.*)$/);
+    const m = /^\s*[•*-]\s+(\S+)\s*(.*)$/.exec(line);
     if (m) items.push({ name: m[1], description: m[2].trim() });
   }
   return items;
