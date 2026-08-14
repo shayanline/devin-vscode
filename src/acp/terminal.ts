@@ -359,7 +359,7 @@ export class TerminalManager {
       // taskkill, and let `/F` be the escalation a SIGKILL asks for.
       const force = sig === "SIGKILL" ? ["/F"] : [];
       if (pid) {
-        try { execFile("taskkill", ["/PID", String(pid), "/T", ...force], () => {}); } catch { /* ignore */ }
+        try { execFile("taskkill", ["/PID", String(pid), "/T", ...force], { windowsHide: true }, () => {}); } catch { /* ignore */ }
       }
       if (force.length) {
         try { term.child.kill(); } catch { /* already gone */ }

@@ -25,6 +25,17 @@ function run(ctx: CliContext, args: string[]): Promise<{ ok: boolean; out: strin
   });
 }
 
+// A name from a config file that is about to be typed into the user's own shell.
+// Which shell that is is unknown (PowerShell by default on Windows, and quoting
+// differs between all of them), so rather than try to quote for every one, anything
+// that is not a plain name is refused: a server called `a" & whoami & "b` in a
+// cloned repo's own .devin/mcp_config.json is not a name, it is a command.
+export function isPlainCliName(name: string): boolean {
+  // `@` and `/` are in, so an npm style `@scope/name` still works: neither means
+  // anything to a shell. A leading dash is out, since that reads as a flag.
+  return /^[A-Za-z0-9@][A-Za-z0-9._@/-]*$/.test(name);
+}
+
 export interface NamedItem {
   name: string;
   description?: string;

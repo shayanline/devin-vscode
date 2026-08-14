@@ -437,6 +437,18 @@ test("a Windows .cmd shim is run through the interpreter, quoting and all", asyn
       false,
       "a real executable still spawns directly"
     );
+    // cmd.exe expands these even inside double quotes and there is no escape for
+    // them on a command line, so passing one through would run something else.
+    assert.throws(
+      () => cliCommand("C:\\tools\\devin.cmd", ["mcp", "add", "%USERPROFILE%"]),
+      /no escape/,
+      "a value carrying % is refused rather than quoted and mangled"
+    );
+    assert.throws(
+      () => cliCommand("C:\\tools\\devin.cmd", ["mcp", "add", "a!b!"]),
+      /no escape/,
+      "and so is one carrying !"
+    );
   } finally {
     Object.defineProperty(process, "platform", win);
   }

@@ -515,7 +515,7 @@ export class AcpClient extends EventEmitter {
       // `/F` forces it, so the escalation is the flag rather than the signal.
       const force = signal === "SIGKILL" ? ["/F"] : [];
       try {
-        execFile("taskkill", ["/PID", String(pid), "/T", ...force], () => {});
+        execFile("taskkill", ["/PID", String(pid), "/T", ...force], { windowsHide: true }, () => {});
       } catch {
         // taskkill missing; fall through to the direct kill below
       }

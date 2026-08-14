@@ -18,7 +18,7 @@ import {
   userConfigPath,
   userMcpConfigPath
 } from "./configService";
-import { CliContext, listPlugins, listSkills, mcpAdd, mcpVerb, McpAddOptions, pluginVerb } from "./devinConfigCli";
+import { CliContext, isPlainCliName, listPlugins, listSkills, mcpAdd, mcpVerb, McpAddOptions, pluginVerb } from "./devinConfigCli";
 import { withQuerySession } from "../acp/queryClient";
 import { LoadedHook, LoadedRule } from "../acp/types";
 import { checkHealth, loginShellEnv } from "../cli/locate";
@@ -432,6 +432,14 @@ export class SettingsPanel {
 
   private mcpLoginTerminal(name: string, root?: string): void {
     if (!name) return;
+    // The name comes from a config file, which may be a cloned repository's own, and
+    // this line is typed into whichever shell the user has.
+    if (!isPlainCliName(name)) {
+      void vscode.window.showErrorMessage(
+        `"${name}" is not a name this can log in for. Run devin mcp login yourself for that server.`
+      );
+      return;
+    }
     const term = vscode.window.createTerminal({ name: "Devin MCP login", env: this.cli.env, cwd: root || this.root() });
     term.show(true);
     term.sendText(`${quoteArg(this.cli.cliPath)} mcp login ${quoteArg(name)}`);

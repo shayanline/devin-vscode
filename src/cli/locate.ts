@@ -148,6 +148,15 @@ export function cliCommand(bin: string, args: string[]): { file: string; args: s
   if (process.platform !== "win32" || !/\.(cmd|bat)$/i.test(bin)) {
     return { file: bin, args, shell: false };
   }
+  // `cmd.exe` expands `%VAR%` and, with delayed expansion, `!VAR!`, and it does so
+  // inside double quotes as well. There is no escape for either on a command line
+  // (`%%` only works inside a batch file), so a value carrying one cannot be passed
+  // through a shim safely. Refusing says so, where quoting it would silently run
+  // something else.
+  const unsafe = [bin, ...args].find((s) => /[%!]/.test(s));
+  if (unsafe) {
+    throw new Error(`Cannot pass "${unsafe}" to the Devin CLI on Windows: % and ! have no escape through a .cmd shim.`);
+  }
   const quote = (s: string) => (/[\s"^&|<>()]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s);
   return { file: quote(bin), args: args.map(quote), shell: true };
 }

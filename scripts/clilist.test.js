@@ -28,7 +28,7 @@ esbuild.buildSync({
   logLevel: "error",
   alias: { vscode: path.join(__dirname, "vscode-stub.js") }
 });
-const { listPlugins, listSkills } = require(outfile);
+const { listPlugins, listSkills, isPlainCliName } = require(outfile);
 
 // A stand-in `devin` that prints what it is told and exits how it is told.
 function fakeCli(name, stdout, exitCode = 0) {
@@ -74,6 +74,28 @@ test("the skill list keeps its strict shape", async () => {
     + "Error: something went wrong\n"));
   assert.deepStrictEqual(skills.map((s) => s.name), ["docx"], "only the row that is a skill");
   assert.strictEqual(skills[0].description, "Word documents");
+});
+
+test("a server name that is really a command is not typed into a shell", () => {
+  // The name comes from a config file, which may belong to a cloned repository, and
+  // the OAuth login types it into whichever shell the user has. Quoting for all of
+  // them is not possible, so anything that is not a name is refused.
+  for (const ok of ["godot-ai", "fetch", "my_server.v2", "@acme/tools", "a-b_c.1"]) {
+    assert.strictEqual(isPlainCliName(ok), true, ok + " is an ordinary name");
+  }
+  for (const bad of [
+    'a" & whoami & "b',
+    "a; rm -rf ~",
+    "a`whoami`",
+    "a$(whoami)",
+    "a|b",
+    "a b",
+    "-leading-dash",
+    "",
+    "a\nb"
+  ]) {
+    assert.strictEqual(isPlainCliName(bad), false, JSON.stringify(bad) + " must be refused");
+  }
 });
 
 test.after(() => {
