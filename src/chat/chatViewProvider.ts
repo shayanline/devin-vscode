@@ -1749,25 +1749,36 @@ export class ChatController implements AcpHost {
         rt.id = res.sessionId;
         rt.lastActivityAt = Date.now();
         this.runtimes.set(rt.id, rt);
-        this.activeId = rt.id;
-        this.currentMode = undefined;
-        this.currentModel = undefined;
         this.store.add(rt.id, cwd);
-        this.markVisible(rt.id);
-        this.painted = true;
-        this.postCapabilities();
+        // Starting a chat takes seconds, and the user can open an existing one
+        // while it does. It is a real session either way, so it stays in the pool
+        // and runs in the background, but it must not take the panel back from
+        // whatever they are looking at now.
+        const claimed = this.activeId === undefined;
+        if (claimed) {
+          this.activeId = rt.id;
+          this.currentMode = undefined;
+          this.currentModel = undefined;
+          this.markVisible(rt.id);
+          this.painted = true;
+          this.postCapabilities();
+        } else {
+          this.log(`[new-session] ${rt.id} arrived after another chat was opened, left in the background`);
+        }
         this.publishOptions(rt, res.configOptions, res.modes?.currentModeId);
         await this.applyDefaults(rt, res);
         // Start it off knowing what is already open, rather than waiting for the
         // user to switch files before it has any editor context at all.
         this.sendOpenDocuments(rt);
-        // Whatever was in the "new chat" box has been carried into this session,
-        // so it is no longer waiting in the list: the text, and the files staged
-        // with it, belong to this chat now.
-        this.store.setDraft(undefined, "");
-        await this.dropStaged(undefined);
-        this.postAttachments();
-        this.post({ type: "sessionReady", sessionId: rt.id });
+        if (claimed) {
+          // Whatever was in the "new chat" box has been carried into this session,
+          // so it is no longer waiting in the list: the text, and the files staged
+          // with it, belong to this chat now.
+          this.store.setDraft(undefined, "");
+          await this.dropStaged(undefined);
+          this.postAttachments();
+          this.post({ type: "sessionReady", sessionId: rt.id });
+        }
         this.ensureIdleTimer();
         this.broadcastStatuses();
         void this.refreshSessions();
@@ -2055,7 +2066,13 @@ export class ChatController implements AcpHost {
       const res = await this.loadWithTakeover(rt, id, cwd);
       rt.lastActivityAt = Date.now();
       this.store.add(id, cwd);
-      this.markVisible(id);
+      // Loading a chat means spawning an agent and replaying its history, which
+      // takes seconds, and nothing stops the user picking a different chat while
+      // it runs. Everything below speaks for the panel, so it only applies if this
+      // is still the chat the panel is showing.
+      if (this.activeId === id) {
+        this.markVisible(id);
+      }
       if (res && (res.configOptions || res.modes)) {
         this.publishOptions(rt, res.configOptions, res.modes?.currentModeId);
       } else {
@@ -2063,8 +2080,10 @@ export class ChatController implements AcpHost {
       }
       // A woken session starts knowing nothing about the editor, same as a new one.
       this.sendOpenDocuments(rt);
-      this.post({ type: "assistantEnd" });
-      this.post({ type: "sessionReady", sessionId: id });
+      if (this.activeId === id) {
+        this.post({ type: "assistantEnd" });
+        this.post({ type: "sessionReady", sessionId: id });
+      }
       this.ensureIdleTimer();
     } catch (err) {
       // Waking failed: drop the half-spawned runtime so the row goes gray again,
@@ -2089,14 +2108,22 @@ export class ChatController implements AcpHost {
         // from the cache and clicked again.
         this.sessionsCache = undefined;
         this.broadcastStatuses();
-        await this.closeOutSession(OPEN_FAILED);
-        this.reportLoadFailure(loadFailed, rt);
+        // Only if the user is still on this chat. Closing out would otherwise send
+        // them back to the list from a chat that opened perfectly well.
+        if (this.activeId === id) {
+          await this.closeOutSession(OPEN_FAILED);
+          this.reportLoadFailure(loadFailed, rt);
+        } else {
+          this.log(`[load-failed] ${id} (no longer on screen): ${loadFailed}`);
+        }
       } else {
-        this.post({ type: "loaded" });
-        this.reportInterrupted(id);
-        // The head read right after a reload is NOT a reliable revert target: the
-        // next prompt re-expands the conversation and orphans it.
-        await this.postTurnHead(false);
+        if (this.activeId === id) {
+          this.post({ type: "loaded" });
+          this.reportInterrupted(id);
+          // The head read right after a reload is NOT a reliable revert target: the
+          // next prompt re-expands the conversation and orphans it.
+          await this.postTurnHead(false);
+        }
         this.broadcastStatuses();
         // Re-surface permissions/questions this session raised while it was in
         // the background, now that it is visible again.
@@ -3386,9 +3413,12 @@ export class ChatController implements AcpHost {
     if (!rt) {
       try {
         if (!startNew && this.activeId && !this.runtimes.has(this.activeId)) {
-          // The visible session was idle-exited: wake it, then send.
-          await this.loadSession(this.activeId);
-          rt = this.active();
+          // The visible session was idle-exited: wake it, then send. The wake takes
+          // seconds, so the message belongs to the session it was written in, not
+          // to whichever one is on screen when the wake finishes.
+          const target = this.activeId;
+          await this.loadSession(target);
+          rt = this.runtimes.get(target);
         } else {
           rt = await this.createSession();
         }
