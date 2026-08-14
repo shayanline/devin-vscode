@@ -4593,15 +4593,19 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       // original per file, from before this chat first touched it. So these say the
       // file, rather than "this change", which read as though the row's own edit
       // could be undone on its own.
+      // Neither says so itself: an undo can fail (a read only file, a lock, a
+      // directory that has gone), and the host then keeps the file in the working
+      // set so it can be undone again. A row that had already written "Undone" over
+      // itself would be the last thing still claiming the file had been put back.
+      // The host answers with what it really resolved, the way the tray already
+      // waits for it.
       actions.appendChild(iconBtn("codicon-check", "Keep this file's changes", (ev) => {
         ev.stopPropagation();
         vscode.postMessage({ type: "acceptFile", path });
-        markEditResolved(node, "Kept");
       }));
       actions.appendChild(iconBtn("codicon-discard", "Undo this file's changes", (ev) => {
         ev.stopPropagation();
         vscode.postMessage({ type: "rejectFile", path });
-        markEditResolved(node, "Undone");
       }));
       node.appendChild(actions);
       // And only the newest row for a file carries them. An older row's Undo wound

@@ -377,7 +377,9 @@ test("renders response images and inline keep/undo on edits", async () => {
   keep.parentElement.click();
   await h.settle(5);
   assert.ok(h.posted.some((m) => m.type === "acceptFile" && m.path === "/w/app.ts"), "Keep posts acceptFile");
-  assert.ok(pill.classList.contains("resolved"), "pill marks resolved after keep");
+  h.post({ type: "changesResolved", paths: ["/w/app.ts"], action: "accept" });
+  await h.settle(5);
+  assert.ok(pill.classList.contains("resolved"), "pill marks resolved once the host says so");
   assert.strictEqual(h.errors().length, 0, "image/edit rendering threw: " + JSON.stringify(h.errors()));
 });
 
@@ -1819,6 +1821,36 @@ test("a long chain of commands is cut to a scannable length", async () => {
   assert.ok(label.textContent.endsWith("..."));
   assert.ok(long.startsWith(label.textContent.slice(0, 77)), "it is the start of the command");
   assert.strictEqual(h.thread().querySelector(".tool .dv-collapsible-header").title, long, "all of it on hover");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("an edit row waits for the host before it says a file was undone", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "userMessage", text: "do it" });
+  h.post({ type: "fileChange", path: "/w/a.ts", added: 3, removed: 1 });
+  await h.settle(20);
+
+  const pill = () => h.thread().querySelector(".edit-pill");
+  const undo = pill().querySelector('.edit-pill-actions button[title="Undo this file\'s changes"]');
+  assert.ok(undo, "the row offers it");
+  undo.click();
+  assert.ok(h.posted.some((m) => m && m.type === "rejectFile" && m.path === "/w/a.ts"), "the host was asked");
+  await h.settle(10);
+
+  // An undo can fail: a read only file, a lock, a directory that has gone. The
+  // host says so and keeps the file in the working set, so a row that had already
+  // written "Undone" over itself would be the only thing claiming otherwise.
+  assert.strictEqual(pill().querySelector(".edit-pill-label").textContent, "Edited", "it does not guess");
+  assert.ok(!pill().classList.contains("resolved"));
+  assert.ok(pill().querySelector(".edit-pill-actions"), "so it can be undone again");
+
+  h.post({ type: "changesResolved", paths: ["/w/a.ts"], action: "reject" });
+  await h.settle(10);
+  assert.strictEqual(pill().querySelector(".edit-pill-label").textContent, "Undone", "and says so once it is");
+  assert.strictEqual(h.thread().querySelectorAll(".edit-pill-actions").length, 0);
   assert.strictEqual(h.errors().length, 0);
 });
 
