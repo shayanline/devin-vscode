@@ -80,6 +80,7 @@ export class SettingsPanel {
   private watchedDirs = "";
   private watchTimer?: NodeJS.Timeout;
   private cli: CliContext = { cliPath: "devin" };
+  private cliResolved = false;
   private disposed = false;
   // When the config changes while the panel is hidden, refresh on reveal instead.
   private stale = false;
@@ -114,7 +115,15 @@ export class SettingsPanel {
         }
       }),
       vscode.workspace.onDidChangeConfiguration((e) => {
-        if (e.affectsConfiguration("devin")) this.queueRefresh();
+        if (!e.affectsConfiguration("devin")) {
+          return;
+        }
+        // Fixing the path to the binary, or the environment it runs with, has to take
+        // effect on the refresh it triggers rather than on the next panel.
+        if (e.affectsConfiguration("devin.cliPath") || e.affectsConfiguration("devin.env")) {
+          this.cliResolved = false;
+        }
+        this.queueRefresh();
       }),
       // A folder added or removed changes the scope tabs, so never skip it.
       vscode.workspace.onDidChangeWorkspaceFolders(() => this.queueRefresh(true))
@@ -146,11 +155,24 @@ export class SettingsPanel {
     return all[0]?.path;
   }
 
+  // Which binary to run and what to run it with. Resolving it means a health check
+  // and reading a login shell's environment, so it is done once and kept, and dropped
+  // when the settings it comes from change: it was only ever resolved when the panel
+  // opened, so a wrong `devin.cliPath` stayed wrong for the life of the tab. Every
+  // list would be empty and every MCP or plugin action would fail, and correcting the
+  // setting changed nothing, since only closing and reopening the tab could.
   private async ensureCli(): Promise<void> {
+    // The directory moves on its own: the scope the panel is pointed at, and the
+    // folders in the workspace, both change without these settings changing.
+    this.cli.cwd = this.root();
+    if (this.cliResolved) {
+      return;
+    }
     const setting = vscode.workspace.getConfiguration("devin").get<string>("cliPath", "devin") || "devin";
     const [health, env] = await Promise.all([checkHealth(setting), loginShellEnv()]);
     const extra = vscode.workspace.getConfiguration("devin").get<Record<string, string>>("env", {}) || {};
     this.cli = { cliPath: health.path || "devin", env: { ...env, ...extra }, cwd: this.root() };
+    this.cliResolved = true;
   }
 
   private post(message: unknown): void {
@@ -600,6 +622,9 @@ export class SettingsPanel {
 
   private async sendData(): Promise<void> {
     if (this.disposed) return;
+    // Every list below is a CLI call, so this is where the binary has to be current.
+    // A no op unless the settings it comes from changed, or the folder moved.
+    await this.ensureCli();
     this.startWatching();
     const [skills, plugins, loaded] = await Promise.all([
       listSkills(this.cli).catch(() => []),
