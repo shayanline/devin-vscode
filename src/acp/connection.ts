@@ -103,17 +103,41 @@ export class JsonRpcConnection {
     }
   }
 
-  request<T = unknown>(method: string, params?: unknown): Promise<T> {
+  // `timeoutMs` bounds the wait for calls that have no business taking long: the
+  // handshake, opening a session, and the short queries. A reply is otherwise only
+  // settled by the agent answering or its process closing, so an agent that is
+  // alive and silent (a blocking MCP server, a token refresh) leaves the caller
+  // waiting for the rest of the window. It is deliberately not the default: a
+  // prompt is a whole turn and can legitimately run for many minutes.
+  request<T = unknown>(method: string, params?: unknown, timeoutMs?: number): Promise<T> {
     if (this.closed) {
       return Promise.reject(new Error("ACP connection is closed"));
     }
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {
-      this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
+      let timer: NodeJS.Timeout | undefined;
+      const clear = (): void => {
+        if (timer) {
+          clearTimeout(timer);
+        }
+        this.pending.delete(id);
+      };
+      this.pending.set(id, {
+        resolve: (v: unknown) => { clear(); resolve(v as T); },
+        reject: (e: unknown) => { clear(); reject(e); }
+      });
+      if (timeoutMs && timeoutMs > 0) {
+        timer = setTimeout(() => {
+          this.onLog?.(`[rpc-timeout] ${method} after ${timeoutMs}ms`);
+          clear();
+          reject(new Error(`${method} did not answer within ${Math.round(timeoutMs / 1000)}s`));
+        }, timeoutMs);
+        timer.unref?.();
+      }
       // If the write fails the response can never arrive, so settle the call
       // now rather than leaving it pending forever.
       if (!this.send({ jsonrpc: "2.0", id, method, params })) {
-        this.pending.delete(id);
+        clear();
         reject(new Error("Failed to write to ACP process"));
       }
     });

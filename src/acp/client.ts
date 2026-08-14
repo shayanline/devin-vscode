@@ -55,6 +55,15 @@ export interface AcpHost {
 //  "update"  -> SessionUpdateNotification
 //  "log"     -> string
 //  "exit"    -> void
+// The handshake is the agent saying hello, so it should be quick. Generous rather
+// than tight: what matters is that it finishes at all, since a call with no bound
+// leaves the panel waiting for the rest of the window.
+const HANDSHAKE_TIMEOUT_MS = 60_000;
+
+// Opening a session starts every configured MCP server, which can mean pulling a
+// docker image on a cold machine, so this is deliberately long.
+const OPEN_TIMEOUT_MS = 180_000;
+
 export class AcpClient extends EventEmitter {
   private child?: ChildProcessWithoutNullStreams;
   private conn?: JsonRpcConnection;
@@ -227,7 +236,7 @@ export class AcpClient extends EventEmitter {
           "cognition.ai/partialContent": true
         }
       }
-    });
+    }, HANDSHAKE_TIMEOUT_MS);
     this.initializeResult = result;
     return result;
   }
@@ -256,7 +265,7 @@ export class AcpClient extends EventEmitter {
       cwd: cwd || this.options.cwd,
       mcpServers,
       ...(additionalDirectories.length ? { additionalDirectories } : {})
-    });
+    }, OPEN_TIMEOUT_MS);
   }
 
   // True when the agent can replay a stored conversation. Standard ACP capability:
@@ -276,7 +285,7 @@ export class AcpClient extends EventEmitter {
       cwd: cwd || this.options.cwd,
       mcpServers,
       ...(additionalDirectories.length ? { additionalDirectories } : {})
-    });
+    }, OPEN_TIMEOUT_MS);
   }
 
   prompt(sessionId: string, blocks: ContentBlock[]): Promise<PromptResult> {
@@ -421,11 +430,11 @@ export class AcpClient extends EventEmitter {
     return headOf(steps);
   }
 
-  private rpc<T>(method: string, params?: unknown): Promise<T> {
+  private rpc<T>(method: string, params?: unknown, timeoutMs?: number): Promise<T> {
     if (!this.conn) {
       return Promise.reject(new Error("ACP connection not started"));
     }
-    return this.conn.request<T>(method, params);
+    return this.conn.request<T>(method, params, timeoutMs);
   }
 
   // Stop the agent while this extension host stays alive (terminating one

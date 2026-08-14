@@ -33,6 +33,7 @@ function load(rel, name) {
   return require(outfile);
 }
 const { AcpClient } = load("src/acp/client.ts", "client");
+const { JsonRpcConnection } = load("src/acp/connection.ts", "connection");
 const { diagnosticItems, MAX_DIAGNOSTICS } = load("src/acp/diagnostics.ts", "diagnostics");
 const vscode = globalThis.__dvVscode;
 
@@ -136,6 +137,37 @@ async function waitFor(log, match, ms = 3000) {
 async function settle(ms = 150) {
   await new Promise((r) => setTimeout(r, ms));
 }
+
+test("a call that must not hang gives up, and one that may run long is left alone", async () => {
+  // A reply is otherwise settled only by the agent answering or its process
+  // closing, so an agent that is alive and silent (a blocking MCP server, a token
+  // refresh) leaves the caller waiting for the rest of the window: the panel sits
+  // on "starting" and New chat never works again.
+  const { spawn } = require("child_process");
+  const child = spawn(process.execPath, ["-e", "process.stdin.resume()"], { stdio: ["pipe", "pipe", "pipe"] });
+  const logs = [];
+  const conn = new JsonRpcConnection(child, async () => ({}), () => {}, (l) => logs.push(l));
+  try {
+    const started = Date.now();
+    await assert.rejects(
+      () => conn.request("initialize", {}, 250),
+      /did not answer within/,
+      "a bounded call has to reject rather than wait for ever"
+    );
+    assert.ok(Date.now() - started < 3000, "and it rejects when it said it would");
+    assert.ok(logs.some((l) => l.includes("[rpc-timeout]")), "with a line saying which call it was");
+
+    // A prompt is a whole turn and can legitimately take many minutes, so no
+    // timeout is passed for it and none is imposed.
+    let settled = false;
+    void conn.request("session/prompt", {}).then(() => { settled = true; }, () => { settled = true; });
+    await new Promise((r) => setTimeout(r, 400));
+    assert.strictEqual(settled, false, "an unbounded call is still waiting");
+  } finally {
+    conn.dispose();
+    child.kill("SIGKILL");
+  }
+});
 
 test("initialize promises only the capabilities we actually serve", async () => {
   const { cli, log } = fakeAgent("caps", {});

@@ -646,10 +646,11 @@ export class ChatController implements AcpHost {
     this.stopLocalState();
     // A surface that has gone cannot be the one holding the keyboard.
     this.setFocused(false);
-    for (const rt of this.runtimes.values()) {
+    for (const rt of new Set([...this.runtimes.values(), ...this.spawnedRuntimes])) {
       this.destroyRuntime(rt);
     }
     this.runtimes.clear();
+    this.spawnedRuntimes.clear();
     this.starting.clear();
     this.activeId = undefined;
   }
@@ -665,10 +666,14 @@ export class ChatController implements AcpHost {
   // the next window can say the turn was interrupted rather than losing it
   // silently.
   async shutdown(): Promise<void> {
-    const live = [...this.runtimes.values()];
+    // Everything with a process, not just everything with a session id: a chat
+    // still waiting on session/new is not in the pool yet, and it is exactly as
+    // unable to outlive us as the rest.
+    const live = [...new Set([...this.runtimes.values(), ...this.spawnedRuntimes])];
     const interrupted = live.filter((rt) => rt.id && (rt.busy || rt.awaiting > 0)).map((rt) => rt.id);
     this.stopLocalState();
     this.runtimes.clear();
+    this.spawnedRuntimes.clear();
     this.starting.clear();
     this.activeId = undefined;
     // Record before killing: the write has to be in flight while the host is
@@ -797,6 +802,9 @@ export class ChatController implements AcpHost {
     this.starting.delete(id);
     // Drop this controller's listeners: the new one attaches its own.
     rt.client.removeAllListeners();
+    // The arriving surface owns the process from here, so this one must stop
+    // counting it among the agents it is responsible for stopping.
+    this.spawnedRuntimes.delete(rt);
     const take = <T>(map: Map<string, T & { rid: string }>): [string, T][] => {
       const taken: [string, T][] = [];
       for (const [key, entry] of [...map]) {
@@ -876,6 +884,8 @@ export class ChatController implements AcpHost {
     for (const [model, supported] of transfer.modelImages) {
       this.modelImageSupport.set(model, supported);
     }
+    // This surface is responsible for stopping it now.
+    this.spawnedRuntimes.add(rt);
     this.activeId = rt.id;
     this.store.add(rt.id, rt.cwd);
     this.markVisible(rt.id);
@@ -927,6 +937,7 @@ export class ChatController implements AcpHost {
   }
 
   private destroyRuntime(rt: Runtime): void {
+    this.spawnedRuntimes.delete(rt);
     try {
       // Stop listening before stopping the process: everything this runtime could
       // still say is about a session we have finished with, and its exit is about
@@ -942,6 +953,12 @@ export class ChatController implements AcpHost {
       // ignore
     }
   }
+
+  // Every runtime whose process is alive, whether or not it has a session id yet.
+  // The pool is keyed by session id, so a runtime waiting on session/new is not in
+  // it, and a reload during those seconds left the agent running: it survived the
+  // host that spawned it, still holding a lock, and on Windows nothing reaps it.
+  private readonly spawnedRuntimes = new Set<Runtime>();
 
   // Spawn a fresh `devin acp` process and wire its events. The runtime is not
   // yet in the pool: its session id is unknown until session/new or /load.
@@ -988,6 +1005,7 @@ export class ChatController implements AcpHost {
       subagentIds: new Map()
     };
     ref = rt;
+    this.spawnedRuntimes.add(rt);
     client.setHost(this);
     client.on("log", (line: string) => this.log(line));
     client.on("update", (n: SessionUpdateNotification) => this.onUpdate(n));
@@ -1142,6 +1160,7 @@ export class ChatController implements AcpHost {
       this.log(`[exit] a replaced agent for ${rt.id} exited, keeping the live one`);
       return;
     }
+    this.spawnedRuntimes.delete(rt);
     if (rt.id) {
       // Settle any prompt the agent was still waiting on so its client-side
       // call does not hang and no dead widget is left on screen.
