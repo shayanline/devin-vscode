@@ -115,10 +115,14 @@ export function stripJsonComments(input: string): string {
     if (c === '"' || c === "'") { inStr = true; quote = c; out += c; continue; }
     if (c === "/" && next === "/") { inLine = true; i++; continue; }
     if (c === "/" && next === "*") { inBlock = true; i++; continue; }
+    // A trailing comma is dropped here, where a string is still a string, rather
+    // than by a pass over the finished text: a pass cannot tell a comma inside a
+    // value from one before a close, so a hook command or a deny rule holding `,}`
+    // was read back short a character and the next write saved that.
+    if (c === "}" || c === "]") { out = out.replace(/,\s*$/, ""); }
     out += c;
   }
-  // Remove trailing commas before } or ].
-  return out.replace(/,(\s*[}\]])/g, "$1");
+  return out;
 }
 
 // `readConfig` answers {} for a file it cannot parse, which is fine for showing

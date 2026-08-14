@@ -145,4 +145,24 @@ test("a file with comments keeps parsing, and can still be written", () => {
   assert.deepStrictEqual(Object.keys(serversIn(file)), ["fetch", "other"]);
 });
 
+test("a comma inside a value is part of the value, not a trailing comma", () => {
+  // A trailing comma before } or ] is legal in the config and not in JSON, so it
+  // has to go before parsing. Stripping it with a pass over the finished text
+  // cannot tell a comma in a string from a real one, and a hook command or a deny
+  // rule that happens to contain one was quietly edited: the read returned a
+  // different value than the file held, and the next write saved it back.
+  const file = path.join(TMP, "commas", "config.json");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const command = "jq '{name, }' out.json";
+  fs.writeFileSync(file, JSON.stringify({ hooks: { PreToolUse: [{ command }] }, model: "sonnet" }, null, 2));
+
+  assert.strictEqual(readConfig(file).hooks.PreToolUse[0].command, command, "read back as written");
+
+  // And a real trailing comma is still removed, next to one that only looks like it.
+  fs.writeFileSync(file, `{\n  "note": "ends with a comma, ]",\n  "list": [1, 2,],\n}`);
+  const jsonc = readConfig(file);
+  assert.strictEqual(jsonc.note, "ends with a comma, ]");
+  assert.deepStrictEqual(jsonc.list, [1, 2]);
+});
+
 test.after(() => fs.rmSync(TMP, { recursive: true, force: true }));
