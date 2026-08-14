@@ -144,10 +144,17 @@ export class ChangeTracker
       }
       const body = Buffer.from(JSON.stringify(out), "utf8");
       if (body.byteLength > MAX_STORE_BYTES) {
+        // Too big to keep, and a stale file would restore older originals than the
+        // ones held now, so it goes rather than being left behind.
+        await vscode.workspace.fs.delete(this.store).then(undefined, () => undefined);
         return;
       }
       await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(this.store, ".."));
-      await vscode.workspace.fs.writeFile(this.store, body);
+      // Beside it, then over it: this file is the only copy of the text every
+      // pending undo would restore, so a half written one loses all of them.
+      const tmp = this.store.with({ path: this.store.path + ".tmp" });
+      await vscode.workspace.fs.writeFile(tmp, body);
+      await vscode.workspace.fs.rename(tmp, this.store, { overwrite: true });
     } catch {
       // Nothing to delete, or the storage is not writable: the working set is
       // still correct in this window, it just will not survive a reload.

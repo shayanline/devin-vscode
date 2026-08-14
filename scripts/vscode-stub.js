@@ -21,8 +21,19 @@ class EventEmitter {
 const nodeFs = require("fs");
 const nodePath = require("path");
 
+const fileUri = (p) => ({
+  scheme: "file",
+  path: p,
+  fsPath: p,
+  query: "",
+  toString: () => "file://" + p,
+  // The real Uri is immutable and derives a new one. Used to name the scratch file
+  // an atomic write goes through, so a test that lacks it silently saves nothing.
+  with: (change) => fileUri(change && change.path !== undefined ? change.path : p)
+});
+
 const Uri = {
-  file: (p) => ({ scheme: "file", path: p, fsPath: p, query: "", toString: () => "file://" + p }),
+  file: fileUri,
   from: ({ scheme, path: p, query }) => ({ scheme, path: p, fsPath: p, query: query || "", toString: () => `${scheme}://${p}?${query}` }),
   joinPath: (base, ...parts) => Uri.file(nodePath.join(base.fsPath, ...parts))
 };
@@ -54,7 +65,8 @@ const workspace = {
     readFile: async (uri) => nodeFs.promises.readFile(uri.fsPath),
     writeFile: async (uri, body) => nodeFs.promises.writeFile(uri.fsPath, body),
     createDirectory: async (uri) => nodeFs.promises.mkdir(uri.fsPath, { recursive: true }),
-    delete: async (uri) => nodeFs.promises.rm(uri.fsPath)
+    delete: async (uri) => nodeFs.promises.rm(uri.fsPath),
+    rename: async (from, to) => nodeFs.promises.rename(from.fsPath, to.fsPath)
   }
 };
 

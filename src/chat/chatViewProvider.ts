@@ -4615,18 +4615,31 @@ export class ChatController implements AcpHost {
 
   async writeTextFile(params: WriteTextFileParams): Promise<Record<string, never>> {
     const full = this.resolvePath(params.path, params.sessionId);
-    let original: string | null = null;
+    let bytes: Buffer | undefined;
     try {
-      original = await fs.promises.readFile(full, "utf8");
+      bytes = await fs.promises.readFile(full);
     } catch {
-      original = null;
+      bytes = undefined;
+    }
+    const original = bytes ? bytes.toString("utf8") : null;
+    // Reading a UTF-16 or Latin-1 file as text gives replacement characters, and
+    // writing that back would destroy every byte they stood for. Refuse instead:
+    // the agent is told why, which is better than a file it silently ruined.
+    if (bytes && original !== null && !bytes.equals(Buffer.from(original, "utf8"))) {
+      throw new Error(`${path.basename(full)} is not UTF-8 text, so it was left alone.`);
     }
     await fs.promises.mkdir(path.dirname(full), { recursive: true });
     // Keep the file's own line endings: the agent writes LF, and rewriting a
     // CRLF file with it would show every line as changed in git.
-    const content = original && /\r\n/.test(original) && !/\r\n/.test(params.content)
+    let content = original && /\r\n/.test(original) && !/\r\n/.test(params.content)
       ? params.content.replace(/\n/g, "\r\n")
       : params.content;
+    // And keep its byte order mark for the same reason: the agent's content will
+    // not have one, and dropping it is a real change to a .csproj, a .ps1 or
+    // anything else Windows authored, on a line the diff does not even show.
+    if (original && original.startsWith("\uFEFF") && !content.startsWith("\uFEFF")) {
+      content = "\uFEFF" + content;
+    }
     await fs.promises.writeFile(full, content, "utf8");
     // The edit is tracked against the session that made it, so a background
     // session's working set is waiting for it when it is next opened.

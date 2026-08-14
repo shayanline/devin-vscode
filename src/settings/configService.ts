@@ -64,8 +64,7 @@ export function writeMcpServer(file: string, name: string, def: Record<string, u
     servers[name] = def;
   }
   current.mcpServers = servers;
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify(current, null, 2) + "\n", "utf8");
+  writeFileAtomic(file, JSON.stringify(current, null, 2) + "\n");
 }
 
 // Where the CLI keeps its own state: XDG on macOS/Linux, %LOCALAPPDATA% on
@@ -126,6 +125,24 @@ export function stripJsonComments(input: string): string {
 // one and ruinous for writing it: the write would replace someone's broken config
 // with a document holding nothing but the value just edited, taking their model,
 // permissions, hooks and MCP servers with it. Every write goes through here first.
+// Write a config file without ever leaving a half written one behind. A plain
+// write truncates in place, so a crash, a force quit or a full disk between the
+// truncate and the last byte leaves the user with an empty or partial config, which
+// is worse than the edit not happening. Writing beside it and renaming over the top
+// is atomic on every filesystem we run on, and the rename is in the same directory
+// so it cannot cross a device boundary.
+export function writeFileAtomic(file: string, body: string): void {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.tmp`);
+  try {
+    fs.writeFileSync(tmp, body, "utf8");
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    try { fs.rmSync(tmp, { force: true }); } catch { /* nothing to clean up */ }
+    throw err;
+  }
+}
+
 export function refuseIfUnparseable(file: string): void {
   if (!fs.existsSync(file)) {
     return;
@@ -178,7 +195,6 @@ export function setConfigPath(scope: ConfigScope, dotted: string, value: unknown
   } else {
     node[keys[keys.length - 1]] = value;
   }
-  fs.mkdirSync(path.dirname(p), { recursive: true });
-  fs.writeFileSync(p, JSON.stringify(current, null, 2) + "\n", "utf8");
+  writeFileAtomic(p, JSON.stringify(current, null, 2) + "\n");
   return p;
 }

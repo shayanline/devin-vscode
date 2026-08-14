@@ -24,7 +24,7 @@ esbuild.buildSync({
   format: "cjs",
   logLevel: "error"
 });
-const { writeMcpServer, windsurfMcpConfigPath, readConfig, setConfigPath } = require(outfile);
+const { writeMcpServer, windsurfMcpConfigPath, readConfig, setConfigPath, writeFileAtomic } = require(outfile);
 
 const serversIn = (file) => readConfig(file).mcpServers || {};
 
@@ -53,6 +53,29 @@ test("a server can be added, turned off and removed in another tool's file", () 
 
   writeMcpServer(file, "godot-ai", null);
   assert.deepStrictEqual(Object.keys(serversIn(file)), ["fetch"], "removing one leaves the rest");
+});
+
+test("a config is never left half written", () => {
+  // A plain write truncates in place, so a crash or a full disk between the
+  // truncate and the last byte leaves an empty or partial config, which is worse
+  // than the edit not happening at all.
+  const file = path.join(TMP, "atomic", "config.json");
+  writeFileAtomic(file, '{"model":"first"}\n');
+  assert.strictEqual(readConfig(file).model, "first");
+
+  // The file is only ever replaced whole, and the scratch file it goes through does
+  // not survive, in either direction.
+  writeFileAtomic(file, '{"model":"second"}\n');
+  assert.strictEqual(readConfig(file).model, "second");
+  assert.deepStrictEqual(
+    fs.readdirSync(path.dirname(file)),
+    ["config.json"],
+    "no temporary file is left behind"
+  );
+
+  // A failure leaves the previous contents intact rather than a truncated file.
+  assert.throws(() => writeFileAtomic(path.join(file, "not-a-dir", "x.json"), "{}"));
+  assert.strictEqual(readConfig(file).model, "second", "and the good file is untouched");
 });
 
 test("a config we cannot parse is left alone, not replaced by the one value edited", () => {

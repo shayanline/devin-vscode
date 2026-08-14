@@ -9,6 +9,7 @@ import {
   mcpOauthDir,
   refuseIfUnparseable,
   windsurfDir,
+  writeFileAtomic,
   windsurfMcpConfigPath,
   writeMcpServer,
   readConfig,
@@ -511,7 +512,7 @@ export class SettingsPanel {
           delete (hooksObj as Record<string, unknown>)[String(msg.event)];
         }
       }
-      fs.writeFileSync(src, JSON.stringify(root, null, 2) + "\n", "utf8");
+      writeFileAtomic(src, JSON.stringify(root, null, 2) + "\n");
     } catch (err) {
       void vscode.window.showErrorMessage("Could not remove hook: " + (err instanceof Error ? err.message : String(err)));
     }
