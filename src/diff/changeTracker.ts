@@ -52,19 +52,26 @@ function key(fsPath: string): string {
     return known;
   }
   let real = resolved;
+  let answered = false;
   try {
     // What the filesystem itself calls it: the on-disk spelling on a case
     // insensitive volume, which macOS is by default, and one name for a file reached
-    // through a symlinked directory. Only cached when it answered, so a file that
-    // does not exist yet is not pinned to the name it was guessed by.
+    // through a symlinked directory.
     real = fs.realpathSync.native(resolved);
-    if (realNames.size < 2000) {
-      realNames.set(resolved, real);
-    }
+    answered = true;
   } catch {
     // Not there, so the resolved path is the best name available.
   }
-  return process.platform === "win32" ? real.toLowerCase() : real;
+  const folded = process.platform === "win32" ? real.toLowerCase() : real;
+  // The finished key is what gets cached, not the step before it: caching the
+  // unfolded path meant the second lookup of a file answered differently from the
+  // first, so on Windows an undo went looking for a snapshot that was filed under
+  // another name and quietly did nothing. Only cached once the filesystem answered,
+  // so a file that does not exist yet is not pinned to the name it was guessed by.
+  if (answered && realNames.size < 2000) {
+    realNames.set(resolved, folded);
+  }
+  return folded;
 }
 
 // Tracks agent file edits so the user can review them as native diffs and

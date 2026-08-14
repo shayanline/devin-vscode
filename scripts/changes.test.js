@@ -268,21 +268,30 @@ test("each session gets its own working set, and a revert forgets only its own",
 });
 
 test("one file is one entry, however it was spelled", async () => {
-  // macOS is case insensitive by default, so these are the same file. Two entries
-  // meant two rows in the working set and two originals, and undoing them in order
-  // wrote the older text over the newer content.
+  // Whether two spellings are one file is the filesystem's business, not ours:
+  // macOS and Windows say yes by default, Linux says no. Either way the working set
+  // has to agree with it, because two entries for one file means two originals, and
+  // undoing them in order writes the older text over the newer.
   const tracker = new ChangeTracker();
   tracker.register();
   const file = write("Casing.ts", "devin wrote this\n");
   const other = path.join(path.dirname(file), "casing.ts");
+  const sameFile = fs.existsSync(other);
 
   tracker.recordDiff(file, "the original\n", "devin wrote this\n", "A");
   tracker.recordDiff(other, "devin wrote this\n", "devin wrote more\n", "A");
 
-  assert.strictEqual(tracker.pathsFor("A").length, 1, "the second spelling is the same file");
-  await tracker.reject(other);
-  assert.strictEqual(fs.readFileSync(file, "utf8"), "the original\n",
-    "and undoing it goes back to before the first edit, not to the middle");
+  if (sameFile) {
+    assert.strictEqual(tracker.pathsFor("A").length, 1, "one file, one entry");
+    await tracker.reject(other);
+    assert.strictEqual(fs.readFileSync(file, "utf8"), "the original\n",
+      "and undoing it goes back to before the first edit, not to the middle");
+  } else {
+    assert.strictEqual(tracker.pathsFor("A").length, 2,
+      "on a case sensitive filesystem these really are two files");
+    await tracker.reject(file);
+    assert.strictEqual(fs.readFileSync(file, "utf8"), "the original\n", "each with its own original");
+  }
 });
 
 test("an undo that cannot write says so, and keeps the original", async () => {
