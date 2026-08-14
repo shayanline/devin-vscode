@@ -4335,6 +4335,66 @@ test("a turn can be forked into a new chat without discarding anything", async (
   assert.strictEqual(h.errors().length, 0);
 });
 
+test("a prompt left half written comes back, and survives the panel settling", async () => {
+  // The host restores the draft before it says `ready`, and says `ready` twice: on
+  // open, and again once the CLI health check finishes. Handing the composer back
+  // to the "new chat" box empties it, so doing that on every `ready` threw the
+  // restored draft away, and with it anything typed while the check was running.
+  const h = createHarness();
+  const input = h.document.getElementById("input");
+
+  h.post({ type: "draft", id: null, text: "half a prompt from last time" });
+  await h.settle(10);
+  assert.strictEqual(input.value, "half a prompt from last time", "the draft arrives");
+
+  h.post({ type: "ready" });
+  await h.settle(10);
+  assert.strictEqual(input.value, "half a prompt from last time", "and is still there once the panel is ready");
+
+  // Typing while the health check runs, then the second ready lands.
+  input.value = "something I am typing now";
+  input.dispatchEvent(new h.window.Event("input", { bubbles: true }));
+  h.post({ type: "ready" });
+  await h.settle(10);
+  assert.strictEqual(input.value, "something I am typing now", "and a second ready does not wipe it either");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a new chat does not offer the last chat's message", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "userMessage", text: "delete all the generated tests" });
+  await h.settle(20);
+
+  // What starting a new chat posts: a thread body, then a reset clear.
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear", reset: true });
+  await h.settle(20);
+
+  const input = h.document.getElementById("input");
+  input.value = "";
+  input.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true, cancelable: true }));
+  await h.settle(10);
+  assert.strictEqual(input.value, "",
+    "Up recalls this chat's last message, and this chat has not had one");
+
+  // And the same text must not be what a failed start offers to retry.
+  h.post({ type: "error", text: "Couldn't start the agent." });
+  await h.settle(10);
+  const retry = h.thread().querySelector(".footer-retry, .error-retry");
+  if (retry) {
+    retry.dispatchEvent(new h.window.MouseEvent("click", { bubbles: true }));
+    await h.settle(10);
+    const sent = h.posted.filter((m) => m.type === "send").pop();
+    assert.notStrictEqual(sent && sent.text, "delete all the generated tests",
+      "Retry must not send the previous chat's message into this one");
+  }
+  assert.strictEqual(h.errors().length, 0);
+});
+
 test("a rewind says the file edits it cannot undo are staying", async () => {
   // Probed against a real agent: the revert plan is empty even for files it edited
   // through us, and its own rewind leaves the disk alone. So "Discard Edits" would

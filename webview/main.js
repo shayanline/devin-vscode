@@ -194,6 +194,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
 
   function setBody(b) {
     clearElsewhere();
+    const was = body;
     // A tab is its one chat, so there is nowhere else for it to go.
     body = inEditor() ? "thread" : b;
     const list = body === "list";
@@ -206,7 +207,11 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     // An explicit label wins over the placeholder, so it has to say the same thing:
     // in the list the box starts a chat, in a chat it continues one.
     el.input.setAttribute("aria-label", list ? "Start a new chat" : "Ask Devin");
-    if (list) { closeTitleMenu(); detachComposerFromSession(); closeSessionsPanel(); stopThreadLoading(); }
+    // Only on the way in. Handing the composer back to the "new chat" box empties
+    // it, and the panel is told it is a list more than once: on open, and again
+    // once the CLI health check finishes. Doing it every time wiped the draft that
+    // had just been restored, and anything typed while that check was running.
+    if (list && was !== "list") { closeTitleMenu(); detachComposerFromSession(); closeSessionsPanel(); stopThreadLoading(); }
     renderHeader();
     updateComposerDock();
     updateTerminateBtn();
@@ -6705,6 +6710,10 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         if (m.reset) {
           currentTitle = "Chat";
           curSessionId = null;
+          // Nothing has been said in this chat yet, so there is nothing for Up to
+          // recall and nothing for Retry to resend. Keeping the last chat's message
+          // meant a brand new chat offered it, and Retry would have sent it here.
+          lastUserText = "";
           closeTitleMenu();
           renderHeader();
           updateTerminateBtn();
