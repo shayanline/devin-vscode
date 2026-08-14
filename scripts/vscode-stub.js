@@ -1,6 +1,12 @@
-// Minimal stand-in for the `vscode` module, enough to load src/diff/changeTracker.ts
-// outside VS Code so its keep/undo semantics can be tested. Only the API the
-// tracker actually touches is implemented.
+// Minimal stand-in for the `vscode` module, enough to load the host side of the
+// extension outside VS Code: the working set (src/diff/changeTracker.ts), the ACP
+// and terminal layers, and the chat controller itself (see chat-harness.js). Only
+// the API those actually touch is implemented.
+//
+// Two things a test can drive from the outside, because the module under test is
+// bundled with its own copy of this file and cannot be handed objects directly:
+//   globalThis.__dvConfig  -> what workspace.getConfiguration().get() answers
+//   globalThis.__dvFolders -> workspace.workspaceFolders
 
 class EventEmitter {
   constructor() {
@@ -35,7 +41,11 @@ const fileUri = (p) => ({
 const Uri = {
   file: fileUri,
   from: ({ scheme, path: p, query }) => ({ scheme, path: p, fsPath: p, query: query || "", toString: () => `${scheme}://${p}?${query}` }),
-  joinPath: (base, ...parts) => Uri.file(nodePath.join(base.fsPath, ...parts))
+  joinPath: (base, ...parts) => Uri.file(nodePath.join(base.fsPath, ...parts)),
+  parse: (s) => {
+    const m = /^([a-z][a-z0-9+.-]*):\/\/(.*)$/i.exec(String(s));
+    return m ? { scheme: m[1], path: m[2], fsPath: m[2], query: "", toString: () => String(s) } : fileUri(String(s));
+  }
 };
 
 const Disposable = { from: (...items) => ({ dispose: () => items.forEach((i) => i.dispose && i.dispose()) }) };
@@ -133,7 +143,91 @@ workspace.getConfiguration = () => ({
   update: async () => undefined
 });
 
-module.exports = { EventEmitter, Uri, Disposable, commands, workspace, scm, window, ThemeIcon, DiagnosticSeverity, languages };
+// --- Enough more of the API for the chat controller to be constructed and driven --
+// It wires editor and document listeners in its constructor, so these have to exist
+// or it cannot be built at all. Nothing here does any work: a test that needs an
+// event fires it through `__fire`.
+
+const editorChanged = new EventEmitter();
+const selectionChanged = new EventEmitter();
+const configChanged = new EventEmitter();
+const docOpened = new EventEmitter();
+const docClosed = new EventEmitter();
+const docChanged = new EventEmitter();
+const docSaved = new EventEmitter();
+
+Object.assign(window, {
+  activeTextEditor: undefined,
+  visibleTextEditors: [],
+  onDidChangeActiveTextEditor: editorChanged.event,
+  onDidChangeTextEditorSelection: selectionChanged.event,
+  showTextDocument: async () => undefined,
+  // Answered rather than shown. A test that needs a particular choice sets
+  // `window.answer` to it, which is how the terminate and discard prompts are driven.
+  answer: undefined,
+  showInputBox: async () => window.answer,
+  showQuickPick: async () => window.answer,
+  showOpenDialog: async () => undefined,
+  createStatusBarItem: () => ({ show() {}, hide() {}, dispose() {}, text: "", tooltip: "", command: undefined })
+});
+window.showWarningMessage = (m) => { window.shown.warning.push(String(m)); return Promise.resolve(window.answer); };
+window.showInformationMessage = (m) => { window.shown.info.push(String(m)); return Promise.resolve(window.answer); };
+window.__fire.editorChanged = editorChanged;
+window.__fire.selectionChanged = selectionChanged;
+window.__fire.configChanged = configChanged;
+
+Object.assign(workspace, {
+  get workspaceFolders() {
+    return globalThis.__dvFolders;
+  },
+  workspaceFile: undefined,
+  textDocuments: [],
+  asRelativePath: (p) => {
+    const root = (globalThis.__dvFolders || [])[0];
+    const full = typeof p === "string" ? p : p.fsPath;
+    return root && full.startsWith(root.uri.fsPath) ? full.slice(root.uri.fsPath.length + 1) : full;
+  },
+  getWorkspaceFolder: () => (globalThis.__dvFolders || [])[0],
+  findFiles: async () => [],
+  onDidChangeConfiguration: configChanged.event,
+  onDidOpenTextDocument: docOpened.event,
+  onDidCloseTextDocument: docClosed.event,
+  onDidChangeTextDocument: docChanged.event,
+  onDidSaveTextDocument: docSaved.event
+});
+
+const env = {
+  clipboard: { writeText: async (t) => { env.clipboard.text = t; }, text: "" },
+  openExternal: async () => true
+};
+
+const ConfigurationTarget = { Global: 1, Workspace: 2, WorkspaceFolder: 3 };
+
+class Position {
+  constructor(line, character) {
+    this.line = line;
+    this.character = character;
+  }
+}
+class Range {
+  constructor(start, end) {
+    this.start = start;
+    this.end = end;
+  }
+}
+
+// Same numbering as VS Code, since the symbol picker maps these to its own labels.
+const SymbolKind = {
+  File: 0, Module: 1, Namespace: 2, Package: 3, Class: 4, Method: 5, Property: 6,
+  Field: 7, Constructor: 8, Enum: 9, Interface: 10, Function: 11, Variable: 12,
+  Constant: 13, String: 14, Number: 15, Boolean: 16, Array: 17, Object: 18,
+  Key: 19, Null: 20, EnumMember: 21, Struct: 22, Event: 23, Operator: 24, TypeParameter: 25
+};
+
+module.exports = {
+  EventEmitter, Uri, Disposable, commands, workspace, scm, window, ThemeIcon,
+  DiagnosticSeverity, languages, env, ConfigurationTarget, Position, Range, SymbolKind
+};
 
 // The module under test is bundled with its own copy of this stub, so a test
 // that requires it directly would be holding a different one. The copy the
