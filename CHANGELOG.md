@@ -8,13 +8,43 @@ the commit messages carry the detail.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
+## [0.11.10]
+
+Chats stop borrowing each other's things.
+
+### Highlights
+- A message carries the files staged with it, once, and only its own.
+- Another chat's staged files are never sent, and never deleted for you.
+- A chat left part way through opening comes back whole, not half drawn.
+- A message written while a chat wakes waits its turn instead of racing.
+- Queued messages survive closing the tab and an agent dying unasked.
+- A chat starting in the background leaves your mode and model alone.
+- Undo all in one chat leaves a file another chat changed, and says so.
+- An edit row says a change was undone only once it really has been.
+- A thought stays where you scrolled it while the agent keeps working.
+- An edited request is sent once, however many times Enter is pressed.
+- Restore Checkpoint refuses a rewind from a control drawn for another state.
+- A chat with a command still running is no longer treated as idle.
+- A finished command keeps its output in the transcript.
+- Switching chats closes an edit left open in the one you left.
+- The settings panel shows a config value whatever shape it is in.
+- A corrected path to the CLI takes effect without reopening the panel.
+- A config file that is a symlink stays one, and keeps its permissions.
+- A comma inside a config value survives every later save.
+- One oversized file no longer costs you every other pending undo.
+
+### Under the hood
+- Every protocol call but a turn is bounded, so nothing waits for ever.
+- The agent behind the settings panel is stopped on the way out.
+- The chat controller runs under test, against a real agent.
+- Staged files are held per chat rather than per composer.
+
 ## [0.11.9] - 2026-08-14
 
 A pass over every way a chat could lose your work.
 
 ### Highlights
 - Restoring a checkpoint no longer abandons the edits it cannot undo.
-- Undo all in one chat no longer reverts what another chat changed.
 - An undo that fails says which file and why, and stays undoable.
 - Keep and Undo on an edit row name the file they act on.
 - Only the newest change to a file offers to keep or undo it.
@@ -496,6 +526,8 @@ The foundation of the extension.
 - The agent's whole process group is killed on dispose, so no MCP server leaks.
 - A jsdom webview test harness, and a browser preview for visual iteration.
 
+[0.11.9]: https://github.com/shayanline/devin-vscode/releases/tag/v0.11.9
+[0.11.8]: https://github.com/shayanline/devin-vscode/releases/tag/v0.11.8
 [0.9.3]: https://github.com/shayanline/devin-vscode/releases/tag/v0.9.3
 [0.9.2]: https://github.com/shayanline/devin-vscode/releases/tag/v0.9.2
 [0.9.1]: https://github.com/shayanline/devin-vscode/releases/tag/v0.9.1
