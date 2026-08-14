@@ -8,6 +8,43 @@ the commit messages carry the detail.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
+## [0.11.9] - 2026-08-14
+
+A pass over every way a chat could lose your work.
+
+### Highlights
+- Restoring a checkpoint no longer abandons the edits it cannot undo.
+- Undo all in one chat no longer reverts what another chat changed.
+- An undo that fails says which file and why, and stays undoable.
+- Keep and Undo on an edit row name the file they act on.
+- Only the newest change to a file offers to keep or undo it.
+- A settings toggle no longer replaces a config file it could not parse.
+- A file that is not UTF-8 is left alone instead of being mangled.
+- A byte order mark survives an edit.
+- Messages queued behind a turn come back as a draft, not lost.
+- A prompt left half written comes back, and stays there.
+- A new chat no longer offers the previous chat's message.
+- Opening a slow chat no longer takes the panel from the one you picked.
+- Retrying a chat that failed to open no longer strands its agent.
+- A chat that never answers gives up instead of breaking New chat.
+- Enter while an IME is composing no longer sends the message.
+- A late file suggestion no longer eats the Enter that sends.
+- Stop now stops a command that was still starting.
+- Continue in Background now keeps the command running.
+- Terminating a chat stops a command that ignores being asked.
+- One chat's failed MCP server is no longer blamed on another.
+- The plugin list no longer turns an error message into a plugin.
+- Log in (OAuth) stops spinning once it has opened its terminal.
+- With two folders open, loaded rules and hooks match the one selected.
+- A noisy command no longer stalls the panel, and shows its latest output.
+- A turn starting no longer takes the keyboard away from a control.
+
+### Under the hood
+- Protocol calls are bounded, so a silent agent cannot wedge a chat.
+- Every agent is stopped on the way out, including one still starting.
+- Config and working set writes are atomic, so a crash cannot truncate one.
+- A name from a config file is never handed to a shell unquoted.
+
 ## [0.11.8] - 2026-08-14
 
 Devin can see what the editor sees.
