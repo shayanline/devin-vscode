@@ -1432,11 +1432,14 @@ export class ChatController implements AcpHost {
         case "rejectFile":
           await this.changes.reject(String(msg.path || ""));
           return;
+        // From the chat's own changed files tray, so scoped to that chat. The
+        // Source Control title buttons stay unscoped: they speak for the view they
+        // are in, which lists every chat's files.
         case "acceptAll":
-          this.changes.acceptAll();
+          this.changes.acceptAll(this.activeId);
           return;
         case "rejectAll":
-          await this.changes.rejectAll();
+          await this.changes.rejectAll(this.activeId);
           return;
         case "addContext":
           await this.addContext();

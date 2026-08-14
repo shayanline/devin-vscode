@@ -419,14 +419,18 @@ export class ChangeTracker
     this.refreshGroup();
   }
 
-  acceptAll(): void {
-    for (const p of this.changedPaths()) {
+  // With a session, only that chat's files: the tray these come from says "N
+  // changed files" for one chat, and another chat's edits are not the user's to
+  // lose from a button they cannot see. Without one, everything, which is what the
+  // Source Control title actions mean.
+  acceptAll(sessionId?: string): void {
+    for (const p of sessionId ? this.pathsFor(sessionId) : this.changedPaths()) {
       this.accept(p);
     }
   }
 
-  async rejectAll(): Promise<void> {
-    for (const p of this.changedPaths()) {
+  async rejectAll(sessionId?: string): Promise<void> {
+    for (const p of sessionId ? this.pathsFor(sessionId) : this.changedPaths()) {
       await this.reject(p);
     }
   }

@@ -267,6 +267,33 @@ test("each session gets its own working set, and a revert forgets only its own",
   assert.strictEqual(tracker.hasUnresolvedChange(mine), false, "and nothing of A's is held any more");
 });
 
+test("undoing everything in one chat leaves the other chat's edits alone", async () => {
+  // The tray these buttons live in shows one chat's files and counts them in its
+  // header, so it must not reach into a chat the user cannot even see.
+  const tracker = new ChangeTracker();
+  tracker.register();
+  const mine = write("mine.ts", "devin wrote mine\n");
+  const theirs = write("theirs.ts", "devin wrote theirs\n");
+
+  tracker.recordDiff(mine, "mine\n", "devin wrote mine\n", "A");
+  tracker.recordDiff(theirs, "theirs\n", "devin wrote theirs\n", "B");
+
+  await tracker.rejectAll("A");
+  assert.strictEqual(fs.readFileSync(mine, "utf8"), "mine\n", "A's file is put back");
+  assert.strictEqual(fs.readFileSync(theirs, "utf8"), "devin wrote theirs\n", "B's file is untouched");
+  assert.deepStrictEqual(tracker.pathsFor("B"), [theirs], "and B still has it to review");
+
+  // Keeping everything in one chat is the same promise in the other direction.
+  const alsoMine = write("also-mine.ts", "devin wrote this\n");
+  tracker.recordDiff(alsoMine, "before\n", "devin wrote this\n", "A");
+  tracker.acceptAll("A");
+  assert.deepStrictEqual(tracker.pathsFor("B"), [theirs], "B is not resolved by A's Keep all");
+
+  // The Source Control title action has no chat, and still means everything.
+  await tracker.rejectAll();
+  assert.strictEqual(fs.readFileSync(theirs, "utf8"), "theirs\n", "unscoped still reaches every file");
+});
+
 test("a rewind only forgets the files it really put back", async () => {
   // The agent's revert reports a file plan that is empty even for files it edited
   // through us, and its own rewind leaves the disk alone. So forgetting the whole
