@@ -7,6 +7,7 @@ import {
   ConfigScope,
   loadConfigFile,
   mcpOauthDir,
+  refuseIfUnparseable,
   windsurfDir,
   windsurfMcpConfigPath,
   writeMcpServer,
@@ -477,6 +478,9 @@ export class SettingsPanel {
     );
     if (choice !== "Remove") return;
     try {
+      // Same hazard as every other write: an unparseable file reads as {}, and
+      // writing that back would replace it with just this hook's leftovers.
+      refuseIfUnparseable(src);
       const root = readConfig(src);
       const hooksObj = (src.endsWith("hooks.v1.json") ? root : (root.hooks as Record<string, unknown>)) || {};
       const groups = (hooksObj as Record<string, unknown>)[String(msg.event)] as any[];

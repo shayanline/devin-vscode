@@ -24,7 +24,7 @@ esbuild.buildSync({
   format: "cjs",
   logLevel: "error"
 });
-const { writeMcpServer, windsurfMcpConfigPath, readConfig } = require(outfile);
+const { writeMcpServer, windsurfMcpConfigPath, readConfig, setConfigPath } = require(outfile);
 
 const serversIn = (file) => readConfig(file).mcpServers || {};
 
@@ -53,6 +53,32 @@ test("a server can be added, turned off and removed in another tool's file", () 
 
   writeMcpServer(file, "godot-ai", null);
   assert.deepStrictEqual(Object.keys(serversIn(file)), ["fetch"], "removing one leaves the rest");
+});
+
+test("a config we cannot parse is left alone, not replaced by the one value edited", () => {
+  // Every write is a read, modify and write back, and a file that will not parse
+  // reads as {}. Writing that would replace the user's model, permissions, hooks
+  // and MCP servers with a document holding nothing but this one setting.
+  const root = path.join(TMP, "broken-project");
+  const file = path.join(root, ".devin", "config.json");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const broken = '{\n  "model": "claude-sonnet-4",\n  "permissions": { "allow": ["Exec(ls)"] },\n';
+  fs.writeFileSync(file, broken, "utf8");
+
+  assert.throws(
+    () => setConfigPath("project", "attribution", false, root),
+    /not valid JSON/,
+    "it has to refuse, and say why"
+  );
+  assert.strictEqual(fs.readFileSync(file, "utf8"), broken, "and the file is untouched, byte for byte");
+
+  // Once it parses, the same edit goes through and keeps everything else.
+  fs.writeFileSync(file, broken + "}\n", "utf8");
+  setConfigPath("project", "attribution", false, root);
+  const after = readConfig(file);
+  assert.strictEqual(after.attribution, false, "the edit lands");
+  assert.strictEqual(after.model, "claude-sonnet-4", "and the rest of the config is still there");
+  assert.deepStrictEqual(after.permissions, { allow: ["Exec(ls)"] });
 });
 
 test("everything else in the file survives the edit", () => {

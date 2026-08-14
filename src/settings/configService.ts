@@ -53,17 +53,7 @@ export function windsurfMcpConfigPath(): string {
 // file. The Devin CLI owns its own files, so this is only for the ones it merely
 // imports: `devin mcp` will not write to another tool's config.
 export function writeMcpServer(file: string, name: string, def: Record<string, unknown> | null): void {
-  // `readConfig` answers {} for a file it cannot parse, which is fine for showing
-  // one and ruinous for writing it: the write would replace someone else's broken
-  // config with a document holding nothing but this server. Refuse instead.
-  if (fs.existsSync(file)) {
-    const raw = fs.readFileSync(file, "utf8");
-    try {
-      if (raw.trim()) JSON.parse(stripJsonComments(raw));
-    } catch {
-      throw new Error(`${file} is not valid JSON, so it was left alone. Fix the file and try again.`);
-    }
-  }
+  refuseIfUnparseable(file);
   const current = readConfig(file);
   const servers = (current.mcpServers && typeof current.mcpServers === "object"
     ? current.mcpServers
@@ -132,6 +122,22 @@ export function stripJsonComments(input: string): string {
   return out.replace(/,(\s*[}\]])/g, "$1");
 }
 
+// `readConfig` answers {} for a file it cannot parse, which is fine for showing
+// one and ruinous for writing it: the write would replace someone's broken config
+// with a document holding nothing but the value just edited, taking their model,
+// permissions, hooks and MCP servers with it. Every write goes through here first.
+export function refuseIfUnparseable(file: string): void {
+  if (!fs.existsSync(file)) {
+    return;
+  }
+  const raw = fs.readFileSync(file, "utf8");
+  try {
+    if (raw.trim()) JSON.parse(stripJsonComments(raw));
+  } catch {
+    throw new Error(`${file} is not valid JSON, so it was left alone. Fix the file and try again.`);
+  }
+}
+
 export function readConfig(file: string): Record<string, unknown> {
   try {
     const raw = fs.readFileSync(file, "utf8");
@@ -152,6 +158,7 @@ export function loadConfigFile(scope: ConfigScope, root?: string): ConfigFile {
 // so a removed setting does not linger as `"proxy": {}`.
 export function setConfigPath(scope: ConfigScope, dotted: string, value: unknown, root?: string): string {
   const p = scope === "user" ? userConfigPath() : projectConfigPath(root || process.cwd());
+  refuseIfUnparseable(p);
   const current = readConfig(p);
   const keys = dotted.split(".");
   const chain: Record<string, unknown>[] = [current];
