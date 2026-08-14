@@ -3489,7 +3489,7 @@ export class ChatController implements AcpHost {
       // seeming to vanish.
       const rt = this.runtimes.get(this.activeId);
       if (rt && (rt.replaying || this.loading.has(this.activeId))) {
-        this.enqueueMessage(rt, text);
+        this.enqueueMessage(rt, text, staged);
         return;
       }
     }
@@ -3511,7 +3511,7 @@ export class ChatController implements AcpHost {
     // session is mid-turn is queued (and shown as a pending row) rather than
     // dropped, then auto-sent when the turn finishes.
     if (rt && rt.busy) {
-      this.enqueueMessage(rt, text);
+      this.enqueueMessage(rt, text, staged);
       return;
     }
     if (!rt) {
@@ -3534,6 +3534,17 @@ export class ChatController implements AcpHost {
     }
     if (!rt) {
       giveBack("Couldn't open a session to send that to. Your message is back in the box.");
+      return;
+    }
+    // A turn can have started while the wake or the create was running: opening a
+    // chat drains whatever was typed while it opened, and two sends from the new chat
+    // box share one session/new and so arrive at one runtime. The busy check above
+    // ran before all of that. ACP has no way to hand a prompt to a live one, so a
+    // second here does not queue behind the first, it contends with it: the two
+    // arrive out of order and the channel can be lost. It goes to the queue, which is
+    // where a message sent during a turn goes.
+    if (rt.busy) {
+      this.enqueueMessage(rt, text, staged);
       return;
     }
 
@@ -3656,15 +3667,24 @@ export class ChatController implements AcpHost {
 
   // Snapshot a message (implicit context + attachments + text) and add it to the
   // runtime's queue, then reflect the queue in the composer.
-  private enqueueMessage(rt: Runtime, text: string, first = false): void {
-    const message = { id: `q-${++this.queueSeq}`, text, implicit: this.buildImplicitBlocks(), attachments: this.attachments };
+  // `staged` is passed rather than read from the composer: a message can be queued
+  // after an await, by which time the composer belongs to whatever chat the user
+  // opened in the meantime.
+  private enqueueMessage(rt: Runtime, text: string, staged: Staged[], first = false): void {
+    const message = { id: `q-${++this.queueSeq}`, text, implicit: this.buildImplicitBlocks(), attachments: staged };
     if (first) {
       rt.queued.unshift(message);
     } else {
       rt.queued.push(message);
     }
-    this.attachments = [];
-    this.postAttachments();
+    if (this.activeId === rt.id) {
+      this.attachments = [];
+      this.postAttachments();
+    } else {
+      // The queued message is holding them now, so they are no longer staged for the
+      // chat it went to, and the composer on screen is another chat's.
+      void this.dropStaged(rt.id);
+    }
     this.postQueued(rt);
   }
 
@@ -3683,7 +3703,7 @@ export class ChatController implements AcpHost {
       return;
     }
     this.store.setDraft(this.activeId, "");
-    this.enqueueMessage(rt, text, true);
+    this.enqueueMessage(rt, text, this.attachments, true);
     rt.client.cancel(rt.id);
   }
 
