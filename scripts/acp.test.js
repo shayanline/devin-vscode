@@ -51,6 +51,14 @@ const WARNING = 1;
 const INFO = 2;
 const HINT = 3;
 
+// Absolute paths in the platform own form. The workspace filter compares with
+// path.sep, so a POSIX literal is not inside the root on Windows and every
+// diagnostic would be dropped there for a reason that has nothing to do with the
+// behaviour under test.
+const abs = (...parts) => path.resolve(path.sep, ...parts);
+const W = abs("w");
+const f = (name) => path.join(W, name);
+
 // A scripted fake agent. It answers `initialize` with `agentMeta`, records every
 // message it receives (including the client's replies to its own requests), and
 // runs `onMessage` for anything else. `afterInit` is source that runs once the
@@ -58,7 +66,11 @@ const HINT = 3;
 function fakeAgent(name, agentMeta, { onMessage = "", afterInit = "" } = {}) {
   const log = path.join(TMP, name + ".log");
   const js = path.join(TMP, name + ".js");
-  const sh = path.join(TMP, name + ".sh");
+  // The client spawns `<cliPath> acp`, so the fake agent has to look like the CLI
+  // itself. Windows refuses to spawn a shebang script, and a .cmd is what npm
+  // installs the real CLI as there, which the client already knows to run through
+  // a shell.
+  const shim = path.join(TMP, name + (process.platform === "win32" ? ".cmd" : ".sh"));
   fs.writeFileSync(js, `
     const fs = require("fs");
     const LOG = ${JSON.stringify(log)};
@@ -89,9 +101,13 @@ function fakeAgent(name, agentMeta, { onMessage = "", afterInit = "" } = {}) {
     });
     process.stdin.on("end", () => process.exit(0));
   `);
-  fs.writeFileSync(sh, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(js)}\n`);
-  fs.chmodSync(sh, 0o755);
-  return { cli: sh, log };
+  if (process.platform === "win32") {
+    fs.writeFileSync(shim, `@echo off\r\n"${process.execPath}" "${js}"\r\n`);
+  } else {
+    fs.writeFileSync(shim, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(js)}\n`);
+    fs.chmodSync(shim, 0o755);
+  }
+  return { cli: shim, log };
 }
 
 function seen(log) {
@@ -316,16 +332,16 @@ test("pushed notifications become events, and MCP churn is noted once", async ()
 
 test("only real defects are sent, as uris the agent will accept", () => {
   const items = diagnosticItems([
-    [vscode.Uri.file("/w/a.ts"), [
+    [vscode.Uri.file(f("a.ts")), [
       diag("broken", ERROR, { code: "ts2304", source: "ts" }),
       diag("untidy", WARNING, { code: "no-unused-vars", source: "eslint" }),
       diag("just so you know", INFO),
       diag("could be nicer", HINT)
     ]]
-  ], { roots: ["/w"] });
+  ], { roots: [W] });
 
   assert.deepStrictEqual(items.map((i) => i.severity), ["error", "warning"], "hints and information are editor UI, not defects");
-  assert.strictEqual(items[0].uri, "file:///w/a.ts", "a path instead of a uri makes the agent reject the whole reply");
+  assert.match(items[0].uri, /^file:\/\/\S*a\.ts$/, "a path instead of a uri makes the agent reject the whole reply");
   assert.strictEqual(items[0].id, "ts2304");
   assert.strictEqual(items[1].id, "no-unused-vars");
   assert.strictEqual(items[0].range.start.line, 0, "ranges stay zero based");
@@ -333,9 +349,9 @@ test("only real defects are sent, as uris the agent will accept", () => {
 
 test("an unlabelled diagnostic still gets a stable id", () => {
   const [withSource, bare] = diagnosticItems([
-    [vscode.Uri.file("/w/a.ts"), [diag("no code", ERROR, { source: "ts" })]],
-    [vscode.Uri.file("/w/b.ts"), [diag("nothing at all", ERROR)]]
-  ], { roots: ["/w"] });
+    [vscode.Uri.file(f("a.ts")), [diag("no code", ERROR, { source: "ts" })]],
+    [vscode.Uri.file(f("b.ts")), [diag("nothing at all", ERROR)]]
+  ], { roots: [W] });
   assert.strictEqual(withSource.id, "ts");
   assert.strictEqual(bare.id, "diagnostic");
 });
@@ -343,39 +359,39 @@ test("an unlabelled diagnostic still gets a stable id", () => {
 test("a rule that carries a documentation link still reduces to a string", () => {
   // VS Code allows code to be an object with a link to the rule's docs.
   const [item] = diagnosticItems([
-    [vscode.Uri.file("/w/a.ts"), [diag("linked", ERROR, { code: { value: "ts6133", target: "https://x/y" } })]]
-  ], { roots: ["/w"] });
+    [vscode.Uri.file(f("a.ts")), [diag("linked", ERROR, { code: { value: "ts6133", target: "https://x/y" } })]]
+  ], { roots: [W] });
   assert.strictEqual(item.id, "ts6133");
 });
 
 test("diagnostics outside the workspace are dropped, and non-file schemes with them", () => {
   const items = diagnosticItems([
-    [vscode.Uri.file("/w/mine.ts"), [diag("mine", ERROR)]],
-    [vscode.Uri.file("/elsewhere/theirs.ts"), [diag("not actionable", ERROR)]],
-    [{ scheme: "untitled", fsPath: "/w/scratch", toString: () => "untitled:/w/scratch" }, [diag("unsaved", ERROR)]]
-  ], { roots: ["/w"] });
+    [vscode.Uri.file(f("mine.ts")), [diag("mine", ERROR)]],
+    [vscode.Uri.file(abs("elsewhere", "theirs.ts")), [diag("not actionable", ERROR)]],
+    [{ scheme: "untitled", fsPath: f("scratch"), toString: () => "untitled:/w/scratch" }, [diag("unsaved", ERROR)]]
+  ], { roots: [W] });
   assert.deepStrictEqual(items.map((i) => i.message), ["mine"]);
 });
 
 test("a path that merely starts with the root is not inside it", () => {
   const items = diagnosticItems([
-    [vscode.Uri.file("/work-other/a.ts"), [diag("different project", ERROR)]]
-  ], { roots: ["/work"] });
+    [vscode.Uri.file(abs("work-other", "a.ts")), [diag("different project", ERROR)]]
+  ], { roots: [abs("work")] });
   assert.deepStrictEqual(items, [], "/work-other is not under /work");
 });
 
 test("with no workspace open, nothing is filtered by location", () => {
   const items = diagnosticItems([
-    [vscode.Uri.file("/anywhere/a.ts"), [diag("still worth knowing", ERROR)]]
+    [vscode.Uri.file(abs("anywhere", "a.ts")), [diag("still worth knowing", ERROR)]]
   ], { roots: [] });
   assert.strictEqual(items.length, 1);
 });
 
 test("files the agent just edited come first, then errors before warnings", () => {
   const items = diagnosticItems([
-    [vscode.Uri.file("/w/untouched.ts"), [diag("old error", ERROR)]],
-    [vscode.Uri.file("/w/edited.ts"), [diag("its warning", WARNING), diag("its error", ERROR)]]
-  ], { roots: ["/w"], touched: new Set(["/w/edited.ts"]) });
+    [vscode.Uri.file(f("untouched.ts")), [diag("old error", ERROR)]],
+    [vscode.Uri.file(f("edited.ts")), [diag("its warning", WARNING), diag("its error", ERROR)]]
+  ], { roots: [W], touched: new Set([f("edited.ts")]) });
 
   assert.deepStrictEqual(
     items.map((i) => i.message),
@@ -386,16 +402,16 @@ test("files the agent just edited come first, then errors before warnings", () =
 
 test("the list is capped, so one broken file cannot eat the whole context", () => {
   const many = Array.from({ length: MAX_DIAGNOSTICS + 50 }, (_, i) => diag("e" + i, ERROR, { line: i }));
-  const items = diagnosticItems([[vscode.Uri.file("/w/a.ts"), many]], { roots: ["/w"] });
+  const items = diagnosticItems([[vscode.Uri.file(f("a.ts")), many]], { roots: [W] });
   assert.strictEqual(items.length, MAX_DIAGNOSTICS);
 });
 
 test("a touched file still wins after the cap is applied", () => {
   const noise = Array.from({ length: MAX_DIAGNOSTICS + 10 }, (_, i) => diag("noise" + i, ERROR, { line: i }));
   const items = diagnosticItems([
-    [vscode.Uri.file("/w/noisy.ts"), noise],
-    [vscode.Uri.file("/w/edited.ts"), [diag("the one that matters", ERROR)]]
-  ], { roots: ["/w"], touched: new Set(["/w/edited.ts"]) });
+    [vscode.Uri.file(f("noisy.ts")), noise],
+    [vscode.Uri.file(f("edited.ts")), [diag("the one that matters", ERROR)]]
+  ], { roots: [W], touched: new Set([f("edited.ts")]) });
 
   assert.strictEqual(items.length, MAX_DIAGNOSTICS);
   assert.strictEqual(items[0].message, "the one that matters", "the cap must not throw away the relevant one");
