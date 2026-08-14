@@ -34,7 +34,10 @@ Open VSX under the `shayanline` publisher.
 - **`webview/`** is the browser side that runs inside the chat panel: `main.js`,
   markdown rendering, the Mermaid entry point, and the settings panel script.
 - **`scripts/`** holds the test harnesses, the browser previews, and the ACP
-  probe (see the commands below).
+  probe (see the commands below). Three harnesses, one per side: `webview-harness.js`
+  mounts the chat page in jsdom, `settings-harness.js` does the same for the settings
+  panel, and `chat-harness.js` runs the real chat controller against a real ACP
+  agent (see "Testing the host" below).
 - **`media/`, `resources/`** are icons and static assets. **`docs/`** holds the
   README screenshots and the guide for regenerating them.
 - Build output goes to **`dist/`** (bundled by esbuild, do not edit by hand).
@@ -161,6 +164,45 @@ The agent pulls on its own schedule (not per turn) by calling
 source}` and a range is `{start, end}` of `{line, character}`. `uri` is **required**
 ("missing field `uri`"), a null reply is rejected outright ("invalid type: null"),
 and ranges stay zero based because the agent renders them one based itself.
+
+## Testing the host
+
+`scripts/chat-harness.js` runs the real `ChatController` outside VS Code, against a
+real ACP conversation. Nothing is mocked at the seam: the actual controller,
+`ChangeTracker`, `SessionStore`, `AcpClient` and `TerminalManager`, with `vscode`
+aliased to `scripts/vscode-stub.js`, and a fake agent that is a genuine peer over
+stdio and answers `--version` and `auth status` too, so the health check takes the
+real path as well.
+
+**The agent's delays are the technique.** Every bug found in this file is the same
+shape: work that takes seconds (spawning an agent, `session/new`, `session/load`, a
+wake) finishing into a panel the user has moved on from. `createChat({ newDelay,
+loadDelay, promptDelay })` and `setDelays(...)` hold a call open so a test can act
+inside that window, and `setAgentMode` gives a chat a mode of its own so one chat's
+settings can be told from another's.
+
+Four things to know before writing one, each of which cost time to find:
+
+- **The agent's environment comes from the `devin.env` setting**, not from this
+  process's environment, because the environment a client inherits is read from a
+  login shell once and cached for the run: a delay set that way only ever reaches
+  the first agent.
+- **Every chat spawns its own agent**, so session ids have to be unique across them.
+  Counting from one in each made every chat `s-1`, which silently makes two chats
+  look like one to everything keyed on the id, and made a test pass for the wrong
+  reason.
+- **Never leave an agent running at the end of a test.** It keeps the runner's event
+  loop alive, and the suite hangs with no output rather than failing. `cleanup()`
+  disposes every harness for exactly this reason, so a failing test cannot strand
+  one, and the same applies to a thinking block's label timer in the webview
+  harness.
+- **Wait for a condition, not a duration.** `until(predicate)` exists because the
+  first chat in a run also pays for the health check and the login shell read, so a
+  fixed wait is either flaky or slow.
+
+**Check a new test by breaking the thing it covers.** Undo the fix, confirm the test
+fails, put it back. Several tests here passed against the bug they were written for
+until that was done.
 
 ## Releasing
 
