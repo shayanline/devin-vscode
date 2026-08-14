@@ -3,6 +3,11 @@ import * as fs from "fs";
 import * as path from "path";
 import { StringDecoder } from "string_decoder";
 
+// How often live output is handed to the panel. Fast enough to read as live, slow
+// enough that a build's worth of chunks is a few dozen posts rather than hundreds
+// of full buffer copies.
+const OUTPUT_POST_MS = 80;
+
 export interface EnvVariable {
   name: string;
   value: string;
@@ -143,20 +148,40 @@ export class TerminalManager {
   }
 
   private async start(terminalId: string, term: Term, params: CreateTerminalParams): Promise<void> {
+    // A chatty command arrives in hundreds of chunks, and every one of them used to
+    // post the whole buffer, up to a megabyte, and have the panel rebuild the card
+    // around it. That is quadratic in the output, and it made the panel stall during
+    // a build. The buffer is coalesced instead: at most one post per interval, plus
+    // one at the end so the last lines are never left unsent.
+    let pendingPost: NodeJS.Timeout | undefined;
+    const flush = () => {
+      if (pendingPost) {
+        clearTimeout(pendingPost);
+        pendingPost = undefined;
+      }
+      this.onOutput?.(terminalId, term.output, term.exitStatus);
+    };
+    const postSoon = () => {
+      if (pendingPost) {
+        return;
+      }
+      pendingPost = setTimeout(flush, OUTPUT_POST_MS);
+      pendingPost.unref?.();
+    };
     const append = (text: string) => {
       term.output += text;
       while (Buffer.byteLength(term.output, "utf8") > term.limit) {
         term.truncated = true;
         term.output = term.output.slice(Math.ceil(term.output.length * 0.1) || 1);
       }
-      this.onOutput?.(terminalId, term.output, term.exitStatus);
+      postSoon();
     };
     const settle = (status: TerminalExitStatus) => {
       term.exitStatus = status;
       for (const w of term.waiters.splice(0)) {
         w(status);
       }
-      this.onOutput?.(terminalId, term.output, status);
+      flush();
       this.log?.(`[terminal] ${terminalId} exited code=${status.exitCode} signal=${status.signal || ""}`);
     };
 

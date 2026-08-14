@@ -1994,8 +1994,30 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   }
 
   function refreshTurnChrome() {
-    turns.forEach((t) => { if (!t.editing) buildTurnChrome(t); });
+    // Rebuilding a turn's controls replaces the elements, so a keyboard user standing
+    // on a Copy, a Retry or a Restore Checkpoint would be dropped back to the top of
+    // the panel every time a turn started or finished. The turn holding focus keeps
+    // its controls, and gets them rebuilt when focus moves on.
+    turns.forEach((t) => {
+      if (t.editing) return;
+      if (t.container && t.container.contains(document.activeElement)) {
+        t.chromeStale = true;
+        return;
+      }
+      t.chromeStale = false;
+      buildTurnChrome(t);
+    });
   }
+  // The deferred half of the above: whatever was left alone is brought up to date
+  // once the user is no longer inside it.
+  document.addEventListener("focusout", () => {
+    setTimeout(() => {
+      const pending = turns.filter((t) => t.chromeStale && !t.editing
+        && !(t.container && t.container.contains(document.activeElement)));
+      if (!pending.length) return;
+      pending.forEach((t) => { t.chromeStale = false; buildTurnChrome(t); });
+    }, 0);
+  }, true);
 
   // A turn is revertable only when we hold a node id that is valid on the CURRENT
   // conversation expansion. The agent re-expands the conversation on session
@@ -3721,6 +3743,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // one line naming the file, never as a section with the file buried inside it.
   // An edit becomes the edit row itself, wherever it came from.
   const editTools = new Map(); // tool call id -> what it has told us about the edit
+  // Enough for the calls still on screen in a long turn, and bounded so a day in one
+  // panel does not retain every edit payload it has ever seen.
+  const MAX_EDIT_TOOLS = 200;
   const FILE_LINE_KINDS = ["read", "delete", "move"];
 
   // What a file tool is acting on: the diff it produced, the location it reported,
@@ -3790,6 +3815,13 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     if (Array.isArray(m.content) && m.content.length) d.content = m.content;
     if (Array.isArray(m.locations) && m.locations.length) d.locations = m.locations;
     editTools.set(m.id, d);
+    // `rawInput` carries the file's text for an edit tool, so this map is two copies
+    // of a file per call. It is only read to name the file and open the diff of the
+    // call being reported, so the oldest are dropped rather than kept for the life
+    // of the panel across every chat it shows.
+    while (editTools.size > MAX_EDIT_TOOLS) {
+      editTools.delete(editTools.keys().next().value);
+    }
     const target = toolFileTarget(d);
     // Nothing names the file yet (a pending call): the row appears with the diff.
     if (!target) return true;
@@ -6607,14 +6639,29 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       skipped: !!m.skipped,
       revealed: !!m.revealed
     };
+    const before = terminalCache.get(m.terminalId);
     terminalCache.set(m.terminalId, state);
+    let wrote = false;
     el.thread.querySelectorAll(`pre[data-terminal="${cssEscape(m.terminalId)}"]`).forEach((pre) => {
+      // Write into the box that is already there, and keep it pinned to the newest
+      // line unless the user has scrolled up to read something. Rebuilding it reset
+      // the scroll, so a long command only ever showed its first few lines.
+      const atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 24;
       pre.textContent = text || "\u2026";
+      if (atBottom) pre.scrollTop = pre.scrollHeight;
+      wrote = true;
       scrollToBottom();
     });
     // The row is titled and actioned by the state of its command, so redraw the
     // rows bound to this terminal: what it says ("in background") and what it
-    // offers (backgrounding it, showing it) both follow from this.
+    // offers (backgrounding it, showing it) both follow from this. Only when one of
+    // those actually changed, though: doing it for every chunk of output rebuilt the
+    // whole card, re-highlighted the command and re-decoded any image in it, which
+    // is what made the panel stall during a build.
+    const chrome = (s) => s && [!!s.exitStatus, s.integrated, s.skipped, s.revealed].join("|");
+    if (wrote && chrome(before) === chrome(state)) {
+      return;
+    }
     const bound = [];
     toolEls.forEach((entry, id) => {
       if (entry.data && entry.data.terminalId === m.terminalId) bound.push(id);

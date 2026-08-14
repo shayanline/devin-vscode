@@ -4335,6 +4335,33 @@ test("a turn can be forked into a new chat without discarding anything", async (
   assert.strictEqual(h.errors().length, 0);
 });
 
+test("a turn starting does not take the keyboard away from a control", async () => {
+  // Every turn's controls are rebuilt when the busy state flips, which replaces the
+  // elements. A keyboard user standing on one was dropped back to the top of the
+  // panel each time a turn started or ended.
+  const h = createHarness();
+  h.replay([{ role: "user", text: "first" }, { role: "assistant", text: "answer" }]);
+  await h.settle(20);
+  h.post({ type: "turnHead", head: 31, reliable: true });
+  h.post({ type: "userChunk", text: "second" });
+  h.post({ type: "assistantChunk", text: "answer 2" });
+  h.post({ type: "assistantEnd", stopReason: "end_turn" });
+  await h.settle(20);
+
+  const btn = h.document.querySelector("#thread .checkpoint-restore, #thread .footer-copy, #thread .msg-copy");
+  assert.ok(btn, "there is a control in the transcript to stand on");
+  btn.focus();
+  assert.strictEqual(h.document.activeElement, btn, "focus is on it");
+
+  h.post({ type: "busy", value: true });
+  await h.settle(10);
+  assert.strictEqual(h.document.activeElement, btn, "and a turn starting leaves it there");
+  h.post({ type: "busy", value: false });
+  await h.settle(10);
+  assert.strictEqual(h.document.activeElement, btn, "and so does a turn ending");
+  assert.strictEqual(h.errors().length, 0);
+});
+
 test("a failed MCP server is not blamed on the next chat", async () => {
   // The card sits above the composer rather than in the transcript, so switching
   // chats does not take it with the thread, and it was left saying the chat now on
