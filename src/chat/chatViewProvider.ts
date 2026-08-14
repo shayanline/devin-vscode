@@ -2576,14 +2576,20 @@ export class ChatController implements AcpHost {
 
   private statusMap(): Record<string, SessionStatus> {
     const statuses: Record<string, SessionStatus> = {};
-    for (const id of this.starting) {
-      statuses[id] = "starting";
-    }
     for (const [id, rt] of this.runtimes) {
       if (rt.awaiting > 0 && id !== this.activeId) {
         statuses[id] = "attention";
       } else {
         statuses[id] = rt.busy && rt.awaiting === 0 ? "running" : "idle";
+      }
+    }
+    // Last, not first: a load and a wake both register the runtime before the replay
+    // has finished, so reading the pool afterwards called every one of them "idle"
+    // and the starting dot was never shown for either. Not over "attention", which
+    // is a question waiting to be answered.
+    for (const id of this.starting) {
+      if (statuses[id] !== "attention") {
+        statuses[id] = "starting";
       }
     }
     return statuses;

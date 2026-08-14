@@ -264,6 +264,45 @@ test("a changed, now-idle session is reloaded, not restored", async () => {
   assert.strictEqual(h.errors().length, 0);
 });
 
+test("a chat left while it was still opening is reloaded, not restored half rendered", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  // A full load: the spinner is up and the history streams in behind it.
+  h.post({ type: "clear", loading: true });
+  h.post({ type: "capabilities", revert: true });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "sessionStatuses", statuses: { A: "starting" }, activeId: "A" });
+  h.post({ type: "userChunk", text: "the first of several turns" });
+  await h.settle(20);
+
+  // Left before the replay finished, so what is cached is a part of the transcript
+  // with the spinner still in it, and the rest of the replay is dropped: the host
+  // stops painting for a chat that is no longer on screen.
+  h.document.getElementById("history-btn").click();
+  await h.settle(10);
+  h.post({
+    type: "sessions",
+    sessions: [{ id: "A", short_id: "A", title: "A", working_directory: "/w" }],
+    activeId: null,
+    statuses: { A: "idle" },
+    folders: [{ path: "/w", name: "w" }]
+  });
+  await h.settle(10);
+
+  h.document.querySelector("#sessions-list .session-main").click();
+  await h.settle(10);
+  assert.ok(
+    h.posted.some((m) => m.type === "loadSession" && m.id === "A"),
+    "it loads the chat again rather than showing what it managed to render"
+  );
+  assert.ok(
+    !h.posted.some((m) => m.type === "activateSession" && m.id === "A"),
+    "and does not just re-point at it"
+  );
+  assert.strictEqual(h.errors().length, 0);
+});
+
 test("returning to a session with a turn in flight re-attaches, never reloads", async () => {
   // Reloading a running session over its live channel aborts the prompt
   // ("Agent communication channel closed"), so a running session must activate.

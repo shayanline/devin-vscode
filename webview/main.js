@@ -6046,8 +6046,13 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     autosize();
     updateSendState();
     // A session that was mid-run when we left it will keep changing, so its
-    // snapshot is stale: force a reload when we come back.
-    if (sessionStatuses[curSessionId] === "running") dirtyViews.add(curSessionId);
+    // snapshot is stale: force a reload when we come back. So is one that was still
+    // opening, and worse: what is cached is however much of the history had arrived,
+    // with the loading row still in it, and the rest is dropped, since the host stops
+    // painting a replay for a chat that is no longer on screen. Restoring that showed
+    // a chat missing most of itself under a spinner that had nothing left to clear it.
+    const leaving = sessionStatuses[curSessionId];
+    if (leaving === "running" || leaving === "starting") dirtyViews.add(curSessionId);
     // Cap retained transcripts to bound DOM retention. Never the one being left, and
     // never the one being opened: evicting that left the chat it was about to
     // restore with an empty thread and no reload, so it came up blank.
