@@ -2719,11 +2719,12 @@ export class ChatController implements AcpHost {
   // on its runtime, and this is only what is on screen, so every write that crossed an
   // await goes through here: a chat that is not the one being shown records its own
   // settings and may not paint them. The synchronous writers, taking a new chat and the
-  // user's own pickers, set it directly, since the panel cannot have moved on under them. That rule used to be written out again at each of these sites, and the
-  // one that left it out flipped the pickers of the chat the user was reading to a
-  // background chat's, which matters most on the mode, since it says whether permission
-  // is asked for before anything runs. Answers whether the panel is really showing this
-  // chat, so a caller can post the rest of what it was going to say.
+  // user's own pickers, set it directly, since the panel cannot have moved on under
+  // them. The rule used to be written out again at each of these sites, and the one that
+  // left it out flipped the pickers of the chat the user was reading to a background
+  // chat's, which matters most on the mode, since it says whether permission is asked
+  // for before anything runs. Answers whether the panel is really showing this chat, so
+  // a caller can post the rest of what it was going to say.
   private showOptions(rt: Runtime | undefined, mode?: string, model?: string): boolean {
     if (rt && this.activeId !== rt.id) {
       return false;
