@@ -2386,13 +2386,25 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     }
   }
 
+  // Nothing about the editor changes while the host is asked what the rewind would
+  // discard, and that answer is a round trip away, so a user who saw nothing happen
+  // presses Enter again. Both submits then rewound, which sends the edited prompt
+  // twice and lands the second rewind under the resend of the first. The turn is
+  // held for the duration, and the state is re-checked afterwards, since a turn can
+  // start while the question is still open.
   async function submitEdit(turn, text) {
     text = (text || "").trim();
-    if (!text) return;
-    const needs = await revertNeedsConfirm(turn);
-    if (needs && !(await confirmDiscard())) return;
-    finishEditing(turn);
-    revertAndResend(turn, text);
+    if (!text || turn.submitting) return;
+    turn.submitting = true;
+    try {
+      const needs = await revertNeedsConfirm(turn);
+      if (needs && !(await confirmDiscard())) return;
+      if (!canEditTurn(turn)) return;
+      finishEditing(turn);
+      revertAndResend(turn, text);
+    } finally {
+      turn.submitting = false;
+    }
   }
 
   // --- Edit a request from the bottom composer (editRequests:input) ---------
@@ -2425,10 +2437,17 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   }
 
   async function submitInputEdit(turn, text) {
-    const needs = await revertNeedsConfirm(turn);
-    if (needs && !(await confirmDiscard())) return;
-    cancelInputEditing();
-    revertAndResend(turn, text);
+    if (turn.submitting) return;
+    turn.submitting = true;
+    try {
+      const needs = await revertNeedsConfirm(turn);
+      if (needs && !(await confirmDiscard())) return;
+      if (!canEditTurn(turn)) return;
+      cancelInputEditing();
+      revertAndResend(turn, text);
+    } finally {
+      turn.submitting = false;
+    }
   }
 
   function showEditingBanner(text, onCancel) {

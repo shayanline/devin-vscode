@@ -668,6 +668,59 @@ function twoLiveTurns(h) {
   h.post({ type: "busy", value: false });
 }
 
+test("a second Enter while an edit is being checked does not send it twice", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "capabilities", revert: true, editRequests: "inline", checkpoints: true, confirmRemoval: true });
+  h.post({ type: "sessionReady", sessionId: "S" });
+  h.post({ type: "userMessage", text: "first" });
+  h.post({ type: "assistantStart" }); h.post({ type: "assistantChunk", text: "a1" }); h.post({ type: "assistantEnd" });
+  h.post({ type: "turnHead", head: 10, reliable: true });
+  h.post({ type: "busy", value: false });
+  h.post({ type: "userMessage", text: "second" });
+  h.post({ type: "assistantStart" }); h.post({ type: "assistantChunk", text: "a2" }); h.post({ type: "assistantEnd" });
+  h.post({ type: "turnHead", head: 20, reliable: true });
+  h.post({ type: "busy", value: false });
+  await h.settle(20);
+
+  const reqBodies = [...h.document.querySelectorAll("#thread .turn-request .req-body")];
+  reqBodies[1].click();
+  await h.settle(5);
+  const ta = h.document.querySelector(".req-editor-input");
+  assert.ok(ta, "the editor is open");
+  ta.value = "second, but better";
+
+  // Submitting asks the host what the rewind would discard first, and nothing about
+  // the editor changes while that answer is on its way: the text is still there and
+  // the editor is still open, so a user who saw nothing happen presses Enter again.
+  const enter = () => ta.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  enter();
+  enter();
+  await h.settle(10);
+
+  for (const asked of h.posted.filter((m) => m.type === "revertPreview")) {
+    h.post({
+      type: "revertPreview",
+      token: asked.token,
+      head: asked.head,
+      result: { fileActions: [], irreversibleWarnings: [], conflicts: [] },
+      pendingFiles: 0
+    });
+  }
+  await h.settle(20);
+
+  // Two rewinds on one channel is the edited prompt sent twice, and the second
+  // landing under the resend of the first.
+  assert.strictEqual(
+    h.posted.filter((m) => m.type === "revertExecute").length,
+    1,
+    "the edit is sent once"
+  );
+  assert.strictEqual(h.errors().length, 0);
+});
+
 test("only one inline request edits at a time and Cancel closes it", async () => {
   const h = createHarness();
   twoLiveTurns(h);
