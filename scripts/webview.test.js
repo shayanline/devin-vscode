@@ -4335,6 +4335,69 @@ test("a turn can be forked into a new chat without discarding anything", async (
   assert.strictEqual(h.errors().length, 0);
 });
 
+test("committing a word in an IME does not send the message", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  await h.settle(10);
+  const input = h.document.getElementById("input");
+  input.value = "\u3053\u3093\u306b\u3061";
+  input.dispatchEvent(new h.window.Event("input", { bubbles: true }));
+  await h.settle(5);
+
+  // The Enter that commits the candidate. It belongs to the IME, not to us.
+  input.dispatchEvent(new h.window.KeyboardEvent("keydown", {
+    key: "Enter", bubbles: true, cancelable: true, isComposing: true, keyCode: 229
+  }));
+  await h.settle(10);
+  assert.strictEqual(h.posted.filter((m) => m.type === "send").length, 0,
+    "the reading must not be sent as the prompt");
+  assert.strictEqual(input.value, "\u3053\u3093\u306b\u3061", "and the text is left alone");
+
+  // Once the word is committed, Enter is ours again.
+  input.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+  await h.settle(10);
+  assert.strictEqual(h.posted.filter((m) => m.type === "send").length, 1, "a real Enter still sends");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a file suggestion that arrives too late does not steal the next Enter", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  await h.settle(10);
+  const input = h.document.getElementById("input");
+  const menu = h.document.getElementById("autocomplete");
+
+  input.value = "@Chat";
+  input.dispatchEvent(new h.window.Event("input", { bubbles: true }));
+  await h.settle(10);
+  const asked = h.posted.filter((m) => m.type === "queryFiles").pop();
+  assert.ok(asked, "typing a mention asks the host for matches");
+
+  // The user gives up on the mention before the workspace answers.
+  input.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+  await h.settle(5);
+  assert.ok(menu.classList.contains("hidden"), "Escape closes it");
+
+  // The reply lands now, for the query that was asked.
+  h.post({ type: "fileSuggestions", query: asked.query, items: [{ path: "/w/chatViewProvider.ts", label: "chatViewProvider.ts", detail: "src/chat" }] });
+  await h.settle(10);
+  assert.ok(menu.classList.contains("hidden"), "and it stays closed rather than reopening over the composer");
+
+  input.value = "what does this file do?";
+  input.dispatchEvent(new h.window.Event("input", { bubbles: true }));
+  input.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+  await h.settle(10);
+  const sent = h.posted.filter((m) => m.type === "send").pop();
+  assert.ok(sent && sent.text === "what does this file do?", "so Enter sends the message instead of picking a file");
+  assert.strictEqual(h.errors().length, 0);
+});
+
 test("a prompt left half written comes back, and survives the panel settling", async () => {
   // The host restores the draft before it says `ready`, and says `ready` twice: on
   // open, and again once the CLI health check finishes. Handing the composer back

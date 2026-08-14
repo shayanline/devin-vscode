@@ -93,7 +93,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
 
   let commands = [];
   let ac = null;
-  let fileQueryToken = "";
+  // The `@` query a reply is expected for, or null when nothing is expected.
+  let fileQueryToken = null;
   let currentTitle = "Chat";
   let lastUserText = "";
 
@@ -827,12 +828,26 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   }
   el.attach.addEventListener("click", () => vscode.postMessage({ type: "addContext" }));
 
+  // While an IME is composing, the keys belong to the IME: Enter commits the
+  // candidate and the arrows walk its list. Acting on them here sent the reading
+  // instead of the word, and `preventDefault` took the composition down with it,
+  // which made the composer unusable in Japanese, Chinese and Korean.
+  function composing(e) {
+    return e.isComposing || e.keyCode === 229;
+  }
   el.input.addEventListener("keydown", (e) => {
+    if (composing(e)) return;
     if (ac) {
       if (e.key === "ArrowDown") { e.preventDefault(); ac.index = (ac.index + 1) % ac.items.length; renderAutocomplete(); return; }
       if (e.key === "ArrowUp") { e.preventDefault(); ac.index = (ac.index - 1 + ac.items.length) % ac.items.length; renderAutocomplete(); return; }
       if ((e.key === "Enter" || e.key === "Tab") && ac.items.length) { e.preventDefault(); acceptAutocomplete(ac.items[ac.index]); return; }
       if (e.key === "Escape") { e.preventDefault(); closeAutocomplete(); return; }
+    }
+    // Escape before the menu has even opened still abandons the mention: its reply
+    // is in flight, and finding files and symbols is slow enough that it usually
+    // is. Without this the menu appeared after the user had given up on it.
+    if (e.key === "Escape" && !ac && fileQueryToken !== null) {
+      fileQueryToken = null;
     }
     if (e.key === "Escape" && editingQueuedId) { e.preventDefault(); cancelQueuedEdit(); return; }
     if (e.key === "Escape" && editingTurn) { e.preventDefault(); cancelInputEditing(); return; }
@@ -1593,6 +1608,12 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
 
   function closeAutocomplete() {
     ac = null;
+    // Forget which query is expected, or a reply still in flight would reopen the
+    // menu over a composer the user has already moved on from. Finding files and
+    // symbols takes a round trip through the workspace and the language servers,
+    // so Escape, a Backspace out of the mention, or a space all beat it back, and
+    // the menu then ate the Enter meant to send the message.
+    fileQueryToken = null;
     el.autocomplete.classList.add("hidden");
     el.autocomplete.innerHTML = "";
   }
@@ -2295,6 +2316,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     const grow = () => { ta.style.height = "auto"; ta.style.height = Math.min(Math.max(ta.scrollHeight, 32), 240) + "px"; };
     ta.addEventListener("input", grow);
     ta.addEventListener("keydown", (e) => {
+      // Submitting an edit rewinds the conversation, so a candidate-confirm taken
+      // for a submit would discard turns as well as mangling the text.
+      if (composing(e)) return;
       if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); finishEditing(turn); }
       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submitEdit(turn, ta.value); }
     });
@@ -4904,6 +4928,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     // free text answer is Shift+Enter, or Ctrl/Cmd+Enter. A focused button keeps
     // its own Enter, so Cancel still cancels.
     qc.addEventListener("keydown", (e) => {
+      // Committing a candidate in a free text answer is not answering the question.
+      if (composing(e)) return;
       const t = e.target;
       const inButton = t && t.tagName === "BUTTON";
       const inTextarea = t && t.tagName === "TEXTAREA";
