@@ -136,6 +136,7 @@ process.stdin.on("end", () => process.exit(0));
 `;
 
 let agentPath;
+let harnessSeq = 0;
 
 // A Memento over a plain object, which is all SessionStore asks for.
 function memento(seed) {
@@ -179,7 +180,10 @@ function createChat(opts = {}) {
   // surface: the extension's storage directory is per workspace, not per window, and it
   // is where anything that outlives an agent is kept.
   const storage = opts.storage || fs.mkdtempSync(path.join(TMP, "store-"));
-  const agentLog = path.join(dir, "agent-requests.jsonl");
+  // Per harness, not per directory: two harnesses can share a workspace now (that is
+  // what a reload is), and a shared log would mix one controller's requests into the
+  // other's, which is silent and would make `agentSaw` quietly wrong.
+  const agentLog = path.join(storage, `agent-requests.${++harnessSeq}.jsonl`);
   globalThis.__dvFolders = [{ name: path.basename(dir), uri: vscode.Uri.file(dir), index: 0 }];
   // How the agent is told what to do. It goes through the `devin.env` setting rather
   // than this process's environment because the controller reads that on every spawn,
