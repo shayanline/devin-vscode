@@ -168,6 +168,25 @@ test("writing a config keeps the file it was, link and permissions and all", { s
   assert.deepStrictEqual(fs.readdirSync(store), ["config.json"], "no scratch file left beside it");
 });
 
+test("a link whose target is not there yet is still followed, not replaced", { skip: process.platform === "win32" }, () => {
+  // A dotfiles link can point at a file that is not checked out yet, and asking the
+  // filesystem to resolve the whole path fails for that, which read as "nothing there"
+  // and replaced the link with a regular file: the same silent detachment as before.
+  const store = path.join(TMP, "dotfiles-pending");
+  const home = path.join(TMP, "home-pending", ".config", "devin");
+  fs.mkdirSync(store, { recursive: true });
+  fs.mkdirSync(home, { recursive: true });
+  const real = path.join(store, "config.json");
+  const link = path.join(home, "config.json");
+  fs.symlinkSync(real, link);
+  assert.ok(!fs.existsSync(real), "the target is genuinely missing");
+
+  writeFileAtomic(link, '{"model":"written-through"}\n');
+
+  assert.ok(fs.lstatSync(link).isSymbolicLink(), "the link is still a link");
+  assert.strictEqual(readConfig(real).model, "written-through", "and the file it points at was created");
+});
+
 test("a comma inside a value is part of the value, not a trailing comma", () => {
   // A trailing comma before } or ] is legal in the config and not in JSON, so it
   // has to go before parsing. Stripping it with a pass over the finished text

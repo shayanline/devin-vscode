@@ -145,16 +145,26 @@ export function writeFileAtomic(file: string, body: string): void {
   let target = file;
   let mode: number | undefined;
   try {
-    target = fs.realpathSync(file);
+    // The link is read rather than the whole path resolved, because resolving fails for
+    // a link whose target is not there yet, which a dotfiles link often is: the file has
+    // not been checked out, or was renamed. Treating that as "nothing there" replaced the
+    // link with a regular file, which is the detachment this is here to prevent.
+    const link = fs.lstatSync(file);
+    target = link.isSymbolicLink() ? path.resolve(path.dirname(file), fs.readlinkSync(file)) : file;
     mode = fs.statSync(target).mode & 0o777;
   } catch {
-    // Nothing there yet: no link to follow and no permissions to carry over.
+    // Nothing there at all, or a link to a file that is not there: no permissions to
+    // carry over, and `target` is the right thing to write either way.
   }
+  fs.mkdirSync(path.dirname(target), { recursive: true });
   const tmp = path.join(path.dirname(target), `.${path.basename(target)}.${process.pid}.tmp`);
   try {
-    fs.writeFileSync(tmp, body, "utf8");
-    // A new file is 0644 whatever it is replacing, and an MCP config holds tokens
-    // in its `env`, so a 0600 config must not come back readable by everyone.
+    // A new file is 0644 whatever it is replacing, and an MCP config holds tokens in its
+    // `env`, so a 0600 config must not come back readable by everyone. Created with the
+    // mode rather than only narrowed afterwards, or the secrets sit in a world readable
+    // scratch file for the length of the write, and then chmodded to be exact, since what
+    // the mode argument asks for is still cut down by the umask.
+    fs.writeFileSync(tmp, body, mode === undefined ? "utf8" : { encoding: "utf8", mode });
     if (mode !== undefined) {
       fs.chmodSync(tmp, mode);
     }

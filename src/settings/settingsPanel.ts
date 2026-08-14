@@ -81,6 +81,11 @@ export class SettingsPanel {
   private watchTimer?: NodeJS.Timeout;
   private cli: CliContext = { cliPath: "devin" };
   private cliResolved = false;
+  // A resolve in flight, so two refreshes at once do not both spawn a health check and a
+  // login shell, and a counter so one that read the old setting cannot finish last and
+  // win: it would latch, since only another change to those settings clears the flag.
+  private cliPending?: Promise<void>;
+  private cliGeneration = 0;
   private disposed = false;
   // When the config changes while the panel is hidden, refresh on reveal instead.
   private stale = false;
@@ -122,6 +127,8 @@ export class SettingsPanel {
         // effect on the refresh it triggers rather than on the next panel.
         if (e.affectsConfiguration("devin.cliPath") || e.affectsConfiguration("devin.env")) {
           this.cliResolved = false;
+          this.cliPending = undefined;
+          this.cliGeneration++;
         }
         this.queueRefresh();
       }),
@@ -161,18 +168,31 @@ export class SettingsPanel {
   // opened, so a wrong `devin.cliPath` stayed wrong for the life of the tab. Every
   // list would be empty and every MCP or plugin action would fail, and correcting the
   // setting changed nothing, since only closing and reopening the tab could.
-  private async ensureCli(): Promise<void> {
+  private ensureCli(): Promise<void> {
     // The directory moves on its own: the scope the panel is pointed at, and the
     // folders in the workspace, both change without these settings changing.
     this.cli.cwd = this.root();
     if (this.cliResolved) {
-      return;
+      return Promise.resolve();
     }
-    const setting = vscode.workspace.getConfiguration("devin").get<string>("cliPath", "devin") || "devin";
-    const [health, env] = await Promise.all([checkHealth(setting), loginShellEnv()]);
-    const extra = vscode.workspace.getConfiguration("devin").get<Record<string, string>>("env", {}) || {};
-    this.cli = { cliPath: health.path || "devin", env: { ...env, ...extra }, cwd: this.root() };
-    this.cliResolved = true;
+    if (!this.cliPending) {
+      const generation = this.cliGeneration;
+      this.cliPending = (async () => {
+        const setting = vscode.workspace.getConfiguration("devin").get<string>("cliPath", "devin") || "devin";
+        const [health, env] = await Promise.all([checkHealth(setting), loginShellEnv()]);
+        if (generation !== this.cliGeneration) {
+          // The setting changed while this was running, so it answers for a path the user
+          // has already corrected. Another resolve is on its way.
+          return;
+        }
+        const extra = vscode.workspace.getConfiguration("devin").get<Record<string, string>>("env", {}) || {};
+        this.cli = { cliPath: health.path || "devin", env: { ...env, ...extra }, cwd: this.root() };
+        this.cliResolved = true;
+      })().finally(() => {
+        this.cliPending = undefined;
+      });
+    }
+    return this.cliPending;
   }
 
   private post(message: unknown): void {
@@ -248,7 +268,6 @@ export class SettingsPanel {
       }
       switch (msg?.type) {
         case "settings:load":
-          await this.ensureCli();
           await this.sendData();
           return;
         case "settings:reload":
@@ -260,9 +279,9 @@ export class SettingsPanel {
           await this.setValue(scopeOf(msg.scope), String(msg.path), msg.value, msg.root ? String(msg.root) : this.root());
           return;
         case "settings:setRoot":
-          // Follows the scope tab, so project-scoped CLI verbs run in that folder.
+          // Follows the scope tab, so project-scoped CLI verbs run in that folder. The
+          // directory itself is brought up to date by the refresh below.
           this.selectedRoot = String(msg.path || "") || undefined;
-          this.cli.cwd = this.root();
           await this.sendData();
           return;
         case "settings:resetSection":
