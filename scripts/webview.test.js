@@ -4335,6 +4335,34 @@ test("a turn can be forked into a new chat without discarding anything", async (
   assert.strictEqual(h.errors().length, 0);
 });
 
+test("a failed MCP server is not blamed on the next chat", async () => {
+  // The card sits above the composer rather than in the transcript, so switching
+  // chats does not take it with the thread, and it was left saying the chat now on
+  // screen was missing tools it actually had.
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "mcpProblems", servers: [{ name: "godot-ai", message: "did not start" }] });
+  await h.settle(10);
+  assert.ok(h.document.getElementById("mcp-problems"), "the chat that has the problem says so");
+
+  // Back to the list, which has no chat and so no servers of its own.
+  h.document.getElementById("history-btn").click();
+  await h.settle(20);
+  assert.strictEqual(h.document.getElementById("mcp-problems"), null,
+    "and the warning does not follow the user into the list");
+
+  // A second chat, which the host reports as having nothing wrong.
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "sessionReady", sessionId: "B" });
+  h.post({ type: "mcpProblems", servers: [] });
+  await h.settle(10);
+  assert.strictEqual(h.document.getElementById("mcp-problems"), null, "nor into the next chat");
+  assert.strictEqual(h.errors().length, 0);
+});
+
 test("committing a word in an IME does not send the message", async () => {
   const h = createHarness();
   h.post({ type: "ready" });

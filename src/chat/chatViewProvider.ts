@@ -1114,16 +1114,18 @@ export class ChatController implements AcpHost {
     void vscode.window.showWarningMessage(`Couldn't find the skill "${name}" on this machine.`);
   }
 
+  // Always posts for the visible chat, including an empty list: the card lives above
+  // the composer rather than in the transcript, so it is not swapped out with the
+  // thread, and staying silent left the last chat's failures sitting over the next
+  // one, telling the user it was missing tools it actually had.
   private postMcpProblems(rt: Runtime): void {
-    if (this.activeId !== rt.id || !rt.mcpProblems.size) {
+    if (this.activeId !== rt.id) {
       return;
     }
-    if (ChatController.mcpMutedHere || !this.cfg().get<boolean>("showMcpWarnings", true)) {
-      return;
-    }
+    const muted = ChatController.mcpMutedHere || !this.cfg().get<boolean>("showMcpWarnings", true);
     this.post({
       type: "mcpProblems",
-      servers: [...rt.mcpProblems].map(([name, message]) => ({ name, message }))
+      servers: muted ? [] : [...rt.mcpProblems].map(([name, message]) => ({ name, message }))
     });
   }
 
@@ -2193,6 +2195,10 @@ export class ChatController implements AcpHost {
       this.post({ type: "model", model: rt.model });
     }
     this.post({ type: "busy", value: rt.busy });
+    // Which servers failed to start belongs to the agent behind this chat, so the
+    // card above the composer is re-derived for the chat now on screen rather than
+    // being left saying what was wrong with the last one.
+    this.postMcpProblems(rt);
     // Name the session: a surface handed a chat never called into `switchToSession`,
     // so without this its header, terminate and move controls have no session.
     this.painted = true;

@@ -555,6 +555,11 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // reviewable and reappear when a thread is reopened.
   function detachComposerFromSession() {
     cancelInputEditing();
+    // Which servers failed belongs to the chat that was open. The card sits above
+    // the composer, not in the thread, so nothing else takes it away, and it was
+    // left warning about the last chat while the user browsed the list.
+    renderMcpProblems([]);
+    mcpDismissed.clear();
     el.input.value = "";
     closeAutocomplete();
     autosize();
