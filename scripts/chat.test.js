@@ -16,6 +16,12 @@ const test = require("node:test");
 const assert = require("node:assert");
 const { createChat, cleanup } = require("./chat-harness");
 
+// The fake agent is a `/bin/sh` wrapper, so the CLI resolver cannot run it on Windows:
+// the health check fails, no chat starts, and every test here would fail for that one
+// reason. Skipped rather than left to fail, until the harness grows a `.cmd` shim (which
+// would also exercise the Windows quoting path in cli/locate.ts, so it is worth doing).
+const posixOnly = { skip: process.platform === "win32" };
+
 const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
 
 // What each prompt actually carried, in the order the agent was asked.
@@ -29,7 +35,7 @@ function prompts(h) {
   });
 }
 
-test("a message does not take the files of the chat opened while it was being sent", async () => {
+test("a message does not take the files of the chat opened while it was being sent", posixOnly, async () => {
   // Starting a chat takes seconds, and the composer belongs to whatever is on screen.
   // Opening another chat and staging a file in it during that window used to end with
   // the file sent to the agent of the chat being started, and then deleted, because
@@ -67,7 +73,7 @@ test("a message does not take the files of the chat opened while it was being se
   await h.dispose();
 });
 
-test("a file staged before a chat exists follows it into the chat", async () => {
+test("a file staged before a chat exists follows it into the chat", posixOnly, async () => {
   // The sessions list has a composer of its own, so a screenshot can be attached
   // before there is any chat to attach it to. Starting a chat carries what was waiting
   // there into it, and sending carries it with the message instead.
@@ -97,7 +103,7 @@ test("a file staged before a chat exists follows it into the chat", async () => 
   await h.dispose();
 });
 
-test("a file sent with the first message is not left staged in the chat it started", async () => {
+test("a file sent with the first message is not left staged in the chat it started", posixOnly, async () => {
   // Sending from the sessions list starts a chat and sends in one go, so the file is
   // staged in the box, carried into the chat the box becomes, and sent. It has to stop
   // being staged in both places, or the next message sends it again.
@@ -115,7 +121,7 @@ test("a file sent with the first message is not left staged in the chat it start
   await h.dispose();
 });
 
-test("a chat that finishes starting in the background does not take the panel", async () => {
+test("a chat that finishes starting in the background does not take the panel", posixOnly, async () => {
   // No configured default mode, so each chat keeps the mode its own agent reports and
   // the two can be told apart.
   const h = createChat({ config: { defaultMode: "" } });
@@ -130,7 +136,14 @@ test("a chat that finishes starting in the background does not take the panel", 
   await h.settle(120);
   h.send({ type: "loadSession", id: first });
   await h.until(() => h.activeId() === first);
-  await h.settle(900);
+  // The background chat really did finish starting: without this every assertion below
+  // is satisfied by it never having got there. Waiting on the request being logged is
+  // not enough, since the agent logs it before it answers.
+  assert.ok(
+    await h.until(() => h.liveChats() === 2, 8000),
+    "the second chat finished opening"
+  );
+  await h.settle(300);
 
   assert.strictEqual(h.activeId(), first, "the panel stays where the user put it");
   // What a window reload resumes from has to name the chat being read, not whichever
@@ -145,7 +158,7 @@ test("a chat that finishes starting in the background does not take the panel", 
   await h.dispose();
 });
 
-test("a chat still opening is reported as starting, not as idle", async () => {
+test("a chat still opening is reported as starting, not as idle", posixOnly, async () => {
   const h = createChat();
   await h.ready();
   const id = await h.startChat("hello");
@@ -167,7 +180,7 @@ test("a chat still opening is reported as starting, not as idle", async () => {
   await h.dispose();
 });
 
-test("messages queued behind a turn come back as a draft when the surface goes", async () => {
+test("messages queued behind a turn come back as a draft when the surface goes", posixOnly, async () => {
   // The queue only ever lived on the runtime. Closing a chat tab mid turn offers to
   // terminate it, and taking that offer went through dispose, which threw the queue
   // away, while terminating the same chat from the list handed it back.
@@ -186,7 +199,7 @@ test("messages queued behind a turn come back as a draft when the surface goes",
   await h.dispose();
 });
 
-test("a staged file goes with one message, not with both of them", async () => {
+test("a staged file goes with one message, not with both of them", posixOnly, async () => {
   // The message written first owns what was staged when it was written. A second one
   // written while the first is still waiting for its chat to open must not find the
   // same files still staged: they belong to a message that has already gone.
@@ -212,7 +225,7 @@ test("a staged file goes with one message, not with both of them", async () => {
   await h.dispose();
 });
 
-test("a second send never puts a second prompt on the same channel", async () => {
+test("a second send never puts a second prompt on the same channel", posixOnly, async () => {
   // Opening a chat drains whatever was typed while it opened, so the turn that starts
   // can be in flight exactly when the send that asked for the wake resumes. ACP has no
   // way to hand a prompt to a live one: a second contends with the first, and they are

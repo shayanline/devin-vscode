@@ -60,6 +60,10 @@ function writeAgent() {
 case "$1" in
   --version) echo "devin 3000.0.0-fake"; exit 0 ;;
   auth) echo "Logged in (via Devin)."; echo "  Name: Test User"; exit 0 ;;
+  # Returning to the sessions list falls back to the CLI when no agent is live. Left to
+  # reach the ACP loop below, it would sit on a stdin nobody writes to until the CLI's
+  # own timeout killed it, tracked by nothing that could stop it.
+  list) echo '[]'; exit 0 ;;
 esac
 exec ${JSON.stringify(process.execPath)} ${JSON.stringify(js)}
 `
@@ -93,7 +97,7 @@ process.stdin.on("data", async (chunk) => {
     // Every request, in order, so a test can assert what the agent was really asked:
     // which prompt carried which attachment, and how many prompts arrived at all.
     if (process.env.DV_LOG) {
-      try { require("fs").appendFileSync(process.env.DV_LOG, JSON.stringify(msg) + "\\n"); } catch {}
+      try { require("fs").appendFileSync(process.env.DV_LOG, JSON.stringify({ ...msg, _agent: process.pid }) + "\\n"); } catch {}
     }
     if (msg.id === undefined) continue;
     const reply = (result) => send({ jsonrpc: "2.0", id: msg.id, result });
@@ -187,11 +191,12 @@ function createChat(opts = {}) {
     {
       cliPath: agentPath,
       env: agentEnv,
-      // The controller reads these on every send and every open, and the defaults are
-      // what a fresh install has.
+      // Turned off rather than defaulted: the editor context and a real terminal are
+      // their own subjects, and an idle exit firing mid test would look like a bug in
+      // whatever was being tested. The key has to be the one the code reads.
       "implicitContext.enabled": false,
       useIntegratedTerminal: false,
-      idleExitMinutes: 0
+      idleSessionKeepAliveMinutes: 0
     },
     opts.config
   );
@@ -266,6 +271,10 @@ function createChat(opts = {}) {
     last: (type) => [...posted].reverse().find((m) => !type || m.type === type),
     // The chat the panel is showing, which is the thing most of these bugs get wrong.
     activeId: () => controller.activeId,
+    // How many chats are really open. A chat is only in the pool once its session/new
+    // has been answered, so this is the signal that a chat started in the background has
+    // finished starting, which a test has to wait for or it asserts nothing.
+    liveChats: () => controller.runtimes.size,
     // What the user picks in a modal (Terminate, Discard). The controller asks through
     // window.showWarningMessage, so this is the answer it gets.
     answerWith: (choice) => { vscode.window.answer = choice; return api; },
@@ -287,6 +296,9 @@ function createChat(opts = {}) {
     },
     async dispose() {
       built.delete(api);
+      // An answer outlives the harness otherwise, and the stub hands it to every dialog,
+      // so a later test's rename prompt would be answered "Terminate".
+      vscode.window.answer = undefined;
       await controller.shutdown().catch(() => {});
       changes.dispose?.();
     }
