@@ -8,6 +8,33 @@ the commit messages carry the detail.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
+## [0.11.8] - 2026-08-14
+
+Devin can see what the editor sees.
+
+### Highlights
+- Devin reads the errors and warnings the editor is already showing.
+- It knows which files you have open, focused, and have edited but not saved.
+- Right click in the editor for Explain This and Fix Problems Here.
+- Right click a file in the editor or the explorer to add it to the chat.
+- Typing `@` now finds symbols too, not just file names.
+- Fork a turn into a new chat, leaving the original untouched.
+- A permission prompt keeps every broader grant behind a chevron.
+- What you allowed or rejected stays in the transcript.
+- The mode picker offers every mode your CLI has, including Smart.
+- Instructions and Hooks list what is really loaded, plugins included.
+- Copy a link to a chat from its header.
+- A model that cannot read images no longer receives one.
+- A link Devin asks you to open is a link, and Open opens it.
+- Screen readers are told when a turn starts, ends, or needs you.
+- New setting: `devin.sandbox` runs the agent's commands sandboxed.
+
+### Under the hood
+- Checkpoints use the agent's own step list instead of parsing an error string.
+- Sessions are listed over the protocol while an agent is running.
+- The MCP server churn no longer floods the output channel.
+- `scripts/acp-probe.js` can report capabilities and probe methods.
+
 ## [0.11.7] - 2026-08-13
 
 ### Highlights

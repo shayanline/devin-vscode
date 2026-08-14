@@ -3850,6 +3850,33 @@ test("starting a new chat clears the previous chat's thread controls", async () 
   assert.strictEqual(h.errors().length, 0);
 });
 
+test("sharing is offered only for a chat the agent can share", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "sessionStatuses", statuses: { A: "idle" }, activeId: "A" });
+  // An older CLI has no share method, so the button must not be there to press.
+  h.post({ type: "capabilities", surface: "view" });
+  await h.settle(10);
+  const btn = h.document.getElementById("share-btn");
+  assert.ok(btn.classList.contains("hidden"), "nothing to press against an agent that cannot share");
+
+  h.post({ type: "capabilities", surface: "view", sessionShare: true });
+  await h.settle(10);
+  assert.ok(!btn.classList.contains("hidden"), "the agent says it can, so the control appears");
+  btn.click();
+  await h.settle(5);
+  assert.ok(h.posted.some((m) => m.type === "shareSession"), "and it asks the host for a link");
+
+  // The list has no chat to share, so the control goes with the rest of them.
+  h.post({ type: "clear", reset: true });
+  await h.settle(10);
+  assert.ok(btn.classList.contains("hidden"), "and is withdrawn with the other session controls");
+  assert.strictEqual(h.errors().length, 0);
+});
+
 test("a permission prompt says what it would run", async () => {
   // Devin asks about a command without a title, carrying the command in _meta,
   // so a prompt that only repeats "a tool" cannot be answered.
@@ -4130,6 +4157,217 @@ test("Enter answers the option it is on before moving to the next question", asy
 });
 
 
+
+// --- Announcements ---------------------------------------------------------
+// Everything here happens without the user looking at the panel, and the
+// transcript fills in silently, so without an announcement a screen reader user
+// gets no signal that Devin started, finished, or is blocked waiting on them.
+
+test("the panel says out loud when a turn starts, ends, and is stopped", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  const said = () => h.document.querySelector("#announcer").textContent.replace(/\u200b/g, "");
+
+  h.post({ type: "userChunk", text: "hi" });
+  h.post({ type: "assistantStart" });
+  await h.settle(10);
+  assert.match(said(), /working/i);
+
+  h.post({ type: "assistantEnd", stopReason: "end_turn" });
+  await h.settle(10);
+  assert.match(said(), /finished/i);
+
+  h.post({ type: "assistantStart" });
+  h.post({ type: "assistantEnd", stopReason: "cancelled" });
+  await h.settle(10);
+  assert.match(said(), /stopped/i, "a stop that landed is the one thing a user is waiting to hear");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a request for a decision is announced and marked as a dialog", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "userChunk", text: "tidy up" });
+  h.post({
+    type: "permission",
+    requestId: "p1",
+    command: "rm -rf build",
+    options: [
+      { optionId: "allow_once", name: "Allow", kind: "allow_once" },
+      { optionId: "reject_once", name: "Reject", kind: "reject_once" }
+    ]
+  });
+  await h.settle(20);
+  const said = h.document.querySelector("#announcer").textContent;
+  assert.match(said, /permission/i);
+  assert.match(said, /rm -rf build/, "what it wants to run is the whole question");
+  const widget = h.document.querySelector("#permission-tray [role='dialog']");
+  assert.ok(widget, "a request for a decision is a dialog");
+  // An unnamed dialog is announced as just "dialog", which says nothing about
+  // what is being asked.
+  assert.ok((widget.getAttribute("aria-label") || "").trim(), "and it is a named one");
+  // Focus must stay where the user put it: a question arriving mid sentence must
+  // not take the composer away.
+  assert.notStrictEqual(h.document.activeElement, widget);
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("the transcript is a log and the composer is labelled", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  await h.settle(10);
+  assert.strictEqual(h.document.querySelector("#thread").getAttribute("role"), "log");
+  assert.ok(h.document.querySelector("#thread").getAttribute("aria-label"));
+  // A placeholder is not a label: it disappears the moment anything is typed.
+  const input = h.document.querySelector("#input");
+  assert.match(input.getAttribute("aria-label"), /ask devin/i);
+  // The same box starts a new chat in the list, and the label has to follow it:
+  // it overrides the placeholder, so a stale one is what gets read out.
+  h.post({ type: "body", body: "list" });
+  await h.settle(10);
+  assert.match(input.getAttribute("aria-label"), /new chat/i);
+  const announcer = h.document.querySelector("#announcer");
+  assert.strictEqual(announcer.getAttribute("aria-live"), "polite");
+  assert.ok(!announcer.classList.contains("hidden"), "display:none would remove it from the accessibility tree");
+});
+
+test("a permission prompt keeps the broad grants behind a chevron, and records the answer", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "userChunk", text: "run something" });
+  // The six options a real agent sends for a single shell command. Rendered flat,
+  // "always allow in all projects" and "switch to bypass mode" look exactly as
+  // ordinary as "Allow".
+  h.post({
+    type: "permission",
+    requestId: "p1",
+    title: "Devin wants to run a command",
+    command: "exit 42",
+    options: [
+      { optionId: "allow_once", name: "Allow", kind: "allow_once" },
+      { optionId: "allow_session", name: "Yes, allow `exit` commands (this session)", kind: "allow_always" },
+      { optionId: "allow_always", name: "Yes, always allow `exit` commands in `devin-vscode`", kind: "allow_always" },
+      { optionId: "allow_always_global", name: "Yes, always allow `exit` commands in all projects", kind: "allow_always" },
+      { optionId: "switch_bypass", name: "Yes, switch to bypass mode", kind: "allow_always" },
+      { optionId: "reject_once", name: "Reject", kind: "reject_once" }
+    ]
+  });
+  await h.settle(20);
+
+  const tray = h.document.querySelector("#permission-tray");
+  const labels = [...tray.querySelectorAll(".cw-buttons button")].map((b) => b.textContent.trim() || b.getAttribute("aria-label"));
+  assert.deepStrictEqual(labels, ["Allow", "More ways to allow this", "Reject"], "only the narrow yes and the no are buttons");
+
+  const more = tray.querySelector(".cw-more");
+  more.dispatchEvent(new h.window.MouseEvent("click", { bubbles: true }));
+  await h.settle(20);
+  const items = [...h.document.querySelectorAll(".dv-menu .dv-menu-item")];
+  assert.strictEqual(items.length, 4, "every grant that outlives the request is one level in");
+
+  items[1].dispatchEvent(new h.window.MouseEvent("click", { bubbles: true }));
+  await h.settle(20);
+  assert.deepStrictEqual(h.posted.filter((m) => m.type === "permission").pop(), {
+    type: "permission",
+    requestId: "p1",
+    optionId: "allow_always"
+  });
+  // A grant that keeps applying has to leave a trace, or there is no way to see
+  // later what was allowed.
+  const recap = h.document.querySelector(".perm-recap");
+  assert.ok(recap, "the decision is recorded in the transcript");
+  assert.match(recap.textContent, /always allow .*exit.* in .*devin-vscode.*: exit 42/);
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a plain allow or reject still records what happened", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "userChunk", text: "run something" });
+  h.post({
+    type: "permission",
+    requestId: "p2",
+    command: "rm -rf build",
+    options: [
+      { optionId: "allow_once", name: "Allow", kind: "allow_once" },
+      { optionId: "reject_once", name: "Reject", kind: "reject_once" }
+    ]
+  });
+  await h.settle(20);
+  const tray = h.document.querySelector("#permission-tray");
+  // With nothing broader on offer there is no chevron to show.
+  assert.strictEqual(tray.querySelector(".cw-more"), null);
+  [...tray.querySelectorAll(".cw-buttons button")].find((b) => b.textContent.trim() === "Reject").click();
+  await h.settle(20);
+  const recap = h.document.querySelector(".perm-recap");
+  assert.ok(recap.classList.contains("rejected"));
+  assert.strictEqual(recap.textContent.trim(), "Rejected: rm -rf build");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a turn can be forked into a new chat without discarding anything", async () => {
+  const h = createHarness();
+  h.replay([{ role: "user", text: "first" }, { role: "assistant", text: "answer" }]);
+  await h.settle(20);
+  // A head arrives after each turn, and becomes the next turn's rewind point.
+  h.post({ type: "turnHead", head: 31, reliable: true });
+  h.post({ type: "userChunk", text: "second" });
+  h.post({ type: "assistantChunk", text: "answer 2" });
+  h.post({ type: "assistantEnd", stopReason: "end_turn" });
+  await h.settle(20);
+
+  const fork = h.document.querySelector(".checkpoint-fork");
+  assert.ok(fork, "a turn with a rewind point can also be forked from");
+  assert.ok(fork.getAttribute("aria-label"), "an icon with no text still needs a name");
+  fork.dispatchEvent(new h.window.MouseEvent("click", { bubbles: true }));
+  await h.settle(10);
+
+  const msg = h.posted.filter((m) => m.type === "revertFork").pop();
+  // The same node a restore would rewind to, which is a valid fork point: the
+  // agent branches there into a session of its own.
+  assert.deepStrictEqual(msg, { type: "revertFork", target: 31 });
+  // Forking discards nothing, so it must not ask about discarding edits.
+  assert.strictEqual(h.posted.filter((m) => m.type === "revertPreview").length, 0);
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("the mode picker offers whatever modes the agent reports", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  // The five a real `devin acp` reports. The extension used to compile in four of
+  // them, so `smart` was unreachable from the panel however new the CLI was.
+  h.post({
+    type: "options",
+    currentMode: "smart",
+    currentModel: "adaptive",
+    models: [],
+    modes: [
+      { value: "accept-edits", name: "Code", icon: "codicon-code" },
+      { value: "smart", name: "Smart", icon: "codicon-sparkle" },
+      { value: "ask", name: "Ask", icon: "codicon-comment-discussion" },
+      { value: "plan", name: "Plan", icon: "codicon-checklist" },
+      { value: "bypass", name: "Bypass Permissions", icon: "codicon-unlock" }
+    ]
+  });
+  await h.settle(20);
+  const dd = h.document.querySelector("#mode-dd");
+  // A mode the extension does not know the name of would show as its raw id.
+  assert.match(dd.textContent, /Smart/, "the picker names the mode the session is actually in");
+
+  dd.querySelector("button").dispatchEvent(new h.window.MouseEvent("click", { bubbles: true }));
+  await h.settle(20);
+  const rows = [...dd.querySelectorAll(".dd-item")].map((r) => r.textContent.trim());
+  assert.deepStrictEqual(rows, ["Code", "Smart", "Ask", "Plan", "Bypass Permissions"]);
+  assert.strictEqual(dd.querySelector(".dd-item.selected").textContent.trim(), "Smart");
+  // Devin names its icons after its own set, so they arrive already mapped.
+  assert.ok(dd.querySelector(".dd-item-icon.codicon-sparkle"), "the mapped icon is used");
+  assert.strictEqual(h.errors().length, 0);
+});
 
 test("tool output carries a copy action, and JSON is pretty printed", async () => {
   const h = createHarness();

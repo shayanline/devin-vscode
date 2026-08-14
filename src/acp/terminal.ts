@@ -178,8 +178,8 @@ export class TerminalManager {
 
     // The agent sends either a program + args (run it directly) or, more often,
     // a full shell command line as `command` with no args (e.g. `cd x && ls`).
-    // Running that string directly fails with ENOENT — there is no program by
-    // that name — so a compound command surfaces as "Command failed". Run the
+    // Running that string directly fails with ENOENT (there is no program by that
+    // name), so a compound command surfaces as "Command failed". Run the
     // no-args form through a shell, the way a real terminal does, so cd, &&,
     // pipes, globs and quoting all work.
     const win = process.platform === "win32";

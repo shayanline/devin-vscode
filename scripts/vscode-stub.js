@@ -102,12 +102,20 @@ class ThemeIcon {
   }
 }
 
+// Same numbering as VS Code, which the diagnostics mapper compares against.
+const DiagnosticSeverity = { Error: 0, Warning: 1, Information: 2, Hint: 3 };
+
+const languages = {
+  diagnostics: new Map(),
+  getDiagnostics: (uri) => (uri ? languages.diagnostics.get(uri.fsPath) || [] : [...languages.diagnostics])
+};
+
 workspace.getConfiguration = () => ({
   get: (_key, fallback) => (globalThis.__dvConfig && _key in globalThis.__dvConfig ? globalThis.__dvConfig[_key] : fallback),
   update: async () => undefined
 });
 
-module.exports = { EventEmitter, Uri, Disposable, commands, workspace, scm, window, ThemeIcon };
+module.exports = { EventEmitter, Uri, Disposable, commands, workspace, scm, window, ThemeIcon, DiagnosticSeverity, languages };
 
 // The module under test is bundled with its own copy of this stub, so a test
 // that requires it directly would be holding a different one. The copy the

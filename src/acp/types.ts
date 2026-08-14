@@ -207,6 +207,147 @@ export interface RevertPreviewResult {
   conflicts: unknown[];
 }
 
+// One revertible point in the conversation, from `_cognition.ai/revert/listSteps`
+// and from the `revert/stepsUpdated` notification the agent pushes after every
+// turn. This is the authoritative source of node ids: they are never in the
+// stream, and the alternative (parsing them out of a preview error) breaks on any
+// change to the agent's wording.
+//
+// `revertTargetNodeId` rewinds to the step, discarding what came after.
+// `forkTargetNodeId` branches from it instead, leaving the later turns alone.
+export interface RevertStep {
+  stepNumber: number;
+  // "prompt" for a user request; the agent also reports question and tool steps.
+  kind?: string;
+  userMessageId?: string;
+  toolCallId?: string;
+  questionNodeId?: number;
+  revertTargetNodeId: number;
+  forkTargetNodeId?: number;
+  summary?: string;
+  reason?: string;
+}
+
+export interface RevertStepsUpdate {
+  sessionId?: string;
+  steps: RevertStep[];
+}
+
+// The conversation's head from a step list: the newest step's fork target, which
+// is the node after it finished. Its revert target is a turn earlier, so reading
+// that instead rewinds one turn too far.
+export function headOf(steps: RevertStep[]): number | null {
+  const last = steps[steps.length - 1];
+  if (!last) {
+    return null;
+  }
+  return last.forkTargetNodeId ?? last.revertTargetNodeId ?? null;
+}
+
+// `_cognition.ai/rules/list`: every always-on context file the agent actually
+// loaded, from wherever it came (AGENTS.md, CLAUDE.md, Cursor, Windsurf, a plugin).
+// Scanning for these by filename cannot see the plugin ones, and cannot tell which
+// of the files it found the CLI is honouring.
+export interface LoadedRule {
+  name: string;
+  // Absolute path, so a row can open the file it is describing.
+  path?: string;
+  // "agents_standard" | "windsurf" | "cursor" | "claude" | ...
+  provider?: string;
+  // Display form of the provider, e.g. "AGENTS.md", ".windsurf".
+  providerLabel?: string;
+  // "always_on" for a rule; skills that the user can invoke report otherwise.
+  trigger?: string;
+  userInvocable?: boolean;
+  // "global" | "workspace"
+  scope?: string;
+}
+
+// `_cognition.ai/hooks/list`: the hooks in force, including ones from a plugin or
+// from another tool's config, which the panel's own file reading cannot see.
+export interface LoadedHook {
+  id?: string;
+  name?: string;
+  // "permission_request" | "post_tool" | ...
+  events?: string[];
+  sourcePath?: string;
+  provider?: string;
+  providerLabel?: string;
+  scope?: string;
+  // "claude" for a hook written in the Claude format the CLI also accepts.
+  format?: string;
+}
+
+// A row from `session/list`. `_meta["cognition.ai/isLocked"]` says another client
+// holds the session, but not which one: reclaiming a stale lock still needs the
+// owning pid from the CLI's own lock files (see cli/sessionLocks.ts).
+export interface AcpSessionRow {
+  sessionId: string;
+  cwd?: string;
+  title?: string;
+  // ISO 8601.
+  updatedAt?: string;
+  _meta?: Record<string, unknown>;
+}
+
+// `_cognition.ai/request_diagnostics`: the agent asking the editor what is wrong
+// with the code, rather than spawning a compiler or a linter to find out what the
+// editor already knows. Unlocked by advertising
+// clientCapabilities._meta["cognition.ai/requestDiagnostics"], after which the
+// agent pulls on its own schedule rather than per turn.
+//
+// The reply must be `RequestDiagnosticsResult` exactly: a null or a bare object is
+// rejected ("invalid type: null, expected struct RequestDiagnosticsResult").
+export interface RequestDiagnosticsParams {
+  sessionId?: string;
+  // Present when the agent wants one file rather than the whole workspace.
+  path?: string;
+}
+
+export interface DiagnosticPosition {
+  line: number;
+  character: number;
+}
+
+export interface DiagnosticRange {
+  start: DiagnosticPosition;
+  end: DiagnosticPosition;
+}
+
+export interface DiagnosticItem {
+  // File URI, required: the agent rejects the reply without it ("missing field
+  // `uri`") and uses it to link the problem to a file.
+  uri: string;
+  // The rule or code that produced it, e.g. "ts2304" or an ESLint rule name.
+  id: string;
+  message: string;
+  // Zero based, as VS Code reports it. The agent renders it one based itself.
+  range: DiagnosticRange;
+  // "error" | "warning" | "information" | "hint"
+  severity: string;
+  // Who reported it, e.g. "ts", "eslint".
+  source?: string;
+}
+
+export interface RequestDiagnosticsResult {
+  items: DiagnosticItem[];
+}
+
+// `_cognition.ai/document/{didOpen,didClose,didChangeDirty,didFocus}`: what the
+// user has open, focused and unsaved. Sent as notifications (there is no reply)
+// and unlocked by advertising clientCapabilities._meta["cognition.ai/documentLifecycle"].
+//
+// This is what puts an "open documents" list in the agent's context, and the agent
+// only surfaces diagnostics for documents it knows about, so the two go together:
+// without this, the diagnostics above have nothing to attach to.
+export interface DocumentParams {
+  sessionId: string;
+  // File URI, not a path: a path is rejected as a parse failure.
+  uri: string;
+  languageId?: string;
+  isDirty?: boolean;
+}
+
 // fs/* client methods
 export interface ReadTextFileParams {
   sessionId: string;

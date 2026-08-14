@@ -277,6 +277,33 @@ export class ChatManager implements vscode.WebviewViewProvider, vscode.WebviewPa
   showSessions(): void {
     void this.sidebar?.showSessionsView();
   }
+
+  // --- Entry points from the editor ----------------------------------------
+  // These are invoked from the editor and the explorer, where there may be no
+  // chat open at all, so the side panel is brought up first and given the work.
+  // A chat already open in an editor tab is left alone: the side panel is the one
+  // surface that is always reachable from a right click anywhere.
+
+  async explainSelection(): Promise<void> {
+    const chat = await this.ensureSidebar();
+    await chat?.explainSelection();
+  }
+
+  async fixProblemsHere(): Promise<void> {
+    const chat = await this.ensureSidebar();
+    await chat?.fixProblemsHere();
+  }
+
+  // From the explorer's context menu, which passes the file that was clicked, and
+  // from the command palette, which passes nothing and means the active editor.
+  async addFileToChat(uri?: vscode.Uri): Promise<void> {
+    const target = uri || vscode.window.activeTextEditor?.document.uri;
+    if (!target) {
+      return;
+    }
+    const chat = await this.ensureSidebar();
+    await chat?.attachUri(target);
+  }
   // Ctrl/Cmd+1..9. The panel numbers its own rows, so it is the one that knows
   // which chat a number stands for.
   switchSession(index: number): void {

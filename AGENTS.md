@@ -65,6 +65,103 @@ screenshots in the README come from `npm run preview`. See
 regenerate them, and [CONTRIBUTING.md](CONTRIBUTING.md) for the full build and
 release notes.
 
+## The protocol Devin actually speaks
+
+Devin's ACP surface is standard ACP plus a large set of `cognition.ai/*` extensions
+that **are not documented anywhere**. The CLI ships `docs/acp/{zed,jetbrains,xcode}.mdx`
+and none of them mention a single extension key. Everything below was established by
+probing a real agent, so re-probe rather than trust it after a CLI upgrade:
+
+```
+node scripts/acp-probe.js --caps all --caps-report --no-prompt
+node scripts/acp-probe.js --methods session/list,_cognition.ai/rules/list --no-prompt
+node scripts/acp-probe.js --caps all --notify _cognition.ai/document/didOpen \
+  --notify-params '{"path":"/abs/file.ts"}' -p "which files do I have open?"
+```
+
+**Capabilities are directional, and the echo is not an acknowledgement.** The
+`agentCapabilities._meta` that comes back from `initialize` is the agent advertising
+its *own* capabilities. It does **not** confirm the ones we declared:
+`requestDiagnostics` and `subagentSupport` are never echoed, yet both take effect. So
+gate a method **we call** on the echoed key (plus treat `-32601` as unsupported), and
+never gate a capability **we serve** on the echo, or it silently stops working.
+
+**Client capabilities this build looks for**, from the binary's own list: `revert`,
+`subagentSupport`, `subagentControl`, `partialContent`, `groupedSessionConfigOptions`,
+`stopOnReject`, `mcp`, `plugins`, `workspaceDirCommands`, `clipboardWrite`,
+`windsurfConfigBridge`, `requestDiagnostics`, `documentLifecycle`, `editorContext`,
+`terminalContext`, `fastContext`, `browserPreview`, `browserPreviewOpen`,
+`messageGrouping`, `refTagsRaw`. Declaring one is a promise to serve it, so declare
+it in the same change as its handler.
+
+**Useful custom methods**, all verified to exist. A `sessionId` is required unless
+noted, and the leading `_` is part of the wire name:
+
+| Method | Notes |
+| --- | --- |
+| `session/list` | Standard ACP. Needs **no session** and **no capability**, and is **not** cwd scoped. Rows are `{sessionId, cwd, title, updatedAt}` plus `_meta["cognition.ai/isLocked"]`. `updatedAt` is ISO, while `devin list` reports epoch seconds |
+| `_cognition.ai/revert/listSteps` | The authoritative step list. Never parse node ids out of an error message |
+| `_cognition.ai/revert/{preview,execute,resume}` | Rewind. `preview` reports the file undo the client is expected to apply |
+| `_cognition.ai/revert/forkFromStep` | `{sessionId, targetNodeId}`, **not** `stepNumber`. Returns `{forkedSessionId}`: it copies the conversation into a **new session** and leaves this one untouched, so nothing is discarded and no file is undone |
+| `_cognition.ai/rules/list` | Every loaded rule with `path`, `provider`, `trigger`, `scope`. Beats scanning for `AGENTS.md`, which cannot see a plugin's rules. **Needs a sessionId** |
+| `_cognition.ai/hooks/list` | Every loaded hook with `sourcePath`, `events`, `scope`, `format`. **Needs a sessionId** |
+| `_cognition.ai/plugins/list` | Only exists once `plugins` is declared, and `{sessionId}` alone is not the right params |
+| `_cognition.ai/session/share` | Errors with "Nothing to share yet" until the session has content |
+| `_cognition.ai/command/revise` | Edit a command before approving it. `CommandReviseParams` has 3 fields; the names are still unconfirmed, and finding them needs a probe that holds a permission request open instead of answering it |
+| `_cognition.ai/reads/promptHistory` | Prompt history across sessions |
+| `_cognition.ai/terminal/killBackgroundShell` | Kill a background command for real |
+
+No MCP management method has been found: only the `mcp/serversChanged` notification.
+
+**Node ids are a turn apart, and mixing them up is silent.** For a step,
+`revertTargetNodeId` is the node BEFORE it ran (rewinding there discards it) and
+`forkTargetNodeId` is the node after it finished, which is the conversation head.
+So step N's fork target is step N+1's revert target. Reading the revert target
+where the head is wanted rewinds every checkpoint one turn too far, and nothing
+errors. With two turns the agent reports `rev=27/31` and `fork=31/34`, with the
+head at 31 then 34.
+
+**Permission requests already offer scoped grants.** One shell command comes back
+with up to six options: `allow_once`, `allow_session`, `allow_always` (this
+project), `allow_always_global`, `switch_bypass`, and `reject_once`. The last four
+all carry `kind: "allow_always"`, so `kind` cannot tell them apart, only
+`optionId`. Rendered as equal buttons, "always allow in all projects" and "switch
+to bypass mode" look exactly as ordinary as "Allow", so the panel keeps the narrow
+yes and the no as buttons and puts the rest behind a chevron. The request itself
+carries no title: the command is in
+`toolCall._meta["cognition.ai/editableCommand"]`.
+
+**Notifications the agent sends** (all `_cognition.ai/`): `output`, `agent_stopped`,
+`thinking_complete`, `compaction`, `connection_retry`, `billingInformation`,
+`showModal`, `clipboard/write`, `mcp/serversChanged`, `plugins/changed`,
+`revert/stepsUpdated`, `revert/historyRewound`, `browserPreview/capture`,
+`browserPreview/opened`.
+
+**Session updates that are easy to miss**: `config_option_update` (the model changed,
+possibly from `/model`) and `session_info_update` (the title). Both arrive in every
+session, so handle them or the pickers and tab titles go stale.
+
+**Client to agent notifications** arrive as an `ext_notification` envelope and the
+wire name keeps the `_` prefix:
+`_cognition.ai/document/{didOpen,didClose,didChangeDirty,didFocus}` take
+`{sessionId, uri, languageId}`. It must be a **uri**, not a path: a path is
+rejected outright. A wrong shape shows up as `Failed to parse ... params` on the
+agent's stderr, which is the fastest way to converge on the right one, and a
+notification gets no reply so that log line is the only feedback there is.
+
+**Diagnostics and document lifecycle are a pair.** The agent only surfaces problems
+for documents it has been told are open, so declaring `requestDiagnostics` without
+sending the document events gets you a pull that has nothing to attach to. Asked
+what is open with neither, the agent says so plainly: "My editor client hasn't sent
+me any open editor or active file context in this session."
+
+The agent pulls on its own schedule (not per turn) by calling
+`_cognition.ai/request_diagnostics`, and expects `RequestDiagnosticsResult`:
+`{items: DiagnosticItem[]}` where an item is `{uri, id, message, range, severity,
+source}` and a range is `{start, end}` of `{line, character}`. `uri` is **required**
+("missing field `uri`"), a null reply is rejected outright ("invalid type: null"),
+and ranges stay zero based because the agent renders them one based itself.
+
 ## Releasing
 
 Releases are automated. Bump the version and push the tag:
@@ -111,6 +208,15 @@ place.
   Settings editor and Copilot Chat layouts the extension is modelled on, rather
   than inventing controls.
 - Handle the empty, loading, and error states, not just the happy path.
+- **A command in a shared context menu carries "Devin: " in its `title` and has
+  no `category`.** Only the command palette reads `category`, every other menu
+  reads `title` alone, and there is no per menu title (VS Code has rejected
+  that). So a command in the editor or explorer menu is unbranded unless the
+  title says Devin, and it would read "Devin: Devin: ..." in the palette if it
+  kept the category too. `shortTitle` is no help: it is for shorter labels, and
+  the menu decides when to use it. Commands in Devin's own surfaces (a chat tab,
+  the Devin source control group) stay unprefixed, since the surface has already
+  said whose they are.
 
 ## Writing style for docs and text
 

@@ -13,10 +13,15 @@ import {
   CreateTerminalParams,
   NewSessionResult,
   ReadTextFileParams,
+  RequestDiagnosticsParams,
+  RequestDiagnosticsResult,
   RequestPermissionParams,
   RequestPermissionResult,
   ResponseDimension,
   RevertPreviewResult,
+  RevertStep,
+  RevertStepsUpdate,
+  headOf,
   SessionUpdateNotification,
   SubagentCompleted,
   SubagentStarted,
@@ -24,10 +29,11 @@ import {
   TerminalRef,
   WriteTextFileParams
 } from "../acp/types";
+import { diagnosticItems } from "../acp/diagnostics";
 import { TerminalManager } from "../acp/terminal";
 import { VsCodeTerminalRunner } from "../acp/vscodeTerminal";
 import { userConfigDir } from "../settings/configService";
-import { DevinSession, listSessions } from "../session/sessionList";
+import { DevinSession, ListResult, fromAcpRows, listSessions } from "../session/sessionList";
 import { SessionStore } from "../session/sessionStore";
 import { ChangeTracker } from "../diff/changeTracker";
 import { diffStat } from "../diff/diffStat";
@@ -105,6 +111,10 @@ interface Runtime {
   // to the other so the webview only ever sees the block's id.
   subagentSpawns: { id: string; title: string }[];
   subagentIds: Map<string, string>;
+  // Every revertible point in this conversation, as the agent last reported it.
+  // Pushed after each turn, so this is the authoritative source of the node ids
+  // checkpoints and edit-and-resubmit rewind to.
+  steps: RevertStep[];
 }
 
 // Cap on a backgrounded session's replay buffer (oldest dropped past this).
@@ -133,6 +143,10 @@ export interface RuntimeTransfer {
   attachments: Staged[];
   permissions: [string, { resolve: (res: RequestPermissionResult) => void; rid: string }][];
   elicitations: [string, { resolve: (res: unknown) => void; rid: string }][];
+  // Which models cannot read an image, which the agent only reports when it lists
+  // its options. The arriving surface never asks again, and an image sent to a
+  // model that cannot decode it breaks the session for good, so it travels.
+  modelImages: [string, boolean][];
   from: string; // where it came from, for the log line the handover leaves
 }
 
@@ -181,6 +195,87 @@ const MAX_IMAGE_BYTES = 30 * 1024 * 1024;
 // How much of an attached file's text is sent. A dropped file says so when it is
 // cut short, since its bytes are all the agent gets: it has no path to read more.
 const MAX_ATTACH_CHARS = 200000;
+
+// The mode a chat starts in when nothing else says otherwise.
+const DEFAULT_MODE = "accept-edits";
+
+// How long typing settles before the agent is told a file has unsaved edits. It
+// only needs to know that the file is dirty, so one message per pause is enough.
+const DIRTY_DEBOUNCE_MS = 1500;
+
+// How many problems "Fix Problems Here" hands over. A file with hundreds is a
+// build that is broken everywhere, not a question about a few lines.
+const MAX_ATTACHED_PROBLEMS = 40;
+
+// Below this many filename matches, the query is probably naming a symbol rather
+// than a file, so the language servers are asked too.
+const SYMBOL_FALLBACK_AT = 5;
+
+// A real file the user is working in, worth telling the agent about. The diff
+// views git opens are a second scheme, but git also opens true files inside
+// .git (a commit message), and those are plumbing, not the user's work. It has
+// to be a path segment: `.github/workflows` and `.gitignore` are ordinary files.
+function isEditorDocument(doc: vscode.TextDocument): boolean {
+  return doc.uri.scheme === "file" && !/(^|[/\\])\.git([/\\]|$)/.test(doc.uri.fsPath);
+}
+
+// The few symbol kinds worth naming in a suggestion row. Anything else is left as
+// "symbol" rather than spelling out every kind VS Code knows.
+function symbolKindLabel(kind: vscode.SymbolKind): string {
+  switch (kind) {
+    case vscode.SymbolKind.Class: return "class";
+    case vscode.SymbolKind.Interface: return "interface";
+    case vscode.SymbolKind.Function: return "function";
+    case vscode.SymbolKind.Method: return "method";
+    case vscode.SymbolKind.Enum: return "enum";
+    case vscode.SymbolKind.Constant: return "constant";
+    case vscode.SymbolKind.Variable: return "variable";
+    case vscode.SymbolKind.Struct: return "struct";
+    default: return "symbol";
+  }
+}
+
+function severityLabel(s: vscode.DiagnosticSeverity): string {
+  if (s === vscode.DiagnosticSeverity.Error) return "error";
+  if (s === vscode.DiagnosticSeverity.Warning) return "warning";
+  if (s === vscode.DiagnosticSeverity.Information) return "info";
+  return "hint";
+}
+
+// Shown until a session reports the real list. Deliberately the modes every
+// supported CLI has: anything newer (`smart`, and whatever comes next) arrives
+// from the agent instead of being hardcoded here.
+const FALLBACK_MODES = [
+  { value: DEFAULT_MODE, name: "Code", icon: "codicon-code" },
+  { value: "ask", name: "Ask", icon: "codicon-comment-discussion" },
+  { value: "plan", name: "Plan", icon: "codicon-checklist" },
+  { value: "bypass", name: "Bypass", icon: "codicon-unlock" }
+];
+
+// Devin names its mode icons after its own icon set, so map the ones it sends to
+// the nearest codicon. An unknown name falls back to a neutral one rather than
+// rendering an empty square.
+const MODE_ICONS: Record<string, string> = {
+  code: "codicon-code",
+  sparkles: "codicon-sparkle",
+  "message-circle": "codicon-comment-discussion",
+  "file-text": "codicon-checklist",
+  "shield-off": "codicon-unlock",
+  shield: "codicon-shield",
+  zap: "codicon-zap"
+};
+
+// The mode picker's options, from the agent's own `mode` config option. Devin also
+// sends a description for each ("Auto-approve actions the model judges safe"),
+// which the picker has nowhere to show yet, so it is left out rather than passed
+// through unused.
+function modeChoices(opt?: ConfigOption): { value: string; name: string; icon: string }[] {
+  return (opt?.options || []).map((c) => ({
+    value: c.value,
+    name: c.name || c.value,
+    icon: MODE_ICONS[String(c._meta?.["cognition.ai/icon"] || "")] || "codicon-circle-outline"
+  }));
+}
 
 // The dot shown next to a session in the list. "attention" means a backgrounded
 // session raised a permission/question and is now blocked waiting on the user.
@@ -261,9 +356,22 @@ export class ChatController implements AcpHost {
     // its selection (the latter debounced, since selection changes fire often).
     // Stored per controller so an editor/window surface cleans them up on close.
     this.ownDisposables.push(
-      vscode.window.onDidChangeActiveTextEditor(() => this.postImplicitContext()),
+      vscode.window.onDidChangeActiveTextEditor((e) => {
+        this.postImplicitContext();
+        // Which file the user is looking at, so "this file" means something and the
+        // agent stops having to ask or guess.
+        if (e) this.sendDocumentEvent("didFocus", e.document);
+      }),
       vscode.window.onDidChangeTextEditorSelection((e) => {
         if (e.textEditor === vscode.window.activeTextEditor) this.scheduleImplicitPost();
+      }),
+      vscode.workspace.onDidOpenTextDocument((d) => this.sendDocumentEvent("didOpen", d)),
+      vscode.workspace.onDidCloseTextDocument((d) => this.sendDocumentEvent("didClose", d)),
+      // A file the agent read and the user has since edited without saving is the
+      // stale read it cannot otherwise know about.
+      vscode.workspace.onDidSaveTextDocument((d) => this.sendDocumentEvent("didChangeDirty", d)),
+      vscode.workspace.onDidChangeTextDocument((e) => {
+        if (e.document.isDirty) this.scheduleDirtyEvent(e.document);
       }),
       // Every panel preference rides on the capabilities message, so a setting
       // changed in the Settings editor applies to an open chat straight away
@@ -298,6 +406,72 @@ export class ChatController implements AcpHost {
       };
     }
     this.post({ type: "implicitContext", file, enabled: this.implicitEnabled });
+  }
+
+  // Tell the live agent what the user is doing in the editor. This is the half of
+  // the editor context the extension can give that the CLI in a terminal cannot,
+  // and the agent needs it for diagnostics too: it only reports problems for
+  // documents it has been told are open.
+  //
+  // Only the visible session is told. A background agent is working on its own
+  // turn and the user's editor is not part of it, and telling every runtime would
+  // multiply every keystroke by the number of open chats.
+  private sendDocumentEvent(kind: "didOpen" | "didClose" | "didChangeDirty" | "didFocus", doc: vscode.TextDocument): void {
+    const rt = this.active();
+    if (!rt || !rt.initialized || !isEditorDocument(doc)) {
+      return;
+    }
+    rt.client.documentEvent(kind, {
+      sessionId: rt.id,
+      // A URI, not a path: a path is rejected outright by the agent.
+      uri: doc.uri.toString(),
+      languageId: doc.languageId,
+      isDirty: doc.isDirty
+    });
+  }
+
+  // Typing fires a change event per keystroke, so the dirty signal is coalesced:
+  // the agent only needs to know a file has unsaved edits, not how many.
+  private scheduleDirtyEvent(doc: vscode.TextDocument): void {
+    const key = doc.uri.toString();
+    if (this.dirtyTimers.has(key)) {
+      return;
+    }
+    const t = setTimeout(() => {
+      this.dirtyTimers.delete(key);
+      this.sendDocumentEvent("didChangeDirty", doc);
+    }, DIRTY_DEBOUNCE_MS);
+    t.unref?.();
+    this.dirtyTimers.set(key, t);
+  }
+
+  private readonly dirtyTimers = new Map<string, NodeJS.Timeout>();
+
+  // Everything the user has open right now, sent to a session that has just
+  // started so its context is not empty until the next editor event.
+  private sendOpenDocuments(rt: Runtime): void {
+    if (!rt.client.supportsDocumentLifecycle()) {
+      return;
+    }
+    for (const doc of vscode.workspace.textDocuments) {
+      if (isEditorDocument(doc)) {
+        rt.client.documentEvent("didOpen", {
+          sessionId: rt.id,
+          uri: doc.uri.toString(),
+          languageId: doc.languageId,
+          isDirty: doc.isDirty
+        });
+      }
+    }
+    const active = vscode.window.activeTextEditor?.document;
+    if (active && isEditorDocument(active)) {
+      rt.client.documentEvent("didFocus", {
+        sessionId: rt.id,
+        uri: active.uri.toString(),
+        languageId: active.languageId,
+        isDirty: active.isDirty
+      });
+    }
   }
 
   // The active editor as implicit context: the selection when there is one,
@@ -564,6 +738,10 @@ export class ChatController implements AcpHost {
     this.changeListSub = undefined;
     this.changeResolveSub?.dispose();
     this.changeResolveSub = undefined;
+    for (const [, t] of this.dirtyTimers) {
+      clearTimeout(t);
+    }
+    this.dirtyTimers.clear();
     for (const d of this.ownDisposables) {
       try { d.dispose(); } catch { /* ignore */ }
     }
@@ -637,6 +815,7 @@ export class ChatController implements AcpHost {
       attachments: visible ? this.attachments : [],
       permissions: take(this.permissionResolvers),
       elicitations: take(this.elicitationResolvers),
+      modelImages: [...this.modelImageSupport],
       from: this.kind === "view" ? "the side panel" : "an editor tab"
     };
     if (visible) {
@@ -678,6 +857,7 @@ export class ChatController implements AcpHost {
     rt.client.on("update", (n: SessionUpdateNotification) => this.onUpdate(n));
     rt.client.on("output", (o: CliOutput) => this.onCliOutput(rt, o));
     rt.client.on("stopped", (s: AgentStopped) => this.onAgentStopped(rt, s));
+    rt.client.on("revertSteps", (s: RevertStepsUpdate) => this.onRevertSteps(rt, s));
     rt.client.on("exit", () => this.onRuntimeExit(rt));
     rt.terminals.retarget(
       (terminalId, output, exitStatus) => {
@@ -692,6 +872,9 @@ export class ChatController implements AcpHost {
     }
     for (const [key, entry] of transfer.elicitations) {
       this.elicitationResolvers.set(key, entry);
+    }
+    for (const [model, supported] of transfer.modelImages) {
+      this.modelImageSupport.set(model, supported);
     }
     this.activeId = rt.id;
     this.store.add(rt.id, rt.cwd);
@@ -795,6 +978,7 @@ export class ChatController implements AcpHost {
       log: [],
       logFull: true,
       mcpProblems: new Map(),
+      steps: [],
       pendingTerminals: [],
       subagentSpawns: [],
       subagentIds: new Map()
@@ -805,6 +989,7 @@ export class ChatController implements AcpHost {
     client.on("update", (n: SessionUpdateNotification) => this.onUpdate(n));
     client.on("output", (o: CliOutput) => this.onCliOutput(rt, o));
     client.on("stopped", (s: AgentStopped) => this.onAgentStopped(rt, s));
+    client.on("revertSteps", (s: RevertStepsUpdate) => this.onRevertSteps(rt, s));
     client.on("exit", () => this.onRuntimeExit(rt));
     client.start();
     return rt;
@@ -1098,6 +1283,12 @@ export class ChatController implements AcpHost {
         case "revertPreview":
           await this.handleRevertPreview(Number(msg.head), msg.token);
           return;
+        case "revertFork":
+          await this.handleRevertFork(msg.target);
+          return;
+        case "shareSession":
+          await this.shareSession();
+          return;
         case "revertExecute":
           await this.handleRevertExecute(Number(msg.head), msg.resendText, !!msg.newSession);
           return;
@@ -1162,7 +1353,7 @@ export class ChatController implements AcpHost {
           this.resolveTakeover(String(msg.requestId || ""), String(msg.decision || "cancel"));
           return;
         case "setMode":
-          await this.setMode(String(msg.mode || "accept-edits"));
+          await this.setMode(String(msg.mode || DEFAULT_MODE));
           return;
         case "setModel":
           await this.setModel(String(msg.model || ""));
@@ -1501,7 +1692,11 @@ export class ChatController implements AcpHost {
 
   private clientEnv(): NodeJS.ProcessEnv {
     const extra = this.cfg().get<Record<string, string>>("env", {}) || {};
-    return { ...(this.env || process.env), ...extra };
+    // `devin acp` has no --sandbox flag: the env var is the only way in, which is
+    // why the sandbox rows in the settings panel did nothing on their own. Set
+    // before `devin.env` so an explicit DEVIN_SANDBOX there still wins.
+    const sandbox = this.cfg().get<boolean>("sandbox", false) ? { DEVIN_SANDBOX: "1" } : {};
+    return { ...(this.env || process.env), ...sandbox, ...extra };
   }
 
   private async ensureInitialized(rt: Runtime): Promise<void> {
@@ -1545,6 +1740,9 @@ export class ChatController implements AcpHost {
         this.postCapabilities();
         this.publishOptions(rt, res.configOptions, res.modes?.currentModeId);
         await this.applyDefaults(rt, res);
+        // Start it off knowing what is already open, rather than waiting for the
+        // user to switch files before it has any editor context at all.
+        this.sendOpenDocuments(rt);
         // Whatever was in the "new chat" box has been carried into this session,
         // so it is no longer waiting in the list: the text, and the files staged
         // with it, belong to this chat now.
@@ -1575,6 +1773,11 @@ export class ChatController implements AcpHost {
   // lock (dead owner) is reclaimed automatically; a lock held by a live process
   // prompts the user, and force take-over removes it and loads anyway.
   private async loadWithTakeover(rt: Runtime, id: string, cwd: string): Promise<NewSessionResult | undefined> {
+    if (!rt.client.supportsLoadSession()) {
+      // Nothing to fall back to: without session/load an existing chat cannot be
+      // reopened, and saying so beats a raw "method not found" from the agent.
+      throw new Error("This Devin CLI cannot reopen an existing chat. Start a new one instead.");
+    }
     const attempt = () =>
       rt.client.loadSession(id, cwd, this.additionalDirs(cwd)) as Promise<NewSessionResult | undefined>;
     try {
@@ -1840,6 +2043,8 @@ export class ChatController implements AcpHost {
       } else {
         void this.publishInitialOptions();
       }
+      // A woken session starts knowing nothing about the editor, same as a new one.
+      this.sendOpenDocuments(rt);
       this.post({ type: "assistantEnd" });
       this.post({ type: "sessionReady", sessionId: id });
       this.ensureIdleTimer();
@@ -2034,6 +2239,8 @@ export class ChatController implements AcpHost {
       } else {
         void this.publishInitialOptions();
       }
+      // A woken session starts knowing nothing about the editor, same as a new one.
+      this.sendOpenDocuments(rt);
       this.postCapabilities();
       if (this.activeId === id) {
         this.post({ type: "sessionReady", sessionId: id });
@@ -2074,6 +2281,45 @@ export class ChatController implements AcpHost {
   // `devin list` repeatedly.
   // `staleOk` serves the cache at any age (used when returning to the list, so it
   // paints instantly) and is paired with a background revalidate.
+  // List through a live agent when there is one, which costs no process at all,
+  // rather than spawning `devin list` once per directory. Returns undefined when
+  // nothing is live, leaving the CLI path to answer a cold panel (measured at
+  // roughly the same cost as spawning an agent purely to ask, so there is nothing
+  // to gain by starting one).
+  private listOverProtocol(): Promise<ListResult> | undefined {
+    const client = this.anyLiveClient();
+    if (!client) {
+      return undefined;
+    }
+    const ids = this.store.ids();
+    return client
+      .listSessions()
+      .then((rows) => fromAcpRows(rows, ids))
+      .catch((err) => {
+        // An agent that cannot answer must not empty the list: fall back for this
+        // refresh and let the next one try again.
+        this.log(`[list-over-acp-failed] ${err instanceof Error ? err.message : String(err)}`);
+        return listSessions({
+          cliPath: this.resolvedCli || "devin",
+          env: this.env,
+          folders: this.folders(),
+          trackedIds: ids,
+          cwdById: this.store.cwds()
+        });
+      });
+  }
+
+  // Any agent that has finished initialize, since `session/list` belongs to the
+  // connection rather than to a session.
+  private anyLiveClient(): AcpClient | undefined {
+    for (const rt of this.runtimes.values()) {
+      if (rt.initialized && !rt.client.hasExited()) {
+        return rt.client;
+      }
+    }
+    return undefined;
+  }
+
   async refreshSessions(force = false, staleOk = false): Promise<void> {
     if (!this.isReady()) {
       return;
@@ -2087,7 +2333,7 @@ export class ChatController implements AcpHost {
       // Never let a slow/failed `devin list` leave the list stuck on its
       // spinner: cap the wait and fall back to the cache (or empty).
       try {
-        const listing = listSessions({
+        const listing = this.listOverProtocol() || listSessions({
           cliPath: this.resolvedCli || "devin",
           env: this.env,
           folders,
@@ -2263,6 +2509,25 @@ export class ChatController implements AcpHost {
     await this.refreshSessions(true);
   }
 
+  // A name the agent chose itself, rather than one the user typed. Painted like a
+  // rename, but nothing is sent back to the agent, since this came from it. The
+  // pin `setTitle` leaves behind is wanted here too: it stops a `devin list`
+  // already in flight from putting the older name back.
+  private applyAgentTitle(rt: Runtime, title: string): void {
+    if (this.store.titles()[rt.id] === title) {
+      return;
+    }
+    this.store.setTitle(rt.id, title);
+    if (this.activeId === rt.id) {
+      this.post({ type: "sessionReady", sessionId: rt.id, title });
+    }
+    this.surfaces?.titlesChanged();
+    this.surfaces?.sessionsChanged(this);
+    // Repaint the list from the cached listing rather than shelling out for a
+    // fresh one: the only thing that changed is a name we already hold.
+    void this.refreshSessions(false, true);
+  }
+
   // Rename through the agent this surface holds the session in, so its own copy of
   // the name goes with it. Falls back to a throwaway agent if it has since gone.
   async renameOwned(id: string, title: string): Promise<void> {
@@ -2315,12 +2580,34 @@ export class ChatController implements AcpHost {
     const byId = new Map((options || []).map((o) => [o.id, o]));
     const modeOpt = byId.get("mode");
     const modelOpt = byId.get("model");
-    this.currentMode = modeOpt?.currentValue || currentModeId || this.currentMode;
-    this.currentModel = modelOpt?.currentValue || this.currentModel;
     if (rt) {
       rt.mode = modeOpt?.currentValue || currentModeId || rt.mode;
       rt.model = modelOpt?.currentValue || rt.model;
     }
+    // The agent reports the modes it actually has, with their names, descriptions
+    // and icons. Remember them so the picker offers whatever this CLI supports
+    // rather than a list compiled into the extension.
+    const modes = modeChoices(modeOpt);
+    if (modes.length) {
+      this.modes = modes;
+    }
+    // Which models can read an image. Not every one can (Inkling cannot), and an
+    // image block sent to one that cannot poisons the whole session, so this is
+    // recorded whenever the agent reports it.
+    for (const choice of modelOpt?.options || []) {
+      const supported = choice._meta?.["cognition.ai/supportsImages"];
+      if (typeof supported === "boolean") {
+        this.modelImageSupport.set(choice.value, supported);
+      }
+    }
+    // A background session reports its own mode and model too, and they belong to
+    // it alone: recorded on its runtime above, but never painted over the pickers
+    // and status bar, which speak for the chat that is on screen.
+    if (rt && this.activeId !== rt.id) {
+      return;
+    }
+    this.currentMode = modeOpt?.currentValue || currentModeId || this.currentMode;
+    this.currentModel = modelOpt?.currentValue || this.currentModel;
     this.statusBar?.set({ connected: this.isReady(), mode: this.currentMode, model: this.currentModel });
     this.postModelOptions(this.currentModel || "adaptive");
   }
@@ -2331,8 +2618,8 @@ export class ChatController implements AcpHost {
     const families = cachedFamilies();
     const payload = {
       type: "options",
-      modes: ChatController.STATIC_MODES,
-      currentMode: this.currentMode || "accept-edits",
+      modes: this.modes,
+      currentMode: this.currentMode || DEFAULT_MODE,
       models: families,
       currentModel
     };
@@ -2353,19 +2640,35 @@ export class ChatController implements AcpHost {
     }
   }
 
-  // Devin's session modes are fixed, so we can always show them even before a
-  // session exists. (The model list only comes from a session, so it can only
-  // be a cached list or a "default" placeholder until one is created.)
-  private static readonly STATIC_MODES = [
-    { value: "accept-edits", name: "Accept Edits", icon: "codicon-code" },
-    { value: "ask", name: "Ask", icon: "codicon-comment-discussion" },
-    { value: "plan", name: "Plan", icon: "codicon-checklist" },
-    { value: "bypass", name: "Bypass", icon: "codicon-unlock" }
-  ];
+  // Whether each model can read an image, as the agent reported it. A model that
+  // is not in here has not said, and is given the benefit of the doubt.
+  private readonly modelImageSupport = new Map<string, boolean>();
+
+  // Can the model this chat is on read an image? `warn` tells the user why not,
+  // for the paths where they just tried to attach one.
+  private imagesSupported(warn = false): boolean {
+    const model = this.active()?.model || this.currentModel;
+    if (!model || this.modelImageSupport.get(model) !== false) {
+      return true;
+    }
+    if (warn) {
+      const name = familyOf(model)?.name || model;
+      void vscode.window.showWarningMessage(
+        `${name} cannot read images. Pick another model to attach one.`
+      );
+    }
+    return false;
+  }
+
+  // The modes this CLI offers, as it reported them. Seeded with the ones every
+  // supported CLI has so the picker is never empty before a session exists, then
+  // replaced wholesale by the real list (which is where `smart` comes from, and
+  // any mode a later CLI adds).
+  private modes = FALLBACK_MODES;
 
   // Populate the dropdowns before any session exists so they are never empty.
-  // Modes are fixed; models come from `devin models list` (no session needed,
-  // and the uids match what the ACP model option accepts).
+  // Models come from `devin models list` (no session needed, and the uids match
+  // what the ACP model option accepts).
   private async publishInitialOptions(): Promise<void> {
     let families: ModelFamily[] = [];
     try {
@@ -2385,12 +2688,12 @@ export class ChatController implements AcpHost {
     // them would show (say) Bypass on a session the agent is still asking
     // permission for.
     const live = this.active();
-    const mode = live?.mode || this.currentMode || this.cfg().get<string>("defaultMode", "accept-edits");
+    const mode = live?.mode || this.currentMode || this.cfg().get<string>("defaultMode", DEFAULT_MODE);
     const model = live?.model || this.currentModel || this.cfg().get<string>("defaultModel", "");
     const payload = {
       type: "options",
-      modes: ChatController.STATIC_MODES,
-      currentMode: mode || "accept-edits",
+      modes: this.modes,
+      currentMode: mode || DEFAULT_MODE,
       models: families,
       currentModel: model || "adaptive"
     };
@@ -2399,7 +2702,7 @@ export class ChatController implements AcpHost {
   }
 
   private async applyDefaults(rt: Runtime, res: NewSessionResult): Promise<void> {
-    const mode = this.cfg().get<string>("defaultMode", "accept-edits");
+    const mode = this.cfg().get<string>("defaultMode", DEFAULT_MODE);
     const model = this.cfg().get<string>("defaultModel", "");
     const currentMode = res.modes?.currentModeId;
     // Record the session's own mode first. The `current_mode_update` that
@@ -2736,6 +3039,9 @@ export class ChatController implements AcpHost {
           void vscode.window.showWarningMessage(`${path.basename(fsPath)} is too large to attach (over 30 MB).`);
           return;
         }
+        if (!this.imagesSupported(true)) {
+          return;
+        }
         const buf = await fs.promises.readFile(fsPath);
         this.attachments.push({
           id: `att-${++this.attachSeq}`,
@@ -2841,17 +3147,19 @@ export class ChatController implements AcpHost {
     this.postAttachments();
   }
 
-  private async addSelection(): Promise<void> {
+  // Reports whether there was anything to attach, so a caller that follows it with
+  // a question does not ask one about nothing.
+  private async addSelection(): Promise<boolean> {
     const editor = vscode.window.activeTextEditor;
     if (!editor) {
-      return;
+      return false;
     }
     const doc = editor.document;
     const sel = editor.selection;
     const hasSel = sel && !sel.isEmpty;
     const body = hasSel ? doc.getText(sel) : doc.getText();
     if (!body.trim()) {
-      return;
+      return false;
     }
     const rel = vscode.workspace.asRelativePath(doc.uri);
     const label = hasSel
@@ -2865,6 +3173,63 @@ export class ChatController implements AcpHost {
       block: { type: "text", text }
     });
     this.postAttachments();
+    return true;
+  }
+
+  // --- Entry points from the editor ----------------------------------------
+  // Attach what the user is pointing at and put a starting question in the
+  // composer, without sending it. Same convention as "Run in terminal" on a code
+  // block: the extension sets things up, the user decides to go ahead.
+
+  // Reachable from the command palette with no editor in front, where there is no
+  // code to explain and a question on its own would be nonsense.
+  async explainSelection(): Promise<void> {
+    if (await this.addSelection()) {
+      this.prefill("Explain this code.");
+    }
+  }
+
+  // The problems the editor reports where the cursor is, handed over explicitly.
+  // The agent can pull diagnostics itself, but that is the whole workspace: this
+  // is the user pointing at the ones they care about.
+  async fixProblemsHere(): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+      return;
+    }
+    const sel = editor.selection;
+    const all = vscode.languages.getDiagnostics(editor.document.uri);
+    // With a selection, the problems it covers. With just a cursor, the whole file,
+    // since one line rarely holds the problem the user means.
+    const here = sel.isEmpty ? all : all.filter((d) => !!d.range.intersection(sel));
+    const rel = vscode.workspace.asRelativePath(editor.document.uri);
+    if (!here.length) {
+      void vscode.window.showInformationMessage(`No problems reported in ${rel}.`);
+      return;
+    }
+    const lines = here
+      .slice(0, MAX_ATTACHED_PROBLEMS)
+      .map((d) => `- line ${d.range.start.line + 1}: ${severityLabel(d.severity)} ${d.message}${d.source ? ` (${d.source})` : ""}`);
+    this.attachments.push({
+      id: `att-${++this.attachSeq}`,
+      label: `${path.basename(editor.document.uri.fsPath)}: ${here.length} problem${here.length === 1 ? "" : "s"}`,
+      type: "selection",
+      block: { type: "text", text: `Problems the editor reports in ${rel}:\n\n${lines.join("\n")}` }
+    });
+    await this.addSelection();
+    this.prefill(here.length === 1 ? "Fix this problem." : "Fix these problems.");
+  }
+
+  async attachUri(uri: vscode.Uri): Promise<void> {
+    await this.addFile(uri.fsPath);
+  }
+
+  // Put text in the composer, focused and ready to send. Whatever the user has
+  // already typed wins: this never overwrites their own words.
+  private prefill(text: string): void {
+    this.store.setDraft(this.activeId, text);
+    this.postDraft();
+    this.post({ type: "focusInput" });
   }
 
   private fileCache?: { at: number; uris: vscode.Uri[] };
@@ -2880,16 +3245,55 @@ export class ChatController implements AcpHost {
       this.fileCache = { at: now, uris };
     }
     const q = query.toLowerCase();
-    const scored = this.fileCache.uris
+    const files = this.fileCache.uris
       .map((u) => ({ u, rel: vscode.workspace.asRelativePath(u) }))
       .filter((x) => !q || x.rel.toLowerCase().includes(q))
       .slice(0, 20)
       .map((x) => ({ path: x.u.fsPath, label: path.basename(x.u.fsPath), detail: x.rel }));
-    this.post({ type: "fileSuggestions", query, items: scored });
+    // Filenames are only one way to name the thing you mean. When few files match,
+    // ask the language servers: "@ChatController" then finds the file that declares
+    // it, which no amount of filename matching would.
+    const items = files.length >= SYMBOL_FALLBACK_AT || q.length < 2
+      ? files
+      : [...files, ...await this.querySymbols(q, files.map((f) => f.path))];
+    this.post({ type: "fileSuggestions", query, items });
+  }
+
+  // Workspace symbols matching the query, as suggestion rows naming the file that
+  // holds them. Attaching one attaches its file, which is what the agent needs to
+  // read it in context.
+  private async querySymbols(query: string, already: string[]): Promise<{ path: string; label: string; detail: string }[]> {
+    try {
+      const found = await vscode.commands.executeCommand<vscode.SymbolInformation[]>(
+        "vscode.executeWorkspaceSymbolProvider",
+        query
+      );
+      const seen = new Set(already);
+      const rows: { path: string; label: string; detail: string }[] = [];
+      for (const s of found || []) {
+        const uri = s.location?.uri;
+        if (!uri || uri.scheme !== "file" || seen.has(uri.fsPath)) {
+          continue;
+        }
+        seen.add(uri.fsPath);
+        rows.push({
+          path: uri.fsPath,
+          label: s.name,
+          detail: `${symbolKindLabel(s.kind)} in ${vscode.workspace.asRelativePath(uri)}`
+        });
+        if (rows.length >= 8) {
+          break;
+        }
+      }
+      return rows;
+    } catch {
+      // No symbol provider for this workspace, or none ready yet: files only.
+      return [];
+    }
   }
 
   private attachImage(name: unknown, mime: unknown, data: unknown): void {
-    if (typeof data !== "string" || typeof mime !== "string") {
+    if (typeof data !== "string" || typeof mime !== "string" || !this.imagesSupported(true)) {
       return;
     }
     this.attachments.push({
@@ -3002,6 +3406,11 @@ export class ChatController implements AcpHost {
   // queued message, so a session's queue drains itself turn by turn. Shared by a
   // live send and a queued flush.
   private async runPrompt(rt: Runtime, blocks: ContentBlock[]): Promise<void> {
+    // Last stop before the wire. Attaching already refuses an image the model
+    // cannot read, but the model can be changed after that (or while the message
+    // sat in the queue), and an image block the model cannot decode does not fail
+    // the turn, it breaks the session for good.
+    blocks = this.withoutUnreadableImages(rt, blocks);
     this.setRuntimeBusy(rt, true);
     if (this.activeId === rt.id) {
       this.post({ type: "assistantStart" });
@@ -3213,6 +3622,24 @@ export class ChatController implements AcpHost {
     return [...q.implicit, ...q.attachments.map((a) => a.block), { type: "text", text: q.text }];
   }
 
+  // Drop image blocks a model that cannot read them would choke on, and say so in
+  // the chat: sending the rest of the message is far better than breaking the
+  // session, but the user has to know their screenshot did not go.
+  private withoutUnreadableImages(rt: Runtime, blocks: ContentBlock[]): ContentBlock[] {
+    const model = rt.model || this.currentModel;
+    if (!model || this.modelImageSupport.get(model) !== false || !blocks.some((b) => b.type === "image")) {
+      return blocks;
+    }
+    const kept = blocks.filter((b) => b.type !== "image");
+    const dropped = blocks.length - kept.length;
+    const name = familyOf(model)?.name || model;
+    this.emit(rt, {
+      type: "error",
+      text: `${name} cannot read images, so ${dropped === 1 ? "an image was" : `${dropped} images were`} left out of this request.`
+    });
+    return kept;
+  }
+
   // Update a queued message's text in place, keeping its position in the queue
   // (editing must not move it to the end). Editing borrowed the composer, so
   // whatever is staged there is now this message's context: that is both what
@@ -3288,19 +3715,86 @@ export class ChatController implements AcpHost {
     }
   }
 
-  // After a turn completes, read the current head node id and hand it to the
-  // webview so it can pin a revert target ("checkpoint") to the finished turn.
-  // `reliable` marks the head as a valid revert target on the CURRENT expansion.
-  // The agent re-expands the conversation on a session/load and assigns fresh
-  // node ids, so the head read right after a reload is NOT reliable (the next
-  // prompt orphans it). Live turn completions and instant restores are reliable.
+  // The agent pushes the whole revertible step list after every turn, so the
+  // checkpoint target is handed to us rather than asked for. Recorded on the
+  // runtime so a session switch can restore it without a round trip.
+  private onRevertSteps(rt: Runtime, update: RevertStepsUpdate): void {
+    rt.steps = Array.isArray(update.steps) ? update.steps : [];
+    if (this.activeId !== rt.id || rt.silentReplay) {
+      return;
+    }
+    const head = headOf(rt.steps);
+    if (head != null) {
+      // Pushed after the turn it belongs to, on the expansion it belongs to, so
+      // unlike a head we read ourselves this is always a valid target.
+      this.post({ type: "turnHead", head, reliable: true });
+    }
+  }
+
+  // Publish this chat and put the link on the clipboard. The agent refuses until
+  // the conversation has something in it, and says so, which is worth passing on
+  // rather than reporting as a failure.
+  private async shareSession(): Promise<void> {
+    const rt = this.active();
+    if (!rt || !rt.client.supportsSessionShare()) {
+      return;
+    }
+    try {
+      const res = await rt.client.shareSession(rt.id);
+      const url = res?.url;
+      if (!url) {
+        void vscode.window.showInformationMessage("Devin did not return a link for this chat.");
+        return;
+      }
+      await vscode.env.clipboard.writeText(url);
+      const open = await vscode.window.showInformationMessage("Link to this chat copied.", "Open");
+      if (open === "Open") {
+        await vscode.env.openExternal(vscode.Uri.parse(url));
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      void vscode.window.showWarningMessage(`Couldn't share this chat: ${message}`);
+    }
+  }
+
+  // Fork: continue from an earlier turn in a new chat, leaving this one untouched.
+  // The agent copies the conversation into a new session and hands back its id,
+  // which is the chat to open. Nothing is rewound and no file is undone, so unlike
+  // a restore there is nothing to confirm.
+  private async handleRevertFork(target: unknown): Promise<void> {
+    const rt = this.active();
+    if (!rt || typeof target !== "number" || !Number.isFinite(target)) {
+      return;
+    }
+    try {
+      const forked = await rt.client.revertForkFromStep(rt.id, target);
+      if (!forked) {
+        this.post({ type: "error", text: "Couldn't fork this chat: the agent did not return a new session." });
+        return;
+      }
+      // The fork is a separate session with its own agent, so it is opened the way
+      // any other existing chat is.
+      this.store.add(forked, rt.cwd);
+      await this.loadSession(forked);
+      await this.refreshSessions(true);
+    } catch (err) {
+      this.post({ type: "error", text: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
+  // After a turn completes, hand the webview the node id to pin a revert target
+  // ("checkpoint") to the finished turn. The agent pushes this itself
+  // (`onRevertSteps`), so this only covers the state a session starts in: a
+  // freshly loaded conversation has steps but has had no push yet.
   private async postTurnHead(reliable = false): Promise<void> {
     const rt = this.active();
     if (!rt || !rt.client.supportsRevert()) {
       return;
     }
     try {
-      const head = await rt.client.currentHead(rt.id);
+      const steps = await rt.client.listRevertSteps(rt.id);
+      rt.steps = steps;
+      const head = headOf(steps);
       if (head != null && this.activeId === rt.id) {
         this.post({ type: "turnHead", head, reliable });
       }
@@ -3534,6 +4028,7 @@ export class ChatController implements AcpHost {
       root: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
       revert: !!this.active()?.client.supportsRevert(),
       subagentControl: !!this.active()?.client.supportsSubagentControl(),
+      sessionShare: !!this.active()?.client.supportsSessionShare(),
       editRequests: this.cfg().get<string>("editRequests", "inline"),
       checkpoints: this.cfg().get<boolean>("checkpoints.enabled", true),
       showFileChanges: this.cfg().get<boolean>("checkpoints.showFileChanges", true),
@@ -3675,6 +4170,20 @@ export class ChatController implements AcpHost {
           this.currentMode = u.currentModeId || this.currentMode;
           this.statusBar?.set({ connected: this.isReady(), mode: this.currentMode, model: this.currentModel });
           this.post({ type: "mode", mode: u.currentModeId });
+        }
+        return;
+      // The mode or model changed somewhere other than our own pickers: a `/model`
+      // slash command, or another client on the same session. Without this the
+      // composer keeps showing the model the session is no longer using.
+      case "config_option_update":
+        this.publishOptions(rt, u.configOptions);
+        return;
+      // The agent names a session after its first request, and renames it as the
+      // conversation moves on. This is the push feed for that, so the header, the
+      // lists and the editor tab follow it without waiting for a `devin list`.
+      case "session_info_update":
+        if (rt && typeof u.title === "string" && u.title.trim()) {
+          this.applyAgentTitle(rt, u.title.trim());
         }
         return;
       default:
@@ -3986,6 +4495,25 @@ export class ChatController implements AcpHost {
   releaseTerminal(params: TerminalRef): Record<string, never> {
     this.runtimeBySessionId(params.sessionId)?.terminals.release(params.terminalId);
     return {};
+  }
+
+  // What the editor already knows is wrong with the code. The agent pulls this on
+  // its own schedule (it is not tied to a turn), and only reports problems for
+  // documents it has been told are open, which `sendDocumentEvent` covers.
+  requestDiagnostics(params: RequestDiagnosticsParams): RequestDiagnosticsResult {
+    if (!this.cfg().get<boolean>("editorContext.diagnostics", true)) {
+      return { items: [] };
+    }
+    const only = params.path ? vscode.Uri.file(this.resolvePath(params.path, params.sessionId)) : undefined;
+    const entries = only
+      ? [[only, vscode.languages.getDiagnostics(only)] as [vscode.Uri, readonly vscode.Diagnostic[]]]
+      : vscode.languages.getDiagnostics();
+    return {
+      items: diagnosticItems(entries, {
+        touched: new Set(this.changes.pathsFor(this.runtimeBySessionId(params.sessionId)?.id)),
+        roots: (vscode.workspace.workspaceFolders || []).map((f) => f.uri.fsPath)
+      })
+    };
   }
 
   async writeTextFile(params: WriteTextFileParams): Promise<Record<string, never>> {

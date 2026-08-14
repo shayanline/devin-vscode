@@ -3,17 +3,26 @@ import { EventEmitter } from "events";
 import { cliCommand } from "../cli/locate";
 import { JsonRpcConnection } from "./connection";
 import {
+  AcpSessionRow,
   AgentStopped,
   CliOutput,
   ContentBlock,
   CreateTerminalParams,
+  DocumentParams,
+  headOf,
+  LoadedHook,
+  LoadedRule,
   InitializeResult,
   NewSessionResult,
   PromptResult,
   ReadTextFileParams,
+  RequestDiagnosticsParams,
+  RequestDiagnosticsResult,
   RequestPermissionParams,
   RequestPermissionResult,
   RevertPreviewResult,
+  RevertStep,
+  RevertStepsUpdate,
   SessionUpdateNotification,
   TerminalExitStatus,
   TerminalRef,
@@ -31,6 +40,7 @@ export interface AcpClientOptions {
 // agent's client-side requests (permissions, file reads/writes, questions).
 export interface AcpHost {
   requestPermission(params: RequestPermissionParams): Promise<RequestPermissionResult>;
+  requestDiagnostics(params: RequestDiagnosticsParams): RequestDiagnosticsResult;
   readTextFile(params: ReadTextFileParams): Promise<{ content: string }>;
   writeTextFile(params: WriteTextFileParams): Promise<Record<string, never>>;
   createElicitation(params: unknown): Promise<unknown>;
@@ -50,6 +60,7 @@ export class AcpClient extends EventEmitter {
   private conn?: JsonRpcConnection;
   private host?: AcpHost;
   private exited = false;
+  private mcpChangeSeen = false;
   initializeResult?: InitializeResult;
 
   constructor(private readonly options: AcpClientOptions) {
@@ -98,6 +109,10 @@ export class AcpClient extends EventEmitter {
     switch (method) {
       case "session/request_permission":
         return this.host.requestPermission(params as RequestPermissionParams);
+      // The agent pulls diagnostics on its own schedule once
+      // `cognition.ai/requestDiagnostics` is declared; it is not tied to a turn.
+      case "_cognition.ai/request_diagnostics":
+        return this.host.requestDiagnostics(params as RequestDiagnosticsParams);
       case "fs/read_text_file":
         return this.host.readTextFile(params as ReadTextFileParams);
       case "fs/write_text_file":
@@ -142,6 +157,23 @@ export class AcpClient extends EventEmitter {
       this.emit("stopped", params as AgentStopped);
       return;
     }
+    // The revertible step list, pushed after every turn. This is where node ids
+    // come from, so it is worth having even though nothing asked for it.
+    if (method === "_cognition.ai/revert/stepsUpdated") {
+      this.emit("revertSteps", params as RevertStepsUpdate);
+      return;
+    }
+    // Fires whenever the agent's MCP server set changes, which is constantly (50
+    // times in a single trivial turn) and always with an empty payload, so every
+    // one after the first says nothing the first did not. Noted once, then
+    // dropped, rather than flooding the output channel with `[notify]` lines.
+    if (method === "_cognition.ai/mcp/serversChanged") {
+      if (!this.mcpChangeSeen) {
+        this.mcpChangeSeen = true;
+        this.emit("log", "[mcp] server set changed (further changes not logged)");
+      }
+      return;
+    }
     // Anything else: log a small payload preview so its shape can be inspected in
     // the Output channel before deciding whether to surface it.
     let preview = "";
@@ -163,9 +195,14 @@ export class AcpClient extends EventEmitter {
         fs: { readTextFile: true, writeTextFile: true },
         terminal: true,
         elicitation: { form: {}, url: {} },
-        // Unlocks the _cognition.ai/revert/* methods (conversation rewind +
-        // file undo). Verified against devin acp.
+        // Devin's own extensions, none of them documented. Declaring one is a
+        // promise to serve it, so each key here has a handler in this client or
+        // in the chat controller. Note the agent does NOT echo these back: what
+        // comes back in agentCapabilities._meta is what the AGENT offers, so a
+        // capability we serve must never be gated on seeing it there.
         _meta: {
+          // Unlocks the _cognition.ai/revert/* methods (conversation rewind +
+          // file undo). Verified against devin acp.
           "cognition.ai/revert": true,
           // Streams a subagent's own tool calls, messages and thoughts tagged
           // with `subagent_context`, plus the `subagent_started` /
@@ -173,7 +210,21 @@ export class AcpClient extends EventEmitter {
           // opening tool_call arrives, so its rows never leave pending.
           "cognition.ai/subagentSupport": true,
           // Unlocks _cognition.ai/subagent/{background,foreground}.
-          "cognition.ai/subagentControl": true
+          "cognition.ai/subagentControl": true,
+          // The agent pulls the editor's diagnostics instead of spawning tsc or
+          // eslint to find out what the editor already knows. Pairs with
+          // documentLifecycle: the agent only reports diagnostics for documents it
+          // has been told are open.
+          "cognition.ai/requestDiagnostics": true,
+          // Puts the files the user has open, focused and unsaved into the agent's
+          // context, so it stops guessing at what "this file" means and knows when
+          // a file it read has unsaved changes.
+          "cognition.ai/documentLifecycle": true,
+          // Rejecting a permission stops the turn rather than letting the agent
+          // carry on down a path the user just refused.
+          "cognition.ai/stopOnReject": true,
+          // A cancelled tool keeps the output it had already produced.
+          "cognition.ai/partialContent": true
         }
       }
     });
@@ -208,6 +259,12 @@ export class AcpClient extends EventEmitter {
     });
   }
 
+  // True when the agent can replay a stored conversation. Standard ACP capability:
+  // an agent without it cannot reopen a chat at all, only start a new one.
+  supportsLoadSession(): boolean {
+    return this.initializeResult?.agentCapabilities?.loadSession !== false;
+  }
+
   loadSession(
     sessionId: string,
     cwd: string,
@@ -230,10 +287,6 @@ export class AcpClient extends EventEmitter {
     this.conn?.notify("session/cancel", { sessionId });
   }
 
-  setMode(sessionId: string, modeId: string): Promise<unknown> {
-    return this.rpc("session/set_mode", { sessionId, modeId });
-  }
-
   renameSession(sessionId: string, title: string): Promise<unknown> {
     return this.rpc("_cognition.ai/session/rename", { sessionId, title });
   }
@@ -242,10 +295,63 @@ export class AcpClient extends EventEmitter {
     return this.rpc("session/delete", { sessionId });
   }
 
+  // Every session the CLI knows about, from any directory. Standard ACP (the
+  // agent advertises it under sessionCapabilities.list) and it needs no session of
+  // its own, so any live agent can answer it. Unlike `devin list`, which is exact
+  // match on cwd, this is not scoped: a session created in a subdirectory of the
+  // workspace comes back too.
+  async listSessions(): Promise<AcpSessionRow[]> {
+    const res = await this.rpc<{ sessions?: AcpSessionRow[] }>("session/list", {});
+    return res?.sessions || [];
+  }
+
   // Devin exposes both `mode` and `model` as config options set through this
   // custom method: { sessionId, configId, value }.
   setConfigOption(sessionId: string, configId: string, value: string): Promise<unknown> {
     return this.rpc("session/set_config_option", { sessionId, configId, value });
+  }
+
+  // --- What the agent has actually loaded ----------------------------------
+  // Rules and hooks come from more places than any one client can be expected to
+  // know: AGENTS.md and CLAUDE.md, Cursor and Windsurf files, plugins, and whatever
+  // a later CLI adds. Asking the agent is the only way to report what is really in
+  // force, and each entry names the file it came from so it can still be opened.
+
+  async listRules(sessionId: string): Promise<LoadedRule[]> {
+    const res = await this.rpc<{ rules?: LoadedRule[] }>("_cognition.ai/rules/list", { sessionId });
+    return res?.rules || [];
+  }
+
+  async listHooks(sessionId: string): Promise<LoadedHook[]> {
+    const res = await this.rpc<{ hooks?: LoadedHook[] }>("_cognition.ai/hooks/list", { sessionId });
+    return res?.hooks || [];
+  }
+
+  // Publish the conversation and get a link to it. Rejects with "Nothing to share
+  // yet" until the session has content, which is a state to report rather than an
+  // error to swallow.
+  shareSession(sessionId: string): Promise<{ url?: string } | undefined> {
+    return this.rpc<{ url?: string }>("_cognition.ai/session/share", { sessionId });
+  }
+
+  supportsSessionShare(): boolean {
+    return this.agentCapability("cognition.ai/sessionShare");
+  }
+
+  // --- Document lifecycle --------------------------------------------------
+  // What the user has open, focused and unsaved. Notifications, so there is no
+  // reply and nothing to await: a stale one is only ever a wrong "open documents"
+  // list, never a hung call. Gated on the agent advertising the capability,
+  // because an agent that does not will log a parse failure for every one.
+  documentEvent(kind: "didOpen" | "didClose" | "didChangeDirty" | "didFocus", params: DocumentParams): void {
+    if (!this.supportsDocumentLifecycle()) {
+      return;
+    }
+    this.conn?.notify(`_cognition.ai/document/${kind}`, params);
+  }
+
+  supportsDocumentLifecycle(): boolean {
+    return this.agentCapability("cognition.ai/documentLifecycle");
   }
 
   // --- Subagents -----------------------------------------------------------
@@ -282,23 +388,37 @@ export class AcpClient extends EventEmitter {
     });
   }
 
-  // The agent does not surface node ids in the stream, so we read the current
-  // head by probing preview with an out-of-range target and parsing the error
-  // ("...from head H..."). Returns the head node id, or null when the session
-  // has no revertible history yet.
+  // Branch from a step rather than rewinding to it. Nothing is discarded and no
+  // file is touched: the agent copies the conversation up to that point into a
+  // BRAND NEW session and returns its id, leaving this one exactly as it was.
+  // `targetNodeId` is the step's `forkTargetNodeId`, which is not its
+  // `revertTargetNodeId` (verified: passing the wrong one forks the wrong turn).
+  async revertForkFromStep(sessionId: string, targetNodeId: number): Promise<string | undefined> {
+    const res = await this.rpc<{ forkedSessionId?: string }>("_cognition.ai/revert/forkFromStep", {
+      sessionId,
+      targetNodeId
+    });
+    return res?.forkedSessionId;
+  }
+
+  // Every revertible point in the conversation. The agent also pushes this list
+  // unprompted after each turn (`revertSteps`), so this is mostly for the state
+  // a freshly loaded session starts in, before the first push arrives.
+  async listRevertSteps(sessionId: string): Promise<RevertStep[]> {
+    const res = await this.rpc<{ steps?: RevertStep[] }>("_cognition.ai/revert/listSteps", { sessionId });
+    return res?.steps || [];
+  }
+
+  // The conversation's current head, or null when it has no revertible history.
+  //
+  // This is the newest step's `forkTargetNodeId`, NOT its `revertTargetNodeId`.
+  // The two are a turn apart: a step's revert target is the node BEFORE it ran
+  // (rewinding there discards it), and its fork target is the node after it
+  // finished, which is the head. Verified against the agent: with two turns the
+  // steps report rev=27/31 and fork=31/34 while the head is 31 then 34.
   async currentHead(sessionId: string): Promise<number | null> {
-    // Node 0 is always off the expanded chain (the chain starts at the session
-    // prefix), so preview rejects with "...from head H...", which we parse.
-    // A session with no revertible history yet reports no head -> null.
-    try {
-      await this.revertPreview(sessionId, 0);
-      return null;
-    } catch (err) {
-      const data = (err as { data?: unknown }).data;
-      const text = typeof data === "string" ? data : (err instanceof Error ? err.message : String(err));
-      const m = /from head (\d+)/.exec(text);
-      return m ? Number(m[1]) : null;
-    }
+    const steps = await this.listRevertSteps(sessionId);
+    return headOf(steps);
   }
 
   private rpc<T>(method: string, params?: unknown): Promise<T> {

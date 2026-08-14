@@ -1,0 +1,406 @@
+// Protocol tests for the ACP client, run against the real AcpClient compiled out
+// of src/ and talking to a scripted fake agent over stdio.
+//
+// These guard the parts of Devin's protocol that are documented nowhere and were
+// established by probing a real agent (see the matrix in AGENTS.md). A wrong
+// assumption here fails silently: the agent stops sending something, or rejects a
+// reply, and the panel still looks like it works. So each test pins one contract.
+//
+// The fake agent is the one driving in most of these, because that is the shape of
+// the real thing: the agent pulls diagnostics and pushes its step list, unasked.
+
+const test = require("node:test");
+const assert = require("node:assert");
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const esbuild = require("esbuild");
+
+const ROOT = path.resolve(__dirname, "..");
+const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "devin-acp-"));
+
+function load(rel, name) {
+  const outfile = path.join(TMP, name + ".js");
+  esbuild.buildSync({
+    entryPoints: [path.join(ROOT, rel)],
+    outfile,
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    logLevel: "error",
+    alias: { vscode: path.join(__dirname, "vscode-stub.js") }
+  });
+  return require(outfile);
+}
+const { AcpClient } = load("src/acp/client.ts", "client");
+const { diagnosticItems, MAX_DIAGNOSTICS } = load("src/acp/diagnostics.ts", "diagnostics");
+const vscode = globalThis.__dvVscode;
+
+// VS Code's own diagnostic shape, as much of it as the mapper reads.
+function diag(message, severity, { code, source, line = 0 } = {}) {
+  return {
+    message,
+    severity,
+    code,
+    source,
+    range: { start: { line, character: 2 }, end: { line, character: 9 } }
+  };
+}
+const ERROR = 0;
+const WARNING = 1;
+const INFO = 2;
+const HINT = 3;
+
+// A scripted fake agent. It answers `initialize` with `agentMeta`, records every
+// message it receives (including the client's replies to its own requests), and
+// runs `onMessage` for anything else. `afterInit` is source that runs once the
+// initialize reply has gone out, which is where an agent-driven test starts.
+function fakeAgent(name, agentMeta, { onMessage = "", afterInit = "" } = {}) {
+  const log = path.join(TMP, name + ".log");
+  const js = path.join(TMP, name + ".js");
+  const sh = path.join(TMP, name + ".sh");
+  fs.writeFileSync(js, `
+    const fs = require("fs");
+    const LOG = ${JSON.stringify(log)};
+    let buf = "";
+    let nextId = 1000;
+    const send = (m) => process.stdout.write(JSON.stringify(m) + "\\n");
+    const notify = (method, params) => send({ jsonrpc: "2.0", method, params });
+    const ask = (method, params) => send({ jsonrpc: "2.0", id: nextId++, method, params });
+    const record = (m) => fs.appendFileSync(LOG, JSON.stringify(m) + "\\n");
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => {
+      buf += chunk;
+      let i;
+      while ((i = buf.indexOf("\\n")) >= 0) {
+        const line = buf.slice(0, i).trim();
+        buf = buf.slice(i + 1);
+        if (!line) continue;
+        const msg = JSON.parse(line);
+        record(msg);
+        if (msg.method === "initialize") {
+          send({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: 1, agentCapabilities: { _meta: ${JSON.stringify(agentMeta)} } } });
+          ${afterInit}
+          continue;
+        }
+        ${onMessage}
+        if (msg.id !== undefined) send({ jsonrpc: "2.0", id: msg.id, result: {} });
+      }
+    });
+    process.stdin.on("end", () => process.exit(0));
+  `);
+  fs.writeFileSync(sh, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(js)}\n`);
+  fs.chmodSync(sh, 0o755);
+  return { cli: sh, log };
+}
+
+function seen(log) {
+  if (!fs.existsSync(log)) return [];
+  return fs.readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+}
+
+function start(cli) {
+  const client = new AcpClient({ cliPath: cli, cwd: TMP, env: process.env });
+  client.start();
+  return client;
+}
+
+// Wait for the fake agent's log to satisfy a predicate, so tests do not race the
+// pipe. Returns the matching entry, or undefined once the budget is spent.
+async function waitFor(log, match, ms = 3000) {
+  const until = Date.now() + ms;
+  while (Date.now() < until) {
+    const hit = seen(log).find(match);
+    if (hit) return hit;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  return undefined;
+}
+
+async function settle(ms = 150) {
+  await new Promise((r) => setTimeout(r, ms));
+}
+
+test("initialize promises only the capabilities we actually serve", async () => {
+  const { cli, log } = fakeAgent("caps", {});
+  const client = start(cli);
+  await client.initialize();
+  const init = seen(log).find((m) => m.method === "initialize");
+  const declared = Object.keys(init.params.clientCapabilities._meta);
+
+  // Declaring one of these is a promise to serve it, and the agent never echoes
+  // our declarations back, so dropping one here turns a feature off in silence.
+  for (const key of [
+    "cognition.ai/revert",
+    "cognition.ai/subagentSupport",
+    "cognition.ai/subagentControl",
+    "cognition.ai/requestDiagnostics",
+    "cognition.ai/documentLifecycle"
+  ]) {
+    assert.ok(declared.includes(key), `expected to declare ${key}, declared: ${declared.join(", ")}`);
+  }
+  assert.strictEqual(init.params.clientCapabilities.fs.readTextFile, true);
+  assert.strictEqual(init.params.clientCapabilities.terminal, true);
+  await client.shutdown();
+});
+
+test("a diagnostics pull is answered in the shape the agent demands", async () => {
+  // The real agent pulls on its own schedule and rejects anything that is not a
+  // RequestDiagnosticsResult: a bare null fails with "invalid type: null", and an
+  // item without `uri` fails with "missing field `uri`".
+  const { cli, log } = fakeAgent("diag", {}, {
+    afterInit: `ask("_cognition.ai/request_diagnostics", {});`
+  });
+  const client = start(cli);
+  client.setHost({
+    requestDiagnostics: () => ({
+      items: [{
+        uri: "file:///work/a.ts",
+        id: "ts2304",
+        message: "Cannot find name 'zzyzx'",
+        severity: "error",
+        source: "ts",
+        range: { start: { line: 41, character: 6 }, end: { line: 41, character: 11 } }
+      }]
+    })
+  });
+  await client.initialize();
+
+  const reply = await waitFor(log, (m) => m.result && Array.isArray(m.result.items));
+  assert.ok(reply, "the client never answered the diagnostics pull");
+  const item = reply.result.items[0];
+  assert.strictEqual(item.uri, "file:///work/a.ts", "uri is required: without it the agent rejects the whole reply");
+  assert.strictEqual(item.severity, "error");
+  assert.strictEqual(item.range.start.line, 41, "ranges stay zero based, the agent renders them one based itself");
+  await client.shutdown();
+});
+
+test("document lifecycle is only sent to an agent that supports it", async () => {
+  const off = fakeAgent("doc-off", {});
+  const client = start(off.cli);
+  await client.initialize();
+  client.documentEvent("didOpen", { sessionId: "s1", uri: "file:///a.ts", languageId: "typescript" });
+  await settle();
+  assert.ok(
+    !seen(off.log).some((m) => String(m.method || "").includes("document/")),
+    "an agent that does not advertise documentLifecycle logs a parse failure for every event it is sent"
+  );
+  await client.shutdown();
+
+  const on = fakeAgent("doc-on", { "cognition.ai/documentLifecycle": true });
+  const client2 = start(on.cli);
+  await client2.initialize();
+  client2.documentEvent("didFocus", { sessionId: "s1", uri: "file:///a.ts", languageId: "typescript" });
+  const note = await waitFor(on.log, (m) => String(m.method || "").includes("document/didFocus"));
+  assert.ok(note, "expected the didFocus notification to reach the agent");
+  assert.strictEqual(note.method, "_cognition.ai/document/didFocus");
+  assert.strictEqual(note.id, undefined, "it is a notification, so it must carry no id");
+  // A plain path here instead of a uri is rejected by the real agent.
+  assert.strictEqual(note.params.uri, "file:///a.ts");
+  assert.strictEqual(note.params.sessionId, "s1");
+  await client2.shutdown();
+});
+
+test("the revert head comes from the step list, not from parsing an error", async () => {
+  const { cli, log } = fakeAgent("steps", { "cognition.ai/revert": true }, {
+    onMessage: `if (msg.method === "_cognition.ai/revert/listSteps") {
+      send({ jsonrpc: "2.0", id: msg.id, result: { steps: [
+        { stepNumber: 1, kind: "prompt", revertTargetNodeId: 1, forkTargetNodeId: 2, summary: "first" },
+        { stepNumber: 2, kind: "prompt", revertTargetNodeId: 7, forkTargetNodeId: 8, summary: "second" }
+      ] } });
+      continue;
+    }`
+  });
+  const client = start(cli);
+  await client.initialize();
+  assert.strictEqual(client.supportsRevert(), true);
+
+  const steps = await client.listRevertSteps("s1");
+  assert.strictEqual(steps.length, 2);
+  assert.strictEqual(steps[1].forkTargetNodeId, 8, "fork targets differ from revert targets, which is what makes forking possible");
+
+  // The head is the newest step's FORK target, not its revert target. The two are
+  // a turn apart: a step's revert target is the node before it ran. Reading the
+  // revert target here rewinds every checkpoint one turn too far, which is a real
+  // bug this test was written to allow before the agent was asked what it means.
+  assert.strictEqual(await client.currentHead("s1"), 8);
+  assert.ok(
+    !seen(log).some((m) => m.method === "_cognition.ai/revert/preview"),
+    "the head must come from listSteps, never from a preview probed for its error text"
+  );
+  await client.shutdown();
+});
+
+test("a step list with no fork target still yields a head", async () => {
+  // Older agents, and a step the agent reports without one, must not leave the
+  // checkpoint row with nothing to rewind to.
+  const { cli } = fakeAgent("steps-legacy", { "cognition.ai/revert": true }, {
+    onMessage: `if (msg.method === "_cognition.ai/revert/listSteps") {
+      send({ jsonrpc: "2.0", id: msg.id, result: { steps: [{ stepNumber: 1, revertTargetNodeId: 5 }] } });
+      continue;
+    }`
+  });
+  const client = start(cli);
+  await client.initialize();
+  assert.strictEqual(await client.currentHead("s1"), 5);
+  await client.shutdown();
+});
+
+test("a session with no history yet has no head", async () => {
+  const { cli } = fakeAgent("steps-empty", { "cognition.ai/revert": true }, {
+    onMessage: `if (msg.method === "_cognition.ai/revert/listSteps") {
+      send({ jsonrpc: "2.0", id: msg.id, result: { steps: [] } });
+      continue;
+    }`
+  });
+  const client = start(cli);
+  await client.initialize();
+  assert.strictEqual(await client.currentHead("s1"), null, "a fresh session has nothing to revert to");
+  await client.shutdown();
+});
+
+test("forking asks for the fork target and reports the new session", async () => {
+  // Verified against the agent: the param is `targetNodeId` (not `stepNumber`),
+  // and the agent copies the conversation into a NEW session rather than rewinding
+  // this one, so the id it returns is the chat to open.
+  const { cli, log } = fakeAgent("fork", { "cognition.ai/revert": true }, {
+    onMessage: `if (msg.method === "_cognition.ai/revert/forkFromStep") {
+      send({ jsonrpc: "2.0", id: msg.id, result: { forkedSessionId: "living-advantage" } });
+      continue;
+    }`
+  });
+  const client = start(cli);
+  await client.initialize();
+  const forked = await client.revertForkFromStep("s1", 31);
+  assert.strictEqual(forked, "living-advantage");
+  const call = seen(log).find((m) => m.method === "_cognition.ai/revert/forkFromStep");
+  assert.deepStrictEqual(call.params, { sessionId: "s1", targetNodeId: 31 });
+  await client.shutdown();
+});
+
+test("pushed notifications become events, and MCP churn is noted once", async () => {
+  // Both of these arrive unasked from the real agent. The MCP one fires dozens of
+  // times per turn with an empty payload, which used to flood the output channel.
+  const { cli } = fakeAgent("push", {}, {
+    afterInit: `
+      notify("_cognition.ai/revert/stepsUpdated", { sessionId: "s1", steps: [{ stepNumber: 1, revertTargetNodeId: 3 }] });
+      for (let i = 0; i < 6; i++) notify("_cognition.ai/mcp/serversChanged", {});
+    `
+  });
+  const client = start(cli);
+  const pushes = [];
+  const logs = [];
+  client.on("revertSteps", (u) => pushes.push(u));
+  client.on("log", (l) => logs.push(l));
+  await client.initialize();
+  await settle(400);
+
+  assert.strictEqual(pushes.length, 1, "the step list push should surface as one event");
+  assert.strictEqual(pushes[0].steps[0].revertTargetNodeId, 3);
+  assert.strictEqual(
+    logs.filter((l) => l.includes("[mcp]")).length,
+    1,
+    "six notifications carrying nothing new should be noted once"
+  );
+  assert.strictEqual(
+    logs.filter((l) => l.includes("[notify]")).length,
+    0,
+    "neither notification should fall through to the raw notify log"
+  );
+  await client.shutdown();
+});
+
+// --- The diagnostics the agent is handed -----------------------------------
+// A filter, not a dump: what is left out matters as much as what goes in, since
+// everything here costs the agent context it could have spent on the actual task.
+
+test("only real defects are sent, as uris the agent will accept", () => {
+  const items = diagnosticItems([
+    [vscode.Uri.file("/w/a.ts"), [
+      diag("broken", ERROR, { code: "ts2304", source: "ts" }),
+      diag("untidy", WARNING, { code: "no-unused-vars", source: "eslint" }),
+      diag("just so you know", INFO),
+      diag("could be nicer", HINT)
+    ]]
+  ], { roots: ["/w"] });
+
+  assert.deepStrictEqual(items.map((i) => i.severity), ["error", "warning"], "hints and information are editor UI, not defects");
+  assert.strictEqual(items[0].uri, "file:///w/a.ts", "a path instead of a uri makes the agent reject the whole reply");
+  assert.strictEqual(items[0].id, "ts2304");
+  assert.strictEqual(items[1].id, "no-unused-vars");
+  assert.strictEqual(items[0].range.start.line, 0, "ranges stay zero based");
+});
+
+test("an unlabelled diagnostic still gets a stable id", () => {
+  const [withSource, bare] = diagnosticItems([
+    [vscode.Uri.file("/w/a.ts"), [diag("no code", ERROR, { source: "ts" })]],
+    [vscode.Uri.file("/w/b.ts"), [diag("nothing at all", ERROR)]]
+  ], { roots: ["/w"] });
+  assert.strictEqual(withSource.id, "ts");
+  assert.strictEqual(bare.id, "diagnostic");
+});
+
+test("a rule that carries a documentation link still reduces to a string", () => {
+  // VS Code allows code to be an object with a link to the rule's docs.
+  const [item] = diagnosticItems([
+    [vscode.Uri.file("/w/a.ts"), [diag("linked", ERROR, { code: { value: "ts6133", target: "https://x/y" } })]]
+  ], { roots: ["/w"] });
+  assert.strictEqual(item.id, "ts6133");
+});
+
+test("diagnostics outside the workspace are dropped, and non-file schemes with them", () => {
+  const items = diagnosticItems([
+    [vscode.Uri.file("/w/mine.ts"), [diag("mine", ERROR)]],
+    [vscode.Uri.file("/elsewhere/theirs.ts"), [diag("not actionable", ERROR)]],
+    [{ scheme: "untitled", fsPath: "/w/scratch", toString: () => "untitled:/w/scratch" }, [diag("unsaved", ERROR)]]
+  ], { roots: ["/w"] });
+  assert.deepStrictEqual(items.map((i) => i.message), ["mine"]);
+});
+
+test("a path that merely starts with the root is not inside it", () => {
+  const items = diagnosticItems([
+    [vscode.Uri.file("/work-other/a.ts"), [diag("different project", ERROR)]]
+  ], { roots: ["/work"] });
+  assert.deepStrictEqual(items, [], "/work-other is not under /work");
+});
+
+test("with no workspace open, nothing is filtered by location", () => {
+  const items = diagnosticItems([
+    [vscode.Uri.file("/anywhere/a.ts"), [diag("still worth knowing", ERROR)]]
+  ], { roots: [] });
+  assert.strictEqual(items.length, 1);
+});
+
+test("files the agent just edited come first, then errors before warnings", () => {
+  const items = diagnosticItems([
+    [vscode.Uri.file("/w/untouched.ts"), [diag("old error", ERROR)]],
+    [vscode.Uri.file("/w/edited.ts"), [diag("its warning", WARNING), diag("its error", ERROR)]]
+  ], { roots: ["/w"], touched: new Set(["/w/edited.ts"]) });
+
+  assert.deepStrictEqual(
+    items.map((i) => i.message),
+    ["its error", "its warning", "old error"],
+    "what the agent just broke is what it needs to see first"
+  );
+});
+
+test("the list is capped, so one broken file cannot eat the whole context", () => {
+  const many = Array.from({ length: MAX_DIAGNOSTICS + 50 }, (_, i) => diag("e" + i, ERROR, { line: i }));
+  const items = diagnosticItems([[vscode.Uri.file("/w/a.ts"), many]], { roots: ["/w"] });
+  assert.strictEqual(items.length, MAX_DIAGNOSTICS);
+});
+
+test("a touched file still wins after the cap is applied", () => {
+  const noise = Array.from({ length: MAX_DIAGNOSTICS + 10 }, (_, i) => diag("noise" + i, ERROR, { line: i }));
+  const items = diagnosticItems([
+    [vscode.Uri.file("/w/noisy.ts"), noise],
+    [vscode.Uri.file("/w/edited.ts"), [diag("the one that matters", ERROR)]]
+  ], { roots: ["/w"], touched: new Set(["/w/edited.ts"]) });
+
+  assert.strictEqual(items.length, MAX_DIAGNOSTICS);
+  assert.strictEqual(items[0].message, "the one that matters", "the cap must not throw away the relevant one");
+});
+
+test.after(() => {
+  fs.rmSync(TMP, { recursive: true, force: true });
+});

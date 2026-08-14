@@ -37,7 +37,15 @@ PATH and helps you finish setup. It needs VS Code 1.93 or newer.
 - Every file edit shown as a native VS Code diff, kept or undone per file: an
   edit row opens what that edit did, the changed files tray the whole change.
 - Approve or decline the tools Devin runs, and answer its questions, inline in
-  the chat.
+  the chat. Allowing something for the whole session, or every project, is one
+  level in, so the narrow yes stays the easy one.
+- Rewind to any turn to undo what came after it, or fork that turn into a new
+  chat to try a second answer while keeping the first.
+- Right click in the editor or the Explorer for Devin's own actions: Explain
+  This, Fix Problems Here, and Add File to Chat. The code, and the problems that
+  editor reports, come with the question.
+- Devin sees the errors and warnings your editor is already showing, and which
+  file you are working in, so it does not have to run a build to find out.
 - Open a chat in the sidebar, the editor area, a new window, or a terminal, from
   the `+` split button.
 - Move a chat between the side panel and an editor tab, live agent and all: an
@@ -45,12 +53,16 @@ PATH and helps you finish setup. It needs VS Code 1.93 or newer.
 - Sessions saved per workspace that survive restarts, listed in a built in panel
   grouped by workspace, with search and a status filter. `Cmd+K Cmd+D` opens the
   list, and `Cmd+1` to `Cmd+9` open your nine most recent chats.
-- The Devin model and mode (code, ask, plan, or bypass) picked from the composer.
+- The Devin model and mode (code, smart, ask, plan, or bypass) picked from the
+  composer, which offers whatever modes your CLI reports.
+- A link to any chat, copied from its header, for sharing what Devin did.
+- Commands run in the CLI's own sandbox, once you turn `devin.sandbox` on.
 - The Devin CLI's own settings edited natively in a built in editor, no config
   files by hand: instructions, skills, plugins, MCP servers, hooks, permissions,
   and more, per machine or per workspace folder, with search. It writes the CLI's
   real config, so the `devin` command in your terminal picks up the same changes.
-- `/` for Devin commands and skills, `@` to attach files, and image paste.
+- `/` for Devin commands and skills, `@` to attach a file or a symbol from your
+  code, and image paste.
 - Files, folders and images dragged onto the chat attach as context. Hold Shift
   while dragging from the Explorer or an editor tab, since VS Code otherwise
   keeps that drag for itself.

@@ -1,11 +1,11 @@
 import { execFile } from "child_process";
 import { cliCommand } from "../cli/locate";
+import { AcpSessionRow } from "../acp/types";
 
 export interface DevinSession {
   id: string;
   short_id: string;
   working_directory: string;
-  working_directory_display?: string;
   last_activity_at?: number;
   last_activity_ago?: string;
   title?: string;
@@ -87,6 +87,47 @@ export async function listSessions(opts: ListOptions): Promise<ListResult> {
 
   sessions.sort((a, b) => (b.last_activity_at || 0) - (a.last_activity_at || 0));
   return { sessions, prunedIds };
+}
+
+// The same listing, taken from a live agent over ACP (`session/list`) instead of
+// by spawning `devin list` once per directory. Preferred whenever a session is
+// open, which is most of the time the list is looked at, and it is better as well
+// as cheaper: the protocol call is not scoped to a directory, so a tracked session
+// created in a subdirectory of the workspace is found rather than silently missing.
+//
+// Membership is unchanged: the ids this window tracks, and only those. An untracked
+// session (one started by `devin` in a terminal) is deliberately still not listed.
+export function fromAcpRows(rows: AcpSessionRow[], trackedIds: string[]): ListResult {
+  const byId = new Map(rows.filter((r) => r && r.sessionId).map((r) => [r.sessionId, r]));
+  const sessions: DevinSession[] = [];
+  const prunedIds: string[] = [];
+  for (const id of trackedIds) {
+    const row = byId.get(id);
+    if (!row) {
+      // One answer covering every directory, so an id that is absent here is gone,
+      // with none of the "was that directory queried successfully" doubt the CLI
+      // path has to allow for.
+      prunedIds.push(id);
+      continue;
+    }
+    sessions.push({
+      id,
+      short_id: id,
+      working_directory: row.cwd || "",
+      last_activity_at: epochSeconds(row.updatedAt),
+      title: row.title,
+      tracked: true
+    });
+  }
+  sessions.sort((a, b) => (b.last_activity_at || 0) - (a.last_activity_at || 0));
+  return { sessions, prunedIds };
+}
+
+// `devin list` reports epoch seconds and the panel sorts and groups on that, so an
+// ISO timestamp from the protocol has to arrive in the same units.
+function epochSeconds(iso?: string): number | undefined {
+  const ms = iso ? Date.parse(iso) : NaN;
+  return Number.isNaN(ms) ? undefined : Math.floor(ms / 1000);
 }
 
 interface RunResult {

@@ -62,7 +62,12 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("devin.cancel", () => chat.cancel()),
     vscode.commands.registerCommand("devin.runSetup", () => chat.runSetup()),
     vscode.commands.registerCommand("devin.showInfo", () => chat.showInfo()),
-    vscode.commands.registerCommand("devin.openSettings", () => SettingsPanel.show(context))
+    vscode.commands.registerCommand("devin.openSettings", () => SettingsPanel.show(context)),
+    // Reachable from the editor and the explorer, so a question about the code in
+    // front of you does not start with finding the panel and describing where you are.
+    vscode.commands.registerCommand("devin.explainSelection", () => chat.explainSelection()),
+    vscode.commands.registerCommand("devin.fixProblemsHere", () => chat.fixProblemsHere()),
+    vscode.commands.registerCommand("devin.addFileToChat", (uri?: vscode.Uri) => chat.addFileToChat(uri))
   );
 }
 

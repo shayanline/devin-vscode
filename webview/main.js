@@ -15,6 +15,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   const el = {
     boot: $("boot"),
     setup: $("setup"),
+    announcer: $("announcer"),
     chat: $("chat"),
     chatTitle: $("chat-title"),
     historyBtn: $("history-btn"),
@@ -28,6 +29,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     listFilterBtn: $("list-filter-btn"),
     settingsBtn: $("settings-btn"),
     terminateBtn: $("terminate-btn"),
+    shareBtn: $("share-btn"),
     detachBtn: $("detach-btn"),
     status: $("status"),
     usage: $("usage"),
@@ -201,6 +203,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     // session-scoped widgets (working set, context ring) hide while browsing.
     el.composer.classList.toggle("list-mode", list);
     el.input.placeholder = list ? "Start a new chat\u2026" : "Ask Devin, or type @ to add a file";
+    // An explicit label wins over the placeholder, so it has to say the same thing:
+    // in the list the box starts a chat, in a chat it continues one.
+    el.input.setAttribute("aria-label", list ? "Start a new chat" : "Ask Devin");
     if (list) { closeTitleMenu(); detachComposerFromSession(); closeSessionsPanel(); stopThreadLoading(); }
     renderHeader();
     updateComposerDock();
@@ -590,6 +595,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // offers "open in an editor tab", an editor tab offers "move to the side panel".
   function updateDetachBtn() {
     const show = body === "thread" && !!curSessionId;
+    // Sharing publishes the conversation, so it only appears for a chat that exists
+    // and only when the agent supports it.
+    el.shareBtn.classList.toggle("hidden", !(show && caps.sessionShare));
     el.detachBtn.classList.toggle("hidden", !show);
     updateHeaderDivider();
     if (!show) return;
@@ -600,6 +608,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   el.detachBtn.addEventListener("click", () => {
     if (!curSessionId) return;
     vscode.postMessage({ type: inEditor() ? "attachSession" : "detachSession", id: curSessionId });
+  });
+  el.shareBtn.addEventListener("click", () => {
+    if (curSessionId) vscode.postMessage({ type: "shareSession" });
   });
 
   // A chat runs in one place at a time, so when the one being opened is already
@@ -746,6 +757,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     openSendMenu();
   });
   let sendFloater = null;
+  // The chevron menu on a permission prompt, holding the grants that outlive it.
+  let permissionFloater = null;
   function openSendMenu() {
     if (sendFloater) { sendFloater.close(); return; }
     const menu = document.createElement("div");
@@ -802,6 +815,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     // so reopening the session brings them back.
     el.elicitationTray.querySelectorAll(".qc").forEach((w) => w.dispatchEvent(new Event("dv-teardown")));
     el.elicitationTray.innerHTML = "";
+    // The scope menu hangs off the body, anchored to a button in the tray below,
+    // so wiping the tray would otherwise leave it floating over nothing.
+    if (permissionFloater) permissionFloater.close();
     el.permissionTray.innerHTML = "";
   }
   el.attach.addEventListener("click", () => vscode.postMessage({ type: "addContext" }));
@@ -1053,6 +1069,23 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   }
   // Content changed: follow the bottom only if the user is pinned there.
   function scrollToBottom() { schedulePin(); }
+
+  // Say something once, out loud, for anyone not watching the panel.
+  //
+  // Deliberately not the transcript itself: making that live would re-read a reply
+  // on every streamed chunk, which is worse than silence. So this announces the
+  // things that change what the user can do (a turn started or finished, a tool ran,
+  // something is waiting on them) and leaves the reading of replies to the
+  // role=log transcript.
+  //
+  // Repeating the same string is a no-op in most screen readers, so a marker is
+  // toggled to force it to speak twice when it genuinely happened twice.
+  let lastAnnouncement = "";
+  function announce(text) {
+    if (!el.announcer || !text) return;
+    el.announcer.textContent = text === lastAnnouncement ? text + "\u200b" : text;
+    lastAnnouncement = text;
+  }
 
   // A user action (send, open/restore a session) must land at the bottom even
   // though the content keeps reflowing for a moment afterwards (the busy chrome
@@ -2004,6 +2037,22 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     });
     row.appendChild(left);
     row.appendChild(btn);
+    // Fork: carry on from here in a new chat. The agent copies the conversation up
+    // to this point into a session of its own, so unlike a restore this discards
+    // nothing and touches no file, and needs no confirmation.
+    if (caps.revert && turn.headBefore != null) {
+      const fork = document.createElement("button");
+      fork.className = "checkpoint-fork";
+      fork.innerHTML = '<i class="codicon codicon-git-branch"></i>';
+      fork.title = "Continue from here in a new chat, leaving this one as it is";
+      fork.setAttribute("aria-label", "Fork this chat from here");
+      fork.addEventListener("click", (e) => {
+        e.stopPropagation();
+        setConfirming(false);
+        vscode.postMessage({ type: "revertFork", target: turn.headBefore });
+      });
+      row.appendChild(fork);
+    }
     row.appendChild(cancel);
     row.appendChild(right);
   }
@@ -2027,8 +2076,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   }
 
   // A "Checkpoint restored" divider left at the rewind point, matching VS Code's
-  // restored-checkpoint row (fading lines + label). Note: there is no redo, as
-  // re-running from a rewind is non-deterministic and ACP exposes no fork.
+  // restored-checkpoint row (fading lines + label). There is no redo: re-running
+  // from a rewind cannot be relied on to land in the same place. Forking a turn
+  // into a new chat is the way to keep both.
   function renderRestoredRow() {
     const prev = el.thread.querySelector(".restored-row:not(.ended-row)");
     if (prev) prev.remove();
@@ -4537,6 +4587,15 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       const open = tray.querySelector('[data-request-id="' + cssEscape(requestId) + '"]');
       if (open) open.remove();
     }
+    // A tray widget is a request for a decision, so it is a dialog. Focus is left
+    // where it is on purpose (a question arriving must never steal the composer
+    // mid sentence), so the role and the announcement are what make it findable.
+    widget.setAttribute("role", "dialog");
+    widget.setAttribute("aria-live", "off");
+    // A dialog with no name is announced as just "dialog", so it takes the name of
+    // whatever it is asking about, and says what it is when it has no title.
+    const title = widget.querySelector(".cw-title, .qc-title");
+    widget.setAttribute("aria-label", (title && title.textContent.trim()) || "Devin needs an answer");
     tray.appendChild(widget);
   }
   function cssEscape(v) {
@@ -4551,14 +4610,91 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     const detail = permissionDetail(data);
     if (detail) cwBody(box).appendChild(detail);
     const row = cwButtons(box);
-    (data.options || []).forEach((opt) => {
-      const reject = /reject/.test(opt.kind || "");
-      row.appendChild(btn(opt.name || opt.optionId, reject ? "secondary" : "primary", () => {
-        vscode.postMessage({ type: "permission", requestId: data.requestId, optionId: opt.optionId });
-        box.remove();
-      }));
-    });
+    const options = data.options || [];
+    const answer = (opt) => {
+      vscode.postMessage({ type: "permission", requestId: data.requestId, optionId: opt.optionId });
+      box.remove();
+      renderPermissionRecap(data, opt);
+    };
+    // Devin offers up to six options for one command: allow once, allow for the
+    // session, always in this project, always everywhere, switch to bypass, and
+    // reject. As a flat row of identical buttons, "always allow in all projects"
+    // and "switch to bypass mode" look exactly as ordinary as "Allow", which is
+    // how a permission prompt teaches people to stop reading it. So: the narrow
+    // yes and the no are the buttons, and every broader grant is one level in.
+    const rejects = options.filter((o) => /reject/.test(o.kind || ""));
+    const allows = options.filter((o) => !/reject/.test(o.kind || ""));
+    const primary = allows.find((o) => o.kind === "allow_once") || allows[0];
+    const broader = allows.filter((o) => o !== primary);
+
+    if (primary) {
+      if (broader.length) {
+        // A split button, like the composer's Send: the safe answer, and a chevron
+        // holding the ones that outlive this request.
+        const group = document.createElement("span");
+        group.className = "cw-split";
+        group.appendChild(btn(primary.name || primary.optionId, "primary", () => answer(primary)));
+        const more = btn("", "primary cw-more", () => openPermissionScopeMenu(more, broader, answer));
+        more.innerHTML = '<i class="codicon codicon-chevron-down"></i>';
+        more.title = "Allow more broadly";
+        more.setAttribute("aria-label", "More ways to allow this");
+        more.setAttribute("aria-haspopup", "true");
+        group.appendChild(more);
+        row.appendChild(group);
+      } else {
+        row.appendChild(btn(primary.name || primary.optionId, "primary", () => answer(primary)));
+      }
+    }
+    rejects.forEach((opt) => row.appendChild(btn(opt.name || opt.optionId, "secondary", () => answer(opt))));
     trayMount(el.permissionTray, box, data.requestId);
+    // Devin is blocked until this is answered, so it must not be a silent change.
+    announce(data.command ? `Devin needs permission to run: ${data.command}` : "Devin needs permission to use a tool.");
+  }
+
+  // The grants that outlive this one request (this session, this project, every
+  // project, or switching mode outright), kept behind the chevron so choosing one
+  // is deliberate.
+  function openPermissionScopeMenu(anchor, options, answer) {
+    if (permissionFloater) { permissionFloater.close(); return; }
+    const menu = document.createElement("div");
+    menu.className = "dv-menu";
+    options.forEach((opt) => {
+      const row = document.createElement("button");
+      row.className = "dv-menu-item";
+      // Switching mode is not a scope for this command, it turns approvals off
+      // wholesale, so it is marked as the outlier it is.
+      const bypass = /bypass/.test(opt.optionId || "");
+      row.appendChild(mkIcon(bypass ? "unlock" : "check"));
+      const text = document.createElement("span");
+      text.className = "dv-menu-text";
+      text.textContent = opt.name || opt.optionId;
+      row.appendChild(text);
+      row.addEventListener("click", () => {
+        if (permissionFloater) permissionFloater.close();
+        answer(opt);
+      });
+      menu.appendChild(row);
+    });
+    permissionFloater = makeFloater(anchor, menu, "right", () => { permissionFloater = null; });
+  }
+
+  // What was decided, left in the transcript. Without this a prompt answered and
+  // gone leaves no trace, so there is no way to see afterwards what was allowed,
+  // which matters most for the grants that keep applying.
+  function renderPermissionRecap(data, opt) {
+    ensureTurn();
+    const box = document.createElement("div");
+    const rejected = /reject/.test(opt.kind || "");
+    box.className = "perm-recap" + (rejected ? " rejected" : "");
+    box.appendChild(mkIcon(rejected ? "circle-slash" : "check"));
+    const text = document.createElement("span");
+    // The option names are already written from the user's side ("Yes, always allow
+    // `exit` commands in `devin-vscode`"), so they are quoted rather than reworded.
+    const scope = opt.kind === "allow_once" ? "Allowed" : rejected ? "Rejected" : opt.name || "Allowed";
+    text.textContent = data.command ? `${scope}: ${data.command}` : scope;
+    box.appendChild(text);
+    respTarget().appendChild(box);
+    scrollToBottom();
   }
 
   // What the agent is asking permission for: the command it wants to run, the
@@ -4611,14 +4747,24 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       widget = box;
       cwTitle(box, data.message || "Devin has a question");
       const body = cwBody(box);
-      const url = document.createElement("div");
-      url.className = "cw-message muted";
+      // A real link, so it can be read, hovered and opened before agreeing to it:
+      // being asked to approve a URL that is only inert text is not much of a
+      // question. The webview's own link handling opens it.
+      const url = document.createElement("a");
+      url.className = "cw-message";
+      url.href = data.url;
       url.textContent = data.url;
       body.appendChild(url);
       const row = cwButtons(box);
-      row.appendChild(btn("Open", "primary", () => finish("accept")));
+      row.appendChild(btn("Open", "primary", () => {
+        // Answer the agent AND actually open it: the extension asked to handle
+        // this, so leaving the opening to whoever asked would open nothing.
+        vscode.postMessage({ type: "openExternal", url: data.url });
+        finish("accept");
+      }));
       row.appendChild(btn("Decline", "secondary", () => finish("decline")));
       trayMount(el.elicitationTray, box, data.requestId);
+      announce("Devin is asking to open a link: " + data.url);
       return;
     }
 
@@ -4802,6 +4948,13 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     show(saved && typeof saved.at === "number" ? saved.at : 0);
     updateSubmitState();
     trayMount(el.elicitationTray, qc, data.requestId);
+    // Focus stays in the composer by design, so this is the only signal that Devin
+    // is now waiting on an answer.
+    announce(
+      names.length > 1
+        ? `Devin is asking ${names.length} questions. ${data.message || ""}`.trim()
+        : `Devin is asking a question. ${data.message || ""}`.trim()
+    );
   }
 
   // Builds one question block for an elicitation form. Returns the element plus
@@ -6206,6 +6359,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     hideWorking();
     finalizeBlock();
     hideWelcome();
+    announce("Devin reported an error: " + text);
     const box = document.createElement("div");
     box.className = "tray-card error-card";
     const head = document.createElement("div");
@@ -6607,11 +6761,16 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         addUserMessage(m.text, m.attachments);
         break;
       case "userChunk": appendUserChunk(m.text, m.messageId, m.attachments); break;
-      case "assistantStart": finalizeBlock(); break;
+      case "assistantStart": finalizeBlock(); announce("Devin is working."); break;
       case "assistantChunk": appendAssistant(m.text, m.messageId); break;
       case "assistantImage": appendAssistantImage(m.mime, m.data); break;
       case "thoughtChunk": appendThought(m.text, m.messageId, m.replayed, m.at); break;
-      case "assistantEnd": hideWorking(); finalizeBlock(); break;
+      case "assistantEnd":
+        hideWorking();
+        finalizeBlock();
+        // "cancelled" is the one a user needs to hear: it means their stop landed.
+        announce(m.stopReason === "cancelled" ? "Devin stopped." : "Devin finished replying.");
+        break;
       case "plan": renderPlan(m.entries); break;
       case "toolCall":
       case "toolCallUpdate": upsertTool(m); break;
@@ -6624,6 +6783,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       case "queued": renderQueued(m.items); break;
       case "attachments": renderAttachments(m.items); break;
       case "draft": applyDraft(m); break;
+      // Something outside the panel (an editor command) set the composer up and
+      // wants the user in it, ready to send.
+      case "focusInput": el.input.focus(); break;
       case "changesResolved": applyResolved(m.paths, m.action); break;
       case "mcpProblems": renderMcpProblems(m.servers); break;
       case "turnStats": applyTurnStats(m); break;
@@ -6653,6 +6815,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
           root: m.root || caps.root,
           revert: !!m.revert,
           subagentControl: !!m.subagentControl,
+          sessionShare: !!m.sessionShare,
           editRequests: m.editRequests || caps.editRequests,
           checkpoints: m.checkpoints !== undefined ? !!m.checkpoints : caps.checkpoints,
           showFileChanges: m.showFileChanges !== undefined ? !!m.showFileChanges : caps.showFileChanges,

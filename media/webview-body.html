@@ -11,6 +11,13 @@
 
   <div id="setup" class="hidden"></div>
 
+  <!-- Where the panel says out loud what it is doing: a turn starting and ending,
+       a tool running, a permission or a question waiting. Without it a screen
+       reader user gets silence while Devin works, since the transcript fills in
+       visually and nothing asks to be read. Kept off screen but not hidden, which
+       would stop it being announced at all. -->
+  <div id="announcer" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
+
   <div id="chat" class="hidden">
     <!-- Full-height sessions sidebar on the LEFT; the chat content shrinks to
          its right when it is open. A drag handle between them resizes it. -->
@@ -34,13 +41,18 @@
            terminate stays next to the panel toggle at the far end. -->
       <!-- Moves this chat between the side panel and an editor tab, carrying the
            live agent with it. -->
+      <button id="share-btn" class="icon-btn hidden" title="Copy a link to this chat"><i class="codicon codicon-link"></i></button>
       <button id="detach-btn" class="icon-btn hidden"></button>
       <button id="terminate-btn" class="icon-btn hidden" title="Terminate this session (stop its process)"></button>
     </div>
 
     <div id="body">
       <div id="sessions-list" class="hidden"></div>
-      <div id="thread"></div>
+      <!-- role=log so a screen reader treats arriving replies as an append-only
+           feed and reads new content without the user hunting for it. The stream
+           itself is announced through #announcer rather than by making the whole
+           transcript live, which would re-read a reply on every chunk. -->
+      <div id="thread" role="log" aria-label="Devin chat transcript"></div>
       <!-- Jump-to-bottom button (VS Code's .chat-scroll-down): a round secondary
            button bottom-right of the thread, shown only when scrolled up. -->
       <button id="scroll-down" class="chat-scroll-down" title="Scroll to bottom"><i class="codicon codicon-chevron-down"></i></button>
@@ -54,7 +66,7 @@
       <div id="autocomplete" class="hidden"></div>
       <div id="input-box">
         <div id="attachments" class="hidden"></div>
-        <textarea id="input" rows="1" placeholder="Ask Devin"></textarea>
+        <textarea id="input" rows="1" placeholder="Ask Devin" aria-label="Ask Devin"></textarea>
         <div id="toolbar">
           <div class="toolbar-left">
             <button id="attach" class="tool-ctl" title="Add context: files, selection, images (or type @).&#10;Dragging works too, hold Shift when the drag starts inside VS Code."><i class="codicon codicon-add"></i></button>

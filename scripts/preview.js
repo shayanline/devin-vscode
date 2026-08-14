@@ -110,7 +110,7 @@ const SCENARIOS = {
   full: [
     { type: "ready" },
     { type: "body", body: "thread" },
-    { type: "capabilities", root: "/Users/dev/Projects/web-app", revert: true, editRequests: "inline", checkpoints: true, showFileChanges: true, contextUsage: true },
+    { type: "capabilities", root: "/Users/dev/Projects/web-app", revert: true, editRequests: "inline", checkpoints: true, showFileChanges: true, contextUsage: true, sessionShare: true },
     options("adaptive"),
     { type: "userMessage", text: "Refactor the auth module to centralise token handling, then run the tests.",
       attachments: [{ label: "token-service.ts", type: "file" },
@@ -148,12 +148,25 @@ const SCENARIOS = {
     { type: "fileChange", path: "src/auth/token-service.ts", added: 34, removed: 6 },
     { type: "assistantChunk", text: "All tests pass. Token handling now lives in [src/auth/token-service.ts](src/auth/token-service.ts), and the callers were updated to use it. Anything else you'd like adjusted?" },
     { type: "assistantEnd" },
+    // The revert step the agent pushes after a turn, which is what pins a
+    // checkpoint (and a fork) to the turn that follows it.
+    { type: "turnHead", head: 31, reliable: true },
+    { type: "userMessage", text: "Yes, push it." },
+    { type: "assistantStart" },
+    { type: "assistantChunk", text: "I'll push the branch. It needs your approval to run `git`." },
+    { type: "assistantEnd" },
     { type: "busy", value: false },
     { type: "usage", used: 41200, size: 200000, cost: 0.09 },
+    // The six options a real agent sends for one shell command: allow once, three
+    // widening grants, a mode switch, and reject. Only the first and the last are
+    // buttons; the rest sit behind the chevron.
     { type: "permission", requestId: "p1", title: "Devin wants to run a command", command: "git push origin main", options: [
-      { optionId: "allow", name: "Allow", kind: "allow" },
+      { optionId: "allow_once", name: "Allow", kind: "allow_once" },
       { optionId: "allow_session", name: "Yes, allow `git` commands (this session)", kind: "allow_always" },
-      { optionId: "reject", name: "Reject", kind: "reject" }
+      { optionId: "allow_always", name: "Yes, always allow `git` commands in `web-app`", kind: "allow_always" },
+      { optionId: "allow_always_global", name: "Yes, always allow `git` commands in all projects", kind: "allow_always" },
+      { optionId: "switch_bypass", name: "Yes, switch to bypass mode", kind: "allow_always" },
+      { optionId: "reject_once", name: "Reject", kind: "reject_once" }
     ] },
     { type: "elicitation", requestId: "e1", mode: "form", message: "A couple of quick questions", allowOther: true, schema: {
       type: "object", required: ["q0", "q1"], properties: {

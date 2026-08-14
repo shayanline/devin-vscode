@@ -336,6 +336,41 @@
     ]);
   }
 
+  // Every rule the agent has actually loaded. The toggles and the single
+  // instructions file above only partly explain what is in force: a rule can come
+  // from a plugin, or from another tool's file in a directory this panel never
+  // looks at, and only the CLI knows the full set. Read only: the row opens the
+  // file it names, and some of them are not ours to edit.
+  function loadedRules() {
+    const list = data.instructions && data.instructions.loaded;
+    if (!list) {
+      // The CLI could not be asked. Better to say nothing than to imply the files
+      // above are the whole story.
+      return null;
+    }
+    const rows = list.map((r) => listRow(
+      [r.name || "(unnamed)", r.providerLabel ? tag(r.providerLabel, "muted") : null, r.scope === "global" ? tag("global", "muted") : null],
+      r.path,
+      r.path ? [iconBtn("go-to-file", "Open this file", () => post("settings:openFile", { path: r.path }))] : []
+    ));
+    return group("In force now", rows.length ? rows : [empty("No always-on rules are loaded.")]);
+  }
+
+  // The hooks the agent has really loaded, including ones from a plugin or written
+  // in another tool's format, which the editable list below cannot see.
+  function loadedHooks() {
+    const list = data.hooks && data.hooks.loaded;
+    if (!list) {
+      return null;
+    }
+    const rows = list.map((hk) => listRow(
+      [hk.name || hk.id || "hook", (hk.events || []).length ? tag((hk.events || []).join(", "), "muted") : null, hk.format ? tag(hk.format, "muted") : null],
+      hk.sourcePath,
+      hk.sourcePath ? [iconBtn("go-to-file", "Open the file it comes from", () => post("settings:openFile", { path: hk.sourcePath }))] : []
+    ));
+    return group("In force now", rows.length ? rows : [empty("No hooks are loaded.")]);
+  }
+
   // A centered modal dialog. `build(close)` returns the body element and may call
   // close() after a successful submit.
   function openModal(title, build) {
@@ -676,7 +711,8 @@
           keyToggle("read_config_from.cursor", "Cursor (.cursor/rules)"),
           keyToggle("read_config_from.windsurf", "Windsurf (.windsurf/rules)"),
           keyToggle("read_config_from.claude", "Claude Code (.claude)")
-        ], { reset: true })
+        ], { reset: true }),
+        loadedRules()
       );
       return wrap;
     },
@@ -778,7 +814,12 @@
           ));
         }
       }
-      return group("Hooks", rows.length ? rows : [empty("No hooks here.")], { action: addBtn("Add hook", hookModalBody) });
+      const wrap = h("div");
+      wrap.append(
+        group("Hooks", rows.length ? rows : [empty("No hooks here.")], { action: addBtn("Add hook", hookModalBody) }),
+        loadedHooks()
+      );
+      return wrap;
     },
 
     permissions() {

@@ -18,6 +18,8 @@ import {
   userMcpConfigPath
 } from "./configService";
 import { CliContext, listPlugins, listSkills, mcpAdd, mcpVerb, McpAddOptions, pluginVerb } from "./devinConfigCli";
+import { withQuerySession } from "../acp/queryClient";
+import { LoadedHook, LoadedRule } from "../acp/types";
 import { checkHealth, loginShellEnv } from "../cli/locate";
 import { listModelFamilies } from "../cli/models";
 
@@ -203,6 +205,9 @@ export class SettingsPanel {
     if (this.watchTimer) clearTimeout(this.watchTimer);
     this.watchTimer = setTimeout(() => {
       this.watchTimer = undefined;
+      // A config file changed underneath us, which is the one thing that can make
+      // the agent's answer about rules and hooks wrong.
+      this.loaded = undefined;
       void this.sendData();
     }, 300);
   }
@@ -211,6 +216,12 @@ export class SettingsPanel {
     const mutating = MUTATING.has(String(msg?.type));
     try {
       if (mutating) this.selfWriteAt = Date.now();
+      // A write can change which rules and hooks are in force, so it drops the
+      // cached answer. Moving between sections does not: asking the agent means
+      // starting one, and no section click should wait on that.
+      if (mutating) {
+        this.loaded = undefined;
+      }
       switch (msg?.type) {
         case "settings:load":
           await this.ensureCli();
@@ -569,9 +580,12 @@ export class SettingsPanel {
   private async sendData(): Promise<void> {
     if (this.disposed) return;
     this.startWatching();
-    const [skills, plugins] = await Promise.all([
+    const [skills, plugins, loaded] = await Promise.all([
       listSkills(this.cli).catch(() => []),
-      listPlugins(this.cli).catch(() => [])
+      listPlugins(this.cli).catch(() => []),
+      // Asking the agent means starting one, which costs about as much as the two
+      // listings above, so it runs alongside them rather than after them.
+      this.loadFromAgent()
     ]);
     let families: unknown[] = [];
     try { families = await listModelFamilies(this.cli.cliPath, this.cli.env); } catch { /* ignore */ }
@@ -595,17 +609,44 @@ export class SettingsPanel {
         defaultModel: vscode.workspace.getConfiguration("devin").get<string>("defaultModel", "") || ""
       },
       instructions: {
-        byScope: groups.map((g) => ({ ...g, file: this.ruleFileForDir(g.scope === "user" ? userConfigDir() : g.root!) }))
+        byScope: groups.map((g) => ({ ...g, file: this.ruleFileForDir(g.scope === "user" ? userConfigDir() : g.root!) })),
+        // What the agent has really loaded, which is more than the one file per
+        // scope this panel lets you edit: rules also come from Cursor and Windsurf
+        // files, from another tool's config, and from plugins. Undefined when the
+        // CLI could not be asked, and the section then says only what it can.
+        loaded: loaded?.rules
       },
       skills: {
         byScope: groups.map((g) => ({ ...g, list: g.scope === "user" ? userSkills : this.scanProjectSkills(g.root!) }))
       },
       mcp: { byScope: groups.map((g) => ({ ...g, servers: this.mcpServersForScope(g.scope, g.root) })) },
-      hooks: { byScope: groups.map((g) => ({ ...g, entries: this.hooksForScope(g.scope, g.root) })) },
+      hooks: {
+        byScope: groups.map((g) => ({ ...g, entries: this.hooksForScope(g.scope, g.root) })),
+        loaded: loaded?.hooks
+      },
       plugins: { list: plugins },
       permissions: { byScope: groups.map((g) => ({ ...g, ...this.permissionsForScope(g.scope, g.root) })) }
     };
     this.post({ type: "settings:data", data });
+  }
+
+  // Rules and hooks as the agent reports them. Both need a session, so one query
+  // agent answers both and is then closed. Cached until a file changes, which is
+  // the only thing that can change the answer: a write here, or an outside edit
+  // the watcher picks up.
+  private loaded?: { rules: LoadedRule[]; hooks: LoadedHook[] };
+
+  private async loadFromAgent(): Promise<{ rules: LoadedRule[]; hooks: LoadedHook[] } | undefined> {
+    if (this.loaded) {
+      return this.loaded;
+    }
+    const root = this.folders()[0]?.path || userConfigDir();
+    const result = await withQuerySession(this.cli.cliPath, root, this.cli.env, async (client, sessionId) => ({
+      rules: await client.listRules(sessionId),
+      hooks: await client.listHooks(sessionId)
+    }));
+    this.loaded = result;
+    return result;
   }
 
   // The scope groups every section renders: Global plus one per workspace folder.

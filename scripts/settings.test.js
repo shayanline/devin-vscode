@@ -421,6 +421,50 @@ test("re-entering a text field without editing it writes nothing", () => {
   assert.ok(url.classList.contains("busy"));
 });
 
+// --- What is actually in force ---------------------------------------------
+// The panel can only edit one instructions file and one hooks file per scope, but
+// the CLI loads rules and hooks from several other places, including plugins and
+// other tools' config. Reporting only the files it can edit misrepresents what the
+// agent is actually running under, so the CLI's own list is shown beside them.
+
+test("the instructions section reports every rule the agent has loaded", () => {
+  const h = createSettings();
+  h.openSection("Instructions");
+  const rows = h.document.querySelectorAll(".settings-list-row");
+  const text = [...rows].map((r) => h.text(r.querySelector(".settings-list-title"))).join(" | ");
+  // A Windsurf rule and a plugin's own AGENTS.md are in force, and neither is the
+  // editable file above: scanning for known filenames would miss the plugin one.
+  assert.match(text, /global_rules/, "a rule from another tool is still a rule");
+  assert.match(text, /\.windsurf/, "and it says where it came from");
+  assert.strictEqual([...rows].filter((r) => /AGENTS/.test(h.text(r))).length >= 3, true);
+  // Each one opens the file it names, since that is where it is edited.
+  assert.ok(h.actions().includes("Open this file"));
+  assert.deepStrictEqual(h.consoleErrors, []);
+});
+
+test("the hooks section reports the hooks the agent has loaded", () => {
+  const h = createSettings();
+  h.openSection("Hooks");
+  const titles = [...h.document.querySelectorAll(".settings-list-row")].map((r) => h.text(r));
+  assert.ok(titles.some((t) => /permission_request/.test(t)), "a hook in force is listed even if this panel does not own its file");
+  assert.ok(h.actions().includes("Open the file it comes from"));
+  // The editable list is still there, with its own controls.
+  assert.ok(h.actions().includes("Add"));
+  assert.ok(h.actions().includes("Remove hook"));
+  assert.deepStrictEqual(h.consoleErrors, []);
+});
+
+test("when the CLI cannot be asked, the panel claims nothing", () => {
+  // `loaded` is undefined when the query agent could not be started. Saying "no
+  // rules are loaded" would then be a lie, so the section is simply absent.
+  const h = createSettings({ empty: true });
+  h.openSection("Instructions");
+  const groups = [...h.document.querySelectorAll(".settings-group-title")].map((e) => h.text(e));
+  assert.ok(!groups.includes("In force now") || h.document.querySelector(".settings-empty"),
+    "either it reports a real list, or it says nothing at all");
+  assert.deepStrictEqual(h.consoleErrors, []);
+});
+
 test("with nothing configured, every section still offers a way in", () => {
   const h = createSettings({ empty: true });
   h.openSection("Instructions");

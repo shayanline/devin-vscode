@@ -99,7 +99,17 @@ function buildData(opts) {
           exists: !o.empty,
           kind: "AGENTS.md"
         }
-      }))
+      })),
+      // What the CLI reports as actually loaded, which is more than the one file
+      // per scope the panel can edit: a Windsurf file and a plugin's own AGENTS.md
+      // are in force here too, and no amount of scanning for known filenames in
+      // known directories would find the second one.
+      loaded: o.empty ? [] : [
+        { name: "AGENTS", path: USER_DIR + "/AGENTS.md", provider: "agents_standard", providerLabel: "AGENTS.md", trigger: "always_on", scope: "global" },
+        { name: "AGENTS", path: folders[0].path + "/AGENTS.md", provider: "agents_standard", providerLabel: "AGENTS.md", trigger: "always_on", scope: "workspace" },
+        { name: "global_rules", path: HOME + "/.codeium/windsurf/memories/global_rules.md", provider: "windsurf", providerLabel: ".windsurf", trigger: "always_on", scope: "global" },
+        { name: "AGENTS", path: HOME + "/.local/share/devin/cli/plugins/cache/superpowers/6.3.0/AGENTS.md", provider: "agents_standard", providerLabel: "AGENTS.md", trigger: "always_on", scope: "global" }
+      ]
     },
     skills: {
       byScope: byScope((scope, f) => ({
@@ -131,7 +141,13 @@ function buildData(opts) {
               { event: "PostToolUse", matcher: "edit", type: "command", command: "npm run lint -- --fix", source: f.path + "/.devin/config.json" },
               { event: "SessionStart", matcher: "", type: "prompt", prompt: "Check the open pull requests before starting.", source: f.path + "/.devin/config.json" }
             ])
-      }))
+      })),
+      // The CLI's own view, including a hook written in the Claude format, which
+      // the editable list above reads from a file it does not own.
+      loaded: o.empty ? [] : [
+        { id: "<hook 1>", name: "permission_request", events: ["permission_request"], sourcePath: USER_DIR + "/config.json", provider: "devin", providerLabel: ".devin", scope: "global", format: "claude" },
+        { id: "<hook 2>", name: "post_tool", events: ["post_tool"], sourcePath: USER_DIR + "/config.json", provider: "devin", providerLabel: ".devin", scope: "global", format: "claude" }
+      ]
     },
     plugins: { list: o.empty ? [] : [{ name: "team-conventions", description: "Shared skills, hooks, and rules for the team." }] },
     permissions: {

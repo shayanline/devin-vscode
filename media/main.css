@@ -261,6 +261,21 @@ body {
   display: none !important;
 }
 
+/* Read by a screen reader, seen by nobody. `display: none` and `visibility:
+   hidden` would take it out of the accessibility tree as well, which is the one
+   thing this element exists to be in. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 /* Boot overlay: a single loading state that covers the panel from first paint
    until setup or the session list is ready. A pure CSS spinner is used so it
    works before the codicon font has loaded. */
@@ -1684,6 +1699,7 @@ body {
 }
 
 .checkpoint-restore,
+.checkpoint-fork,
 .checkpoint-cancel {
   display: inline-flex;
   align-items: center;
@@ -1700,9 +1716,24 @@ body {
 }
 
 .checkpoint-restore:hover,
+.checkpoint-fork:hover,
 .checkpoint-cancel:hover {
   border-color: var(--vscode-panel-border);
   color: var(--vscode-foreground);
+}
+
+/* Icon only, and narrower than the labelled restore beside it. */
+.checkpoint-fork {
+  padding: 2px 5px;
+}
+
+.checkpoint-fork .codicon {
+  font-size: 12px;
+}
+
+/* While a restore is being confirmed, forking is not the question being asked. */
+.checkpoint-row.confirming .checkpoint-fork {
+  display: none;
 }
 
 /* Confirming: a neutral rounded pill (VS Code's .confirming), the label itself
@@ -3633,6 +3664,45 @@ body {
   justify-content: flex-end;
   gap: var(--dv-space-2);
   padding: var(--dv-space-2) var(--dv-space-4);
+}
+
+/* A permission's answer is a split button: the narrow "Allow", and a chevron for
+   the grants that outlive the request (this session, this project, everywhere). */
+.cw-split {
+  display: inline-flex;
+  align-items: stretch;
+}
+
+.cw-split > button:first-child {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.cw-split > .cw-more {
+  padding-left: 4px;
+  padding-right: 4px;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  border-left: 1px solid var(--vscode-contrastBorder, rgba(0, 0, 0, 0.25));
+}
+
+/* What was decided, left in the transcript once the prompt has gone. */
+.perm-recap {
+  display: flex;
+  align-items: center;
+  gap: var(--dv-space-2);
+  color: var(--vscode-descriptionForeground, #9d9d9d);
+  font-size: var(--dv-fs-s);
+  margin: 2px 0;
+}
+
+.perm-recap .codicon {
+  font-size: 12px;
+  color: var(--vscode-charts-green, #89d185);
+}
+
+.perm-recap.rejected .codicon {
+  color: var(--vscode-descriptionForeground, #9d9d9d);
 }
 
 .cw-dontask {
