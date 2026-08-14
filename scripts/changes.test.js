@@ -267,6 +267,50 @@ test("each session gets its own working set, and a revert forgets only its own",
   assert.strictEqual(tracker.hasUnresolvedChange(mine), false, "and nothing of A's is held any more");
 });
 
+test("a bulk undo leaves a file another chat also changed", async () => {
+  // One file is held once, with one original from before whichever chat touched it
+  // first. So undoing it for chat A would write that over chat B's later work, from
+  // a button in a tray that never mentions B.
+  const vscode = globalThis.__dvVscode;
+  vscode.window.shown.warning.length = 0;
+  const tracker = new ChangeTracker();
+  tracker.register();
+  const mine = write("only-mine.ts", "A wrote this\n");
+  const shared = write("both.ts", "B wrote this last\n");
+
+  tracker.recordDiff(mine, "mine before\n", "A wrote this\n", "A");
+  tracker.recordDiff(shared, "shared before\n", "A wrote this\n", "A");
+  tracker.recordDiff(shared, "A wrote this\n", "B wrote this last\n", "B");
+
+  await tracker.rejectAll("A");
+
+  assert.strictEqual(fs.readFileSync(mine, "utf8"), "mine before\n", "A's own file is undone");
+  assert.strictEqual(fs.readFileSync(shared, "utf8"), "B wrote this last\n",
+    "the shared file keeps the newer work rather than being wound back past it");
+  assert.strictEqual(tracker.hasUnresolvedChange(shared), true, "and it stays reviewable");
+  assert.strictEqual(vscode.window.shown.warning.length, 1, "and the user is told it was left");
+  assert.match(vscode.window.shown.warning[0], /both\.ts/);
+});
+
+test("a failed undo is not reported to the caller as restored", async () => {
+  // The revert flow forgets the files it put back. One it could not write is still
+  // holding the agent's content, so forgetting it would take away the only way back.
+  const tracker = new ChangeTracker();
+  tracker.register();
+  const file = write("locked-too.ts", "devin wrote this\n");
+  tracker.recordDiff(file, "the original\n", "devin wrote this\n", "A");
+
+  fs.chmodSync(file, 0o444);
+  let ok;
+  try {
+    ok = await tracker.reject(file);
+  } finally {
+    fs.chmodSync(file, 0o644);
+  }
+  assert.strictEqual(ok, false, "it says it did not manage it");
+  assert.strictEqual(await tracker.reject(file), true, "and true once it can");
+});
+
 test("one file is one entry, however it was spelled", async () => {
   // Whether two spellings are one file is the filesystem's business, not ours:
   // macOS and Windows say yes by default, Linux says no. Either way the working set

@@ -168,11 +168,25 @@ export class TerminalManager {
       pendingPost = setTimeout(flush, OUTPUT_POST_MS);
       pendingPost.unref?.();
     };
+    // Tracked as it grows rather than measured per chunk: measuring the whole buffer
+    // on every write flattens the string each time, which is quadratic in the output
+    // and put back on the extension host exactly the cost the coalescing above took
+    // out of the panel.
+    let bytes = 0;
     const append = (text: string) => {
       term.output += text;
-      while (Buffer.byteLength(term.output, "utf8") > term.limit) {
+      bytes += Buffer.byteLength(text, "utf8");
+      while (bytes > term.limit) {
         term.truncated = true;
-        term.output = term.output.slice(Math.ceil(term.output.length * 0.1) || 1);
+        let cut = Math.ceil(term.output.length * 0.1) || 1;
+        // Never between the halves of a surrogate pair: a lone one is not valid text,
+        // and the agent's parser rejects the whole reply that carries it.
+        const code = term.output.charCodeAt(cut);
+        if (code >= 0xdc00 && code <= 0xdfff) {
+          cut++;
+        }
+        bytes -= Buffer.byteLength(term.output.slice(0, cut), "utf8");
+        term.output = term.output.slice(cut);
       }
       postSoon();
     };
@@ -307,6 +321,12 @@ export class TerminalManager {
     if (term.exitStatus) {
       return Promise.resolve(term.exitStatus);
     }
+    // Already told the agent this one was over when the user left it running. Asking
+    // again is answered the same way: waiting would never settle, and an unanswered
+    // request stalls the turn with nothing to show why.
+    if (term.skipped) {
+      return Promise.resolve({ exitCode: null, signal: null });
+    }
     return new Promise((resolve) => term.waiters.push(resolve));
   }
 
@@ -349,6 +369,17 @@ export class TerminalManager {
   // Whether this command is one the agent is no longer waiting for.
   isSkipped(terminalId: string): boolean {
     return !!this.terminals.get(terminalId)?.skipped;
+  }
+
+  // Whether any command is still going. A chat with one is not idle, whatever the
+  // conversation is doing: the user left it running on purpose.
+  hasRunning(): boolean {
+    for (const [, term] of this.terminals) {
+      if (!term.exitStatus) {
+        return true;
+      }
+    }
+    return false;
   }
 
   // Whether it is running somewhere the user could go and look at.
@@ -417,12 +448,25 @@ export class TerminalManager {
   // shutdown paths can still reach it.
   release(terminalId: string): void {
     const term = this.terminals.get(terminalId);
-    if (term && term.skipped && !term.exitStatus) {
+    if (!term) {
+      return;
+    }
+    if (term.skipped && !term.exitStatus) {
       this.log?.(`[terminal] ${terminalId} released while left running, so it keeps going`);
       return;
     }
-    this.kill(terminalId);
-    this.terminals.delete(terminalId);
+    if (term.exitStatus) {
+      // Over and done with. The entry stays: the row can still be asked for its
+      // output, and answering an empty one wiped a finished command's output out of
+      // the transcript.
+      return;
+    }
+    // Still running and not something the user asked to keep, so stop it the way
+    // every other teardown does, escalating rather than asking once and forgetting
+    // it, which left anything trapping SIGTERM running with nothing able to reach it.
+    this.signal(term, "SIGTERM");
+    const t = setTimeout(() => this.signal(term, "SIGKILL"), 1500);
+    t.unref?.();
   }
 
   // Everything this chat was running, on the way out (terminating it, an idle

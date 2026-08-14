@@ -181,7 +181,10 @@ export class ChangeTracker
       await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(this.store, ".."));
       // Beside it, then over it: this file is the only copy of the text every
       // pending undo would restore, so a half written one loses all of them.
-      const tmp = this.store.with({ path: this.store.path + ".tmp" });
+      // Named for this process: two windows on one workspace share the storage
+      // directory, and a shared scratch name lets one window's write land inside
+      // another's, renaming a corrupt file into place and losing every original.
+      const tmp = this.store.with({ path: `${this.store.path}.${process.pid}.tmp` });
       await vscode.workspace.fs.writeFile(tmp, body);
       await vscode.workspace.fs.rename(tmp, this.store, { overwrite: true });
     } catch {
@@ -436,10 +439,12 @@ export class ChangeTracker
   // Undo: restore the original content (or delete the file if it was new), then
   // drop it from the working set. The original stays held so an open diff renders
   // against it, now showing no difference, rather than the whole file as added.
-  async reject(fsPath?: string): Promise<void> {
+  // Answers whether the file really was put back, so a caller that goes on to
+  // forget it does not forget one that is still holding the agent's content.
+  async reject(fsPath?: string): Promise<boolean> {
     const snap = fsPath ? this.snapshots.get(key(fsPath)) : undefined;
     if (!snap) {
-      return;
+      return false;
     }
     try {
       if (snap.original === null) {
@@ -455,11 +460,12 @@ export class ChangeTracker
       void vscode.window.showErrorMessage(
         `Couldn't undo ${path.basename(snap.path)}: ${err instanceof Error ? err.message : String(err)}`
       );
-      return;
+      return false;
     }
     snap.resolved = true;
     this.resolved.fire({ paths: [snap.path], action: "reject" });
     this.refreshGroup();
+    return true;
   }
 
   // With a session, only that chat's files: the tray these come from says "N
@@ -467,15 +473,39 @@ export class ChangeTracker
   // lose from a button they cannot see. Without one, everything, which is what the
   // Source Control title actions mean.
   acceptAll(sessionId?: string): void {
-    for (const p of sessionId ? this.pathsFor(sessionId) : this.changedPaths()) {
+    for (const p of this.bulkPaths(sessionId)) {
       this.accept(p);
     }
   }
 
   async rejectAll(sessionId?: string): Promise<void> {
-    for (const p of sessionId ? this.pathsFor(sessionId) : this.changedPaths()) {
+    for (const p of this.bulkPaths(sessionId)) {
       await this.reject(p);
     }
+  }
+
+  // What a bulk action from one chat may touch. A file is held once, with one
+  // original, from before whichever chat edited it first, so a file two chats have
+  // both edited cannot be undone for one of them: writing that original back would
+  // discard the other chat's later work, from a button in a tray that does not
+  // mention it. Those are left alone and named, so the decision is the user's.
+  private bulkPaths(sessionId?: string): string[] {
+    if (!sessionId) {
+      return this.changedPaths();
+    }
+    const mine: string[] = [];
+    const shared: string[] = [];
+    for (const snap of this.unresolvedFor(sessionId)) {
+      (snap.sessions.size > 1 ? shared : mine).push(snap.path);
+    }
+    if (shared.length) {
+      void vscode.window.showWarningMessage(
+        shared.length === 1
+          ? `${path.basename(shared[0])} was also changed by another chat, so it was left alone. Keep or undo it from its own row.`
+          : `${shared.length} files were also changed by another chat, so they were left alone.`
+      );
+    }
+    return mine;
   }
 
   private refreshGroup(): void {

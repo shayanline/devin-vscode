@@ -5945,7 +5945,10 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
 
   // Detach the currently mounted transcript into `views` so we can restore it
   // instantly later, and reset the live singletons for whatever renders next.
-  function snapshotCurrent() {
+  // `opening` is the session about to be shown, when there is one: it must survive
+  // the eviction below, or it would be restored from a cache entry that no longer
+  // exists and come up blank.
+  function snapshotCurrent(opening) {
     if (!curSessionId) return;
     // Abandon any in-progress queued-message edit (releases the host's queue
     // hold) so it does not carry over to the next session.
@@ -5966,6 +5969,20 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     // leaving them up would show one session's question over another's
     // transcript, and double up on return.
     cancelPrompts();
+    // An edit in progress belongs to a turn of the session being left, and `turns`
+    // is about to be replaced. Left open, the dimming it puts on the turns it would
+    // discard could never be lifted (the code that lifts it looks the turn up in
+    // `turns`), leaving that chat at 40% opacity and refusing clicks for good. In
+    // composer mode it was worse: the next message typed anywhere was taken as a
+    // submit of this edit, and rewound whichever chat was open by a node id from
+    // this one.
+    if (inlineEditTurn) finishEditing(inlineEditTurn);
+    cancelInputEditing();
+    // Which servers failed, and which warnings were waved away, belong to the chat
+    // being left. The host re-derives them for the one being opened, and keeping the
+    // dismissals silenced a real warning in the next chat, which is usually about
+    // the same server since they are configured per project.
+    mcpDismissed.clear();
     // Persist the unsent text against the session being left, before the composer
     // is handed to the next one.
     saveDraft();
@@ -5992,10 +6009,17 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     // A session that was mid-run when we left it will keep changing, so its
     // snapshot is stale: force a reload when we come back.
     if (sessionStatuses[curSessionId] === "running") dirtyViews.add(curSessionId);
-    // Cap retained transcripts to bound DOM retention.
+    // Cap retained transcripts to bound DOM retention. Never the one being left, and
+    // never the one being opened: evicting that left the chat it was about to
+    // restore with an empty thread and no reload, so it came up blank.
     if (views.size > 8) {
-      const oldest = views.keys().next().value;
-      if (oldest !== curSessionId) { views.delete(oldest); dirtyViews.delete(oldest); }
+      for (const oldest of views.keys()) {
+        if (oldest !== curSessionId && oldest !== opening) {
+          views.delete(oldest);
+          dirtyViews.delete(oldest);
+          break;
+        }
+      }
     }
     turns = [];
     currentTurn = null;
@@ -6091,8 +6115,11 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     // permission/question, so treat it like running (re-attach, never wake).
     const running = status === "running" || status === "attention";
     const alive = running || status === "idle" || status === "starting";
+    snapshotCurrent(id);
+    // Read after the snapshot, not before: snapshotting evicts the least recently
+    // visited transcript, and deciding beforehand meant acting on a cache entry that
+    // the snapshot had just thrown away, which left the chat blank with no reload.
     const haveView = views.has(id) && !dirtyViews.has(id);
-    snapshotCurrent();
     curSessionId = id;
     if (running && views.has(id)) {
       // A turn is in flight. Reloading its transcript over the live channel

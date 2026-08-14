@@ -1171,6 +1171,9 @@ export class ChatController implements AcpHost {
     const current = rt.id ? this.runtimes.get(rt.id) : undefined;
     if (current && current !== rt) {
       this.log(`[exit] a replaced agent for ${rt.id} exited, keeping the live one`);
+      // Still stop counting the dead one among the agents to stop, or its transcript
+      // and buffers are held for the life of the window.
+      this.spawnedRuntimes.delete(rt);
       return;
     }
     this.spawnedRuntimes.delete(rt);
@@ -1239,10 +1242,16 @@ export class ChatController implements AcpHost {
     const now = Date.now();
     let changed = false;
     for (const rt of [...this.runtimes.values()]) {
-      const idle = !rt.busy && rt.awaiting === 0;
+      // A command the user chose to leave running means this chat is not finished
+      // with, whatever the conversation is doing: exiting would stop the dev server
+      // they asked to keep and dispose the terminal it is running in.
+      const idle = !rt.busy && rt.awaiting === 0 && !rt.terminals.hasRunning();
       if (idle && now - rt.lastActivityAt > maxIdleMs) {
         this.log(`[idle-exit] session ${rt.id} exceeded ${minutes}m idle; exiting`);
         this.settleRequestsFor(rt.id);
+        // Anything still queued is the user's own writing, the same as on the way out
+        // and on terminate.
+        void this.store.queuedBackToDrafts(rt.queued.map((q) => ({ id: rt.id, text: q.text })));
         this.destroyRuntime(rt);
         this.runtimes.delete(rt.id);
         this.starting.delete(rt.id);
@@ -2365,9 +2374,17 @@ export class ChatController implements AcpHost {
       this.broadcastStatuses();
       if (wakeFailed) {
         // The agent could not reload this session: return to the list rather
-        // than leaving a stale, non-interactive transcript on screen.
-        await this.closeOutSession(OPEN_FAILED);
-        this.reportLoadFailure(wakeFailed, rt);
+        // than leaving a stale, non-interactive transcript on screen. Only if the
+        // user is still on it, though. A wake takes seconds, and closing out after
+        // they have moved to another chat rips them out of the one they are reading
+        // to report a failure in the one they left.
+        this.sessionsCache = undefined;
+        if (this.activeId === id) {
+          await this.closeOutSession(OPEN_FAILED);
+          this.reportLoadFailure(wakeFailed, rt);
+        } else {
+          this.log(`[wake-failed] ${id} (no longer on screen): ${wakeFailed}`);
+        }
       } else if (this.activeId === id) {
         await this.postTurnHead(false);
       }
@@ -3995,11 +4012,14 @@ export class ChatController implements AcpHost {
         if (typeof original === "string") {
           await fs.promises.writeFile(p, original, "utf8");
           restored.push(p);
-        } else if (this.changes.hasUnresolvedChange(p)) {
-          // No content to write, so this is the agent asking for the file to go.
-          // The working set knows whether it existed before, and deletes it if not.
-          await this.changes.reject(p);
-          restored.push(p);
+        } else if (a.action === "delete" && this.changes.hasUnresolvedChange(p)) {
+          // The agent asking for the file to go. The working set knows whether it
+          // existed before this chat, and deletes it if not. Only counted as put
+          // back when it really was: an undo that failed still holds the agent's
+          // content, and forgetting it would take away the only way back.
+          if (await this.changes.reject(p)) {
+            restored.push(p);
+          }
         } else {
           this.log(`[revert] no content for ${p}, left as it is`);
         }
@@ -4415,13 +4435,24 @@ export class ChatController implements AcpHost {
     const content = Array.isArray(u.content) ? u.content : [];
     for (const c of content) {
       if (c && c.type === "diff" && typeof c.path === "string") {
+        // Against the session's own directory, like every other agent supplied path:
+        // resolving a relative one against the extension host's working directory
+        // gives a path in the VS Code install, which is then what an undo writes to.
+        const full = this.resolvePath(c.path, rt.id);
         const s = diffStat(c.oldText, c.newText);
-        const editId = this.editId(rt, c.path);
-        this.changes.recordEdit(editId, c.path, c.oldText ?? null, c.newText ?? "");
+        const editId = this.editId(rt, full);
+        this.changes.recordEdit(editId, full, c.oldText ?? null, c.newText ?? "");
         // Post the per-file counts before recordDiff fires the working-set list,
         // so the list renders with the deltas already known.
-        this.emit(rt, { type: "fileChange", path: c.path, added: s.added, removed: s.removed, created: c.oldText == null || c.oldText === "", editId });
-        this.changes.recordDiff(c.path, c.oldText ?? null, c.newText ?? "", rt.id, s);
+        this.emit(rt, { type: "fileChange", path: full, added: s.added, removed: s.removed, created: c.oldText == null || c.oldText === "", editId });
+        // `oldText` is optional on the wire, and a missing one must not become the
+        // sentinel that makes Undo delete the file: only our own read of the disk
+        // can say a file did not exist. Without a baseline there is nothing to
+        // review against, so the row stands on its own and the file is left out of
+        // the working set until the write itself records it.
+        if (typeof c.oldText === "string") {
+          this.changes.recordDiff(full, c.oldText, c.newText ?? "", rt.id, s);
+        }
       }
     }
   }
@@ -4649,7 +4680,16 @@ export class ChatController implements AcpHost {
     let bytes: Buffer | undefined;
     try {
       bytes = await fs.promises.readFile(full);
-    } catch {
+    } catch (err) {
+      // Only "it is not there" may become a null original: that is the sentinel for
+      // a file this chat created, and it is what makes Undo DELETE rather than
+      // restore. Folding a permission error, a lock, or running out of file handles
+      // into it meant an edit to an existing file was recorded as a creation, and
+      // undoing it deleted the user's file with nothing kept to put back.
+      const code = (err as { code?: string }).code;
+      if (code !== "ENOENT" && code !== "ENOTDIR") {
+        throw err;
+      }
       bytes = undefined;
     }
     const original = bytes ? bytes.toString("utf8") : null;
