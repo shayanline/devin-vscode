@@ -3434,6 +3434,12 @@ export class ChatController implements AcpHost {
     // clearing the draft and then returning is how a message disappears.
     const draftFor = startNew ? undefined : this.activeId;
     this.store.setDraft(draftFor, "");
+    // What is staged in the composer was staged for this message, in the chat it
+    // was written in. Waking a session and creating one both take seconds, and the
+    // user can open another chat and stage files there while they run, so the
+    // message carries what was staged when it was written rather than whatever the
+    // composer holds by the time it goes out.
+    const staged = this.attachments;
     const giveBack = (why?: string) => {
       this.store.setDraft(draftFor, text);
       this.post({ type: "draft", id: draftFor || null, text });
@@ -3472,7 +3478,7 @@ export class ChatController implements AcpHost {
       // started from the list never flashes the welcome while the ACP session
       // spins up.
       this.post({ type: "clear", pendingSend: true });
-      this.post({ type: "userMessage", text, attachments: this.shownAttachments(this.attachments) });
+      this.post({ type: "userMessage", text, attachments: this.shownAttachments(staged) });
     }
 
     let rt = startNew ? undefined : this.active();
@@ -3509,16 +3515,26 @@ export class ChatController implements AcpHost {
     const sent = rt;
     // What was attached goes with the message, so the request keeps saying what it
     // was asked about instead of the context vanishing the moment it is sent.
-    const attachments = this.shownAttachments(this.attachments);
+    const attachments = this.shownAttachments(staged);
     this.record(sent, { type: "userMessage", text, attachments });
     // For a fresh chat the message was already rendered above; only echo it here
-    // for a send within an existing (visible) session.
-    if (!startNew) {
+    // for a send within an existing (visible) session, and only while that session
+    // is still the one on screen: a wake that finishes after the user has opened
+    // another chat would otherwise paint this message into their transcript.
+    if (!startNew && this.activeId === sent.id) {
       this.post({ type: "userMessage", text, attachments });
     }
-    const blocks: ContentBlock[] = [...this.buildImplicitBlocks(), ...this.attachments.map((a) => a.block), { type: "text", text }];
-    this.attachments = [];
-    this.postAttachments();
+    const blocks: ContentBlock[] = [...this.buildImplicitBlocks(), ...staged.map((a) => a.block), { type: "text", text }];
+    if (this.activeId === sent.id) {
+      this.attachments = [];
+      this.postAttachments();
+    } else {
+      // Another chat is on screen, and `this.attachments` is now its composer's.
+      // Clearing that sent its files with this message and then deleted them, since
+      // saving is keyed on the chat being shown. Only the files that went with this
+      // message stop being staged.
+      await this.dropStaged(draftFor);
+    }
     await this.runPrompt(sent, blocks);
   }
 
