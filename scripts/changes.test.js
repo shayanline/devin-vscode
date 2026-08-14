@@ -208,6 +208,44 @@ test("two saves of the working set do not write over each other", async () => {
   }
 });
 
+test("one save that fails does not stop every save after it", async () => {
+  // The saves are chained so they cannot write over each other. A chain built out of
+  // `then` alone carries a rejection forward for ever, so one failed write would leave
+  // the working set unsaved for the rest of the window, silently, which is the loss the
+  // chaining was added to prevent.
+  const vscode = globalThis.__dvVscode;
+  const realWrite = vscode.workspace.fs.writeFile;
+  let failNext = true;
+  vscode.workspace.fs.writeFile = async (uri, body) => {
+    if (failNext) {
+      failNext = false;
+      throw new Error("no space left on device");
+    }
+    return realWrite(uri, body);
+  };
+  try {
+    const dir = fs.mkdtempSync(path.join(TMP, "failed-"));
+    const store = { scheme: "file", path: dir, fsPath: dir, query: "", toString: () => "file://" + dir };
+    const first = write("after-a-failure-one.ts", "v2\n");
+    const second = write("after-a-failure-two.ts", "v2\n");
+
+    const before = new ChangeTracker();
+    before.register();
+    await before.useStore(store);
+    before.recordDiff(first, "v1\n", "v2\n", "A", { added: 1, removed: 1 });
+    await new Promise((r) => setTimeout(r, 600));
+    before.recordDiff(second, "v1\n", "v2\n", "A", { added: 1, removed: 1 });
+    await new Promise((r) => setTimeout(r, 600));
+
+    const after = new ChangeTracker();
+    after.register();
+    await after.useStore(store);
+    assert.deepStrictEqual(after.pathsFor("A").sort(), [first, second].sort(), "the next save still wrote");
+  } finally {
+    vscode.workspace.fs.writeFile = realWrite;
+  }
+});
+
 test("one original too big to keep does not take the others with it", async () => {
   // The working set is written out whole, and past a cap it was deleted outright,
   // cap included: one generated file, lock file or data fixture the agent rewrote

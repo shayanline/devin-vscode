@@ -159,7 +159,11 @@ export class ChangeTracker
   // it was running: one write landed inside the other's file, a half written one was
   // renamed into place, and an unparseable store is dropped whole.
   private async save(): Promise<void> {
-    this.saving = (this.saving ?? Promise.resolve()).then(() => this.writeStore());
+    // The catch is what keeps the chain usable: a chain of `then` alone carries a
+    // rejection forward for ever, so one failed link would leave the working set
+    // unsaved for the rest of the window, silently, which is the loss the chaining was
+    // added to prevent.
+    this.saving = (this.saving ?? Promise.resolve()).then(() => this.writeStore()).catch(() => undefined);
     return this.saving;
   }
 
@@ -176,24 +180,33 @@ export class ChangeTracker
         added: s.added,
         removed: s.removed
       }));
-    // The cap is on the whole file, so the biggest originals are what has to go
-    // when it is exceeded, one at a time. Dropping the lot instead meant a single
-    // generated file the agent rewrote took every other original with it, and a
-    // reload came back with nothing to undo.
-    const encode = () => Buffer.from(JSON.stringify(out), "utf8");
-    let body = encode();
-    while (out.length && body.byteLength > MAX_STORE_BYTES) {
-      let biggest = 0;
-      for (let i = 1; i < out.length; i++) {
-        if ((out[i].original?.length ?? 0) > (out[biggest].original?.length ?? 0)) {
-          biggest = i;
-        }
-      }
-      out.splice(biggest, 1);
-      body = encode();
-    }
     try {
+      // The cap is on the whole file, so the biggest originals are what has to go when
+      // it is exceeded, one at a time. Dropping the lot instead meant a single generated
+      // file the agent rewrote took every other original with it, and a reload came back
+      // with nothing to undo. Measured by the text each one holds rather than by
+      // encoding the whole set again per drop, which is quadratic in the bytes and would
+      // be paid on every save from then on. Inside the try, because stringifying a very
+      // large set can throw, and a save that rejects poisons the chain it runs in.
+      let held = out.reduce((n, s) => n + (s.original?.length ?? 0), 0);
+      while (out.length && held > MAX_STORE_BYTES) {
+        let biggest = 0;
+        for (let i = 1; i < out.length; i++) {
+          if ((out[i].original?.length ?? 0) > (out[biggest].original?.length ?? 0)) {
+            biggest = i;
+          }
+        }
+        held -= out[biggest].original?.length ?? 0;
+        out.splice(biggest, 1);
+      }
       if (!out.length) {
+        await vscode.workspace.fs.delete(this.store);
+        return;
+      }
+      const body = Buffer.from(JSON.stringify(out), "utf8");
+      if (body.byteLength > MAX_STORE_BYTES) {
+        // What is left still does not fit, so there is nothing to keep, and a stale file
+        // would restore older originals than the ones held now.
         await vscode.workspace.fs.delete(this.store);
         return;
       }
