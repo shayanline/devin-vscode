@@ -2713,6 +2713,24 @@ export class ChatController implements AcpHost {
   // `rt` is the session the options came from: its mode and model are recorded
   // on it so switching back to the session later restores the pickers to what
   // that session is actually set to, rather than the last session's or a default.
+  // What the pickers and the status bar are showing. A chat's own mode and model live
+  // on its runtime, and this is only what is on screen, so every write goes through
+  // here: a chat that is not the one being shown records its own settings and may not
+  // paint them. That rule used to be written out again at each of these sites, and the
+  // one that left it out flipped the pickers of the chat the user was reading to a
+  // background chat's, which matters most on the mode, since it says whether permission
+  // is asked for before anything runs. Answers whether the panel is really showing this
+  // chat, so a caller can post the rest of what it was going to say.
+  private showOptions(rt: Runtime | undefined, mode?: string, model?: string): boolean {
+    if (rt && this.activeId !== rt.id) {
+      return false;
+    }
+    this.currentMode = mode || this.currentMode;
+    this.currentModel = model || this.currentModel;
+    this.statusBar?.set({ connected: this.isReady(), mode: this.currentMode, model: this.currentModel });
+    return true;
+  }
+
   private publishOptions(rt: Runtime | undefined, options: ConfigOption[] | undefined, currentModeId?: string): void {
     const byId = new Map((options || []).map((o) => [o.id, o]));
     const modeOpt = byId.get("mode");
@@ -2737,15 +2755,11 @@ export class ChatController implements AcpHost {
         this.modelImageSupport.set(choice.value, supported);
       }
     }
-    // A background session reports its own mode and model too, and they belong to
-    // it alone: recorded on its runtime above, but never painted over the pickers
-    // and status bar, which speak for the chat that is on screen.
-    if (rt && this.activeId !== rt.id) {
+    // A background session reports its own mode and model too, and they belong to it
+    // alone: recorded on its runtime above, and not painted over the pickers.
+    if (!this.showOptions(rt, modeOpt?.currentValue || currentModeId, modelOpt?.currentValue)) {
       return;
     }
-    this.currentMode = modeOpt?.currentValue || currentModeId || this.currentMode;
-    this.currentModel = modelOpt?.currentValue || this.currentModel;
-    this.statusBar?.set({ connected: this.isReady(), mode: this.currentMode, model: this.currentModel });
     this.postModelOptions(this.currentModel || "adaptive");
   }
 
@@ -2847,15 +2861,8 @@ export class ChatController implements AcpHost {
     // the pool yet to receive it, and a session that already starts in the
     // configured mode would otherwise have no mode recorded at all.
     rt.mode = currentMode || rt.mode;
-    // The mode and model belong to this runtime, but the pickers, the status bar and
-    // `currentMode`/`currentModel` speak for whatever the panel is showing. Starting
-    // a chat takes seconds and the user can open another one while it runs, so a
-    // chat that arrives in the background would otherwise flip their pickers to its
-    // own defaults and leave the mode picker naming a mode their agent is not in.
-    const showing = () => this.activeId === rt.id;
-    if (showing()) {
-      this.currentMode = rt.mode || this.currentMode;
-    }
+    // Show it straight away, if this is the chat being shown at all.
+    this.showOptions(rt, rt.mode);
     try {
       if (mode && mode !== currentMode) {
         await rt.client.setConfigOption(rt.id, "mode", mode);
@@ -2868,12 +2875,9 @@ export class ChatController implements AcpHost {
         await rt.client.setConfigOption(rt.id, "model", model);
         rt.model = model;
       }
-      if (!showing()) {
+      if (!this.showOptions(rt, rt.mode, rt.model)) {
         return;
       }
-      this.currentMode = rt.mode || this.currentMode;
-      this.currentModel = rt.model || this.currentModel;
-      this.statusBar?.set({ connected: true, mode: this.currentMode, model: this.currentModel });
       this.post({ type: "mode", mode: this.currentMode });
       if (this.currentModel) {
         this.post({ type: "model", model: this.currentModel });
@@ -4430,9 +4434,7 @@ export class ChatController implements AcpHost {
         return;
       case "current_mode_update":
         if (rt) rt.mode = u.currentModeId || rt.mode;
-        if (rt && this.activeId === rt.id && !rt.silentReplay) {
-          this.currentMode = u.currentModeId || this.currentMode;
-          this.statusBar?.set({ connected: this.isReady(), mode: this.currentMode, model: this.currentModel });
+        if (rt && !rt.silentReplay && this.showOptions(rt, u.currentModeId)) {
           this.post({ type: "mode", mode: u.currentModeId });
         }
         return;
