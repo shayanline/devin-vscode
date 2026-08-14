@@ -411,8 +411,15 @@ export class ChangeTracker
       } else {
         await fs.promises.writeFile(snap.path, snap.original, "utf8");
       }
-    } catch {
-      // ignore write failures; still drop from the working set
+    } catch (err) {
+      // A read only file, a lock held by another process, a directory that has
+      // since gone. Resolving anyway would drop the original from the working set
+      // and from the store, leaving the agent's content in place with nothing left
+      // to put back, and the row saying it had been undone. So say so and keep it.
+      void vscode.window.showErrorMessage(
+        `Couldn't undo ${path.basename(snap.path)}: ${err instanceof Error ? err.message : String(err)}`
+      );
+      return;
     }
     snap.resolved = true;
     this.resolved.fire({ paths: [snap.path], action: "reject" });

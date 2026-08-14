@@ -92,6 +92,12 @@ const window = {
   onDidChangeTerminalShellIntegration: shellIntegrationChanged.event,
   onDidEndTerminalShellExecution: shellExecutionEnded.event,
   onDidCloseTerminal: terminalClosed.event,
+  // What the user was told. Recorded rather than shown, so a test can assert that
+  // a failure was reported instead of passing in silence.
+  shown: { error: [], warning: [], info: [] },
+  showErrorMessage: (m) => { window.shown.error.push(String(m)); return Promise.resolve(undefined); },
+  showWarningMessage: (m) => { window.shown.warning.push(String(m)); return Promise.resolve(undefined); },
+  showInformationMessage: (m) => { window.shown.info.push(String(m)); return Promise.resolve(undefined); },
   // Test-side helpers, not part of the real API.
   __fire: { shellIntegrationChanged, shellExecutionEnded, terminalClosed }
 };

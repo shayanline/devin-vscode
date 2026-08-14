@@ -267,6 +267,37 @@ test("each session gets its own working set, and a revert forgets only its own",
   assert.strictEqual(tracker.hasUnresolvedChange(mine), false, "and nothing of A's is held any more");
 });
 
+test("an undo that cannot write says so, and keeps the original", async () => {
+  // The one operation where a silent failure is unacceptable: resolving anyway
+  // drops the original from the working set and from the store, so the agent's
+  // content stays on disk with nothing left to put it back, under a row that
+  // claims it was undone.
+  // The copy the bundle loaded, not a second one required here.
+  const vscode = globalThis.__dvVscode;
+  vscode.window.shown.error.length = 0;
+  const tracker = new ChangeTracker();
+  tracker.register();
+  const file = write("locked.ts", "devin wrote this\n");
+  tracker.recordDiff(file, "the original\n", "devin wrote this\n", "A");
+
+  fs.chmodSync(file, 0o444);
+  try {
+    await tracker.reject(file);
+  } finally {
+    fs.chmodSync(file, 0o644);
+  }
+
+  assert.strictEqual(fs.readFileSync(file, "utf8"), "devin wrote this\n", "the write really did fail");
+  assert.strictEqual(vscode.window.shown.error.length, 1, "the user is told, rather than it passing quietly");
+  assert.match(vscode.window.shown.error[0], /locked\.ts/);
+  assert.strictEqual(tracker.hasUnresolvedChange(file), true, "and it stays in the working set");
+
+  // Which means it can still be undone once the file is writable again.
+  await tracker.reject(file);
+  assert.strictEqual(fs.readFileSync(file, "utf8"), "the original\n");
+  assert.strictEqual(tracker.hasUnresolvedChange(file), false);
+});
+
 test("undoing everything in one chat leaves the other chat's edits alone", async () => {
   // The tray these buttons live in shows one chat's files and counts them in its
   // header, so it must not reach into a chat the user cannot even see.
