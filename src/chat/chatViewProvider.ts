@@ -652,6 +652,10 @@ export class ChatController implements AcpHost {
     // A surface that has gone cannot be the one holding the keyboard.
     this.setFocused(false);
     for (const rt of new Set([...this.runtimes.values(), ...this.spawnedRuntimes])) {
+      // The same as terminating the chat, which this is one of the ways of doing:
+      // closing a tab mid turn offers to terminate, and the prompt promises the
+      // conversation is kept, not that the writing behind it is thrown away.
+      this.keepQueued(rt);
       this.destroyRuntime(rt);
     }
     this.runtimes.clear();
@@ -1181,6 +1185,10 @@ export class ChatController implements AcpHost {
       // Settle any prompt the agent was still waiting on so its client-side
       // call does not hang and no dead widget is left on screen.
       this.settleRequestsFor(rt.id);
+      // An agent can also go without us asking: a crash, an external kill, the CLI
+      // giving up. Every teardown we start keeps the queued messages, and this is the
+      // one where the user is least expecting to lose anything.
+      this.keepQueued(rt);
       this.runtimes.delete(rt.id);
       this.starting.delete(rt.id);
     }
@@ -1249,9 +1257,7 @@ export class ChatController implements AcpHost {
       if (idle && now - rt.lastActivityAt > maxIdleMs) {
         this.log(`[idle-exit] session ${rt.id} exceeded ${minutes}m idle; exiting`);
         this.settleRequestsFor(rt.id);
-        // Anything still queued is the user's own writing, the same as on the way out
-        // and on terminate.
-        void this.store.queuedBackToDrafts(rt.queued.map((q) => ({ id: rt.id, text: q.text })));
+        this.keepQueued(rt);
         this.destroyRuntime(rt);
         this.runtimes.delete(rt.id);
         this.starting.delete(rt.id);
@@ -1961,17 +1967,13 @@ export class ChatController implements AcpHost {
       return;
     }
     this.settleRequestsFor(id);
-    // The prompt promises the conversation is kept, so anything the user had queued
-    // behind the turn goes back to this chat's draft rather than dying with the
-    // runtime that was holding it.
-    void this.store.queuedBackToDrafts(live.queued.map((q) => ({ id, text: q.text })));
+    this.keepQueued(live);
     this.destroyRuntime(live);
     this.runtimes.delete(id);
     this.starting.delete(id);
     const wasActive = this.activeId === id;
     if (wasActive) {
       this.setBusy(false);
-      this.postDraft();
     }
     this.broadcastStatuses();
     // Terminating the open session returns to the list; otherwise just refresh.
@@ -3860,6 +3862,23 @@ export class ChatController implements AcpHost {
 
   // Mirror a runtime's queue to the webview, but only while it is visible (the
   // composer only ever shows the active session's queue).
+  // A chat losing its agent, however it lost it. Anything waiting behind the turn is
+  // the user's own writing and only ever lived on the runtime, so it goes back to
+  // that chat's draft, where an unsent draft in the same box already survives. The
+  // rows go with it: they offer Send now and Remove against a runtime that has gone,
+  // and both are no ops once it has.
+  private keepQueued(rt: Runtime): void {
+    if (!rt.id || !rt.queued.length) {
+      return;
+    }
+    void this.store.queuedBackToDrafts(rt.queued.map((q) => ({ id: rt.id, text: q.text })));
+    rt.queued = [];
+    this.postQueued(rt);
+    if (this.activeId === rt.id) {
+      this.postDraft();
+    }
+  }
+
   private postQueued(rt: Runtime): void {
     if (this.activeId === rt.id) {
       this.post({
