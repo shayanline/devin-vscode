@@ -137,10 +137,28 @@ export function stripJsonComments(input: string): string {
 // so it cannot cross a device boundary.
 export function writeFileAtomic(file: string, body: string): void {
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.tmp`);
+  // A rename replaces whatever is at the destination, including a symlink, so it
+  // has to act on the file the link points at: these configs are often kept in a
+  // dotfiles repository and linked into place, and replacing the link leaves that
+  // copy behind as a file nothing reads any more. Resolving it also keeps the
+  // scratch file beside the real target, so the rename cannot cross a device.
+  let target = file;
+  let mode: number | undefined;
+  try {
+    target = fs.realpathSync(file);
+    mode = fs.statSync(target).mode & 0o777;
+  } catch {
+    // Nothing there yet: no link to follow and no permissions to carry over.
+  }
+  const tmp = path.join(path.dirname(target), `.${path.basename(target)}.${process.pid}.tmp`);
   try {
     fs.writeFileSync(tmp, body, "utf8");
-    fs.renameSync(tmp, file);
+    // A new file is 0644 whatever it is replacing, and an MCP config holds tokens
+    // in its `env`, so a 0600 config must not come back readable by everyone.
+    if (mode !== undefined) {
+      fs.chmodSync(tmp, mode);
+    }
+    fs.renameSync(tmp, target);
   } catch (err) {
     try { fs.rmSync(tmp, { force: true }); } catch { /* nothing to clean up */ }
     throw err;

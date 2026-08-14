@@ -145,6 +145,29 @@ test("a file with comments keeps parsing, and can still be written", () => {
   assert.deepStrictEqual(Object.keys(serversIn(file)), ["fetch", "other"]);
 });
 
+test("writing a config keeps the file it was, link and permissions and all", { skip: process.platform === "win32" }, () => {
+  // These files are commonly a symlink into a dotfiles repository, and renaming
+  // over a link replaces the link itself: the repository copy is left behind,
+  // still there, no longer the file being read. A config can also hold MCP
+  // secrets in its `env`, so 0600 is a deliberate choice a write must not undo.
+  const store = path.join(TMP, "dotfiles");
+  const home = path.join(TMP, "home", ".config", "devin");
+  fs.mkdirSync(store, { recursive: true });
+  fs.mkdirSync(home, { recursive: true });
+  const real = path.join(store, "config.json");
+  const link = path.join(home, "config.json");
+  fs.writeFileSync(real, '{"model":"first"}\n');
+  fs.chmodSync(real, 0o600);
+  fs.symlinkSync(real, link);
+
+  writeFileAtomic(link, '{"model":"second"}\n');
+
+  assert.ok(fs.lstatSync(link).isSymbolicLink(), "the link is still a link");
+  assert.strictEqual(readConfig(real).model, "second", "and the file it points at is what changed");
+  assert.strictEqual(fs.statSync(real).mode & 0o777, 0o600, "with the permissions it had");
+  assert.deepStrictEqual(fs.readdirSync(store), ["config.json"], "no scratch file left beside it");
+});
+
 test("a comma inside a value is part of the value, not a trailing comma", () => {
   // A trailing comma before } or ] is legal in the config and not in JSON, so it
   // has to go before parsing. Stripping it with a pass over the finished text
