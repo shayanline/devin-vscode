@@ -169,6 +169,32 @@ test("a call that must not hang gives up, and one that may run long is left alon
   }
 });
 
+test("every call but a turn is bounded, so no feature can wait for ever", () => {
+  // The rule the connection layer states: the handshake, opening a session and the
+  // short queries are bounded, and only a prompt is not, because it is a whole turn.
+  // Read from the source because that is where the rule can be broken: a method added
+  // without a timeout looks exactly like one with it until an agent goes quiet, and
+  // then whatever waited on it waits for the rest of the window. The settings panel
+  // did, on the two calls that ask what is loaded, and it also leaked the agent it
+  // had opened to ask, because the shutdown in its `finally` was never reached.
+  const src = fs.readFileSync(path.join(ROOT, "src/acp/client.ts"), "utf8");
+  const unbounded = [];
+  for (let i = src.indexOf("this.rpc"); i !== -1; i = src.indexOf("this.rpc", i + 1)) {
+    const open = src.indexOf("(", i);
+    let depth = 0;
+    let end = open;
+    for (; end < src.length; end++) {
+      if (src[end] === "(") depth++;
+      else if (src[end] === ")" && --depth === 0) break;
+    }
+    const call = src.slice(open, end);
+    if (!/TIMEOUT_MS/.test(call)) {
+      unbounded.push((call.match(/"([^"]+)"/) || [])[1] || call.slice(0, 40));
+    }
+  }
+  assert.deepStrictEqual(unbounded, ["session/prompt"], "only a turn may be unbounded");
+});
+
 test("initialize promises only the capabilities we actually serve", async () => {
   const { cli, log } = fakeAgent("caps", {});
   const client = start(cli);

@@ -15,6 +15,17 @@ import { RequestDiagnosticsResult, TerminalExitStatus, TerminalRef } from "./typ
 //
 // Prefer an already running agent where there is one (`ChatController` hands its
 // client over): this exists for the cold case, not to be the normal path.
+// Every agent opened for a question and not yet closed. A `devin acp` cannot outlive
+// the extension host any more than a chat's can, and this one is nobody's chat, so it
+// is in no surface's pool and no shutdown pass walked it: closing the window during
+// the seconds a question takes left it running with its MCP servers and the CLI's
+// lock, which on Windows nothing reaps.
+const live = new Set<AcpClient>();
+
+export function shutdownQueryAgents(): Promise<void[]> {
+  return Promise.all([...live].map((c) => c.shutdown().catch(() => undefined) as Promise<void>));
+}
+
 export async function withQuerySession<T>(
   cliPath: string,
   cwd: string,
@@ -22,6 +33,7 @@ export async function withQuerySession<T>(
   work: (client: AcpClient, sessionId: string) => Promise<T>
 ): Promise<T | undefined> {
   const client = new AcpClient({ cliPath, cwd, env });
+  live.add(client);
   // The agent can ask things of a client mid session. Nothing here runs a tool, so
   // these only exist so an unexpected request cannot hang the call.
   client.setHost({
@@ -52,5 +64,6 @@ export async function withQuerySession<T>(
       await client.deleteSession(sessionId).catch(() => undefined);
     }
     await client.shutdown().catch(() => undefined);
+    live.delete(client);
   }
 }

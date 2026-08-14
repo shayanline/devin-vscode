@@ -64,6 +64,13 @@ const HANDSHAKE_TIMEOUT_MS = 60_000;
 // docker image on a cold machine, so this is deliberately long.
 const OPEN_TIMEOUT_MS = 180_000;
 
+// The short queries: a question the agent answers out of what it already knows.
+// These are what the settings panel and the session list wait on, and an agent that
+// is alive and silent on one of them used to leave the caller waiting for the rest of
+// the window. Long enough not to fire on a busy machine, since the cost of firing
+// early is only a fallback.
+const QUERY_TIMEOUT_MS = 30_000;
+
 export class AcpClient extends EventEmitter {
   private child?: ChildProcessWithoutNullStreams;
   private conn?: JsonRpcConnection;
@@ -257,7 +264,7 @@ export class AcpClient extends EventEmitter {
   }
 
   authenticate(methodId: string): Promise<unknown> {
-    return this.rpc("authenticate", { methodId });
+    return this.rpc("authenticate", { methodId }, QUERY_TIMEOUT_MS);
   }
 
   newSession(cwd: string, additionalDirectories: string[] = [], mcpServers: unknown[] = []): Promise<NewSessionResult> {
@@ -297,11 +304,11 @@ export class AcpClient extends EventEmitter {
   }
 
   renameSession(sessionId: string, title: string): Promise<unknown> {
-    return this.rpc("_cognition.ai/session/rename", { sessionId, title });
+    return this.rpc("_cognition.ai/session/rename", { sessionId, title }, QUERY_TIMEOUT_MS);
   }
 
   deleteSession(sessionId: string): Promise<unknown> {
-    return this.rpc("session/delete", { sessionId });
+    return this.rpc("session/delete", { sessionId }, QUERY_TIMEOUT_MS);
   }
 
   // Every session the CLI knows about, from any directory. Standard ACP (the
@@ -310,14 +317,14 @@ export class AcpClient extends EventEmitter {
   // match on cwd, this is not scoped: a session created in a subdirectory of the
   // workspace comes back too.
   async listSessions(): Promise<AcpSessionRow[]> {
-    const res = await this.rpc<{ sessions?: AcpSessionRow[] }>("session/list", {});
+    const res = await this.rpc<{ sessions?: AcpSessionRow[] }>("session/list", {}, QUERY_TIMEOUT_MS);
     return res?.sessions || [];
   }
 
   // Devin exposes both `mode` and `model` as config options set through this
   // custom method: { sessionId, configId, value }.
   setConfigOption(sessionId: string, configId: string, value: string): Promise<unknown> {
-    return this.rpc("session/set_config_option", { sessionId, configId, value });
+    return this.rpc("session/set_config_option", { sessionId, configId, value }, QUERY_TIMEOUT_MS);
   }
 
   // --- What the agent has actually loaded ----------------------------------
@@ -327,12 +334,12 @@ export class AcpClient extends EventEmitter {
   // force, and each entry names the file it came from so it can still be opened.
 
   async listRules(sessionId: string): Promise<LoadedRule[]> {
-    const res = await this.rpc<{ rules?: LoadedRule[] }>("_cognition.ai/rules/list", { sessionId });
+    const res = await this.rpc<{ rules?: LoadedRule[] }>("_cognition.ai/rules/list", { sessionId }, QUERY_TIMEOUT_MS);
     return res?.rules || [];
   }
 
   async listHooks(sessionId: string): Promise<LoadedHook[]> {
-    const res = await this.rpc<{ hooks?: LoadedHook[] }>("_cognition.ai/hooks/list", { sessionId });
+    const res = await this.rpc<{ hooks?: LoadedHook[] }>("_cognition.ai/hooks/list", { sessionId }, QUERY_TIMEOUT_MS);
     return res?.hooks || [];
   }
 
@@ -340,7 +347,7 @@ export class AcpClient extends EventEmitter {
   // yet" until the session has content, which is a state to report rather than an
   // error to swallow.
   shareSession(sessionId: string): Promise<{ url?: string } | undefined> {
-    return this.rpc<{ url?: string }>("_cognition.ai/session/share", { sessionId });
+    return this.rpc<{ url?: string }>("_cognition.ai/session/share", { sessionId }, QUERY_TIMEOUT_MS);
   }
 
   supportsSessionShare(): boolean {
@@ -368,11 +375,11 @@ export class AcpClient extends EventEmitter {
   // calls prompt for approval) and background (the parent carries on, and
   // unapproved tools are denied). There is no ACP method to cancel one.
   subagentBackground(sessionId: string, agentId: string): Promise<unknown> {
-    return this.rpc("_cognition.ai/subagent/background", { sessionId, agentId });
+    return this.rpc("_cognition.ai/subagent/background", { sessionId, agentId }, QUERY_TIMEOUT_MS);
   }
 
   subagentForeground(sessionId: string, agentId: string): Promise<unknown> {
-    return this.rpc("_cognition.ai/subagent/foreground", { sessionId, agentId });
+    return this.rpc("_cognition.ai/subagent/foreground", { sessionId, agentId }, QUERY_TIMEOUT_MS);
   }
 
   // --- Revert (conversation rewind + file undo) ---------------------------
@@ -383,7 +390,7 @@ export class AcpClient extends EventEmitter {
       targetNodeId,
       force: opts?.force ?? false,
       skipFileUndo: opts?.skipFileUndo ?? false
-    });
+    }, QUERY_TIMEOUT_MS);
   }
 
   // Execute the rewind: truncate the conversation back to `targetNodeId` and
@@ -394,7 +401,7 @@ export class AcpClient extends EventEmitter {
       targetNodeId,
       force: opts?.force ?? true,
       skipFileUndo: opts?.skipFileUndo ?? false
-    });
+    }, QUERY_TIMEOUT_MS);
   }
 
   // Branch from a step rather than rewinding to it. Nothing is discarded and no
@@ -406,7 +413,7 @@ export class AcpClient extends EventEmitter {
     const res = await this.rpc<{ forkedSessionId?: string }>("_cognition.ai/revert/forkFromStep", {
       sessionId,
       targetNodeId
-    });
+    }, QUERY_TIMEOUT_MS);
     return res?.forkedSessionId;
   }
 
@@ -414,7 +421,7 @@ export class AcpClient extends EventEmitter {
   // unprompted after each turn (`revertSteps`), so this is mostly for the state
   // a freshly loaded session starts in, before the first push arrives.
   async listRevertSteps(sessionId: string): Promise<RevertStep[]> {
-    const res = await this.rpc<{ steps?: RevertStep[] }>("_cognition.ai/revert/listSteps", { sessionId });
+    const res = await this.rpc<{ steps?: RevertStep[] }>("_cognition.ai/revert/listSteps", { sessionId }, QUERY_TIMEOUT_MS);
     return res?.steps || [];
   }
 

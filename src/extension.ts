@@ -6,6 +6,7 @@ import { StatusBar } from "./ui/statusBar";
 import { reapOrphanedAgents } from "./cli/reaper";
 import { sweepStaleLocks } from "./cli/sessionLocks";
 import { SettingsPanel } from "./settings/settingsPanel";
+import { shutdownQueryAgents } from "./acp/queryClient";
 
 // Held at module scope so `deactivate` can await the shutdown. A `devin acp`
 // agent runs its commands, file writes and permission prompts through this
@@ -79,5 +80,7 @@ export function activate(context: vscode.ExtensionContext): void {
 export async function deactivate(): Promise<void> {
   const chat = manager;
   manager = undefined;
-  await chat?.shutdown();
+  // The chats, and the agent the settings panel opens to ask what is loaded, which
+  // belongs to no chat and so is in no pool for `shutdown` to find.
+  await Promise.all([chat?.shutdown(), shutdownQueryAgents()]);
 }
