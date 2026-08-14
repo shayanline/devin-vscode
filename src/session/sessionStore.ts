@@ -131,6 +131,24 @@ export class SessionStore {
     void this.state.update(SessionStore.DRAFTS_KEY, map);
   }
 
+  // Messages that were waiting behind a running turn and never got sent, handed back
+  // to the chat's draft. They only ever lived on the runtime, so terminating a chat
+  // or reloading the window took the user's own words with them, while an unsent
+  // draft in the same box survived. Returns the write so a shutdown can await it.
+  queuedBackToDrafts(entries: { id: string; text: string }[]): Thenable<void> {
+    const map = this.drafts();
+    let changed = false;
+    for (const { id, text } of entries) {
+      if (!id || !text.trim()) {
+        continue;
+      }
+      const existing = map[id] ? map[id].trimEnd() + "\n\n" : "";
+      map[id] = (existing + text).slice(0, SessionStore.MAX_DRAFT);
+      changed = true;
+    }
+    return changed ? this.state.update(SessionStore.DRAFTS_KEY, map) : Promise.resolve();
+  }
+
   private drafts(): Record<string, string> {
     return this.state.get<Record<string, string>>(SessionStore.DRAFTS_KEY, {});
   }

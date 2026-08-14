@@ -40,9 +40,31 @@ const MAX_STORE_BYTES = 8 * 1024 * 1024;
 // The same file arrives written two ways: as the agent wrote it, and as VS Code
 // hands it back from a URI (which lower cases a Windows drive letter and always
 // uses backslashes). One key for both, so a lookup finds what was recorded.
+// One file, one entry, whatever it was called on the way in. Two spellings of the
+// same file made two working set rows and two originals, and undoing them in order
+// wrote the older text over the newer content.
+const realNames = new Map<string, string>();
+
 function key(fsPath: string): string {
   const resolved = path.resolve(fsPath);
-  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+  const known = realNames.get(resolved);
+  if (known) {
+    return known;
+  }
+  let real = resolved;
+  try {
+    // What the filesystem itself calls it: the on-disk spelling on a case
+    // insensitive volume, which macOS is by default, and one name for a file reached
+    // through a symlinked directory. Only cached when it answered, so a file that
+    // does not exist yet is not pinned to the name it was guessed by.
+    real = fs.realpathSync.native(resolved);
+    if (realNames.size < 2000) {
+      realNames.set(resolved, real);
+    }
+  } catch {
+    // Not there, so the resolved path is the best name available.
+  }
+  return process.platform === "win32" ? real.toLowerCase() : real;
 }
 
 // Tracks agent file edits so the user can review them as native diffs and

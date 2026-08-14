@@ -211,6 +211,11 @@ const MAX_ATTACHED_PROBLEMS = 40;
 // than a file, so the language servers are asked too.
 const SYMBOL_FALLBACK_AT = 5;
 
+// How long a "take over this session?" question waits for an answer before it is
+// treated as declined. Long enough to walk away from and come back to, short of
+// leaving the session unopenable for the rest of the window.
+const TAKEOVER_TIMEOUT_MS = 3 * 60_000;
+
 // A real file the user is working in, worth telling the agent about. The diff
 // views git opens are a second scheme, but git also opens true files inside
 // .git (a commit message), and those are plumbing, not the user's work. It has
@@ -671,6 +676,9 @@ export class ChatController implements AcpHost {
     // unable to outlive us as the rest.
     const live = [...new Set([...this.runtimes.values(), ...this.spawnedRuntimes])];
     const interrupted = live.filter((rt) => rt.id && (rt.busy || rt.awaiting > 0)).map((rt) => rt.id);
+    // Anything still waiting behind a turn is the user's own writing, and it only
+    // ever lived on the runtime we are about to stop.
+    const unsent = live.flatMap((rt) => rt.queued.map((q) => ({ id: rt.id, text: q.text })));
     this.stopLocalState();
     this.runtimes.clear();
     this.spawnedRuntimes.clear();
@@ -678,7 +686,10 @@ export class ChatController implements AcpHost {
     this.activeId = undefined;
     // Record before killing: the write has to be in flight while the host is
     // still alive to flush it.
-    const recorded = this.store.markInterrupted(interrupted);
+    const recorded = Promise.all([
+      this.store.markInterrupted(interrupted),
+      this.store.queuedBackToDrafts(unsent)
+    ]);
     await Promise.all(live.map((rt) => this.stopRuntime(rt)));
     try {
       await recorded;
@@ -1859,7 +1870,22 @@ export class ChatController implements AcpHost {
   private askTakeover(id: string, pid?: number): Promise<"takeover" | "cancel"> {
     const requestId = `lock-${++this.takeoverSeq}`;
     this.post({ type: "lockConflict", requestId, id, pid });
-    return new Promise((resolve) => this.takeoverResolvers.set(requestId, { resolve, rid: id }));
+    return new Promise((resolve) => {
+      this.takeoverResolvers.set(requestId, { resolve, rid: id });
+      // An unanswered question held the load open for ever, and a load that never
+      // returns pins the session: every later attempt to open it waits on the same
+      // promise, its row keeps a starting dot, and everything sent to it is queued
+      // behind a replay that will not finish. Left long enough to be answered, but
+      // not left for the life of the window.
+      const t = setTimeout(() => {
+        if (!this.takeoverResolvers.has(requestId)) {
+          return;
+        }
+        this.log(`[takeover] no answer for ${id}, treating it as cancelled`);
+        this.resolveTakeover(requestId, "cancel");
+      }, TAKEOVER_TIMEOUT_MS);
+      t.unref?.();
+    });
   }
   private resolveTakeover(requestId: string, decision: string): void {
     const entry = this.takeoverResolvers.get(requestId);
@@ -1926,12 +1952,17 @@ export class ChatController implements AcpHost {
       return;
     }
     this.settleRequestsFor(id);
+    // The prompt promises the conversation is kept, so anything the user had queued
+    // behind the turn goes back to this chat's draft rather than dying with the
+    // runtime that was holding it.
+    void this.store.queuedBackToDrafts(live.queued.map((q) => ({ id, text: q.text })));
     this.destroyRuntime(live);
     this.runtimes.delete(id);
     this.starting.delete(id);
     const wasActive = this.activeId === id;
     if (wasActive) {
       this.setBusy(false);
+      this.postDraft();
     }
     this.broadcastStatuses();
     // Terminating the open session returns to the list; otherwise just refresh.

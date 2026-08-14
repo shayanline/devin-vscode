@@ -4582,17 +4582,33 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     if (actionable && path) {
       const actions = document.createElement("div");
       actions.className = "edit-pill-actions";
-      actions.appendChild(iconBtn("codicon-check", "Keep this change", (ev) => {
+      // Keeping and undoing are per file, not per row: the working set holds one
+      // original per file, from before this chat first touched it. So these say the
+      // file, rather than "this change", which read as though the row's own edit
+      // could be undone on its own.
+      actions.appendChild(iconBtn("codicon-check", "Keep this file's changes", (ev) => {
         ev.stopPropagation();
         vscode.postMessage({ type: "acceptFile", path });
         markEditResolved(node, "Kept");
       }));
-      actions.appendChild(iconBtn("codicon-discard", "Undo this change", (ev) => {
+      actions.appendChild(iconBtn("codicon-discard", "Undo this file's changes", (ev) => {
         ev.stopPropagation();
         vscode.postMessage({ type: "rejectFile", path });
         markEditResolved(node, "Undone");
       }));
       node.appendChild(actions);
+      // And only the newest row for a file carries them. An older row's Undo wound
+      // the file back past every edit that came after it, from a button sitting
+      // beside a diff showing only its own, so the later work went without a word.
+      turns.forEach((t) => {
+        if (!t.editPills) return;
+        t.editPills.forEach((other, key) => {
+          if (key !== path || other === node) return;
+          const stale = other.querySelector(".edit-pill-actions");
+          if (stale) stale.remove();
+          other.title = "This file was edited again later. Keep or undo it from the newest change, or the changed files list.";
+        });
+      });
     }
     // An edit is part of the run that made it, so it joins the group rather than
     // splitting it: that is how a run comes to read "Created a.ts, updated b.ts".

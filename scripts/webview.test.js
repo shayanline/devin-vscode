@@ -4335,6 +4335,36 @@ test("a turn can be forked into a new chat without discarding anything", async (
   assert.strictEqual(h.errors().length, 0);
 });
 
+test("only the newest edit row for a file offers to keep or undo it", async () => {
+  // Keeping and undoing are per file: the working set holds one original, from
+  // before this chat first touched it. An older row's Undo therefore wound the file
+  // back past every edit after it, from a button beside a diff showing only its own.
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "capabilities", revert: true, showFileChanges: true });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "userMessage", text: "edit it twice" });
+  h.post({ type: "fileChange", path: "/w/app.ts", added: 3, removed: 1, editId: "A#1#/w/app.ts" });
+  await h.settle(20);
+  const first = [...h.thread().querySelectorAll(".edit-pill")].pop();
+  assert.ok(first && first.querySelector(".edit-pill-actions"), "the only row so far can be acted on");
+
+  // The same file again, in a later turn.
+  h.post({ type: "assistantEnd" });
+  h.post({ type: "userMessage", text: "and again" });
+  h.post({ type: "fileChange", path: "/w/app.ts", added: 2, removed: 0, editId: "A#2#/w/app.ts" });
+  await h.settle(20);
+
+  const rows = [...h.thread().querySelectorAll(".edit-pill")];
+  const withActions = rows.filter((r) => r.querySelector(".edit-pill-actions"));
+  assert.strictEqual(withActions.length, 1, "only one row still offers the decision");
+  assert.strictEqual(withActions[0], rows[rows.length - 1], "and it is the newest one");
+  assert.match(rows[0].title || "", /edited again later/i, "the older row says why it does not");
+  assert.strictEqual(h.errors().length, 0);
+});
+
 test("a turn starting does not take the keyboard away from a control", async () => {
   // Every turn's controls are rebuilt when the busy state flips, which replaces the
   // elements. A keyboard user standing on one was dropped back to the top of the

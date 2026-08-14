@@ -267,6 +267,24 @@ test("each session gets its own working set, and a revert forgets only its own",
   assert.strictEqual(tracker.hasUnresolvedChange(mine), false, "and nothing of A's is held any more");
 });
 
+test("one file is one entry, however it was spelled", async () => {
+  // macOS is case insensitive by default, so these are the same file. Two entries
+  // meant two rows in the working set and two originals, and undoing them in order
+  // wrote the older text over the newer content.
+  const tracker = new ChangeTracker();
+  tracker.register();
+  const file = write("Casing.ts", "devin wrote this\n");
+  const other = path.join(path.dirname(file), "casing.ts");
+
+  tracker.recordDiff(file, "the original\n", "devin wrote this\n", "A");
+  tracker.recordDiff(other, "devin wrote this\n", "devin wrote more\n", "A");
+
+  assert.strictEqual(tracker.pathsFor("A").length, 1, "the second spelling is the same file");
+  await tracker.reject(other);
+  assert.strictEqual(fs.readFileSync(file, "utf8"), "the original\n",
+    "and undoing it goes back to before the first edit, not to the middle");
+});
+
 test("an undo that cannot write says so, and keeps the original", async () => {
   // The one operation where a silent failure is unacceptable: resolving anyway
   // drops the original from the working set and from the store, so the agent's
