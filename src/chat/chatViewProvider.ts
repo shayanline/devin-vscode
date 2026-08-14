@@ -328,7 +328,6 @@ export class ChatController implements AcpHost {
   // the requests it is waiting on) moves from one surface to another.
   private static permissionSeq = 0;
 
-  private attachments: Staged[] = [];
   private attachSeq = 0;
 
   // Whether the active editor file is sent as implicit context (VS Code's
@@ -830,19 +829,21 @@ export class ChatController implements AcpHost {
       }
       return taken;
     };
-    // The composer's staged files belong to whichever chat is on screen, so they
-    // only travel when that is the chat being handed over.
+    // What was staged for this chat travels with it, whichever chat is on screen.
     const visible = this.activeId === id;
     const transfer: RuntimeTransfer = {
       rt,
-      attachments: visible ? this.attachments : [],
+      attachments: this.stagedFor(id),
       permissions: take(this.permissionResolvers),
       elicitations: take(this.elicitationResolvers),
       modelImages: [...this.modelImageSupport],
       from: this.kind === "view" ? "the side panel" : "an editor tab"
     };
+    // Held by the surface it is going to now. The file on disk stays: it is that
+    // chat's, and the arriving surface reads it back the same way a reload does.
+    this.staged.delete(this.stagedKey(id));
     if (visible) {
-      this.attachments = [];
+      this.postStaged();
     }
     // A lock takeover question belongs to a load this surface is abandoning, and
     // its widget goes with the transcript, so settle it rather than leave the load
@@ -936,8 +937,8 @@ export class ChatController implements AcpHost {
       this.log(`[move] ${rt.id} arrived from ${transfer.from} idle: reloaded from the agent`);
     }
     if (transfer.attachments.length) {
-      this.attachments = transfer.attachments;
-      this.postAttachments();
+      this.staged.set(this.stagedKey(rt.id), transfer.attachments);
+      this.stagedChanged(rt.id);
     }
     // A brand new surface announces its own readiness while this is running, so
     // say once more where it should be: showing the chat, not its session list.
@@ -1822,8 +1823,12 @@ export class ChatController implements AcpHost {
           // so it is no longer waiting in the list: the text, and the files staged
           // with it, belong to this chat now.
           this.store.setDraft(undefined, "");
+          const carried = this.stagedFor(undefined);
           await this.dropStaged(undefined);
-          this.postAttachments();
+          if (carried.length) {
+            this.staged.set(this.stagedKey(rt.id), carried);
+          }
+          this.stagedChanged(rt.id);
           this.post({ type: "sessionReady", sessionId: rt.id });
         }
         this.ensureIdleTimer();
@@ -1940,7 +1945,7 @@ export class ChatController implements AcpHost {
     }
     // The composer is a "new chat" box again, so it gets that box's own draft and
     // staged files back, rather than being emptied.
-    void this.useAttachmentsOf(undefined);
+    void this.loadStaged(undefined);
     this.postDraft();
   }
 
@@ -2026,7 +2031,7 @@ export class ChatController implements AcpHost {
     // own edits tracked; the clear below starts this chat with an empty one. What
     // was staged in the "new chat" box comes with it: that is what it was for.
     this.activeId = undefined;
-    await this.useAttachmentsOf(undefined);
+    await this.loadStaged(undefined);
     this.focus();
     this.post({ type: "body", body: "thread" });
     // `reset` tells the webview this is a fresh session so it clears the title
@@ -2107,7 +2112,7 @@ export class ChatController implements AcpHost {
     // none of them away.
     this.postWorkingSet();
     this.postDraft();
-    await this.useAttachmentsOf(id);
+    await this.loadStaged(id);
     if (!already) {
       this.starting.add(id);
     }
@@ -2224,7 +2229,7 @@ export class ChatController implements AcpHost {
     this.postWorkingSet();
     // The composer belongs to this chat now, so it shows this chat's own unsent
     // text and staged files, not the ones from wherever we just were.
-    await this.useAttachmentsOf(id);
+    await this.loadStaged(id);
     this.postDraft();
     this.currentMode = rt.mode;
     this.currentModel = rt.model;
@@ -2328,7 +2333,7 @@ export class ChatController implements AcpHost {
     this.activeId = id;
     this.postWorkingSet();
     this.postDraft();
-    await this.useAttachmentsOf(id);
+    await this.loadStaged(id);
     const cwd = this.store.cwds()[id] || this.resolveNewSessionCwd();
     const rt = this.spawnRuntime(cwd);
     rt.id = id;
@@ -2952,23 +2957,6 @@ export class ChatController implements AcpHost {
     });
   }
 
-  private postAttachments(save = true): void {
-    this.post({
-      type: "attachments",
-      items: this.attachments.map((a) => {
-        const item: { id: string; label: string; type: string; thumb?: string } = { id: a.id, label: a.label, type: a.type };
-        const b = a.block as { type?: string; mimeType?: string; data?: string };
-        if (a.type === "image" && b && b.type === "image" && b.data) {
-          item.thumb = `data:${b.mimeType || "image/png"};base64,${b.data}`;
-        }
-        return item;
-      })
-    });
-    if (save) {
-      void this.saveAttachments();
-    }
-  }
-
   // Files and images staged in the composer belong to the chat they were staged
   // for, and to a prompt that has not been sent yet, so they outlive leaving the
   // chat, moving it, and reloading the window. They live on disk rather than in
@@ -2980,23 +2968,79 @@ export class ChatController implements AcpHost {
   // megabytes of base64 on every attach is not worth it.
   private static readonly MAX_ATTACHMENT_BYTES = 24 * 1024 * 1024;
 
+  // Held per chat, not as one list belonging to whatever is on screen. The list used
+  // to be swapped on every switch, and that swap is what made the late writes land on
+  // the wrong chat: a send that had to wake a chat first read the composer again when
+  // it finished, and by then it was another chat's, so its files went to an agent they
+  // were never meant for and were then deleted, since saving was keyed on what was
+  // being shown. Keyed by chat id, or by the "new chat" box, which is a real place of
+  // its own: a screenshot can be attached from the sessions list before a chat exists.
+  private readonly staged = new Map<string, Staged[]>();
+
+  private stagedKey(id?: string): string {
+    return id || ChatController.NEW_CHAT_ATTACHMENTS;
+  }
+
+  // What is staged for one chat. The array is live: pushing to it stages a file.
+  private stagedFor(id?: string): Staged[] {
+    const key = this.stagedKey(id);
+    const held = this.staged.get(key);
+    if (held) {
+      return held;
+    }
+    const list: Staged[] = [];
+    this.staged.set(key, list);
+    return list;
+  }
+
+  // Something staged for a chat changed: remember it, and show it if that chat is the
+  // one on screen. Every path that stages, unstages or sends goes through here, so
+  // there is one place that decides what the composer shows and what is written down.
+  private stagedChanged(id?: string): void {
+    void this.saveStaged(id);
+    if (this.stagedKey(id) === this.stagedKey(this.activeId)) {
+      this.postStaged();
+    }
+  }
+
+  // Nothing is staged for this chat any more, because it has just been sent.
+  private clearStaged(id?: string): void {
+    this.staged.set(this.stagedKey(id), []);
+    this.stagedChanged(id);
+  }
+
+  private postStaged(): void {
+    this.post({
+      type: "attachments",
+      items: this.stagedFor(this.activeId).map((a) => {
+        const item: { id: string; label: string; type: string; thumb?: string } = { id: a.id, label: a.label, type: a.type };
+        const b = a.block as { type?: string; mimeType?: string; data?: string };
+        if (a.type === "image" && b && b.type === "image" && b.data) {
+          item.thumb = `data:${b.mimeType || "image/png"};base64,${b.data}`;
+        }
+        return item;
+      })
+    });
+  }
+
   private attachmentsFile(id?: string): vscode.Uri | undefined {
     const root = this.context.storageUri || this.context.globalStorageUri;
-    const key = (id || ChatController.NEW_CHAT_ATTACHMENTS).replace(/[^A-Za-z0-9._-]/g, "_");
+    const key = this.stagedKey(id).replace(/[^A-Za-z0-9._-]/g, "_");
     return root ? vscode.Uri.joinPath(root, "attachments", `${key}.json`) : undefined;
   }
 
-  private async saveAttachments(): Promise<void> {
-    const file = this.attachmentsFile(this.activeId);
+  private async saveStaged(id?: string): Promise<void> {
+    const file = this.attachmentsFile(id);
     if (!file) {
       return;
     }
+    const items = this.stagedFor(id);
     try {
-      if (!this.attachments.length) {
+      if (!items.length) {
         await vscode.workspace.fs.delete(file);
         return;
       }
-      const body = Buffer.from(JSON.stringify(this.attachments), "utf8");
+      const body = Buffer.from(JSON.stringify(items), "utf8");
       if (body.byteLength > ChatController.MAX_ATTACHMENT_BYTES) {
         this.log(`[attachments] ${body.byteLength} bytes staged, too much to keep past this window`);
         return;
@@ -3009,37 +3053,43 @@ export class ChatController implements AcpHost {
     }
   }
 
-  // Forget what was staged for a chat (or for the "new chat" box) without touching
-  // what the composer is holding now.
+  // Forget what was staged for a chat, here and on disk. For a chat that has gone, or
+  // for the "new chat" box once what was in it has been carried into a real chat.
   private async dropStaged(id?: string): Promise<void> {
+    this.staged.delete(this.stagedKey(id));
     const file = this.attachmentsFile(id);
     if (file) {
       await vscode.workspace.fs.delete(file).then(undefined, () => {});
     }
   }
 
-  // Show the composer whatever is staged for a chat, including anything left from
-  // before the window was reloaded.
-  private async useAttachmentsOf(id?: string): Promise<void> {
+  // Read back what was staged for a chat before the window was reloaded. Only for a
+  // chat this window has not staged anything for yet: what is held here is never
+  // older than the file, and reading over it would undo an attach.
+  private async loadStaged(id?: string): Promise<void> {
     const file = this.attachmentsFile(id);
-    this.attachments = [];
-    if (file) {
+    if (file && !this.staged.has(this.stagedKey(id))) {
+      const list = this.stagedFor(id);
       try {
         const raw = Buffer.from(await vscode.workspace.fs.readFile(file)).toString("utf8");
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed)) {
-          this.attachments = parsed.filter((a) => a && a.id && a.block);
+          list.push(...parsed.filter((a) => a && a.id && a.block));
         }
       } catch {
         // Nothing staged for this chat.
       }
     }
-    this.postAttachments(false);
+    this.postStaged();
   }
 
   private removeAttachment(id: string): void {
-    this.attachments = this.attachments.filter((a) => a.id !== id);
-    this.postAttachments();
+    const list = this.stagedFor(this.activeId);
+    const at = list.findIndex((a) => a.id === id);
+    if (at !== -1) {
+      list.splice(at, 1);
+      this.stagedChanged(this.activeId);
+    }
   }
 
   private async addContext(): Promise<void> {
@@ -3186,18 +3236,18 @@ export class ChatController implements AcpHost {
           return;
         }
         const buf = await fs.promises.readFile(fsPath);
-        this.attachments.push({
+        this.stagedFor(this.activeId).push({
           id: `att-${++this.attachSeq}`,
           label: path.basename(fsPath),
           type: "image",
           block: { type: "image", mimeType: imageMime, data: buf.toString("base64") }
         });
-        this.postAttachments();
+        this.stagedChanged(this.activeId);
         return;
       }
       const raw = await fs.promises.readFile(fsPath, "utf8");
       const text = raw.length > MAX_ATTACH_CHARS ? raw.slice(0, MAX_ATTACH_CHARS) : raw;
-      this.attachments.push({
+      this.stagedFor(this.activeId).push({
         id: `att-${++this.attachSeq}`,
         label: path.basename(fsPath),
         type: "file",
@@ -3206,7 +3256,7 @@ export class ChatController implements AcpHost {
           resource: { uri: vscode.Uri.file(fsPath).toString(), text }
         }
       });
-      this.postAttachments();
+      this.stagedChanged(this.activeId);
     } catch (err) {
       this.log(`[attach-file-failed] ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -3222,13 +3272,13 @@ export class ChatController implements AcpHost {
       .map((e) => (e.isDirectory() ? `${e.name}/` : e.name))
       .sort();
     const label = path.basename(dirPath) || dirPath;
-    this.attachments.push({
+    this.stagedFor(this.activeId).push({
       id: `att-${++this.attachSeq}`,
       label,
       type: "directory",
       block: { type: "text", text: `Folder ${dirPath} contains:\n\n${lines.join("\n")}` }
     });
-    this.postAttachments();
+    this.stagedChanged(this.activeId);
   }
 
   // A folder dropped from outside VS Code. An OS drag carries no filesystem path,
@@ -3250,13 +3300,13 @@ export class ChatController implements AcpHost {
       `To read inside it, find the folder that matches this listing (or ask which "${label}" is meant)`,
       "rather than assuming a path."
     ].join("\n");
-    this.attachments.push({
+    this.stagedFor(this.activeId).push({
       id: `att-${++this.attachSeq}`,
       label,
       type: "directory",
       block: { type: "text", text }
     });
-    this.postAttachments();
+    this.stagedChanged(this.activeId);
   }
 
   // Attach the raw content of a file dropped from outside VS Code (an OS drag
@@ -3281,13 +3331,13 @@ export class ChatController implements AcpHost {
       "",
       body
     ].join("\n");
-    this.attachments.push({
+    this.stagedFor(this.activeId).push({
       id: `att-${++this.attachSeq}`,
       label,
       type: "file",
       block: { type: "text", text: blockText }
     });
-    this.postAttachments();
+    this.stagedChanged(this.activeId);
   }
 
   // Reports whether there was anything to attach, so a caller that follows it with
@@ -3309,13 +3359,13 @@ export class ChatController implements AcpHost {
       ? `${path.basename(doc.uri.fsPath)}:${sel.start.line + 1}-${sel.end.line + 1}`
       : path.basename(doc.uri.fsPath);
     const text = `From ${rel}${hasSel ? ` lines ${sel.start.line + 1}-${sel.end.line + 1}` : ""}:\n\n\`\`\`${doc.languageId}\n${body.slice(0, MAX_ATTACH_CHARS)}\n\`\`\``;
-    this.attachments.push({
+    this.stagedFor(this.activeId).push({
       id: `att-${++this.attachSeq}`,
       label,
       type: "selection",
       block: { type: "text", text }
     });
-    this.postAttachments();
+    this.stagedChanged(this.activeId);
     return true;
   }
 
@@ -3353,7 +3403,7 @@ export class ChatController implements AcpHost {
     const lines = here
       .slice(0, MAX_ATTACHED_PROBLEMS)
       .map((d) => `- line ${d.range.start.line + 1}: ${severityLabel(d.severity)} ${d.message}${d.source ? ` (${d.source})` : ""}`);
-    this.attachments.push({
+    this.stagedFor(this.activeId).push({
       id: `att-${++this.attachSeq}`,
       label: `${path.basename(editor.document.uri.fsPath)}: ${here.length} problem${here.length === 1 ? "" : "s"}`,
       type: "selection",
@@ -3439,13 +3489,13 @@ export class ChatController implements AcpHost {
     if (typeof data !== "string" || typeof mime !== "string" || !this.imagesSupported(true)) {
       return;
     }
-    this.attachments.push({
+    this.stagedFor(this.activeId).push({
       id: `att-${++this.attachSeq}`,
       label: typeof name === "string" && name ? name : "image",
       type: "image",
       block: { type: "image", mimeType: mime, data }
     });
-    this.postAttachments();
+    this.stagedChanged(this.activeId);
   }
 
   // --- Prompting -----------------------------------------------------------
@@ -3459,12 +3509,10 @@ export class ChatController implements AcpHost {
     // clearing the draft and then returning is how a message disappears.
     const draftFor = startNew ? undefined : this.activeId;
     this.store.setDraft(draftFor, "");
-    // What is staged in the composer was staged for this message, in the chat it
-    // was written in. Waking a session and creating one both take seconds, and the
-    // user can open another chat and stage files there while they run, so the
-    // message carries what was staged when it was written rather than whatever the
-    // composer holds by the time it goes out.
-    const staged = this.attachments;
+    // What was staged for the chat this message was written in, which is not
+    // necessarily the chat on screen by the time it goes out: waking a chat and
+    // creating one both take seconds, and the user can open another one while they run.
+    const staged = this.stagedFor(draftFor);
     const giveBack = (why?: string) => {
       this.store.setDraft(draftFor, text);
       this.post({ type: "draft", id: draftFor || null, text });
@@ -3561,15 +3609,13 @@ export class ChatController implements AcpHost {
       this.post({ type: "userMessage", text, attachments });
     }
     const blocks: ContentBlock[] = [...this.buildImplicitBlocks(), ...staged.map((a) => a.block), { type: "text", text }];
-    if (this.activeId === sent.id) {
-      this.attachments = [];
-      this.postAttachments();
-    } else {
-      // Another chat is on screen, and `this.attachments` is now its composer's.
-      // Clearing that sent its files with this message and then deleted them, since
-      // saving is keyed on the chat being shown. Only the files that went with this
-      // message stop being staged.
-      await this.dropStaged(draftFor);
+    // They went with the message, so they are no longer staged. Which chat is on
+    // screen does not come into it. For a brand new chat that means both the box they
+    // were staged in and the chat that box just became, since starting a chat carries
+    // what was waiting in the box into it.
+    this.clearStaged(draftFor);
+    if (startNew) {
+      this.clearStaged(sent.id);
     }
     await this.runPrompt(sent, blocks);
   }
@@ -3677,14 +3723,8 @@ export class ChatController implements AcpHost {
     } else {
       rt.queued.push(message);
     }
-    if (this.activeId === rt.id) {
-      this.attachments = [];
-      this.postAttachments();
-    } else {
-      // The queued message is holding them now, so they are no longer staged for the
-      // chat it went to, and the composer on screen is another chat's.
-      void this.dropStaged(rt.id);
-    }
+    // The queued message is holding them now.
+    this.clearStaged(rt.id);
     this.postQueued(rt);
   }
 
@@ -3703,7 +3743,7 @@ export class ChatController implements AcpHost {
       return;
     }
     this.store.setDraft(this.activeId, "");
-    this.enqueueMessage(rt, text, this.attachments, true);
+    this.enqueueMessage(rt, text, this.stagedFor(this.activeId), true);
     rt.client.cancel(rt.id);
   }
 
@@ -3745,14 +3785,13 @@ export class ChatController implements AcpHost {
     const rt = this.active();
     const was = this.queueEditingId;
     this.queueEditingId = id;
-    if (was && was !== id && this.attachments.length) {
-      this.attachments = [];
-      this.postAttachments();
+    if (was && was !== id && this.stagedFor(this.activeId).length) {
+      this.clearStaged(this.activeId);
     }
     const to = id && rt ? rt.queued.find((q) => q.id === id) : undefined;
     if (to) {
-      this.attachments = to.attachments.map((a) => ({ ...a }));
-      this.postAttachments();
+      this.staged.set(this.stagedKey(this.activeId), to.attachments.map((a) => ({ ...a })));
+      this.stagedChanged(this.activeId);
     }
     if (rt) {
       this.flushQueue(rt);
@@ -3836,9 +3875,8 @@ export class ChatController implements AcpHost {
       return;
     }
     q.text = text;
-    q.attachments = this.attachments;
-    this.attachments = [];
-    this.postAttachments();
+    q.attachments = this.stagedFor(this.activeId);
+    this.clearStaged(this.activeId);
     this.postQueued(rt);
   }
 

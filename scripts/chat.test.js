@@ -67,6 +67,54 @@ test("a message does not take the files of the chat opened while it was being se
   await h.dispose();
 });
 
+test("a file staged before a chat exists follows it into the chat", async () => {
+  // The sessions list has a composer of its own, so a screenshot can be attached
+  // before there is any chat to attach it to. Starting a chat carries what was waiting
+  // there into it, and sending carries it with the message instead.
+  const h = createChat();
+  await h.ready();
+  h.send({ type: "attachImage", name: "from-the-list.png", mime: "image/png", data: PNG });
+  await h.until(() => ((h.last("attachments") || {}).items || []).length === 1);
+
+  h.send({ type: "newSession" });
+  await h.until(() => !!h.activeId(), 6000);
+  await h.settle(200);
+  const started = h.activeId();
+  assert.strictEqual(
+    ((h.last("attachments") || {}).items || []).length,
+    1,
+    "it is still staged in the chat the box became"
+  );
+
+  // Sent from there, it goes with the message and stops being staged, rather than
+  // being sent again with the next one.
+  h.send({ type: "send", text: "look at this" });
+  await h.until(() => h.agentSaw("session/prompt").length === 1, 6000);
+  await h.settle(200);
+  assert.deepStrictEqual(prompts(h).map((p) => p.images), [1], "the message carried it");
+  assert.strictEqual(((h.last("attachments") || {}).items || []).length, 0, "and nothing is left staged");
+  assert.ok(started, "the chat started");
+  await h.dispose();
+});
+
+test("a file sent with the first message is not left staged in the chat it started", async () => {
+  // Sending from the sessions list starts a chat and sends in one go, so the file is
+  // staged in the box, carried into the chat the box becomes, and sent. It has to stop
+  // being staged in both places, or the next message sends it again.
+  const h = createChat();
+  await h.ready();
+  h.send({ type: "attachImage", name: "sent-with-the-first.png", mime: "image/png", data: PNG });
+  await h.until(() => ((h.last("attachments") || {}).items || []).length === 1);
+
+  h.send({ type: "send", text: "start with this", newSession: true });
+  await h.until(() => h.agentSaw("session/prompt").length === 1, 6000);
+  await h.settle(250);
+
+  assert.deepStrictEqual(prompts(h).map((p) => p.images), [1], "the first message carried it");
+  assert.strictEqual(((h.last("attachments") || {}).items || []).length, 0, "and it is no longer staged");
+  await h.dispose();
+});
+
 test("a chat that finishes starting in the background does not take the panel", async () => {
   // No configured default mode, so each chat keeps the mode its own agent reports and
   // the two can be told apart.
