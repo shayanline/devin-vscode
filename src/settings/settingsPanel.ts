@@ -19,7 +19,7 @@ import {
   userConfigPath,
   userMcpConfigPath
 } from "./configService";
-import { CliContext, isPlainCliName, listPlugins, listSkills, mcpAdd, mcpVerb, McpAddOptions, pluginVerb } from "./devinConfigCli";
+import { CliContext, isPlainCliName, listPlugins, listSkills, mcpAdd, mcpVerb, McpAddOptions, NamedItem, pluginVerb } from "./devinConfigCli";
 import { withQuerySession } from "../acp/queryClient";
 import { LoadedHook, LoadedRule } from "../acp/types";
 import { checkHealth, loginShellEnv } from "../cli/locate";
@@ -67,6 +67,16 @@ const MUTATING = new Set([
   "settings:mcpAdd", "settings:mcpVerb", "settings:pluginVerb", "settings:clearExtensionModel"
 ]);
 
+// Of those, the writes that can change which rules and hooks are in force, which
+// is the only thing worth asking the agent again about. Asking means starting one,
+// and starting one starts every MCP server: dropping the answer after a toggle
+// that cannot possibly change it left that control disabled and spinning for as
+// long as that took.
+const RELOADS_AGENT = new Set([
+  "settings:addHook", "settings:removeHook", "settings:createSkill", "settings:createFile",
+  "settings:deletePath", "settings:resetSection", "settings:pluginVerb"
+]);
+
 // The Devin customizations / settings surface: a webview editor panel with a
 // section sidebar (General, Instructions, Skills, Plugins, MCP, Hooks,
 // Permissions, Advanced) and a scope picker (Global, plus each workspace folder),
@@ -91,17 +101,40 @@ export class SettingsPanel {
   private stale = false;
   private selfWriteAt = 0;
 
+  static readonly viewType = "devin.settings";
+
   static show(context: vscode.ExtensionContext): void {
     if (SettingsPanel.current) {
       SettingsPanel.current.panel.reveal();
       return;
     }
     const panel = vscode.window.createWebviewPanel(
-      "devin.settings",
+      SettingsPanel.viewType,
       "Devin Settings",
       vscode.ViewColumn.Active,
       { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [context.extensionUri] }
     );
+    SettingsPanel.adopt(context, panel);
+  }
+
+  // VS Code keeps the tab across a window reload and hands it back here. Without
+  // a serializer it came back as a dead tab that nothing could revive, and
+  // opening the settings again put a second one beside it. Nothing needs
+  // restoring: the panel reads everything from disk.
+  static register(context: vscode.ExtensionContext): vscode.Disposable {
+    return vscode.window.registerWebviewPanelSerializer(SettingsPanel.viewType, {
+      async deserializeWebviewPanel(panel: vscode.WebviewPanel): Promise<void> {
+        if (SettingsPanel.current) {
+          panel.dispose();
+          return;
+        }
+        panel.webview.options = { enableScripts: true, localResourceRoots: [context.extensionUri] };
+        SettingsPanel.adopt(context, panel);
+      }
+    });
+  }
+
+  private static adopt(context: vscode.ExtensionContext, panel: vscode.WebviewPanel): void {
     panel.iconPath = vscode.Uri.joinPath(context.extensionUri, "resources", "icon.png");
     SettingsPanel.current = new SettingsPanel(context, panel);
   }
@@ -188,8 +221,16 @@ export class SettingsPanel {
         const extra = vscode.workspace.getConfiguration("devin").get<Record<string, string>>("env", {}) || {};
         this.cli = { cliPath: health.path || "devin", env: { ...env, ...extra }, cwd: this.root() };
         this.cliResolved = true;
-      })().finally(() => {
-        this.cliPending = undefined;
+      })();
+      const mine = this.cliPending;
+      void this.cliPending.finally(() => {
+        // Only if it is still ours: a settings change clears this and starts
+        // another resolve, and clearing it again threw away the handle to that
+        // one, so the next refresh paid for a second health check and a second
+        // login shell read for nothing.
+        if (this.cliPending === mine) {
+          this.cliPending = undefined;
+        }
       });
     }
     return this.cliPending;
@@ -206,7 +247,10 @@ export class SettingsPanel {
   // on every refresh, and re-attaches only when the set of directories that
   // exist has changed (a .devin folder may be created while the panel is open).
   private startWatching(): void {
-    const dirs = [userConfigDir(), windsurfDir(), ...this.folders().map((f) => path.join(f.path, ".devin"))]
+    // The OAuth token directory is watched too: a login happens in a terminal and
+    // reports back through nothing, so without this a server the user had just
+    // signed in to kept offering to log in until they changed section.
+    const dirs = [userConfigDir(), windsurfDir(), mcpOauthDir(), ...this.folders().map((f) => path.join(f.path, ".devin"))]
       .filter((d) => {
         try { return fs.existsSync(d); } catch { return false; }
       });
@@ -257,13 +301,15 @@ export class SettingsPanel {
   }
 
   private async onMessage(msg: any): Promise<void> {
-    const mutating = MUTATING.has(String(msg?.type));
+    const type = String(msg?.type);
+    const mutating = MUTATING.has(type);
     try {
       if (mutating) this.selfWriteAt = Date.now();
-      // A write can change which rules and hooks are in force, so it drops the
-      // cached answer. Moving between sections does not: asking the agent means
-      // starting one, and no section click should wait on that.
-      if (mutating) {
+      // Only a write that can change which rules and hooks are in force drops the
+      // cached answer. Which config files are read is one of those, so a change to
+      // a `read_config_from` row counts even though the rest of that section does
+      // not. Moving between sections never does.
+      if (RELOADS_AGENT.has(type) || (type === "settings:setPath" && String(msg.path || "").startsWith("read_config_from"))) {
         this.loaded = undefined;
       }
       switch (msg?.type) {
@@ -537,10 +583,18 @@ export class SettingsPanel {
       const hooksObj = (src.endsWith("hooks.v1.json") ? root : (root.hooks as Record<string, unknown>)) || {};
       const groups = (hooksObj as Record<string, unknown>)[String(msg.event)] as any[];
       if (Array.isArray(groups)) {
+        // The first match only. Two hooks in one group can carry the same command
+        // (nothing stops that, and the Add form does not check), and filtering by
+        // command removed both from a button that offered to remove this hook.
+        let removed = false;
         for (const g of groups) {
-          if (!g || !Array.isArray(g.hooks)) continue;
+          if (removed || !g || !Array.isArray(g.hooks)) continue;
           if (msg.matcher !== undefined && (g.matcher || "") !== msg.matcher) continue;
-          g.hooks = g.hooks.filter((h: any) => (h?.command ?? h?.prompt) !== (msg.command ?? msg.prompt));
+          const at = g.hooks.findIndex((h: any) => (h?.command ?? h?.prompt) === (msg.command ?? msg.prompt));
+          if (at !== -1) {
+            g.hooks.splice(at, 1);
+            removed = true;
+          }
         }
         // Drop the groups this emptied, and the event with them when it has none
         // left. The old test asked whether the array existed, which it always does,
@@ -633,17 +687,45 @@ export class SettingsPanel {
     } else if (idx < 0) {
       list.push(value);
     }
-    perms[bucket] = list;
-    setConfigPath(scope, "permissions", perms, target);
+    // An empty bucket is not a permission rule, and `setConfigPath` only prunes
+    // empty objects, so removing the last one left `"deny": []` in the file for
+    // ever. Same reasoning as the hook groups above.
+    if (list.length) {
+      perms[bucket] = list;
+    } else {
+      delete perms[bucket];
+    }
+    setConfigPath(scope, "permissions", Object.keys(perms).length ? perms : undefined, target);
   }
 
   // --- Gather section data --------------------------------------------------
 
+  // Refreshes are not serialised (a message handler is fire and forget), and the
+  // scope tab can move while one is in flight. Only the newest may answer: a
+  // slower one landing last showed one folder's rules under another folder's tab,
+  // and left the cache agreeing with it.
+  private dataGeneration = 0;
+  private painted = false;
+
+  private superseded(generation: number): boolean {
+    return this.disposed || generation !== this.dataGeneration;
+  }
+
   private async sendData(): Promise<void> {
     if (this.disposed) return;
+    const generation = ++this.dataGeneration;
+    // What is on disk, straight away and on its own. It was read in microseconds,
+    // and holding it back until a CLI listing and an agent handshake had finished
+    // left the panel saying "Loading Devin settings…" for as long as starting an
+    // agent takes, which is every configured MCP server coming up.
+    if (!this.painted) {
+      this.painted = true;
+      this.post({ type: "settings:data", data: this.buildData() });
+    }
     // Every list below is a CLI call, so this is where the binary has to be current.
     // A no op unless the settings it comes from changed, or the folder moved.
     await this.ensureCli();
+    if (this.superseded(generation)) return;
     this.startWatching();
     const [skills, plugins, loaded] = await Promise.all([
       listSkills(this.cli).catch(() => []),
@@ -652,9 +734,25 @@ export class SettingsPanel {
       // listings above, so it runs alongside them rather than after them.
       this.loadFromAgent()
     ]);
+    if (this.superseded(generation)) return;
     let families: unknown[] = [];
     try { families = await listModelFamilies(this.cli.cliPath, this.cli.env); } catch { /* ignore */ }
+    if (this.superseded(generation)) return;
+    this.post({ type: "settings:data", data: this.buildData({ skills, plugins, families, loaded }) });
+  }
 
+  // Everything the panel renders. The parts that need a process are optional, so
+  // the first paint can go out with only what the files say.
+  private buildData(fromCli?: {
+    skills: NamedItem[];
+    plugins: NamedItem[];
+    families: unknown[];
+    loaded?: { rules: LoadedRule[]; hooks: LoadedHook[] };
+  }): unknown {
+    const skills = fromCli?.skills || [];
+    const plugins = fromCli?.plugins || [];
+    const families = fromCli?.families || [];
+    const loaded = fromCli?.loaded;
     const groups = this.scopeGroups();
     // User skills come from the CLI list (filtered to user scope); project skills
     // per folder are scanned from that folder's .devin/skills directory.
@@ -692,7 +790,7 @@ export class SettingsPanel {
       plugins: { list: plugins },
       permissions: { byScope: groups.map((g) => ({ ...g, ...this.permissionsForScope(g.scope, g.root) })) }
     };
-    this.post({ type: "settings:data", data });
+    return data;
   }
 
   // Rules and hooks as the agent reports them. Both need a session, so one query

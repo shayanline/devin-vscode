@@ -55,6 +55,7 @@ export function activate(context: vscode.ExtensionContext): void {
       webviewOptions: { retainContextWhenHidden: true }
     }),
     vscode.window.registerWebviewPanelSerializer(ChatManager.editorViewType, chat),
+    SettingsPanel.register(context),
     // A backstop for any path that disposes the extension without calling
     // `deactivate`. After an awaited shutdown this is a no-op.
     { dispose: () => chat.dispose() }

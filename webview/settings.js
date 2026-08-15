@@ -479,9 +479,15 @@
     return keyRow(key, label, toggle(val(key), (v) => setPath(key, v)), hint);
   }
   function keySelect(key, label, options, hint, emptyToUndefined) {
-    const control = select(options, val(key) == null ? "" : String(val(key)), (v) =>
-      setPath(key, emptyToUndefined && !v ? undefined : v)
-    );
+    const current = val(key) == null ? "" : String(val(key));
+    // A value the list does not offer still has to be what the row shows. With no
+    // option matching, a browser selects the first one, so a `notify` the CLI
+    // wrote as something newer read as "Never", and a model set by /model read as
+    // the CLI default, both looking like a deliberate setting and both wrong.
+    const shown = current && !options.some((o) => String(o.value) === current)
+      ? [...options, { value: current, label: current + " (set outside this list)" }]
+      : options;
+    const control = select(shown, current, (v) => setPath(key, emptyToUndefined && !v ? undefined : v));
     return keyRow(key, label, control, hint);
   }
   function keyText(key, label, placeholder, hint) {

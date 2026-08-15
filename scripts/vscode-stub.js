@@ -151,6 +151,7 @@ workspace.getConfiguration = () => ({
 const editorChanged = new EventEmitter();
 const selectionChanged = new EventEmitter();
 const configChanged = new EventEmitter();
+const foldersChanged = new EventEmitter();
 const docOpened = new EventEmitter();
 const docClosed = new EventEmitter();
 const docChanged = new EventEmitter();
@@ -188,6 +189,7 @@ Object.assign(workspace, {
   getWorkspaceFolder: () => (globalThis.__dvFolders || [])[0],
   findFiles: async () => [],
   onDidChangeConfiguration: configChanged.event,
+  onDidChangeWorkspaceFolders: foldersChanged.event,
   onDidOpenTextDocument: docOpened.event,
   onDidCloseTextDocument: docClosed.event,
   onDidChangeTextDocument: docChanged.event,

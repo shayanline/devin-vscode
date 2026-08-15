@@ -121,6 +121,26 @@ test("a row says whether the active scope sets it or inherits it", () => {
   assert.strictEqual(h.control("notify").value, GLOBAL_SET.notify);
 });
 
+test("a value the dropdown does not offer is still the value shown", () => {
+  // A <select> with nothing matching shows its first option, so a `notify` written
+  // by a newer CLI (or by hand) read as "Never", the most damaging thing that row
+  // can say, while the dot beside it claimed the scope had set it deliberately.
+  const h = createSettings();
+  const data = JSON.parse(JSON.stringify(h.data));
+  for (const g of data.valuesByScope) {
+    g.values.notify = "on-completion";
+  }
+  h.send({ type: "settings:data", data });
+
+  const control = h.control("notify");
+  assert.strictEqual(control.value, "on-completion", "the row shows what the file holds");
+  assert.ok(
+    [...control.options].some((o) => o.value === "on-completion"),
+    "carried as an option of its own, so choosing another is a real change"
+  );
+  assert.deepStrictEqual(h.consoleErrors, []);
+});
+
 test("the inherited legend is absent where nothing is inherited", () => {
   const h = createSettings();
   h.openScope("Workspace").openSection("Hooks");

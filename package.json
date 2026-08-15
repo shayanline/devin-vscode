@@ -38,7 +38,8 @@
     "ai"
   ],
   "activationEvents": [
-    "onWebviewPanel:devin.chatEditor"
+    "onWebviewPanel:devin.chatEditor",
+    "onWebviewPanel:devin.settings"
   ],
   "main": "./dist/extension.js",
   "contributes": {
