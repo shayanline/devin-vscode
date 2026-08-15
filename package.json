@@ -539,7 +539,7 @@
     "build": "node esbuild.js --production",
     "watch": "node esbuild.js --watch",
     "compile": "node esbuild.js",
-    "check-types": "tsc --noEmit",
+    "check-types": "tsc --noEmit && tsc --noEmit -p scripts/tsconfig.json",
     "pretest": "npm run compile",
     "test": "node --test \"scripts/*.test.js\"",
     "harness": "node scripts/webview-harness.js",
