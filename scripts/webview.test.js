@@ -1028,6 +1028,12 @@ test("session load hides the replay behind the spinner until it settles", async 
 
   h.post({ type: "userChunk", text: "old question" });
   h.post({ type: "assistantChunk", text: "old answer" });
+  await h.settle(10);
+  // The replay is what the spinner is covering, so the first chunk of it must not
+  // take the spinner away: every renderer clears the welcome screen, and the
+  // spinner used to go with it, leaving a blank panel for the rest of the load.
+  assert.ok(thread.querySelector(".thread-loading"), "the spinner stays for the whole replay");
+
   h.post({ type: "loaded" });
   await h.settle(10);
 
@@ -4801,5 +4807,76 @@ test("tool output carries a copy action, and JSON is pretty printed", async () =
   await h.settle(10);
   const posted = h.posted.filter((m) => m.type === "copyText").pop();
   assert.match(posted.text, /"nested": \{/, "which copies the formatted text");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("clearing the thread takes the permission menu with it", async () => {
+  // The scope menu is anchored to a button in the permission tray but lives on the
+  // body, so emptying the tray by hand left it floating over the new thread, still
+  // offering to answer a request that had gone.
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "userChunk", text: "run something" });
+  h.post({
+    type: "permission",
+    requestId: "p9",
+    command: "exit 42",
+    options: [
+      { optionId: "allow_once", name: "Allow", kind: "allow_once" },
+      { optionId: "allow_always", name: "Yes, always allow `exit` commands here", kind: "allow_always" },
+      { optionId: "allow_always_global", name: "Yes, always allow `exit` commands everywhere", kind: "allow_always" },
+      { optionId: "reject_once", name: "Reject", kind: "reject_once" }
+    ]
+  });
+  await h.settle(20);
+  h.document.querySelector("#permission-tray .cw-more").dispatchEvent(new h.window.MouseEvent("click", { bubbles: true }));
+  await h.settle(20);
+  assert.ok(h.document.querySelector(".dv-menu"), "the menu is open");
+
+  // A new chat, or opening another one, clears the thread underneath it.
+  h.post({ type: "clear" });
+  await h.settle(20);
+  assert.strictEqual(h.document.querySelector(".dv-menu"), null, "and it goes with the thread");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a file path with a space or an accent in it still opens", async () => {
+  // The markdown renderer percent encodes every href, so the string on the anchor
+  // is not a path any more. Sent as one, it opened nothing, and the only sign of
+  // it was a line in the extension's output channel.
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "assistantChunk", text: "see [docs/caf\u00e9.md](<docs/caf\u00e9 notes.md>)" });
+  h.post({ type: "assistantEnd" });
+  await h.settle(30);
+
+  const link = [...h.thread().querySelectorAll("a[href]")].pop();
+  assert.ok(link, "the link is rendered");
+  link.dispatchEvent(new h.window.MouseEvent("click", { bubbles: true, cancelable: true }));
+  await h.settle(10);
+  const opened = h.posted.filter((m) => m.type === "openFile").pop();
+  assert.ok(opened, "the click asks the host to open it");
+  assert.strictEqual(opened.path, "docs/caf\u00e9 notes.md", "as a path, not as a percent encoded url");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("turning the changed files summary off turns it off", async () => {
+  // The setting was read by the host, sent to the page and stored, and then never
+  // looked at, so it did nothing whichever way it was set.
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "capabilities", revert: true, showFileChanges: true });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "workingSet", files: [{ path: "/w/app.ts", added: 2, removed: 1 }] });
+  await h.settle(20);
+  const ws = h.document.querySelector("#working-set");
+  assert.ok(!ws.classList.contains("hidden"), "on by default, the summary is there");
+
+  h.post({ type: "capabilities", revert: true, showFileChanges: false });
+  await h.settle(20);
+  assert.ok(ws.classList.contains("hidden"), "and turning it off takes it away now, not next turn");
   assert.strictEqual(h.errors().length, 0);
 });

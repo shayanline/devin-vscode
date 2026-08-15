@@ -395,6 +395,10 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     boxEl.style.left = left + "px";
     boxEl.style.top = top + "px";
     boxEl.addEventListener("mousedown", (e) => e.stopPropagation());
+    // And the click, not only the press: the document handler closes every menu,
+    // including the session switcher a floater can be anchored inside, so clicking
+    // into a floater's own search box removed the menu it belonged to.
+    boxEl.addEventListener("click", (e) => e.stopPropagation());
     const onDown = (e) => { if (!boxEl.contains(e.target) && !anchor.contains(e.target)) close(); };
     const onKey = (e) => { if (e.key === "Escape") close(); };
     setTimeout(() => {
@@ -951,6 +955,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   }, true);
   // Escape cancels the inline edit even when focus has left the textarea.
   document.addEventListener("keydown", (e) => {
+    // Not while composing: dismissing an IME candidate list is an Escape too, and
+    // taking it as "cancel this edit" threw away what had just been written.
+    if (composing(e)) return;
     if (e.key === "Escape" && inlineEditTurn) finishEditing(inlineEditTurn);
   });
 
@@ -1239,7 +1246,11 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     if (/^(https?|mailto):/i.test(href)) return; // let VS Code open it (once)
     e.preventDefault();
     e.stopPropagation();
-    vscode.postMessage({ type: "openFile", path: href.replace(/^file:\/\//, "") });
+    // markdown-it percent encodes every href, so the path has to be decoded
+    // again: a file with a space or an accent in its name opened nothing at all.
+    let target = href;
+    try { target = decodeURI(href); } catch { /* leave it as it came */ }
+    vscode.postMessage({ type: "openFile", path: target });
   });
 
   // --- Drag and drop context (files, images), VS Code chat style -----------
@@ -1629,6 +1640,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       el.input.focus();
       closeAutocomplete();
       autosize();
+      updateSendState();
       return;
     }
     const value = el.input.value;
@@ -1639,6 +1651,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     el.input.focus();
     closeAutocomplete();
     autosize();
+    // The @query has left the box, and setting `value` fires no input event, so
+    // without this Send stays drawn as though there were still something to send.
+    updateSendState();
   }
 
   // --- Turns & thread ------------------------------------------------------
@@ -3971,14 +3986,22 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       entry.node.classList.add("tool-empty", "dv-nocollapse");
       entry.bodyEl.innerHTML = "";
       head.title = fileLine ? fileLine.path : d.title || "";
-      if (fileLine && !entry.node.dataset.opensFile) {
-        entry.node.dataset.opensFile = "1";
-        head.addEventListener("click", () => {
+      if (fileLine && !entry.openFile) {
+        entry.openFile = () => {
           const f = toolFileTarget(entry.data);
           if (f) vscode.postMessage({ type: "openFile", path: f.path, line: f.line });
-        });
+        };
+        head.addEventListener("click", entry.openFile);
       }
     } else {
+      // It is a row with a body again (a later update brought an image or a
+      // terminal), so its header is a collapse toggle once more. Left attached,
+      // the handler from when it was a single line meant expanding it also jumped
+      // the editor to the file.
+      if (entry.openFile) {
+        entry.node.querySelector(".dv-collapsible-header").removeEventListener("click", entry.openFile);
+        entry.openFile = null;
+      }
       // A command shows the command itself in the row, syntax highlighted, the way
       // VS Code's terminal part titles it: the row is the command, not a sentence
       // about it. The status icon beside it already says how it went.
@@ -5274,6 +5297,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // The files the working set is currently listing, retained per session so a
   // switch restores this session's own pending edits.
   let wsFiles = [];
+  // What the host last said this chat had changed, kept even while the summary is
+  // hidden, so turning the setting back on has something to draw again.
+  let wsLast = [];
 
   function countBadges(target, added, removed) {
     if (added) {
@@ -5294,7 +5320,12 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // chevron, and the file list scrolls once it gets long. The collapsible is
   // cached so its collapsed state survives the frequent re-renders during a turn.
   function renderWorkingSet(files) {
-    if (!files || files.length === 0) { hideWorkingSet(); return; }
+    wsLast = files || [];
+    files = wsLast;
+    // The setting that says "show a summary of files changed at the end of each
+    // turn" is this summary, and it was read, sent and stored without ever being
+    // looked at, so turning it off did nothing at all.
+    if (!caps.showFileChanges || files.length === 0) { hideWorkingSet(); return; }
     // Counts sent with the files fill the tally, so a working set restored after a
     // window reload shows its line counts rather than bare names.
     files.forEach((f) => {
@@ -5644,11 +5675,15 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     return sessions.filter((s) => {
       if (sel) {
         const st = sessionStatuses[s.id];
+        // A chat open on another surface has no status here (the host reports only
+        // this surface's runtimes), and its row is drawn as idle. Filtering it as
+        // terminated contradicted the dot beside it.
+        const away = elsewhereIds.includes(s.id);
         const working = st === "running" || st === "starting" || st === "attention";
-        const alive = working || st === "idle";
+        const alive = working || st === "idle" || away;
         const match =
           (sel.has("running") && working) ||
-          (sel.has("idle") && st === "idle") ||
+          (sel.has("idle") && (st === "idle" || away)) ||
           (sel.has("terminated") && !alive);
         if (!match) return false;
       }
@@ -5661,7 +5696,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   function sessionStateRank(s) {
     const st = sessionStatuses[s.id];
     if (st === "running" || st === "starting" || st === "attention") return 0;
-    if (st === "idle") return 1;
+    // Alive elsewhere is alive, the same as the dot says.
+    if (st === "idle" || elsewhereIds.includes(s.id)) return 1;
     return 2;
   }
 
@@ -6427,6 +6463,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     updateDetachBtn();
     // The split button's primary half follows the default action setting.
     updateComposerButtons();
+    // Turning the changed files summary off has to take it off the screen now,
+    // not at the end of the next turn.
+    renderWorkingSet(wsLast);
   }
 
   // --- Welcome / empty state ----------------------------------------------
@@ -6489,8 +6528,6 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   function hideWelcome() {
     const w = el.thread.querySelector(".welcome");
     if (w) w.remove();
-    const l = el.thread.querySelector(".thread-loading");
-    if (l) l.remove();
   }
 
   function showThreadLoading(waking) {
@@ -6512,6 +6549,12 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   function stopThreadLoading() {
     loadingSession = false;
     el.thread.classList.remove("loading-replay");
+    // The spinner row goes when the load ends, and not before. Every renderer
+    // calls hideWelcome, so removing it there took the spinner away with the
+    // first replayed chunk while the transcript behind it was still hidden,
+    // leaving the panel blank for the rest of the replay.
+    const l = el.thread.querySelector(".thread-loading");
+    if (l) l.remove();
     hideLoadingBar();
   }
 
@@ -6895,8 +6938,11 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         lastHeadReliable = false;
         pendingRevert = null;
         previewWaiters.clear();
-        el.permissionTray.innerHTML = "";
-        el.elicitationTray.innerHTML = "";
+        // Not the two trays by hand: the permission scope menu is anchored to a
+        // button in one of them but lives on the body, so wiping the tray left it
+        // floating over the new thread, still answering for a request that had
+        // gone, and left the next prompt's chevron dead on its first click.
+        cancelPrompts();
         planCollapsePref = null;
     wsCollapsePref = null;
         hideDockedPlan();
