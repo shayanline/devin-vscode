@@ -6,8 +6,12 @@ export function diffStat(oldText: string | null | undefined, newText: string | n
   // file where every line changed.
   let a = oldText ? oldText.split(/\r?\n/) : [];
   let b = newText ? newText.split(/\r?\n/) : [];
-  if (!a.length) return { added: b.length, removed: 0 };
-  if (!b.length) return { added: 0, removed: a.length };
+  // A file whose last line ends in a newline splits with an empty element after
+  // it. When both sides have one it cancels out below, but with one side empty
+  // there is nothing to cancel it: a new two line file counted three added lines,
+  // one more than git and than the editor's own diff say.
+  if (!a.length) return { added: withoutFinalBlank(b), removed: 0 };
+  if (!b.length) return { added: 0, removed: withoutFinalBlank(a) };
   // Trim what both sides share at each end first. An edit is nearly always a few
   // lines inside a file that is otherwise identical, and the O(n*m) table below
   // does not care how similar the two sides are: counting a session's worth of
@@ -35,4 +39,8 @@ export function diffStat(oldText: string | null | undefined, newText: string | n
   }
   const lcs = prev[n];
   return { added: n - lcs, removed: m - lcs };
+}
+
+function withoutFinalBlank(lines: string[]): number {
+  return lines.length && lines[lines.length - 1] === "" ? lines.length - 1 : lines.length;
 }

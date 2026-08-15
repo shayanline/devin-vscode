@@ -343,8 +343,11 @@ test("a one line change in a large file is counted, and counted quickly", async 
   assert.ok(Date.now() - started < 250, "and does not take seconds over it");
 
   // The plain cases still hold.
-  assert.deepStrictEqual(diffStat(null, "a\nb\n"), { added: 3, removed: 0 }, "a new file is all additions");
-  assert.deepStrictEqual(diffStat("a\nb\n", ""), { added: 0, removed: 3 }, "an emptied one is all removals");
+  // Two lines, not three: the newline ending the last line is not a line of its
+  // own, and counting it made every file Devin created disagree with git by one.
+  assert.deepStrictEqual(diffStat(null, "a\nb\n"), { added: 2, removed: 0 }, "a new file is all additions");
+  assert.deepStrictEqual(diffStat("a\nb\n", ""), { added: 0, removed: 2 }, "an emptied one is all removals");
+  assert.deepStrictEqual(diffStat(null, "a\nb"), { added: 2, removed: 0 }, "with or without the final newline");
   assert.deepStrictEqual(diffStat("a\nb\n", "a\nb\n"), { added: 0, removed: 0 }, "no change, no counts");
   assert.deepStrictEqual(diffStat("a\nb\nc\n", "a\nx\ny\nc\n"), { added: 2, removed: 1 });
 });
