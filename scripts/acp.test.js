@@ -438,6 +438,16 @@ test("a path that merely starts with the root is not inside it", () => {
   assert.deepStrictEqual(items, [], "/work-other is not under /work");
 });
 
+test("a folder that is itself a drive root still contains its files", () => {
+  // "/" is a folder a user can open, and so is "C:\\". The root already ends in a
+  // separator there, and adding another made nothing match, so the agent was told
+  // the code had no problems at all.
+  const items = diagnosticItems([
+    [vscode.Uri.file(abs("anywhere", "a.ts")), [diag("a real error", ERROR)]]
+  ], { roots: [path.sep] });
+  assert.deepStrictEqual(items.map((i) => i.message), ["a real error"]);
+});
+
 test("with no workspace open, nothing is filtered by location", () => {
   const items = diagnosticItems([
     [vscode.Uri.file(abs("anywhere", "a.ts")), [diag("still worth knowing", ERROR)]]

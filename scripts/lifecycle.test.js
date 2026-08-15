@@ -447,6 +447,22 @@ test("output is cleaned the way a terminal would have drawn it", async () => {
   assert.strictEqual(seen.join(""), "one\ntwo\n[==] 100%\n", "CRLF, split lines, and a progress bar");
   cleaner.flush();
   assert.strictEqual(seen.join(""), "one\ntwo\n[==] 100%\nno newline yet\n", "and what was left over when it ended");
+
+  // A sequence can arrive in two pieces, and half of one matches nothing: the
+  // leftover escape was then deleted as a stray control character and the rest of
+  // it was left in the transcript as "[0mdone".
+  const split = [];
+  const c2 = new OutputCleaner((t) => split.push(t));
+  c2.write("red\u001b[");
+  c2.write("0mdone\n");
+  assert.strictEqual(split.join(""), "reddone\n", "a sequence split across chunks is still a sequence");
+
+  // And an escape that never completes is not held for ever.
+  const stray = [];
+  const c3 = new OutputCleaner((t) => stray.push(t));
+  c3.write("plain\u001b");
+  c3.flush();
+  assert.strictEqual(stray.join(""), "plain\n", "what is left is emitted, not swallowed");
 });
 
 test("a Windows .cmd shim is run through the interpreter, quoting and all", async () => {

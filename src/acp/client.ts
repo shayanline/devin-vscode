@@ -156,11 +156,16 @@ export class AcpClient extends EventEmitter {
         return this.host.killTerminal(params as TerminalRef);
       case "terminal/release":
         return this.host.releaseTerminal(params as TerminalRef);
-      default:
-        // Unknown/custom client method: reply with an empty object to keep the
-        // agent moving (a bare null can trip its response parser).
+      default: {
+        // Not something this client serves. An empty object told the agent it had
+        // worked, so it carried on believing a write had landed or a clipboard had
+        // been set; -32601 is the answer the protocol has for this, and the one
+        // the agent itself gives.
         this.emit("log", `[unhandled-request] ${method}`);
-        return {};
+        const err = new Error(`Method not found: ${method}`) as Error & { code?: number };
+        err.code = -32601;
+        throw err;
+      }
     }
   }
 

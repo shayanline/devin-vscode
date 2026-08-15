@@ -95,9 +95,16 @@ export class VsCodeTerminalRunner implements TerminalRunner {
     };
     const listeners = [
       vscode.window.onDidEndTerminalShellExecution((e) => {
-        if (e.execution === execution) {
-          finish({ exitCode: e.exitCode ?? null, signal: null });
+        if (e.execution !== execution) {
+          return;
         }
+        // The reader is a loop of its own, and the end event can land while chunks
+        // are still queued in it. Finishing here flushed a half line and left the
+        // rest to arrive afterwards, so the output the agent read at
+        // wait_for_exit could be missing the last thing the command said. Capped,
+        // because a stream that never ends must not hold the turn.
+        const status = { exitCode: e.exitCode ?? null, signal: null };
+        void Promise.race([drained, wait(250)]).then(() => finish(status));
       }),
       // The terminal being closed under a running command is that command's end,
       // and without this the agent waits on it for ever.
@@ -108,7 +115,7 @@ export class VsCodeTerminalRunner implements TerminalRunner {
         }
       })
     ];
-    void (async () => {
+    const drained = (async () => {
       try {
         for await (const chunk of stream) {
           clean.write(chunk);
@@ -186,6 +193,13 @@ function waitForIntegration(terminal: vscode.Terminal): Promise<boolean> {
   });
 }
 
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const t = setTimeout(resolve, ms);
+    t.unref?.();
+  });
+}
+
 // A terminal writes for a screen, not for a transcript: escape sequences that
 // colour and move the cursor, and carriage returns that redraw a line in place
 // (every progress bar). Reading the stream rather than the screen means undoing
@@ -193,11 +207,20 @@ function waitForIntegration(terminal: vscode.Terminal): Promise<boolean> {
 // is the one line it ended on.
 export class OutputCleaner {
   private pending = "";
+  // The tail of the raw stream that may still be half of an escape sequence.
+  private held = "";
 
   constructor(private readonly emit: (text: string) => void) {}
 
   write(chunk: string): void {
-    this.pending += stripAnsi(chunk).replace(/\r\n/g, "\n");
+    const raw = this.held + chunk;
+    // A sequence split across two chunks matches nothing, and the half that is
+    // left is then deleted as a stray control character, so "\x1b[" + "0mdone"
+    // reached the transcript as "[0mdone". Anything that could still be the start
+    // of one waits for the rest of it.
+    const end = safeEnd(raw);
+    this.held = raw.slice(end);
+    this.pending += stripAnsi(raw.slice(0, end)).replace(/\r\n/g, "\n");
     const lines = this.pending.split("\n");
     this.pending = lines.pop() ?? "";
     if (lines.length) {
@@ -208,6 +231,11 @@ export class OutputCleaner {
   // Whatever is left when the command ends, which is a prompt line with no
   // newline after it more often than not.
   flush(): void {
+    if (this.held) {
+      // Nothing more is coming, so whatever was being held is all there is of it.
+      this.pending += stripAnsi(this.held).replace(/\r\n/g, "\n");
+      this.held = "";
+    }
     const left = lastDraw(this.pending);
     this.pending = "";
     if (left) {
@@ -231,6 +259,20 @@ const CSI = /(?:\x1b\[|\x9b)[=?>!]?[\d;:]*["$#'* ]?[a-zA-Z@^`{}|~]/;
 const OSC = /(?:\x1b\]|\x9d).*?(?:\x1b\\|\x07|\x9c)/;
 const ESC = /\x1b(?:[ #%()*+\-./]?[a-zA-Z0-9|}~@])/;
 const CONTROL = new RegExp(`(?:${CSI.source}|${OSC.source}|${ESC.source})`, "g");
+
+// How much of `text` can be stripped now. An escape sequence still arriving is
+// held back, unless it has grown past anything a sequence could be, which stops
+// an unterminated OSC holding the output for ever.
+const MAX_PARTIAL = 128;
+const STARTS_WITH_SEQUENCE = new RegExp(`^(?:${CSI.source}|${OSC.source}|${ESC.source})`);
+
+function safeEnd(text: string): number {
+  const at = Math.max(text.lastIndexOf("\x1b"), text.lastIndexOf("\x9b"), text.lastIndexOf("\x9d"));
+  if (at === -1 || text.length - at > MAX_PARTIAL) {
+    return text.length;
+  }
+  return STARTS_WITH_SEQUENCE.test(text.slice(at)) ? text.length : at;
+}
 
 export function stripAnsi(text: string): string {
   // eslint-disable-next-line no-control-regex

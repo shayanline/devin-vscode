@@ -86,5 +86,12 @@ function diagnosticCode(d: vscode.Diagnostic): string {
 }
 
 function inside(p: string, roots: string[]): boolean {
-  return roots.length === 0 || roots.some((r) => p === r || p.startsWith(r + path.sep));
+  // A root can already end in a separator, since "/" and "C:\\" are folders a
+  // user can open. Comparing against "//" then matched nothing at all, so the
+  // agent was told every time that the code had no problems.
+  const norm = (r: string) => (r.length > 1 && r.endsWith(path.sep) ? r.slice(0, -1) : r);
+  return roots.length === 0 || roots.some((raw) => {
+    const r = norm(raw);
+    return p === r || p.startsWith(r.endsWith(path.sep) ? r : r + path.sep);
+  });
 }

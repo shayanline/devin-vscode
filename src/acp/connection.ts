@@ -103,7 +103,12 @@ export class JsonRpcConnection {
       this.send({
         jsonrpc: "2.0",
         id: msg.id,
-        error: { code: -32000, message: err instanceof Error ? err.message : String(err) }
+        error: {
+          // A handler that names a JSON-RPC code (a method we do not serve) keeps it,
+          // since that is how the agent tells "not supported" from "it went wrong".
+          code: typeof (err as { code?: unknown })?.code === "number" ? (err as { code: number }).code : -32000,
+          message: err instanceof Error ? err.message : String(err)
+        }
       });
     }
   }

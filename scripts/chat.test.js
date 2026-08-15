@@ -201,7 +201,7 @@ test("a chat that finishes starting in the background does not take the panel", 
   // Generous, because the whole suite runs in parallel and this waits on a process being
   // spawned: the budget is not the thing under test, so it says why if it runs out.
   assert.ok(
-    await h.until(() => h.liveChats() === 2, 20000),
+    await h.until(() => h.liveChats() === 2, 60000),
     `the second chat finished opening. asked: ${h.agentSaw("session/new").length}, open: ${h.liveChats()},` +
       ` errors: ${JSON.stringify(h.postsOf("error"))}, log: ${h.logs.slice(-3).join(" | ")}`
   );
@@ -393,7 +393,7 @@ test("a chat announcing its mode while it starts does not set the panel's", posi
   await h.settle(120);
   h.send({ type: "loadSession", id: first });
   await h.until(() => h.activeId() === first, 6000);
-  assert.ok(await h.until(() => h.liveChats() === 2, 20000), "the background chat finished starting");
+  assert.ok(await h.until(() => h.liveChats() === 2, 60000), "the background chat finished starting");
   await h.settle(300);
 
   assert.strictEqual(h.activeId(), first, "the panel stays where the user put it");
