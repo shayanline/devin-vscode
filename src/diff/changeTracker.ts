@@ -173,6 +173,28 @@ export class ChangeTracker
     this.refreshGroup();
   }
 
+  // Write the working set out now rather than in 400ms. The window is small and
+  // it is exactly the one a reload lands in: a Keep pressed just before one was
+  // never written, so the next window brought the change back as still pending,
+  // holding text older than the file it would put back.
+  async flush(): Promise<void> {
+    if (this.saveTimer) {
+      clearTimeout(this.saveTimer);
+      this.saveTimer = undefined;
+    }
+    await this.save();
+  }
+
+  dispose(): void {
+    if (this.saveTimer) {
+      clearTimeout(this.saveTimer);
+      this.saveTimer = undefined;
+    }
+    this.contentChanged.dispose();
+    this.listChanged.dispose();
+    this.resolved.dispose();
+  }
+
   private scheduleSave(): void {
     if (!this.store || this.saveTimer) {
       return;

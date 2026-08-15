@@ -997,7 +997,7 @@ export class ChatController implements AcpHost {
         }
       },
       (line) => this.log(line),
-      new VsCodeTerminalRunner(cwd, this.clientEnv(), (line) => this.log(line))
+      new VsCodeTerminalRunner(cwd, this.configuredEnv(), (line) => this.log(line))
     );
     const rt: Runtime = {
       id: "",
@@ -1765,12 +1765,20 @@ export class ChatController implements AcpHost {
   }
 
   private clientEnv(): NodeJS.ProcessEnv {
+    return { ...(this.env || process.env), ...this.configuredEnv() };
+  }
+
+  // What the user asked to be set, on top of whatever environment the thing
+  // being started already has. The integrated terminal takes only this: it opens
+  // its own login shell, so handing it a whole cached environment would put a
+  // stale copy of that shell's own variables back over it.
+  private configuredEnv(): Record<string, string> {
     const extra = this.cfg().get<Record<string, string>>("env", {}) || {};
     // `devin acp` has no --sandbox flag: the env var is the only way in, which is
     // why the sandbox rows in the settings panel did nothing on their own. Set
     // before `devin.env` so an explicit DEVIN_SANDBOX there still wins.
-    const sandbox = this.cfg().get<boolean>("sandbox", false) ? { DEVIN_SANDBOX: "1" } : {};
-    return { ...(this.env || process.env), ...sandbox, ...extra };
+    const sandbox: Record<string, string> = this.cfg().get<boolean>("sandbox", false) ? { DEVIN_SANDBOX: "1" } : {};
+    return { ...sandbox, ...extra };
   }
 
   private async ensureInitialized(rt: Runtime): Promise<void> {
@@ -2441,7 +2449,16 @@ export class ChatController implements AcpHost {
     const ids = this.store.ids();
     return client
       .listSessions()
-      .then((rows) => fromAcpRows(rows, ids))
+      .then((rows) => {
+        // No rows at all, from an agent that has a session of its own to report, is
+        // not an answer about the user's sessions: it is the call not working (a
+        // renamed field after a CLI upgrade, a reset store). Fall back rather than
+        // paint an empty list.
+        if (!rows.length && ids.length) {
+          throw new Error("session/list answered with no sessions");
+        }
+        return fromAcpRows(rows, ids);
+      })
       .catch((err) => {
         // An agent that cannot answer must not empty the list: fall back for this
         // refresh and let the next one try again.

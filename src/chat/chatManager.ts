@@ -274,8 +274,13 @@ export class ChatManager implements vscode.WebviewViewProvider, vscode.WebviewPa
     this.focus();
     void this.sidebar?.newSession();
   }
-  showSessions(): void {
-    void this.sidebar?.showSessionsView();
+  // Through `ensureSidebar`, because the extension has no activation event of its
+  // own for most of these: the command being run is what starts it, so on the
+  // first press of the shortcut (or the first click of the status bar) there is
+  // no sidebar controller yet, and a bare `this.sidebar?.` did nothing at all.
+  async showSessions(): Promise<void> {
+    const chat = await this.ensureSidebar();
+    await chat?.showSessionsView();
   }
 
   // --- Entry points from the editor ----------------------------------------
@@ -310,14 +315,19 @@ export class ChatManager implements vscode.WebviewViewProvider, vscode.WebviewPa
     // The chat the shortcut was pressed in, which is not always the side panel's.
     (ChatController.focusedSurface() ?? this.sidebar)?.pickSession(index);
   }
+  // The chat the user is actually in, like `switchSession`: with the only running
+  // turn in an editor tab, cancelling the side panel's chat stopped nothing, or
+  // stopped an unrelated turn it happened to be showing.
   cancel(): void {
-    this.sidebar?.cancel();
+    (ChatController.focusedSurface() ?? this.sidebar)?.cancel();
   }
-  runSetup(): void {
-    void this.sidebar?.runSetup();
+  async runSetup(): Promise<void> {
+    const chat = await this.ensureSidebar();
+    await chat?.runSetup();
   }
-  showInfo(): void {
-    void this.sidebar?.showInfo();
+  async showInfo(): Promise<void> {
+    const chat = ChatController.focusedSurface() ?? (await this.ensureSidebar());
+    await chat?.showInfo();
   }
 
   // Rename the chat in the editor tab this was invoked on (its context menu). VS

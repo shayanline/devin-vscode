@@ -167,6 +167,29 @@ test("the working set survives a window reload, counts and all", async () => {
   assert.deepStrictEqual(last.pathsFor("A"), [], "a change already dealt with stays dealt with");
 });
 
+test("a Keep taken just before the window goes is not forgotten", async () => {
+  // The save is debounced by 400ms and the timer is unref'd, so the host is free to
+  // exit with it pending. Press Keep and reload inside that window and the change
+  // came back as still pending, holding text older than the file: pressing Undo on
+  // that row would wind back an edit already accepted. `deactivate` waits for this.
+  const dir = fs.mkdtempSync(path.join(TMP, "flush-"));
+  const store = { scheme: "file", path: dir, fsPath: dir, query: "", toString: () => "file://" + dir };
+  const file = write("kept-then-reloaded.ts", "v2\n");
+
+  const before = new ChangeTracker();
+  before.register();
+  await before.useStore(store);
+  before.recordDiff(file, "v1\n", "v2\n", "A", { added: 1, removed: 1 });
+  await new Promise((r) => setTimeout(r, 600));
+  before.accept(file);
+  await before.flush();
+
+  const after = new ChangeTracker();
+  after.register();
+  await after.useStore(store);
+  assert.deepStrictEqual(after.pathsFor("A"), [], "the Keep was written before the window went");
+});
+
 test("two saves of the working set do not write over each other", async () => {
   // The scratch file is named for the process, which stops two windows colliding,
   // and both saves of one window still shared it. A save takes as long as it takes

@@ -7,6 +7,9 @@ import { StringDecoder } from "string_decoder";
 // enough that a build's worth of chunks is a few dozen posts rather than hundreds
 // of full buffer copies.
 const OUTPUT_POST_MS = 80;
+// What a finished, released terminal keeps. Enough that its row can still be
+// asked for its output, and not the whole megabyte it was allowed while running.
+const RELEASED_OUTPUT_BYTES = 64 * 1024;
 
 export interface EnvVariable {
   name: string;
@@ -296,10 +299,10 @@ export class TerminalManager {
     const errDecoder = new StringDecoder("utf8");
     child.stdout?.on("data", (chunk: Buffer) => append(outDecoder.write(chunk)));
     child.stderr?.on("data", (chunk: Buffer) => append(errDecoder.write(chunk)));
-    child.on("error", (err) => {
-      term.output += `\n[spawn error] ${err.message}\n`;
-      this.onOutput?.(terminalId, term.output, term.exitStatus);
-    });
+    // Through `append` like every other write: added straight to the buffer, it
+    // was not counted, so the byte limit the agent asked for could be exceeded by
+    // a reply it then had to parse.
+    child.on("error", (err) => append(`\n[spawn error] ${err.message}\n`));
     child.on("close", (code, signal) => settle({ exitCode: code, signal: signal ? String(signal) : null }));
 
     this.log?.(`[terminal] ${terminalId} start: ${params.command} ${(params.args || []).join(" ")}`);
@@ -458,7 +461,10 @@ export class TerminalManager {
     if (term.exitStatus) {
       // Over and done with. The entry stays: the row can still be asked for its
       // output, and answering an empty one wiped a finished command's output out of
-      // the transcript.
+      // the transcript. What it does not need is the whole buffer, up to a megabyte
+      // of it, held for the rest of the chat: a build loop's worth of released
+      // commands added up to hundreds of megabytes that nothing could free.
+      this.trim(term, RELEASED_OUTPUT_BYTES);
       return;
     }
     // Still running and not something the user asked to keep, so stop it the way
@@ -467,6 +473,27 @@ export class TerminalManager {
     this.signal(term, "SIGTERM");
     const t = setTimeout(() => this.signal(term, "SIGKILL"), 1500);
     t.unref?.();
+  }
+
+  // Cut a finished terminal's buffer back to its last `limit` bytes. Only ever
+  // called once the command has exited, so the running byte count its writer
+  // keeps cannot be left disagreeing with the buffer.
+  private trim(term: Term, limit: number): void {
+    if (Buffer.byteLength(term.output, "utf8") <= limit) {
+      return;
+    }
+    let out = term.output.slice(-limit);
+    while (Buffer.byteLength(out, "utf8") > limit) {
+      out = out.slice(Math.ceil(out.length * 0.1) || 1);
+    }
+    // Never starting on the second half of a surrogate pair: a lone one is not
+    // valid text, and the agent's parser rejects the whole reply carrying it.
+    const first = out.charCodeAt(0);
+    if (first >= 0xdc00 && first <= 0xdfff) {
+      out = out.slice(1);
+    }
+    term.output = out;
+    term.truncated = true;
   }
 
   // Everything this chat was running, on the way out (terminating it, an idle

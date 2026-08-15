@@ -36,7 +36,12 @@ export class VsCodeTerminalRunner implements TerminalRunner {
 
   constructor(
     private readonly cwd: string,
-    private readonly env: NodeJS.ProcessEnv,
+    // What `devin.env` and the sandbox setting add, and nothing else: the shell
+    // this terminal opens brings its own environment. Without it a command the
+    // agent ran here missed the API key or the PATH entry the same command got
+    // when it ran as a child process, which is the fallback path, so the two
+    // disagreed with nothing to say why.
+    private readonly env: Record<string, string>,
     private readonly log?: (line: string) => void
   ) {}
 
@@ -132,7 +137,8 @@ export class VsCodeTerminalRunner implements TerminalRunner {
         name: "Devin",
         iconPath: new vscode.ThemeIcon("sparkle"),
         cwd: this.cwd,
-        env: { ...PAGERS },
+        // The pagers last: a pager set here is one the agent cannot get out of.
+        env: { ...this.env, ...PAGERS },
         // Out of the way until it is wanted: the chat shows the output, and the
         // Show Terminal action is what brings this one up.
         hideFromUser: true,

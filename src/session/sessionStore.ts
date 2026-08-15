@@ -35,7 +35,10 @@ export class SessionStore {
     if (!ids.length) {
       return Promise.resolve();
     }
-    const next = [...new Set([...this.interrupted(), ...ids])].slice(0, 50);
+    // Newest first, because the cap drops the tail: with the old ids in front, a
+    // list that had filled up with sessions nobody reopened silently stopped
+    // recording new ones, and the notice a reload owes the user never appeared.
+    const next = [...new Set([...ids, ...this.interrupted()])].slice(0, 50);
     return this.state.update(SessionStore.INTERRUPTED_KEY, next);
   }
 
@@ -239,6 +242,14 @@ export class SessionStore {
       void this.state.update(SessionStore.CWDS_KEY, cwds);
     }
     this.setDraft(id, "");
+    // A session that has gone will never be reopened to clear this itself, and the
+    // list it sits in is capped.
+    this.clearInterrupted(id);
+    const titles = this.titles();
+    if (id in titles) {
+      delete titles[id];
+      void this.state.update(SessionStore.TITLES_KEY, titles);
+    }
     if (this.activeId() === id) {
       this.setActive(undefined);
     }

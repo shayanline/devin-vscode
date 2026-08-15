@@ -255,6 +255,31 @@ test("a command left running in the background survives the agent releasing it",
   assert.strictEqual(killed, 1, "the way out still stops it");
 });
 
+test("a finished terminal stops holding its whole output once the agent lets it go", async () => {
+  // The entry has to stay, because its row can still be asked for what the command
+  // printed. The megabyte behind it does not: a build loop's worth of released
+  // commands added up to hundreds of megabytes that nothing could free until the
+  // chat was closed.
+  let emit = () => {};
+  let settle = () => {};
+  const run = { exit: new Promise((r) => { settle = r; }), show() {}, kill() {} };
+  const runner = { run: async (_c, _cwd, onData) => { emit = onData; return run; }, dispose() {} };
+  const terms = new TerminalManager(process.env, TMP, undefined, undefined, runner);
+
+  const { terminalId } = terms.create({ sessionId: "s1", command: "npm run build" });
+  await new Promise((r) => setTimeout(r, 20));
+  emit("noise\n".repeat(60000) + "the last line\n");
+  settle({ exitCode: 0, signal: null });
+  await new Promise((r) => setTimeout(r, 30));
+  assert.ok(terms.output(terminalId).output.length > 300000, "it held all of it while it ran");
+
+  terms.release(terminalId);
+  const after = terms.output(terminalId).output;
+  assert.ok(Buffer.byteLength(after, "utf8") <= 64 * 1024, "and not after, " + after.length);
+  assert.ok(after.endsWith("the last line\n"), "keeping the end, which is the part anyone reads");
+  assert.strictEqual(terms.output(terminalId).truncated, true, "and saying it was cut");
+});
+
 // --- Commands in the user's own terminal -----------------------------------
 
 // Stands in for a shell that reports what it runs. `chunks` are written into the
@@ -308,6 +333,16 @@ test("a command runs in the user's own terminal, and its output is readable", as
   assert.strictEqual(terminal.options.name, "Devin");
   assert.strictEqual(terminal.options.hideFromUser, true, "out of the way until it is wanted");
   assert.strictEqual(terminal.options.env.GIT_PAGER, "cat", "or git diff would wait for a keypress for ever");
+
+  // What the user set in `devin.env` reaches a command run here too. It used to
+  // reach only the fallback (a child process), so the same command worked or
+  // failed depending on which path took it, with nothing said either way.
+  vscode.window.terminals.length = 0;
+  const configured = new VsCodeTerminalRunner("/tmp", { API_KEY: "k", GIT_PAGER: "less" }, () => {});
+  void configured.run("env", undefined, () => {});
+  await tick();
+  assert.strictEqual(vscode.window.terminals[0].options.env.API_KEY, "k", "the setting is in the terminal");
+  assert.strictEqual(vscode.window.terminals[0].options.env.GIT_PAGER, "cat", "and the pager it cannot escape still wins");
 
   // The shell reports itself, so the command can be run through it.
   const shell = fakeShell(terminal);

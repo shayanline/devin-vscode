@@ -37,7 +37,9 @@
     "chat",
     "ai"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onWebviewPanel:devin.chatEditor"
+  ],
   "main": "./dist/extension.js",
   "contributes": {
     "viewsContainers": {
@@ -181,7 +183,8 @@
       {
         "command": "devin.showSessions",
         "key": "ctrl+k ctrl+d",
-        "mac": "cmd+k cmd+d"
+        "mac": "cmd+k cmd+d",
+        "when": "!editorTextFocus"
       },
       {
         "command": "devin.switchSession",

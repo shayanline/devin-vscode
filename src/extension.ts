@@ -13,6 +13,9 @@ import { shutdownQueryAgents } from "./acp/queryClient";
 // extension host over our stdio, so it cannot be handed to the next one: the
 // only safe move on the way out is to stop every agent deterministically.
 let manager: ChatManager | undefined;
+// Held here for the same reason: its last write is debounced, and `deactivate` is
+// the only place left that can wait for it.
+let working: ChangeTracker | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel("Devin");
@@ -29,13 +32,19 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   }, 0).unref?.();
   const changes = new ChangeTracker();
+  working = changes;
   const store = new SessionStore(context.workspaceState);
   const statusBar = new StatusBar();
-  context.subscriptions.push(output, changes.register(), statusBar);
+  context.subscriptions.push(output, changes.register(), changes, statusBar);
   // A change waiting to be reviewed has nothing to do with the agent that made it,
   // so it survives a window reload: without this the diffs and their Keep and Undo
   // were forgotten, and the next edit looked like a brand new set of changes.
-  void changes.useStore(context.storageUri || context.globalStorageUri);
+  // Only with a folder or workspace open. A folderless window has no storage of
+  // its own, and the global directory is shared with every other folderless
+  // window, so one window's save replaced another window's whole working set.
+  if (context.storageUri) {
+    void changes.useStore(context.storageUri);
+  }
 
   manager = new ChatManager(context, store, changes, statusBar, output);
   const chat = manager;
@@ -79,8 +88,11 @@ export function activate(context: vscode.ExtensionContext): void {
 // used to survive as an orphan until the next window reaped it.
 export async function deactivate(): Promise<void> {
   const chat = manager;
+  const changes = working;
   manager = undefined;
+  working = undefined;
   // The chats, and the agent the settings panel opens to ask what is loaded, which
-  // belongs to no chat and so is in no pool for `shutdown` to find.
-  await Promise.all([chat?.shutdown(), shutdownQueryAgents()]);
+  // belongs to no chat and so is in no pool for `shutdown` to find. Plus the
+  // working set, whose last Keep or Undo is still sitting behind a debounce.
+  await Promise.all([chat?.shutdown(), shutdownQueryAgents(), changes?.flush()]);
 }

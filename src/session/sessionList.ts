@@ -101,13 +101,21 @@ export function fromAcpRows(rows: AcpSessionRow[], trackedIds: string[]): ListRe
   const byId = new Map(rows.filter((r) => r && r.sessionId).map((r) => [r.sessionId, r]));
   const sessions: DevinSession[] = [];
   const prunedIds: string[] = [];
+  // An agent that can answer this at all has at least its own session to report, so
+  // no rows is a protocol answer that cannot be true, not a fact about the user's
+  // sessions. Believing it pruned the whole workspace list, and with it every
+  // session's recorded directory and unsent draft, which nothing can bring back.
+  // The CLI path guards the same way, per directory.
+  const usable = byId.size > 0;
   for (const id of trackedIds) {
     const row = byId.get(id);
     if (!row) {
       // One answer covering every directory, so an id that is absent here is gone,
       // with none of the "was that directory queried successfully" doubt the CLI
       // path has to allow for.
-      prunedIds.push(id);
+      if (usable) {
+        prunedIds.push(id);
+      }
       continue;
     }
     sessions.push({

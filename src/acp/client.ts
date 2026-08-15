@@ -101,13 +101,21 @@ export class AcpClient extends EventEmitter {
     }) as ChildProcessWithoutNullStreams;
 
     child.on("error", (err) => this.emit("log", `[spawn-error] ${err.message}`));
-    child.on("close", (code) => {
+    const gone = (code: number | null, from: string) => {
+      if (this.exited) {
+        return;
+      }
       this.exited = true;
-      this.emit("log", `[acp-exit] code=${code}`);
+      this.emit("log", `[acp-${from}] code=${code}`);
       // Reap any MCP children that outlived the agent.
       this.killTree("SIGKILL");
       this.emit("exit");
-    });
+    };
+    child.on("close", (code) => gone(code, "exit"));
+    // The agent's own end, which is not the same moment: `close` also waits for
+    // the pipes, and an MCP server it started holds them open. Waiting only for
+    // `close` left a chat looking alive after its agent had died.
+    child.on("exit", (code) => gone(code, "exited"));
 
     this.child = child;
     this.conn = new JsonRpcConnection(

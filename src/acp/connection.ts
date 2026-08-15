@@ -30,6 +30,11 @@ export class JsonRpcConnection {
     this.child.stderr.setEncoding("utf8");
     this.child.stderr.on("data", (chunk: string) => this.onLog?.(chunk.toString()));
     this.child.on("close", () => this.handleClose());
+    // `close` waits for the pipes as well as the process, and the agent starts
+    // its MCP servers as children that inherit them: one of those outliving a
+    // crashed agent held `close` back, and a turn waiting on a prompt (the one
+    // call with no timeout) never heard that its agent had gone.
+    this.child.on("exit", () => this.handleClose());
     // Without listeners, a stream `error` (e.g. EPIPE on stdin after the agent
     // dies) is thrown as an unhandled error and can crash the extension host.
     this.child.stdin.on("error", (err) => this.onLog?.(`[stdin-error] ${err.message}`));
@@ -169,11 +174,13 @@ export class JsonRpcConnection {
   }
 
   dispose(): void {
-    this.closed = true;
     try {
       this.child.stdin.end();
     } catch {
       // ignore
     }
+    // Nothing is going to answer these now. Left pending, a call made just before
+    // the agent was disposed hung for ever, and its caller with it.
+    this.handleClose();
   }
 }
