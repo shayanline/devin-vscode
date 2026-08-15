@@ -20,6 +20,7 @@ Chats stop borrowing each other's things.
 - Queued messages survive closing the tab and an agent dying unasked.
 - A chat starting in the background leaves your mode and model alone.
 - Undo all in one chat leaves a file another chat changed, and says so.
+- Keep or undo on a file that has since been deleted just clears it.
 - An edit row says a change was undone only once it really has been.
 - A thought stays where you scrolled it while the agent keeps working.
 - An edited request is sent once, however many times Enter is pressed.

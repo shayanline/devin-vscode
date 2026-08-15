@@ -460,11 +460,15 @@ export class ChangeTracker
   // content change is fired because nothing about the original changed.
   accept(fsPath?: string): void {
     const snap = fsPath ? this.snapshots.get(key(fsPath)) : undefined;
-    if (!snap) {
-      return;
+    if (snap) {
+      this.settle(snap, "accept");
     }
+  }
+
+  // Out of the working set, whichever way it was dealt with.
+  private settle(snap: Snapshot, action: "accept" | "reject"): void {
     snap.resolved = true;
-    this.resolved.fire({ paths: [snap.path], action: "accept" });
+    this.resolved.fire({ paths: [snap.path], action });
     this.refreshGroup();
   }
 
@@ -477,6 +481,15 @@ export class ChangeTracker
     const snap = fsPath ? this.snapshots.get(key(fsPath)) : undefined;
     if (!snap) {
       return false;
+    }
+    // The file has gone since it was changed, so there is nothing to put back and
+    // nothing to keep: whatever happened to it after Devin touched it is the answer, and
+    // its row is only in the way. Writing the original back would recreate a file that
+    // was deleted on purpose, and when the folder had gone with it the write failed and
+    // left a row whose buttons did nothing at all.
+    if (!fs.existsSync(snap.path)) {
+      this.settle(snap, "reject");
+      return true;
     }
     try {
       if (snap.original === null) {
@@ -494,9 +507,7 @@ export class ChangeTracker
       );
       return false;
     }
-    snap.resolved = true;
-    this.resolved.fire({ paths: [snap.path], action: "reject" });
-    this.refreshGroup();
+    this.settle(snap, "reject");
     return true;
   }
 

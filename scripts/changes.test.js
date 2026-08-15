@@ -208,6 +208,45 @@ test("two saves of the working set do not write over each other", async () => {
   }
 });
 
+test("a file that has gone is dismissed, not put back", async () => {
+  // A file the agent changed can be deleted afterwards, and its row stays in the changed
+  // files tray. There is nothing left to keep and nothing to put back, so whichever
+  // action is chosen the row goes: undoing used to recreate a file that had been deleted
+  // on purpose, and when the folder had gone with it, it failed and left a row whose
+  // buttons did nothing at all.
+  const vscode = globalThis.__dvVscode;
+  vscode.window.shown.error.length = 0;
+  const tracker = new ChangeTracker();
+  tracker.register();
+
+  // Deleted, with its folder still there: writing the original back would recreate it.
+  const deleted = write("deleted-since.ts", "v2\n");
+  tracker.recordDiff(deleted, "v1\n", "v2\n", "A", { added: 1, removed: 1 });
+  fs.rmSync(deleted);
+  assert.strictEqual(await tracker.reject(deleted), true, "undo answers that it is dealt with");
+  assert.deepStrictEqual(tracker.pathsFor("A"), [], "and the row goes");
+  assert.ok(!fs.existsSync(deleted), "the file stays deleted");
+
+  // Deleted along with the folder it was in, which is what used to fail outright.
+  const dir = path.join(TMP, "gone-folder");
+  fs.mkdirSync(dir, { recursive: true });
+  const inFolder = path.join(dir, "in-a-gone-folder.ts");
+  fs.writeFileSync(inFolder, "v2\n");
+  tracker.recordDiff(inFolder, "v1\n", "v2\n", "B", { added: 1, removed: 1 });
+  fs.rmSync(dir, { recursive: true });
+  assert.strictEqual(await tracker.reject(inFolder), true, "undo still answers");
+  assert.deepStrictEqual(tracker.pathsFor("B"), [], "and that row goes too");
+  assert.deepStrictEqual(vscode.window.shown.error, [], "with nothing to report: this is not a failure");
+
+  // And keeping one is the same: there is nothing to keep either.
+  const keptGone = write("kept-and-gone.ts", "v2\n");
+  tracker.recordDiff(keptGone, "v1\n", "v2\n", "C", { added: 1, removed: 1 });
+  fs.rmSync(keptGone);
+  tracker.accept(keptGone);
+  assert.deepStrictEqual(tracker.pathsFor("C"), [], "keep dismisses it as well");
+  assert.ok(!fs.existsSync(keptGone), "and does not bring it back either");
+});
+
 test("one save that fails does not stop every save after it", async () => {
   // The saves are chained so they cannot write over each other. A chain built out of
   // `then` alone carries a rejection forward for ever, so one failed write would leave
