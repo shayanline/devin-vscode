@@ -112,10 +112,17 @@ process.stdin.on("data", async (chunk) => {
           }
         });
         break;
-      case "session/new":
+      case "session/new": {
+        const newId = idBase + "-" + ++seq;
+        // The real agent announces the session's mode before it answers, so this
+        // update arrives while its runtime is not yet in the pool to be found by
+        // id. Anything that answers such an update with "whatever is on screen"
+        // paints one chat's settings into another's.
+        send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: newId, update: { sessionUpdate: "current_mode_update", currentModeId: process.env.DV_MODE || "default" } } });
         await delay(num("DV_NEW_DELAY"));
-        reply({ sessionId: idBase + "-" + ++seq, modes: { currentModeId: process.env.DV_MODE || "default", availableModes: [{ id: "default", name: "Default" }, { id: "plan", name: "Plan" }] } });
+        reply({ sessionId: newId, modes: { currentModeId: process.env.DV_MODE || "default", availableModes: [{ id: "default", name: "Default" }, { id: "plan", name: "Plan" }] } });
         break;
+      }
       case "session/load":
         await delay(num("DV_LOAD_DELAY"));
         reply({});

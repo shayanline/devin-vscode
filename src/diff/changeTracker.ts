@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -7,6 +8,14 @@ interface Snapshot {
   // normalised form of it (see `key`), so this is the one to show and write to.
   path: string;
   original: string | null; // null means the file did not exist before the session
+  // What the agent left behind: a hash of the text it reported, and the file's
+  // own timestamp and size just after. An undo writes `original` over whatever is
+  // there now, so these are how it tells a file still holding the agent's edit
+  // from one the user has worked on since, and asks before discarding that work.
+  // A hash rather than the text, since the store already carries every original
+  // and this only ever answers yes or no.
+  agentHash?: string;
+  agentStat?: { mtimeMs: number; size: number };
   // Sessions that have edited this file. The original content belongs to the
   // file, but the working set is per session: each chat shows what it changed,
   // and reopening one gets its own files back rather than the last chat's.
@@ -26,6 +35,8 @@ interface Snapshot {
 interface StoredSnapshot {
   path: string;
   original: string | null;
+  agentHash?: string;
+  agentStat?: { mtimeMs: number; size: number };
   sessions: string[];
   resolved?: boolean;
   added?: number;
@@ -44,6 +55,23 @@ const MAX_STORE_BYTES = 8 * 1024 * 1024;
 // same file made two working set rows and two originals, and undoing them in order
 // wrote the older text over the newer content.
 const realNames = new Map<string, string>();
+
+// Line endings and a byte order mark are not the user's work: the agent reports
+// the content it meant to write, and what lands on disk can differ in both (see
+// the CRLF and BOM handling in the write path), so hashing them in would call
+// every file changed and ask about an undo nobody needs to be asked about.
+function contentHash(text: string): string {
+  return crypto.createHash("sha1").update(text.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n")).digest("hex");
+}
+
+function statOf(fsPath: string): { mtimeMs: number; size: number } | undefined {
+  try {
+    const s = fs.statSync(fsPath);
+    return { mtimeMs: s.mtimeMs, size: s.size };
+  } catch {
+    return undefined;
+  }
+}
 
 function key(fsPath: string): string {
   const resolved = path.resolve(fsPath);
@@ -131,6 +159,8 @@ export class ChangeTracker
         this.snapshots.set(key(s.path), {
           path: s.path,
           original: s.original ?? null,
+          agentHash: s.agentHash,
+          agentStat: s.agentStat,
           sessions: new Set(s.sessions),
           resolved: s.resolved,
           added: s.added,
@@ -176,6 +206,8 @@ export class ChangeTracker
       .map((s) => ({
         path: s.path,
         original: s.original,
+        agentHash: s.agentHash,
+        agentStat: s.agentStat,
         sessions: [...s.sessions],
         added: s.added,
         removed: s.removed
@@ -330,6 +362,8 @@ export class ChangeTracker
     if (snap) {
       snap.added = stat?.added;
       snap.removed = stat?.removed;
+      snap.agentHash = contentHash(newText);
+      snap.agentStat = statOf(fsPath);
       snap.sessions.add(sessionId);
       if (snap.resolved) {
         // Kept or undone, and now edited again. The review starts from what was
@@ -344,12 +378,13 @@ export class ChangeTracker
       this.snapshots.set(key(fsPath), {
         path: fsPath,
         original: oldText,
+        agentHash: contentHash(newText),
+        agentStat: statOf(fsPath),
         sessions: new Set([sessionId]),
         added: stat?.added,
         removed: stat?.removed
       });
     }
-    void newText;
     this.contentChanged.fire(this.originalUri(fsPath));
     this.refreshGroup();
   }
@@ -491,10 +526,13 @@ export class ChangeTracker
       this.settle(snap, "reject");
       return true;
     }
+    if (!(await this.confirmNoLaterWork(snap))) {
+      return false;
+    }
     try {
       if (snap.original === null) {
         await fs.promises.rm(snap.path, { force: true });
-      } else {
+      } else if (!(await this.writeThroughEditor(snap.path, snap.original))) {
         await fs.promises.writeFile(snap.path, snap.original, "utf8");
       }
     } catch (err) {
@@ -509,6 +547,80 @@ export class ChangeTracker
     }
     this.settle(snap, "reject");
     return true;
+  }
+
+  // An undo writes the text from before the agent's edit, so anything the user
+  // did to the file since goes with it, and that work is in no diff and no
+  // history: this is the one place it can be lost for good. Only asks when the
+  // file really has moved on, and a snapshot recorded before this was tracked
+  // has nothing to compare, so it undoes as it always did.
+  private async confirmNoLaterWork(snap: Snapshot): Promise<boolean> {
+    if (!snap.agentHash) {
+      return true;
+    }
+    let current: string;
+    const doc = this.openDocument(snap.path);
+    if (doc?.isDirty) {
+      // Unsaved work is exactly what this is protecting, and the file on disk
+      // cannot see it.
+      current = doc.getText();
+    } else {
+      // The file's own timestamp answers the ordinary case without reading it,
+      // and it is the half of the answer the text cannot give on its own: what
+      // the agent reports is the content it meant to write, which is not always
+      // byte for byte what landed. Both have to say the file has moved on, or an
+      // undo of a perfectly ordinary edit would stop to ask about nothing.
+      const now = statOf(snap.path);
+      if (!snap.agentStat || !now || (now.mtimeMs === snap.agentStat.mtimeMs && now.size === snap.agentStat.size)) {
+        return true;
+      }
+      try {
+        current = await fs.promises.readFile(snap.path, "utf8");
+      } catch {
+        // Unreadable, so there is nothing to compare it against. The write below
+        // will fail too, and it reports that properly.
+        return true;
+      }
+    }
+    if (contentHash(current) === snap.agentHash) {
+      return true;
+    }
+    const name = path.basename(snap.path);
+    const choice = await vscode.window.showWarningMessage(
+      `${name} has changed since Devin edited it.`,
+      {
+        modal: true,
+        detail: `Undo puts back the version from before Devin's edit, which discards everything changed since.`
+      },
+      "Undo Anyway"
+    );
+    return choice === "Undo Anyway";
+  }
+
+  private openDocument(fsPath: string): vscode.TextDocument | undefined {
+    const k = key(fsPath);
+    return vscode.workspace.textDocuments.find(
+      (d) => d.uri.scheme === "file" && !d.isClosed && key(d.uri.fsPath) === k
+    );
+  }
+
+  // Through the editor when the file is open, so an unsaved buffer is put back
+  // with it: writing the file underneath a dirty editor left the agent's text in
+  // the buffer, so the undo looked like it had done nothing and the next save
+  // wrote the agent's version back. Answers false when the file is not open,
+  // which is the ordinary case and the one the plain write serves.
+  private async writeThroughEditor(fsPath: string, text: string): Promise<boolean> {
+    const doc = this.openDocument(fsPath);
+    if (!doc) {
+      return false;
+    }
+    const edit = new vscode.WorkspaceEdit();
+    const whole = new vscode.Range(doc.positionAt(0), doc.positionAt(doc.getText().length));
+    edit.replace(doc.uri, whole, text);
+    if (!(await vscode.workspace.applyEdit(edit))) {
+      return false;
+    }
+    return doc.save();
   }
 
   // With a session, only that chat's files: the tray these come from says "N

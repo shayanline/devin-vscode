@@ -879,7 +879,7 @@ export class ChatController implements AcpHost {
     this.runtimes.set(rt.id, rt);
     rt.client.setHost(this);
     rt.client.on("log", (line: string) => this.log(line));
-    rt.client.on("update", (n: SessionUpdateNotification) => this.onUpdate(n));
+    rt.client.on("update", (n: SessionUpdateNotification) => this.onUpdate(n, rt));
     rt.client.on("output", (o: CliOutput) => this.onCliOutput(rt, o));
     rt.client.on("stopped", (s: AgentStopped) => this.onAgentStopped(rt, s));
     rt.client.on("revertSteps", (s: RevertStepsUpdate) => this.onRevertSteps(rt, s));
@@ -1025,7 +1025,7 @@ export class ChatController implements AcpHost {
     this.spawnedRuntimes.add(rt);
     client.setHost(this);
     client.on("log", (line: string) => this.log(line));
-    client.on("update", (n: SessionUpdateNotification) => this.onUpdate(n));
+    client.on("update", (n: SessionUpdateNotification) => this.onUpdate(n, rt));
     client.on("output", (o: CliOutput) => this.onCliOutput(rt, o));
     client.on("stopped", (s: AgentStopped) => this.onAgentStopped(rt, s));
     client.on("revertSteps", (s: RevertStepsUpdate) => this.onRevertSteps(rt, s));
@@ -1206,11 +1206,18 @@ export class ChatController implements AcpHost {
     this.broadcastStatuses();
   }
 
-  private runtimeBySessionId(sessionId?: string): Runtime | undefined {
+  private runtimeBySessionId(sessionId?: string, owner?: Runtime): Runtime | undefined {
     if (sessionId && this.runtimes.has(sessionId)) {
       return this.runtimes.get(sessionId);
     }
-    // Fall back to the active runtime (e.g. a request that arrives before the
+    // The agent it came from, whenever the caller knows which that is. A session's
+    // first updates arrive before `session/new` returns, so its runtime is not in
+    // the pool to be found by id, and answering with whatever is on screen painted
+    // a chat starting in the background into the chat the user was reading.
+    if (owner) {
+      return owner;
+    }
+    // Otherwise the active runtime (e.g. a request that arrives before the
     // session id is stamped, or a client that only serves one session).
     return this.active();
   }
@@ -2327,6 +2334,14 @@ export class ChatController implements AcpHost {
       await p;
     } finally {
       this.loading.delete(id);
+      // Anything typed while it was waking was queued rather than sent, because
+      // the channel was busy. A load drains its queue on the way out and a wake
+      // did not, so that message sat there until some later turn finished, out of
+      // order, or until the user noticed and sent it by hand.
+      const opened = this.runtimes.get(id);
+      if (opened) {
+        this.flushQueue(opened);
+      }
     }
   }
 
@@ -3558,10 +3573,15 @@ export class ChatController implements AcpHost {
       giveBack();
       return;
     }
-    // If the visible session is still coming back to life (a silent background
-    // wake), wait for it so the prompt lands on a ready runtime.
-    if (!startNew && this.activeId) {
-      const waking = this.runtimes.get(this.activeId)?.waking;
+    // Everything from here on is about `target`, the chat this message was written
+    // in, and never about whatever is on screen by the time it goes out. A wake
+    // takes seconds, and a message written in one chat and sent to another is the
+    // worst thing this method can do.
+    const target = draftFor;
+    // If that session is still coming back to life (a silent background wake),
+    // wait for it so the prompt lands on a ready runtime.
+    if (!startNew && target) {
+      const waking = this.runtimes.get(target)?.waking;
       if (waking) {
         await waking;
       }
@@ -3569,8 +3589,8 @@ export class ChatController implements AcpHost {
       // prompt sent into that is swallowed. Queue it: the load drains the queue
       // when it finishes, and it shows as pending in the meantime instead of
       // seeming to vanish.
-      const rt = this.runtimes.get(this.activeId);
-      if (rt && (rt.replaying || this.loading.has(this.activeId))) {
+      const rt = this.runtimes.get(target);
+      if (rt && (rt.replaying || this.loading.has(target))) {
         this.enqueueMessage(rt, text, staged);
         return;
       }
@@ -3587,7 +3607,7 @@ export class ChatController implements AcpHost {
       this.post({ type: "userMessage", text, attachments: this.shownAttachments(staged) });
     }
 
-    let rt = startNew ? undefined : this.active();
+    let rt = startNew || !target ? undefined : this.runtimes.get(target);
     // One turn at a time within a session: a message sent while the visible
     // session is mid-turn is queued (and shown as a pending row) rather than
     // dropped, then auto-sent when the turn finishes.
@@ -3597,11 +3617,10 @@ export class ChatController implements AcpHost {
     }
     if (!rt) {
       try {
-        if (!startNew && this.activeId && !this.runtimes.has(this.activeId)) {
-          // The visible session was idle-exited: wake it, then send. The wake takes
-          // seconds, so the message belongs to the session it was written in, not
-          // to whichever one is on screen when the wake finishes.
-          const target = this.activeId;
+        if (!startNew && target) {
+          // The session this was written in was idle-exited: wake it, then send. The
+          // wake takes seconds, so the message belongs to the session it was written
+          // in, not to whichever one is on screen when the wake finishes.
           await this.loadSession(target);
           rt = this.runtimes.get(target);
         } else {
@@ -4220,7 +4239,13 @@ export class ChatController implements AcpHost {
     // tells the agent: the widgets are on the other side and were left on
     // screen, still offering to answer a question nobody was waiting on.
     this.post({ type: "cancelPrompts" });
-    this.setBusy(false);
+    // The composer is free again, but the turn is not over: cancel is a
+    // notification, and the prompt stays open until the agent answers it, which
+    // can take as long as the command it is waiting on. Clearing `rt.busy` here
+    // let the next message past the one gate there is and put a second prompt on
+    // a channel that already had one. `endTurn` clears it when the turn really
+    // ends, and drains anything queued in between.
+    this.post({ type: "busy", value: false });
   }
 
   // Click-through popup for the status bar (the hover card can't be triggered
@@ -4361,9 +4386,9 @@ export class ChatController implements AcpHost {
     }
   }
 
-  private onUpdate(n: SessionUpdateNotification): void {
+  private onUpdate(n: SessionUpdateNotification, owner?: Runtime): void {
     const u = n.update as any;
-    const rt = this.runtimeBySessionId(n.sessionId);
+    const rt = this.runtimeBySessionId(n.sessionId, owner);
     // Delegated work arrives on the same stream as the parent's, tagged in
     // `_meta`. Lift the lifecycle out first, then hand the rest to the switch
     // with the owning subagent attached so the webview can nest it.

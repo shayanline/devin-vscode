@@ -578,3 +578,50 @@ test("a kept file is no longer offered for review, but can still be put back", a
   await tracker.reject(file);
   assert.strictEqual(fs.readFileSync(file, "utf8"), "before\n", "and an undo still restores it");
 });
+
+test("undoing a file that was worked on since asks before discarding that work", async () => {
+  // The one place a user's own work can be lost for good: Undo writes the text from
+  // before Devin's edit, and anything typed since is in no diff and no history. It
+  // used to go without a word, including from "Undo all", which has no confirmation
+  // of its own.
+  const vscode = globalThis.__dvVscode;
+  const tracker = new ChangeTracker();
+  tracker.register();
+  const file = write("worked-on.ts", "agent\n");
+  tracker.recordDiff(file, "before\n", "agent\n", "A", { added: 1, removed: 1 });
+
+  vscode.window.shown.warning.length = 0;
+  vscode.window.answer = undefined;
+  assert.strictEqual(await tracker.reject(file), true, "a file still as Devin left it undoes straight away");
+  assert.strictEqual(fs.readFileSync(file, "utf8"), "before\n");
+  assert.deepStrictEqual(vscode.window.shown.warning, [], "with nothing to ask about");
+
+  // Edited by hand after Devin's edit, and the undo declined.
+  fs.writeFileSync(file, "agent\n", "utf8");
+  tracker.recordDiff(file, "before\n", "agent\n", "A", { added: 1, removed: 1 });
+  fs.writeFileSync(file, "agent\nmine\n", "utf8");
+  assert.strictEqual(await tracker.reject(file), false, "declining answers that nothing was put back");
+  assert.strictEqual(fs.readFileSync(file, "utf8"), "agent\nmine\n", "so the later work is still there");
+  assert.deepStrictEqual(tracker.pathsFor("A"), [file], "and the row stays, still offering to undo");
+  assert.strictEqual(vscode.window.shown.warning.length, 1, "asked once");
+
+  vscode.window.answer = "Undo Anyway";
+  assert.strictEqual(await tracker.reject(file), true, "and answering it undoes as before");
+  assert.strictEqual(fs.readFileSync(file, "utf8"), "before\n");
+  vscode.window.answer = undefined;
+});
+
+test("a file rewritten with other line endings is not mistaken for work to protect", async () => {
+  // The agent reports the content it meant to write, and what lands on disk can
+  // differ in its line endings and byte order mark (the write path adds both back
+  // deliberately). Counting that as a change would ask about every undo.
+  const vscode = globalThis.__dvVscode;
+  const tracker = new ChangeTracker();
+  tracker.register();
+  const file = write("crlf.ts", "one\r\ntwo\r\n");
+  tracker.recordDiff(file, "one\n", "one\ntwo\n", "A", { added: 1, removed: 0 });
+
+  vscode.window.shown.warning.length = 0;
+  assert.strictEqual(await tracker.reject(file), true);
+  assert.deepStrictEqual(vscode.window.shown.warning, [], "no question for a line ending");
+});

@@ -314,4 +314,112 @@ test("a second send never puts a second prompt on the same channel", posixOnly, 
   await h.dispose();
 });
 
+test("a message written while a chat wakes is sent once it is awake", posixOnly, async () => {
+  // A wake takes seconds and its channel is busy replaying, so a message written into
+  // it waits in the queue. Opening a chat drains that queue on the way out and waking
+  // one did not, so the message sat there until some later turn happened to end: sent
+  // out of order, or never, from a chat whose composer had gone quiet.
+  const h = createChat({ promptDelay: 150 });
+  await h.ready();
+  const id = await h.startChat("first");
+  await h.until(() => prompts(h).length === 1, 6000);
+
+  h.answerWith("Terminate");
+  h.send({ type: "terminateSession", id });
+  await h.until(() => h.liveChats() === 0, 6000);
+  h.answerWith(undefined);
+
+  h.setDelays({ loadDelay: 900 });
+  h.send({ type: "wakeSession", id });
+  await h.settle(250);
+  h.send({ type: "send", text: "typed while it woke" });
+  const sent = await h.until(() => prompts(h).some((p) => p.text === "typed while it woke"), 8000);
+
+  assert.ok(sent, "the message went out: " + JSON.stringify(prompts(h)));
+  assert.deepStrictEqual((h.last("queued") || { items: [] }).items, [], "and nothing is left waiting");
+  await h.dispose();
+});
+
+test("a message goes to the chat it was written in, not the one opened while it woke", posixOnly, async () => {
+  // The same shape as every other bug here: the send waits for the wake, and the code
+  // after the await asked what was on screen by then. Writing into a chat, then opening
+  // another while it wakes, used to send the message to that other chat's agent.
+  const h = createChat({ promptDelay: 150 });
+  await h.ready();
+  const woken = await h.startChat("the chat with the message");
+  await h.until(() => prompts(h).length === 1, 6000);
+  h.answerWith("Terminate");
+  h.send({ type: "terminateSession", woken, id: woken });
+  await h.until(() => h.liveChats() === 0, 6000);
+  h.answerWith(undefined);
+
+  const other = await h.startChat("the chat opened instead");
+  await h.until(() => prompts(h).length === 2, 6000);
+  h.send({ type: "leaveToList" });
+  await h.settle(100);
+
+  // Wake the first, write into it, then open the other one while it is still waking.
+  h.setDelays({ loadDelay: 1200 });
+  h.send({ type: "wakeSession", id: woken });
+  await h.settle(250);
+  h.send({ type: "send", text: "for the chat I wrote it in" });
+  await h.settle(50);
+  h.send({ type: "activateSession", id: other });
+  await h.until(() => h.activeId() === other, 4000);
+  await h.settle(2000);
+
+  const carried = h.agentSaw("session/prompt").filter((m) =>
+    (m.params.prompt || []).some((b) => b.text === "for the chat I wrote it in")
+  );
+  assert.strictEqual(carried.length, 1, "it was sent once");
+  assert.strictEqual(carried[0].params.sessionId, woken, "to the chat it was written in");
+  await h.dispose();
+});
+
+test("a chat announcing its mode while it starts does not set the panel's", posixOnly, async () => {
+  // A session's first updates arrive before session/new returns, so its runtime is not
+  // in the pool to be found by id. Answering those with whatever is on screen flipped
+  // the mode picker of the chat being read to a background chat's, which is the one
+  // control where being wrong matters: it says whether permission is asked for before
+  // anything runs.
+  const h = createChat({ config: { defaultMode: "" }, promptDelay: 150 });
+  await h.ready();
+  const first = await h.startChat("the chat on screen");
+  await h.until(() => (h.last("mode") || {}).mode === "default", 6000);
+
+  h.setAgentMode("plan");
+  h.setDelays({ newDelay: 700 });
+  h.send({ type: "send", text: "a chat started in the background", newSession: true });
+  await h.settle(120);
+  h.send({ type: "loadSession", id: first });
+  await h.until(() => h.activeId() === first, 6000);
+  assert.ok(await h.until(() => h.liveChats() === 2, 20000), "the background chat finished starting");
+  await h.settle(300);
+
+  assert.strictEqual(h.activeId(), first, "the panel stays where the user put it");
+  assert.strictEqual(h.last("mode").mode, "default", "and still shows its own mode");
+  assert.notStrictEqual(h.controller.currentMode, "plan", "not the one the background chat announced");
+  await h.dispose();
+});
+
+test("stopping a turn does not let the next message contend with it", posixOnly, async () => {
+  // Stop is a notification: the prompt stays open until the agent answers it, which can
+  // take as long as the command it is waiting on. Freeing the composer is right, but
+  // clearing the turn's own busy flag with it let the next message straight past the one
+  // gate there is and onto a channel that already had a prompt on it.
+  const h = createChat({ promptDelay: 60000 });
+  await h.ready();
+  await h.startChat("a turn that will not end");
+  await h.until(() => prompts(h).length === 1, 6000);
+
+  h.send({ type: "cancel" });
+  await h.settle(100);
+  h.send({ type: "send", text: "after the stop" });
+  await h.settle(600);
+
+  assert.strictEqual(prompts(h).length, 1, "still one prompt: " + JSON.stringify(prompts(h)));
+  assert.strictEqual(h.last("queued").items.length, 1, "and the message is waiting, not lost");
+  await h.dispose();
+});
+
 test.after(() => cleanup());
