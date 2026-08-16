@@ -3215,6 +3215,7 @@ export class ChatController implements AcpHost {
     if (!fsPath) {
       return;
     }
+    fsPath = fileFromUri(fsPath);
     if (!path.isAbsolute(fsPath)) {
       fsPath = path.join(this.active()?.cwd || this.cwd(), fsPath);
     }
@@ -4836,20 +4837,30 @@ export class ChatController implements AcpHost {
     return {};
   }
 
-  // What the editor already knows is wrong with the code. The agent pulls this on
-  // its own schedule (it is not tied to a turn), and only reports problems for
-  // documents it has been told are open, which `sendDocumentEvent` covers.
+  // What the editor already knows is wrong with the code. The agent may pull this
+  // on its own schedule, but idle sessions receive nothing, so an idle pull cannot
+  // start an unsolicited turn. Documents must also be open, which `sendDocumentEvent`
+  // covers.
   requestDiagnostics(params: RequestDiagnosticsParams): RequestDiagnosticsResult {
     if (!this.cfg().get<boolean>("editorContext.diagnostics", true)) {
       return { items: [] };
     }
-    const only = params.path ? vscode.Uri.file(this.resolvePath(params.path, params.sessionId)) : undefined;
+    const runtimes = [...new Set([...this.runtimes.values(), ...this.spawnedRuntimes])];
+    const runtime = params.sessionId
+      ? runtimes.find((candidate) => candidate.id === params.sessionId)
+      : runtimes.length === 1
+        ? runtimes[0]
+        : undefined;
+    if (!runtime?.busy) {
+      return { items: [] };
+    }
+    const only = params.path ? vscode.Uri.file(this.resolvePath(params.path, runtime.id)) : undefined;
     const entries = only
       ? [[only, vscode.languages.getDiagnostics(only)] as [vscode.Uri, readonly vscode.Diagnostic[]]]
       : vscode.languages.getDiagnostics();
     return {
       items: diagnosticItems(entries, {
-        touched: new Set(this.changes.pathsFor(this.runtimeBySessionId(params.sessionId)?.id)),
+        touched: new Set(this.changes.pathsFor(runtime.id)),
         roots: (vscode.workspace.workspaceFolders || []).map((f) => f.uri.fsPath)
       })
     };
@@ -5176,7 +5187,7 @@ function dimensionText(d: ResponseDimension): string {
 // The path inside a file URI, for a resource a tool points at.
 function fileFromUri(uri: string): string {
   try {
-    return uri.startsWith("file:") ? vscode.Uri.parse(uri).fsPath : uri;
+    return /^file:/i.test(uri) ? vscode.Uri.parse(uri).fsPath : uri;
   } catch {
     return uri;
   }

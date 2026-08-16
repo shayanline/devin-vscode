@@ -28,6 +28,8 @@ const md = new MarkdownIt({
     return `<pre class="code-block hljs"${attr}><code>${body}</code></pre>`;
   }
 });
+const defaultLinkValidator = md.validateLink.bind(md);
+md.validateLink = (url) => /^file:/i.test(url) || defaultLinkValidator(url);
 
 export function renderMarkdown(src) {
   return md.render(src || "");

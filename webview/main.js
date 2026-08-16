@@ -1234,23 +1234,28 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     ro.observe(el.inputBox);
   }
 
-  // Clickable anchors in assistant/user text. External links (http/mailto) are
-  // opened by VS Code's own built-in webview link handling, so we must NOT also
-  // open them here or the link opens twice. We only handle the rest: a workspace
-  // path opened in the editor.
+  function isFileReference(href) {
+    const target = href.split(/[?#]/, 1)[0];
+    if (!target || target === "./" || target === "../") return false;
+    return /^[a-z]:[\\/]/i.test(href) || /^file:/i.test(href) ||
+      (!/^[a-z][a-z0-9+.-]*:/i.test(href) && !href.startsWith("//"));
+  }
+  function fileReferenceTarget(href) {
+    if (/^file:/i.test(href)) return href;
+    const path = href.split(/[?#]/, 1)[0];
+    try { return decodeURIComponent(path); } catch { return path; }
+  }
+
+  // Clickable anchors in assistant/user text. External links are opened by VS Code's
+  // own webview link handling, so we only open file and relative links in the editor.
   el.thread.addEventListener("click", (e) => {
     const a = e.target.closest && e.target.closest("a[href]");
     if (!a) return;
     const href = a.getAttribute("href") || "";
-    if (!href || href.startsWith("#")) return;
-    if (/^(https?|mailto):/i.test(href)) return; // let VS Code open it (once)
+    if (!href || href.startsWith("#") || !isFileReference(href)) return;
     e.preventDefault();
     e.stopPropagation();
-    // markdown-it percent encodes every href, so the path has to be decoded
-    // again: a file with a space or an accent in its name opened nothing at all.
-    let target = href;
-    try { target = decodeURI(href); } catch { /* leave it as it came */ }
-    vscode.postMessage({ type: "openFile", path: target });
+    vscode.postMessage({ type: "openFile", path: fileReferenceTarget(href) });
   });
 
   // --- Drag and drop context (files, images), VS Code chat style -----------
@@ -2629,17 +2634,16 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     }).catch(() => { /* mermaid unavailable: leave the source blocks in place */ });
   }
 
-  // File/symbol references in assistant text (non http links) render as VS Code
-  // style inline anchor chips: a bordered pill with a file-type icon. External
-  // links stay plain. With inlineReferences.style === "link" they stay as plain
-  // links (VS Code's chat.inlineReferences.style). Clicks are handled by the
-  // delegated thread listener.
+  // File/symbol references in assistant text render as VS Code style inline anchor
+  // chips: a bordered pill with a file-type icon. External links stay plain. With
+  // inlineReferences.style === "link" they stay as plain links. Clicks are handled
+  // by the delegated thread listener.
   function enhanceAnchors(container) {
     if (!container || caps.inlineReferencesStyle === "link") return;
     container.querySelectorAll("a[href]").forEach((a) => {
       if (a.dataset.anchored) return;
       const href = a.getAttribute("href") || "";
-      if (!href || href.startsWith("#") || /^(https?|mailto):/i.test(href)) return;
+      if (!href || href.startsWith("#") || !isFileReference(href)) return;
       a.dataset.anchored = "1";
       a.classList.add("anchor-chip");
       const icon = document.createElement("i");

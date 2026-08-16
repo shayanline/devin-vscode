@@ -8,6 +8,13 @@ the commit messages carry the detail.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
+## [0.11.11] - 2026-08-16
+
+### Highlights
+- File references in replies render as clickable links and open the referenced file.
+- External links remain external instead of opening as workspace files.
+- Idle chats no longer start a turn from editor diagnostics.
+
 ## [0.11.10]
 
 Chats stop borrowing each other's things.

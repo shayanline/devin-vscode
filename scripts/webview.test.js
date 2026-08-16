@@ -49,6 +49,47 @@ test("live user message renders without a handler error", async () => {
   assert.strictEqual(h.errors().length, 0, "webview handler threw: " + JSON.stringify(h.errors()));
 });
 
+test("assistant file references render as clickable links", async () => {
+  const h = createHarness();
+  const href = "file:///Users/shayan.khaksar/VSCode/devin-vscode/src/acp/client.ts";
+  h.replay([{ role: "assistant", text: `See [client.ts:243-251](${href})` }]);
+  await h.settle();
+
+  const link = h.thread().querySelector(".resp-text a");
+  assert.ok(link, "file references should render as anchors");
+  assert.strictEqual(link.textContent, "client.ts:243-251");
+  assert.strictEqual(link.getAttribute("href"), href);
+  link.dispatchEvent(new h.window.MouseEvent("click", { bubbles: true }));
+  assert.deepStrictEqual(h.posted.at(-1), { type: "openFile", path: href });
+  assert.strictEqual(h.errors().length, 0, "webview handler threw: " + JSON.stringify(h.errors()));
+});
+
+test("external links stay external and relative links open decoded paths", async () => {
+  const h = createHarness();
+  h.replay([{
+    role: "assistant",
+    text: "[FTP](ftp://example.com/file) [Doc](docs/C%23.md#section) " +
+      "[Drive](C:/repo/src/app.ts) [Query](?view=raw) [Section](./#section)"
+  }]);
+  await h.settle();
+
+  const [ftp, doc, drive, query, section] = h.thread().querySelectorAll(".resp-text a");
+  assert.ok(ftp && doc && drive && query && section, "all links should render");
+  assert.ok(!ftp.classList.contains("anchor-chip"), "external links stay plain");
+  assert.ok(doc.classList.contains("anchor-chip"), "relative links use file styling");
+  assert.ok(drive.classList.contains("anchor-chip"), "drive paths use file styling");
+  assert.ok(!query.classList.contains("anchor-chip"), "query links stay plain");
+  assert.ok(!section.classList.contains("anchor-chip"), "empty relative fragments stay plain");
+  ftp.dispatchEvent(new h.window.MouseEvent("click", { bubbles: true }));
+  query.dispatchEvent(new h.window.MouseEvent("click", { bubbles: true }));
+  section.dispatchEvent(new h.window.MouseEvent("click", { bubbles: true }));
+  assert.strictEqual(h.posted.some((m) => m.type === "openFile"), false, "non file links stay with VS Code");
+  drive.dispatchEvent(new h.window.MouseEvent("click", { bubbles: true }));
+  assert.deepStrictEqual(h.posted.at(-1), { type: "openFile", path: "C:/repo/src/app.ts" });
+  doc.dispatchEvent(new h.window.MouseEvent("click", { bubbles: true }));
+  assert.deepStrictEqual(h.posted.at(-1), { type: "openFile", path: "docs/C#.md" });
+});
+
 test("elicitation renders oneOf/anyOf options and submits the chosen consts", async () => {
   const h = createHarness();
   h.post({ type: "ready" });

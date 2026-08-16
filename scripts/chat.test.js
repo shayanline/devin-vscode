@@ -14,6 +14,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert");
+const path = require("node:path");
 const { createChat, cleanup } = require("./chat-harness");
 
 // The fake agent is a `/bin/sh` wrapper, so the CLI resolver cannot run it on Windows:
@@ -23,6 +24,65 @@ const { createChat, cleanup } = require("./chat-harness");
 const posixOnly = { skip: process.platform === "win32" };
 
 const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
+test("idle sessions do not hand diagnostics to the agent", posixOnly, async () => {
+  const h = createChat({ promptDelay: 500 });
+  await h.ready();
+  const uri = globalThis.__dvVscode.Uri.file(path.join(h.cwd, "src", "example.ts"));
+  globalThis.__dvVscode.languages.diagnostics.set(uri.fsPath, [{
+    message: "Lint errors detected.",
+    severity: globalThis.__dvVscode.DiagnosticSeverity.Error,
+    code: "lint",
+    source: "eslint",
+    range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } }
+  }]);
+
+  const id = await h.startChat("check the file");
+  await h.until(() => h.postsOf("busy").some((m) => m.value === true));
+  globalThis.__dvFolders = [{ name: path.basename(h.cwd), uri: globalThis.__dvVscode.Uri.file(h.cwd), index: 0 }];
+  assert.strictEqual(
+    h.controller.requestDiagnostics({ sessionId: id, path: uri.fsPath }).items.length,
+    1,
+    "active turns still receive editor diagnostics"
+  );
+
+  await h.until(() => h.postsOf("busy").some((m) => m.value === false), 3000);
+  assert.deepStrictEqual(
+    h.controller.requestDiagnostics({ sessionId: id, path: uri.fsPath }).items,
+    [],
+    "idle sessions must not trigger an unsolicited diagnostics turn"
+  );
+  await h.dispose();
+});
+
+test("unscoped diagnostics are withheld when multiple sessions exist", posixOnly, async () => {
+  const h = createChat({ promptDelay: 60000 });
+  await h.ready();
+  const first = await h.startChat("first chat");
+  const uri = globalThis.__dvVscode.Uri.file(path.join(h.cwd, "src", "example.ts"));
+  globalThis.__dvVscode.languages.diagnostics.set(uri.fsPath, [{
+    message: "Lint errors detected.",
+    severity: globalThis.__dvVscode.DiagnosticSeverity.Error,
+    code: "lint",
+    source: "eslint",
+    range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } }
+  }]);
+  globalThis.__dvFolders = [{ name: path.basename(h.cwd), uri: globalThis.__dvVscode.Uri.file(h.cwd), index: 0 }];
+
+  h.setDelays({ promptDelay: 500 });
+  h.send({ type: "send", text: "second chat", newSession: true });
+  await h.until(() => {
+    const active = h.controller.runtimes.get(h.activeId());
+    return h.liveChats() === 2 && h.activeId() !== first && active?.busy;
+  }, 6000);
+
+  assert.deepStrictEqual(
+    h.controller.requestDiagnostics({ path: uri.fsPath }).items,
+    [],
+    "an unscoped request must not use another session's active runtime"
+  );
+  await h.dispose();
+});
 
 // What each prompt actually carried, in the order the agent was asked.
 function prompts(h) {
@@ -34,6 +94,22 @@ function prompts(h) {
     };
   });
 }
+
+test("file URI links open the referenced file", posixOnly, async () => {
+  const h = createChat();
+  await h.ready();
+  globalThis.__dvOpened = [];
+  const fileUri = globalThis.__dvVscode.Uri.file(path.join(h.cwd, "src", "client.ts")).toString();
+  const upperFileUri = fileUri.replace(/^file:/, "FILE:");
+
+  for (const href of [fileUri, upperFileUri]) {
+    h.send({ type: "openFile", path: href });
+    await h.until(() => globalThis.__dvOpened.at(-1) === fileUri);
+  }
+
+  assert.deepStrictEqual(globalThis.__dvOpened.slice(-2), [fileUri, fileUri]);
+  await h.dispose();
+});
 
 test("a message does not take the files of the chat opened while it was being sent", posixOnly, async () => {
   // Starting a chat takes seconds, and the composer belongs to whatever is on screen.
