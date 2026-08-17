@@ -8,6 +8,12 @@ the commit messages carry the detail.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
+## [0.12.0] - 2026-08-17
+
+### Highlights
+- Add an opt in setting to auto approve shell commands.
+- Rename Bypass Permissions to Bypass in the mode picker.
+
 ## [0.11.12] - 2026-08-17
 
 ### Highlights

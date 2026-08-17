@@ -25,6 +25,31 @@ const posixOnly = { skip: process.platform === "win32" };
 
 const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
 
+test("auto approve commands answers permission requests without showing them", async () => {
+  const h = createChat({ config: { autoApproveCommands: true } });
+  const pending = h.controller.requestPermission({
+    sessionId: "session",
+    toolCall: {
+      toolCallId: "command",
+      _meta: { "cognition.ai/editableCommand": "gh api graphql" }
+    },
+    options: [
+      { optionId: "allow_once", name: "Allow", kind: "allow_once" },
+      { optionId: "reject_once", name: "Reject", kind: "reject_once" }
+    ]
+  });
+  try {
+    const result = await Promise.race([
+      pending,
+      new Promise((resolve) => setTimeout(() => resolve(undefined), 100))
+    ]);
+    assert.deepStrictEqual(result, { outcome: { outcome: "selected", optionId: "allow_once" } });
+    assert.strictEqual(h.postsOf("permission").length, 0);
+  } finally {
+    await h.dispose();
+  }
+});
+
 test("idle sessions do not hand diagnostics to the agent", posixOnly, async () => {
   const h = createChat({ promptDelay: 500, config: { "editorContext.diagnostics": true } });
   await h.ready();

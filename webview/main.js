@@ -6935,7 +6935,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         break;
       case "workspace": break;
       case "options":
-        modeDropdown.set(m.modes, m.currentMode);
+        modeDropdown.set((m.modes || []).map((mode) => mode.value === "bypass" ? { ...mode, name: "Bypass" } : mode), m.currentMode);
         applyModelOptions(m.models, m.currentModel);
         break;
       case "commands": commands = Array.isArray(m.commands) ? m.commands : []; break;

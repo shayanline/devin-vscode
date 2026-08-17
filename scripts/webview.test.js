@@ -4900,7 +4900,7 @@ test("the mode picker offers whatever modes the agent reports", async () => {
   dd.querySelector("button").dispatchEvent(new h.window.MouseEvent("click", { bubbles: true }));
   await h.settle(20);
   const rows = [...dd.querySelectorAll(".dd-item")].map((r) => r.textContent.trim());
-  assert.deepStrictEqual(rows, ["Code", "Smart", "Ask", "Plan", "Bypass Permissions"]);
+  assert.deepStrictEqual(rows, ["Code", "Smart", "Ask", "Plan", "Bypass"]);
   assert.strictEqual(dd.querySelector(".dd-item.selected").textContent.trim(), "Smart");
   // Devin names its icons after its own set, so they arrive already mapped.
   assert.ok(dd.querySelector(".dd-item-icon.codicon-sparkle"), "the mapped icon is used");
