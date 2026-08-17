@@ -116,8 +116,8 @@ function seen(log) {
   return fs.readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
 }
 
-function start(cli) {
-  const client = new AcpClient({ cliPath: cli, cwd: TMP, env: process.env });
+function start(cli, options = {}) {
+  const client = new AcpClient({ cliPath: cli, cwd: TMP, env: process.env, ...options });
   client.start();
   return client;
 }
@@ -197,7 +197,7 @@ test("every call but a turn is bounded, so no feature can wait for ever", () => 
 
 test("initialize promises only the capabilities we actually serve", async () => {
   const { cli, log } = fakeAgent("caps", {});
-  const client = start(cli);
+  const client = start(cli, { diagnostics: true });
   await client.initialize();
   const init = seen(log).find((m) => m.method === "initialize");
   const declared = Object.keys(init.params.clientCapabilities._meta);
@@ -218,6 +218,18 @@ test("initialize promises only the capabilities we actually serve", async () => 
   await client.shutdown();
 });
 
+test("initialize omits automatic diagnostics when disabled", async () => {
+  const { cli, log } = fakeAgent("caps-off", {});
+  const client = start(cli, { diagnostics: false });
+  await client.initialize();
+  const init = seen(log).find((m) => m.method === "initialize");
+  assert.ok(
+    !Object.hasOwn(init.params.clientCapabilities._meta, "cognition.ai/requestDiagnostics"),
+    "disabled diagnostics must not be advertised to the agent"
+  );
+  await client.shutdown();
+});
+
 test("a diagnostics pull is answered in the shape the agent demands", async () => {
   // The real agent pulls on its own schedule and rejects anything that is not a
   // RequestDiagnosticsResult: a bare null fails with "invalid type: null", and an
@@ -225,7 +237,7 @@ test("a diagnostics pull is answered in the shape the agent demands", async () =
   const { cli, log } = fakeAgent("diag", {}, {
     afterInit: `ask("_cognition.ai/request_diagnostics", {});`
   });
-  const client = start(cli);
+  const client = start(cli, { diagnostics: true });
   client.setHost({
     requestDiagnostics: () => ({
       items: [{

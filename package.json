@@ -374,7 +374,7 @@
         "devin.editorContext.diagnostics": {
           "type": "boolean",
           "default": true,
-          "description": "Let Devin read the editor's problems (errors and warnings) when it asks for them, so it can see what the editor already knows instead of running a compiler or a linter to find out."
+          "description": "Let Devin request diagnostics for a named file instead of running a compiler or a linter. Disable this to keep editor diagnostics out of chat."
         },
         "devin.autoResumeLast": {
           "type": "boolean",

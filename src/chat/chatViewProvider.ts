@@ -984,7 +984,8 @@ export class ChatController implements AcpHost {
       cliPath: this.resolvedCli || "devin",
       cwd,
       env: this.clientEnv(),
-      extraArgs: this.extraArgs()
+      extraArgs: this.extraArgs(),
+      diagnostics: this.cfg().get<boolean>("editorContext.diagnostics", true)
     });
     let ref: Runtime | undefined;
     const terminals = new TerminalManager(
@@ -4837,12 +4838,11 @@ export class ChatController implements AcpHost {
     return {};
   }
 
-  // What the editor already knows is wrong with the code. The agent may pull this
-  // on its own schedule, but idle sessions receive nothing, so an idle pull cannot
-  // start an unsolicited turn. Documents must also be open, which `sendDocumentEvent`
-  // covers.
+  // What the editor already knows is wrong with a file the agent names. Unscoped
+  // pulls receive nothing, so workspace wide editor noise never enters the chat.
+  // Documents must also be open, which `sendDocumentEvent` covers.
   requestDiagnostics(params: RequestDiagnosticsParams): RequestDiagnosticsResult {
-    if (!this.cfg().get<boolean>("editorContext.diagnostics", true)) {
+    if (!this.cfg().get<boolean>("editorContext.diagnostics", true) || !params.path) {
       return { items: [] };
     }
     const runtimes = [...new Set([...this.runtimes.values(), ...this.spawnedRuntimes])];

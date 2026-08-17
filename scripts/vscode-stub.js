@@ -135,7 +135,9 @@ const DiagnosticSeverity = { Error: 0, Warning: 1, Information: 2, Hint: 3 };
 
 const languages = {
   diagnostics: new Map(),
-  getDiagnostics: (uri) => (uri ? languages.diagnostics.get(uri.fsPath) || [] : [...languages.diagnostics])
+  getDiagnostics: (uri) => (uri
+    ? languages.diagnostics.get(uri.fsPath) || []
+    : [...languages.diagnostics].map(([p, list]) => [Uri.file(p), list]))
 };
 
 workspace.getConfiguration = () => ({

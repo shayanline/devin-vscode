@@ -34,6 +34,7 @@ export interface AcpClientOptions {
   cwd: string;
   env?: NodeJS.ProcessEnv;
   extraArgs?: string[];
+  diagnostics?: boolean;
 }
 
 // Callbacks the host (extension) provides so the client can serve the
@@ -244,7 +245,7 @@ export class AcpClient extends EventEmitter {
           // eslint to find out what the editor already knows. Pairs with
           // documentLifecycle: the agent only reports diagnostics for documents it
           // has been told are open.
-          "cognition.ai/requestDiagnostics": true,
+          ...(this.options.diagnostics ? { "cognition.ai/requestDiagnostics": true } : {}),
           // Puts the files the user has open, focused and unsaved into the agent's
           // context, so it stops guessing at what "this file" means and knows when
           // a file it read has unsaved changes.

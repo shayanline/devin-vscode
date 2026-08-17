@@ -26,7 +26,7 @@ const posixOnly = { skip: process.platform === "win32" };
 const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
 
 test("idle sessions do not hand diagnostics to the agent", posixOnly, async () => {
-  const h = createChat({ promptDelay: 500 });
+  const h = createChat({ promptDelay: 500, config: { "editorContext.diagnostics": true } });
   await h.ready();
   const uri = globalThis.__dvVscode.Uri.file(path.join(h.cwd, "src", "example.ts"));
   globalThis.__dvVscode.languages.diagnostics.set(uri.fsPath, [{
@@ -40,6 +40,11 @@ test("idle sessions do not hand diagnostics to the agent", posixOnly, async () =
   const id = await h.startChat("check the file");
   await h.until(() => h.postsOf("busy").some((m) => m.value === true));
   globalThis.__dvFolders = [{ name: path.basename(h.cwd), uri: globalThis.__dvVscode.Uri.file(h.cwd), index: 0 }];
+  assert.deepStrictEqual(
+    h.controller.requestDiagnostics({ sessionId: id }).items,
+    [],
+    "unscoped requests must not return workspace diagnostics"
+  );
   assert.strictEqual(
     h.controller.requestDiagnostics({ sessionId: id, path: uri.fsPath }).items.length,
     1,
@@ -56,7 +61,7 @@ test("idle sessions do not hand diagnostics to the agent", posixOnly, async () =
 });
 
 test("unscoped diagnostics are withheld when multiple sessions exist", posixOnly, async () => {
-  const h = createChat({ promptDelay: 60000 });
+  const h = createChat({ promptDelay: 60000, config: { "editorContext.diagnostics": true } });
   await h.ready();
   const first = await h.startChat("first chat");
   const uri = globalThis.__dvVscode.Uri.file(path.join(h.cwd, "src", "example.ts"));
