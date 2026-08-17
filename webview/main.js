@@ -191,11 +191,12 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       ["Max context", formatTokenCount(item.maxContextTokens)],
       ["Max output", formatTokenCount(item.maxOutputTokens)]
     ].filter(([, value]) => value);
-    const hasConfigurable = !!item.thinkingLevels || !!item.maxContextTokens;
+    const hasConfigurable = !!item.thinkingLevels;
     if (!item.description && !item.costTier && !rowLabels.length && !promotion && !contextRows.length && !hasConfigurable) return null;
+    const compact = !rowLabels.length && !promotion && !contextRows.length && !hasConfigurable;
 
     const card = document.createElement("div");
-    card.className = "model-hover";
+    card.className = "model-hover" + (compact ? " compact" : "");
     const header = document.createElement("div");
     header.className = "model-hover-header" + (item.description ? "" : " no-description");
     header.appendChild(Object.assign(document.createElement("strong"), { className: "model-hover-name", textContent: item.name || "Model" }));
@@ -253,25 +254,16 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       configurable.appendChild(Object.assign(document.createElement("span"), { className: "model-hover-configurable-label", textContent: "Configurable" }));
       const controls = document.createElement("div");
       controls.className = "model-hover-configurable-controls";
-      if (item.thinkingLevels) {
-        const effort = document.createElement("button");
-        effort.type = "button";
-        effort.className = "model-hover-configurable-button";
-        effort.textContent = "Thinking Level";
-        effort.addEventListener("click", (event) => {
-          event.stopPropagation();
-          modelDropdown.close();
-          el.thinkingDD.querySelector(".dd-btn")?.click();
-        });
-        controls.appendChild(effort);
-      }
-      if (item.maxContextTokens) {
-        controls.appendChild(Object.assign(document.createElement("span"), {
-          className: "model-hover-configurable-button model-hover-configurable-badge",
-          title: `Maximum context: ${formatTokenCount(item.maxContextTokens)}`,
-          textContent: "Context Size"
-        }));
-      }
+      const effort = document.createElement("button");
+      effort.type = "button";
+      effort.className = "model-hover-configurable-button";
+      effort.textContent = "Thinking Level";
+      effort.addEventListener("click", (event) => {
+        event.stopPropagation();
+        modelDropdown.close();
+        el.thinkingDD.querySelector(".dd-btn")?.click();
+      });
+      controls.appendChild(effort);
       configurable.appendChild(controls);
       card.appendChild(configurable);
     }

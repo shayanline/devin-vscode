@@ -4928,7 +4928,7 @@ test("model picker follows the adaptive pinned and models layout", async () => {
         id: "adaptive",
         name: "Adaptive",
         default: "adaptive",
-        variants: [{ value: "adaptive", name: "Adaptive" }]
+        variants: [{ value: "adaptive", name: "Adaptive", description: "Automatically balances quality and cost" }]
       },
       {
         id: "claude",
@@ -4964,6 +4964,15 @@ test("model picker follows the adaptive pinned and models layout", async () => {
   dd.querySelector(".dd-btn").click();
   const rows = [...dd.querySelectorAll(".dd-item")];
   assert.match(rows[0].textContent, /Adaptive/);
+  const adaptiveRow = rows[0];
+  adaptiveRow.dispatchEvent(new h.window.MouseEvent("mouseenter", { bubbles: true }));
+  await h.settle(550);
+  const adaptiveHover = h.document.querySelector(".model-hover");
+  assert.ok(adaptiveHover.classList.contains("compact"), "Adaptive uses the compact hover card");
+  assert.match(adaptiveHover.textContent, /Automatically balances quality and cost/);
+  assert.strictEqual(adaptiveHover.querySelector(".model-hover-configurable"), null, "Adaptive has no configurable controls");
+  adaptiveRow.dispatchEvent(new h.window.MouseEvent("mouseleave", { bubbles: true }));
+  await h.settle(350);
   const row = rows.find((item) => /Claude/.test(item.textContent));
   assert.ok(row, "the Claude family is listed");
   assert.doesNotMatch(row.textContent, /Med cost|MTok/, "cost stays out of the model row");
@@ -4992,7 +5001,7 @@ test("model picker follows the adaptive pinned and models layout", async () => {
   assert.match(hover.textContent, /Configurable/);
   assert.deepStrictEqual(
     [...hover.querySelectorAll(".model-hover-configurable-button")].map((button) => button.textContent),
-    ["Thinking Level", "Context Size"]
+    ["Thinking Level"]
   );
   assert.ok([...hover.querySelectorAll("button")].some((button) => button.textContent === "Thinking Level"));
   assert.match(hover.textContent, /PROMO/);
@@ -5011,6 +5020,8 @@ test("model picker follows the adaptive pinned and models layout", async () => {
   assert.match(css, /#model-dd \.dd-menu\s*\{[\s\S]*width: min\(200px, calc\(100vw - 16px\)\);/, "the model picker has a compact width");
   assert.match(css, /\.model-hover-configurable-controls\s*\{/, "configurable items use a right aligned control group");
   assert.match(css, /\.model-hover-configurable-button\s*\{[\s\S]*border: 1px solid var\(--vscode-widget-border/, "configurable items use the Copilot badge border");
+  assert.match(css, /\.model-hover\.compact\s*\{/, "metadata only hovers use compact spacing");
+  assert.match(css, /\.model-hover\.compact \.model-hover-header\s*\{/, "compact hovers remove the unused header gap");
 
   const terra = rows.find((item) => /Terra/.test(item.textContent));
   terra.dispatchEvent(new h.window.MouseEvent("mouseenter", { bubbles: true }));
