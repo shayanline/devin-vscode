@@ -1015,81 +1015,182 @@ body {
   background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
 }
 
+.dv-floater.model-hover-floater {
+  min-width: 320px;
+  max-width: 520px;
+  padding: 0;
+}
+
 .model-hover {
-  min-width: 280px;
-  padding: 8px;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 14px;
 }
 
 .model-hover-header {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 4px;
+  gap: 12px;
+  margin-bottom: 14px;
 }
 
 .model-hover-name {
   min-width: 0;
-  flex: 1 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
-  font-size: 1.05em;
+  font-size: 1.15em;
+  font-weight: 600;
+}
+
+.model-hover-description {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+  font-size: 1em;
+  white-space: nowrap;
 }
 
 .model-hover-tier {
   flex: 0 0 auto;
-  padding: 3px 7px;
+  padding: 4px 10px;
   border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
-  border-radius: 12px;
+  border-radius: 16px;
   color: var(--vscode-descriptionForeground, var(--vscode-foreground));
-  font-size: 0.85em;
+  font-size: 0.95em;
+  white-space: nowrap;
 }
 
-.model-hover-status {
-  display: flex;
-  gap: 4px;
-  margin: 4px 0 8px;
+.model-hover-tier.cost-low {
+  color: var(--vscode-charts-green, var(--vscode-foreground));
+  border-color: var(--vscode-charts-green, var(--vscode-widget-border));
 }
 
-.model-hover-description {
-  margin: 4px 0 10px;
-  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
-  font-size: 0.9em;
+.model-hover-tier.cost-high,
+.model-hover-tier.cost-very-high {
+  color: var(--vscode-editorWarning-foreground, var(--vscode-foreground));
+  border-color: var(--vscode-editorWarning-foreground, var(--vscode-widget-border));
 }
 
 .model-hover-section {
-  margin: 10px 0 4px;
-  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
-  font-size: 0.85em;
+  margin: 0 0 8px;
+  color: var(--vscode-foreground);
+  font-size: 0.95em;
   font-weight: 600;
 }
 
-.model-hover-table {
+.model-hover-cost-heading-row {
   display: grid;
-  grid-template-columns: 1fr auto;
-  column-gap: 20px;
-  row-gap: 6px;
+  grid-template-columns: max-content minmax(16px, 1fr) max-content;
+  column-gap: 8px;
+  margin-bottom: 4px;
 }
 
-.model-hover-label {
+.model-hover-cost-heading-row.has-long-context {
+  grid-template-columns: max-content minmax(16px, 1fr) max-content minmax(16px, 1fr) max-content;
+}
+
+.model-hover-cost-heading-row .model-hover-cost-heading:first-child {
+  grid-column: 3;
+}
+
+.model-hover-cost-heading-row.has-long-context .model-hover-cost-heading:last-child {
+  grid-column: 5;
+}
+
+.model-hover-cost-table {
+  display: grid;
+  grid-template-columns: max-content minmax(16px, 1fr) max-content;
+  column-gap: 8px;
+  row-gap: 9px;
+  align-items: center;
+}
+
+.model-hover-cost-table.has-long-context {
+  grid-template-columns: max-content minmax(16px, 1fr) max-content minmax(16px, 1fr) max-content;
+}
+
+.model-hover-cost-heading {
   color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+  font-size: 0.9em;
+  text-align: right;
+  white-space: nowrap;
 }
 
-.model-hover-value {
+.model-hover-cost-label {
+  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+  white-space: nowrap;
+}
+
+.model-hover-cost-leader {
+  min-width: 12px;
+  height: 1px;
+  border-bottom: 1px dotted var(--vscode-descriptionForeground);
+  opacity: 0.65;
+}
+
+.model-hover-cost-value {
+  min-width: 3ch;
   font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
 }
 
 .model-hover-promotion {
   display: flex;
   justify-content: space-between;
   gap: 16px;
-  margin-top: 10px;
-  padding-top: 8px;
+  margin-top: 14px;
+  padding-top: 10px;
   border-top: 1px solid var(--vscode-panel-border);
   color: var(--vscode-descriptionForeground, var(--vscode-foreground));
 }
 
 .model-hover-promotion strong {
   color: var(--vscode-charts-green, var(--vscode-foreground));
+}
+
+.model-hover-limits {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px 16px;
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--vscode-panel-border);
+  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+}
+
+.model-hover-limits strong {
+  color: var(--vscode-foreground);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.model-hover-configurable {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+}
+
+.model-hover-configurable-label {
+  margin-right: auto;
+}
+
+.model-hover-configurable-button {
+  padding: 4px 10px;
+  border: 1px solid var(--vscode-button-secondaryBackground, var(--vscode-widget-border));
+  border-radius: 5px;
+  color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+  background: var(--vscode-button-secondaryBackground, transparent);
+  font: inherit;
+  cursor: pointer;
+}
+
+.model-hover-configurable-button:hover {
+  background: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground));
 }
 
 #thinking-dd .dd-icon {

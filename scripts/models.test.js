@@ -27,7 +27,7 @@ function fakeCli(stdout) {
   return sh;
 }
 
-test("model listing preserves cost and status metadata", async () => {
+test("model listing preserves cost, limits, and status metadata", async () => {
   const families = await listModelFamilies(fakeCli(JSON.stringify({
     families: [{
       family_label: "Claude",
@@ -37,6 +37,10 @@ test("model listing preserves cost and status metadata", async () => {
         label: "Claude Medium",
         cost_tier: "Med cost",
         cost_summary: "$2 / MTok In · $10 / MTok Out",
+        long_context_cost_summary: "$4 / MTok In · $20 / MTok Out",
+        description: "Powerful",
+        max_context_tokens: 1000000,
+        max_output_tokens: 128000,
         promotion: "PROMO",
         is_new: true,
         is_beta: false
@@ -49,6 +53,10 @@ test("model listing preserves cost and status metadata", async () => {
     name: "Medium",
     costTier: "Med cost",
     costSummary: "$2 / MTok In · $10 / MTok Out",
+    longContextCostSummary: "$4 / MTok In · $20 / MTok Out",
+    description: "Powerful",
+    maxContextTokens: 1000000,
+    maxOutputTokens: 128000,
     promotion: "PROMO",
     isNew: true,
     isBeta: false

@@ -4934,14 +4934,21 @@ test("model picker follows the adaptive pinned and models layout", async () => {
         id: "claude",
         name: "Claude",
         default: "claude-medium",
-        variants: [{
-          value: "claude-medium",
-          name: "Medium",
-          costTier: "Med cost",
-          costSummary: "$2 / MTok In · $10 / MTok Out",
-          isNew: true,
-          promotion: "PROMO"
-        }]
+        variants: [
+          {
+            value: "claude-medium",
+            name: "Medium",
+            costTier: "Med cost",
+            costSummary: "$2 / MTok In · $10 / MTok Out · $0.2 / MTok Cache Read · $2.5 / MTok Cache Write",
+            longContextCostSummary: "$4 / MTok In · $20 / MTok Out · $0.4 / MTok Cache Read · $5 / MTok Cache Write",
+            description: "Powerful",
+            maxContextTokens: 1000000,
+            maxOutputTokens: 128000,
+            isNew: true,
+            promotion: "PROMO"
+          },
+          { value: "claude-low", name: "Low" }
+        ]
       },
       {
         id: "terra",
@@ -4966,14 +4973,31 @@ test("model picker follows the adaptive pinned and models layout", async () => {
   assert.ok(pin, "the model row has a pin action");
 
   row.dispatchEvent(new h.window.MouseEvent("mouseenter", { bubbles: true }));
-  await h.settle(10);
+  await h.settle(100);
+  assert.strictEqual(h.document.querySelector(".model-hover"), null, "the model hover waits before opening");
+  await h.settle(500);
   const hover = h.document.querySelector(".model-hover");
-  assert.ok(hover, "the model opens a hover card");
+  assert.ok(hover, "the model opens a hover card after the delay");
+  assert.match(hover.textContent, /Powerful/);
   assert.match(hover.textContent, /Medium cost/);
   assert.match(hover.textContent, /Cost per 1M tokens/);
+  assert.match(hover.textContent, /Default/);
+  assert.match(hover.textContent, /Long Context/);
   assert.match(hover.textContent, /Input/);
+  assert.match(hover.textContent, /Cache Read/);
   assert.match(hover.textContent, /\$2/);
+  assert.match(hover.textContent, /\$4/);
+  assert.match(hover.textContent, /1M tokens/);
+  assert.match(hover.textContent, /128K tokens/);
+  assert.match(hover.textContent, /Configurable/);
+  assert.ok([...hover.querySelectorAll("button")].some((button) => button.textContent === "Thinking Level"));
   assert.match(hover.textContent, /PROMO/);
+
+  row.dispatchEvent(new h.window.MouseEvent("mouseleave", { bubbles: true }));
+  await h.settle(100);
+  assert.ok(h.document.querySelector(".model-hover"), "the hover remains during the hide delay");
+  await h.settle(250);
+  assert.strictEqual(h.document.querySelector(".model-hover"), null, "the hover closes after the hide delay");
 
   pin.click();
   await h.settle(20);

@@ -159,6 +159,13 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   function costTierLabel(tier) {
     return String(tier || "").replace(/^med\b/i, "Medium").trim();
   }
+  function costTierClass(tier) {
+    const value = String(tier || "").toLowerCase();
+    if (value.includes("very")) return "cost-very-high";
+    if (value.includes("high")) return "cost-high";
+    if (value.includes("med")) return "cost-medium";
+    return "cost-low";
+  }
   function costRows(summary) {
     return String(summary || "").split("·").map((part) => {
       const match = /^(.+?)\s*\/\s*MTok\s+(In|Out|Cache Read|Cache Write)$/i.exec(part.trim());
@@ -167,38 +174,61 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       return { label: labels[match[2].toLowerCase()], value: match[1].trim() };
     }).filter(Boolean);
   }
+  function formatTokenCount(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) return "";
+    if (n >= 1000000) return `${n / 1000000}M tokens`;
+    if (n >= 1000) return `${n / 1000}K tokens`;
+    return `${n} tokens`;
+  }
   function modelHoverContent(item) {
     if (!item) return null;
-    const rows = costRows(item.costSummary);
+    const defaultRows = costRows(item.costSummary);
+    const longRows = costRows(item.longContextCostSummary);
+    const rowLabels = [...new Set([...defaultRows, ...longRows].map((row) => row.label))];
     const promotion = promotionLabel(item);
-    if (!item.description && !item.costTier && !rows.length && !promotion && !item.isNew && !item.isBeta) {
-      return null;
-    }
+    const contextRows = [
+      ["Max context", formatTokenCount(item.maxContextTokens)],
+      ["Max output", formatTokenCount(item.maxOutputTokens)]
+    ].filter(([, value]) => value);
+    const hasConfigurable = !!item.thinkingLevels;
+    if (!item.description && !item.costTier && !rowLabels.length && !promotion && !contextRows.length && !hasConfigurable) return null;
+
     const card = document.createElement("div");
     card.className = "model-hover";
     const header = document.createElement("div");
     header.className = "model-hover-header";
     header.appendChild(Object.assign(document.createElement("strong"), { className: "model-hover-name", textContent: item.name || "Model" }));
-    if (item.costTier) header.appendChild(Object.assign(document.createElement("span"), { className: "model-hover-tier", textContent: costTierLabel(item.costTier) }));
+    if (item.description) header.appendChild(Object.assign(document.createElement("span"), { className: "model-hover-description", textContent: item.description }));
+    if (item.costTier) header.appendChild(Object.assign(document.createElement("span"), { className: `model-hover-tier ${costTierClass(item.costTier)}`, textContent: costTierLabel(item.costTier) }));
     card.appendChild(header);
-    const badges = variantBadges(item);
-    if (badges.length) {
-      const status = document.createElement("div");
-      status.className = "model-hover-status";
-      badges.forEach((badge) => status.appendChild(Object.assign(document.createElement("span"), { className: "dd-item-badge", textContent: badge })));
-      card.appendChild(status);
-    }
-    if (item.description) card.appendChild(Object.assign(document.createElement("p"), { className: "model-hover-description", textContent: item.description }));
-    if (rows.length) {
+
+    if (rowLabels.length) {
       card.appendChild(Object.assign(document.createElement("div"), { className: "model-hover-section", textContent: "Cost per 1M tokens" }));
+      const cost = document.createElement("div");
+      cost.className = "model-hover-cost";
+      const headings = document.createElement("div");
+      headings.className = "model-hover-cost-heading-row" + (longRows.length ? " has-long-context" : "");
+      headings.appendChild(Object.assign(document.createElement("span"), { className: "model-hover-cost-heading", textContent: "Default" }));
+      if (longRows.length) headings.appendChild(Object.assign(document.createElement("span"), { className: "model-hover-cost-heading", textContent: "Long Context" }));
+      cost.appendChild(headings);
       const table = document.createElement("div");
-      table.className = "model-hover-table";
-      rows.forEach((row) => {
-        table.appendChild(Object.assign(document.createElement("span"), { className: "model-hover-label", textContent: row.label }));
-        table.appendChild(Object.assign(document.createElement("strong"), { className: "model-hover-value", textContent: row.value }));
+      table.className = "model-hover-cost-table" + (longRows.length ? " has-long-context" : "");
+      const defaultByLabel = new Map(defaultRows.map((row) => [row.label, row.value]));
+      const longByLabel = new Map(longRows.map((row) => [row.label, row.value]));
+      rowLabels.forEach((label) => {
+        table.appendChild(Object.assign(document.createElement("span"), { className: "model-hover-cost-label", textContent: label }));
+        table.appendChild(Object.assign(document.createElement("span"), { className: "model-hover-cost-leader" }));
+        table.appendChild(Object.assign(document.createElement("strong"), { className: "model-hover-cost-value", textContent: defaultByLabel.get(label) || "" }));
+        if (longRows.length) {
+          table.appendChild(Object.assign(document.createElement("span"), { className: "model-hover-cost-leader" }));
+          table.appendChild(Object.assign(document.createElement("strong"), { className: "model-hover-cost-value", textContent: longByLabel.get(label) || "" }));
+        }
       });
-      card.appendChild(table);
+      cost.appendChild(table);
+      card.appendChild(cost);
     }
+
     if (promotion) {
       const promo = document.createElement("div");
       promo.className = "model-hover-promotion";
@@ -206,30 +236,68 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       promo.appendChild(Object.assign(document.createElement("strong"), { textContent: promotion }));
       card.appendChild(promo);
     }
+
+    if (contextRows.length) {
+      const limits = document.createElement("div");
+      limits.className = "model-hover-limits";
+      contextRows.forEach(([label, value]) => {
+        limits.appendChild(Object.assign(document.createElement("span"), { textContent: label }));
+        limits.appendChild(Object.assign(document.createElement("strong"), { textContent: value }));
+      });
+      card.appendChild(limits);
+    }
+
+    if (hasConfigurable) {
+      const configurable = document.createElement("div");
+      configurable.className = "model-hover-configurable";
+      configurable.appendChild(Object.assign(document.createElement("span"), { className: "model-hover-configurable-label", textContent: "Configurable" }));
+      const effort = document.createElement("button");
+      effort.type = "button";
+      effort.className = "model-hover-configurable-button";
+      effort.textContent = "Thinking Level";
+      effort.addEventListener("click", (event) => {
+        event.stopPropagation();
+        modelDropdown.close();
+        el.thinkingDD.querySelector(".dd-btn")?.click();
+      });
+      configurable.appendChild(effort);
+      card.appendChild(configurable);
+    }
     return card;
   }
+  let modelHoverShowTimer = null;
   let modelHoverCloseTimer = null;
+  function cancelModelHoverShow() {
+    if (modelHoverShowTimer) clearTimeout(modelHoverShowTimer);
+    modelHoverShowTimer = null;
+  }
   function cancelModelHoverClose() {
     if (modelHoverCloseTimer) clearTimeout(modelHoverCloseTimer);
     modelHoverCloseTimer = null;
   }
   function closeModelHover() {
+    cancelModelHoverShow();
     cancelModelHoverClose();
     if (modelHoverFloater) modelHoverFloater.close();
     modelHoverFloater = null;
   }
   function scheduleModelHoverClose() {
+    cancelModelHoverShow();
     cancelModelHoverClose();
-    modelHoverCloseTimer = setTimeout(closeModelHover, 150);
+    modelHoverCloseTimer = setTimeout(closeModelHover, 300);
   }
   function showModelHover(anchor, item) {
     cancelModelHoverClose();
     closeModelHover();
-    const card = modelHoverContent(item.hover);
-    if (!card) return;
-    card.addEventListener("mouseenter", cancelModelHoverClose);
-    card.addEventListener("mouseleave", scheduleModelHoverClose);
-    modelHoverFloater = makeFloater(anchor, card, "outside-right", () => { modelHoverFloater = null; });
+    modelHoverShowTimer = setTimeout(() => {
+      modelHoverShowTimer = null;
+      const card = modelHoverContent(item.hover);
+      if (!card) return;
+      card.addEventListener("mouseenter", cancelModelHoverClose);
+      card.addEventListener("mouseleave", scheduleModelHoverClose);
+      modelHoverFloater = makeFloater(anchor, card, "outside-right", () => { modelHoverFloater = null; });
+      modelHoverFloater.el.classList.add("model-hover-floater");
+    }, 500);
   }
   function savePinnedModels() {
     vscode.setState({ ...(vscode.getState() || {}), pinnedModels: [...pinnedModelIds] });
@@ -283,7 +351,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         name: family.name,
         badges: variantBadges(variant),
         pinned: pinnedModelIds.has(family.id),
-        hover: { ...variant, name: family.name },
+        hover: { ...variant, name: family.name, thinkingLevels: (family.variants || []).length > 1 },
         group
       };
     };
