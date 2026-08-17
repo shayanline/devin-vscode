@@ -957,6 +957,56 @@ body {
   flex: 0 0 16px;
 }
 
+.dd-item-content {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.dd-item-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dd-item-detail {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+  font-size: 0.85em;
+  font-weight: 400;
+}
+
+.dd-item-badge {
+  flex: 0 0 auto;
+  padding: 1px 4px;
+  border-radius: 3px;
+  color: var(--vscode-badge-foreground);
+  background: var(--vscode-badge-background);
+  font-size: 0.75em;
+  font-weight: 600;
+}
+
+.dd-item-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  color: var(--vscode-icon-foreground, var(--vscode-foreground));
+  background: transparent;
+  cursor: pointer;
+}
+
+.dd-item-action:hover {
+  background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
+}
+
 .dd-item.selected {
   font-weight: 600;
 }
@@ -1180,14 +1230,14 @@ body {
 /* Responsive composer tiers (classes toggled by a ResizeObserver) */
 #input-box.cmp-sm .dd-label { display: none; }
 #input-box.cmp-sm .dd-btn { max-width: none; }
-#input-box.cmp-sm #thinking-dd { display: none !important; }
 #input-box.cmp-sm .usage-pct { display: none; }
 
 #input-box.cmp-xs #model-dd,
 #input-box.cmp-xs #usage { display: none !important; }
 
 #input-box.cmp-xxs #mode-dd,
-#input-box.cmp-xxs #attach { display: none !important; }
+#input-box.cmp-xxs #attach,
+#input-box.cmp-xxs #thinking-dd { display: none !important; }
 
 /* Context-window usage ring (click for a details popover) */
 .usage-ring {
@@ -3986,6 +4036,7 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  flex-wrap: wrap;
   padding: 6px 10px;
   font-size: 0.9em;
   font-weight: 600;
@@ -4033,6 +4084,7 @@ body {
   display: flex;
   gap: 6px;
   flex: 0 0 auto;
+  margin-left: auto;
 }
 
 .ws-file {

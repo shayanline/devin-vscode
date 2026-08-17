@@ -2053,6 +2053,13 @@ test("an edit row waits for the host before it says a file was undone", async ()
   assert.strictEqual(h.errors().length, 0);
 });
 
+test("changed files header lets its controls wrap", () => {
+  const css = fs.readFileSync(path.join(ROOT, "media", "main.css"), "utf8");
+  const header = /\.ws-header\s*\{([^}]*)\}/.exec(css);
+  assert.ok(header, "the changed files header has a style block");
+  assert.match(header[1], /flex-wrap:\s*wrap/, "the header can reflow at narrow widths");
+});
+
 test("keeping every change marks every edit row, not just the one clicked", async () => {
   const h = createHarness();
   h.post({ type: "ready" });
@@ -4904,6 +4911,94 @@ test("the mode picker offers whatever modes the agent reports", async () => {
   assert.strictEqual(dd.querySelector(".dd-item.selected").textContent.trim(), "Smart");
   // Devin names its icons after its own set, so they arrive already mapped.
   assert.ok(dd.querySelector(".dd-item-icon.codicon-sparkle"), "the mapped icon is used");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("model picker shows available metadata and supports pinning", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({
+    type: "options",
+    currentMode: "accept-edits",
+    currentModel: "claude-medium",
+    modes: [],
+    models: [{
+      id: "claude",
+      name: "Claude",
+      default: "claude-medium",
+      variants: [{
+        value: "claude-medium",
+        name: "Medium",
+        costTier: "Med cost",
+        costSummary: "$2 / MTok In · $10 / MTok Out",
+        isNew: true
+      }]
+    }]
+  });
+  await h.settle(20);
+
+  const dd = h.document.querySelector("#model-dd");
+  dd.querySelector(".dd-btn").click();
+  const row = dd.querySelector(".dd-item");
+  assert.match(row.textContent, /Med cost/);
+  assert.match(row.textContent, /\$2 \/ MTok In/);
+  assert.ok(row.querySelector(".dd-item-badge"), "the new model badge is shown");
+  const pin = row.querySelector(".dd-item-action");
+  assert.ok(pin, "the model row has a pin action");
+  pin.click();
+  await h.settle(20);
+  dd.querySelector(".dd-btn").click();
+  assert.match(dd.textContent, /Pinned/);
+  dd.querySelector(".dd-btn").click();
+
+  h.post({
+    type: "options",
+    currentMode: "accept-edits",
+    currentModel: "other-medium",
+    modes: [],
+    models: [{
+      id: "other",
+      name: "Other",
+      default: "other-medium",
+      variants: [{ value: "other-medium", name: "Medium" }]
+    }]
+  });
+  await h.settle(20);
+  dd.querySelector(".dd-btn").click();
+  assert.doesNotMatch(dd.textContent, /Claude/, "an unavailable pinned model is not shown");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("thinking picker keeps a thought icon in compact mode", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({
+    type: "options",
+    currentMode: "accept-edits",
+    currentModel: "claude-medium",
+    models: [{
+      id: "claude",
+      name: "Claude",
+      default: "claude-medium",
+      variants: [
+        { value: "claude-low", name: "Low" },
+        { value: "claude-medium", name: "Medium" }
+      ]
+    }],
+    modes: []
+  });
+  await h.settle(20);
+
+  const thinking = h.document.querySelector("#thinking-dd");
+  assert.ok(!thinking.classList.contains("hidden"), "the picker is available for multiple variants");
+  assert.ok(thinking.querySelector(".dd-icon .codicon-thinking"), "the compact control has a thought icon");
+  assert.strictEqual(thinking.querySelector(".dd-btn").getAttribute("aria-label"), "Thinking effort");
+
+  const css = fs.readFileSync(path.join(ROOT, "media", "main.css"), "utf8");
+  assert.doesNotMatch(css, /#input-box\.cmp-sm #thinking-dd/, "the small tier keeps the thinking control");
+  assert.match(css, /#input-box\.cmp-xxs #mode-dd,\s*\n#input-box\.cmp-xxs #attach,\s*\n#input-box\.cmp-xxs #thinking-dd/, "the smallest tier hides it with the other controls");
   assert.strictEqual(h.errors().length, 0);
 });
 

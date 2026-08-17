@@ -8,6 +8,15 @@ the commit messages carry the detail.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
+## [0.12.2] - 2026-08-17
+
+### Highlights
+- Keep the changed files actions readable at narrow widths.
+- Show the thinking control in compact mode with a thought icon.
+- Show model cost and status details when the CLI reports them.
+- Pin available models and hide pins that are unavailable.
+- Keep queued message attachments with their own messages.
+
 ## [0.12.1] - 2026-08-17
 
 ### Highlights

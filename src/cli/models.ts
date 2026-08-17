@@ -4,6 +4,10 @@ import { cliCommand } from "./locate";
 export interface ModelVariant {
   value: string; // model uid the ACP `model` option accepts
   name: string; // effort label, e.g. "Medium", "High", "No Thinking"
+  costTier?: string;
+  costSummary?: string;
+  isNew?: boolean;
+  isBeta?: boolean;
 }
 
 export interface ModelFamily {
@@ -18,7 +22,14 @@ interface ModelsJson {
     family_label?: string;
     family_uid?: string;
     slug?: string;
-    variants?: { model_uid?: string; label?: string }[];
+    variants?: {
+      model_uid?: string;
+      label?: string;
+      cost_tier?: string;
+      cost_summary?: string;
+      is_new?: boolean;
+      is_beta?: boolean;
+    }[];
   }[];
 }
 
@@ -106,7 +117,14 @@ function run(cliPath: string, env?: NodeJS.ProcessEnv): Promise<ModelFamily[]> {
             const variants: ModelVariant[] = [];
             for (const v of fam.variants || []) {
               if (v.model_uid) {
-                variants.push({ value: v.model_uid, name: effortLabel(label, v.label || v.model_uid) });
+                variants.push({
+                  value: v.model_uid,
+                  name: effortLabel(label, v.label || v.model_uid),
+                  costTier: v.cost_tier,
+                  costSummary: v.cost_summary,
+                  isNew: v.is_new,
+                  isBeta: v.is_beta
+                });
               }
             }
             if (!variants.length) {

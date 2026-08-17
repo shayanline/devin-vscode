@@ -3052,8 +3052,8 @@ export class ChatController implements AcpHost {
   // too, so one image went to the agent twice.
   private takeStaged(id?: string): Staged[] {
     const held = this.stagedFor(id);
+    this.staged.set(this.stagedKey(id), []);
     if (held.length) {
-      this.staged.set(this.stagedKey(id), []);
       this.stagedChanged(id);
     }
     return held;

@@ -102,13 +102,22 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // Model picker lists families; a separate thinking picker holds the effort
   // variants of the selected family (Copilot-style).
   let modelFamilies = [];
+  let currentModelUid = "";
+  const savedState = vscode.getState() || {};
+  const pinnedModelIds = new Set(Array.isArray(savedState.pinnedModels) ? savedState.pinnedModels : []);
   // The active model family's display name, stamped onto each turn when it is
   // sent so the response footer can show "{model} · {time}" (VS Code's footer
   // detail). ACP does not report a per-turn model, so this is the model
   // selected at send time.
   let currentModelLabel = "";
-  const modelDropdown = createDropdown(el.modelDD, onModelSelect, { buttonIcon: modelButtonIcon });
-  const thinkingDropdown = createDropdown(el.thinkingDD, onThinkingSelect);
+  const modelDropdown = createDropdown(el.modelDD, onModelSelect, {
+    buttonIcon: modelButtonIcon,
+    itemAction: toggleModelPin
+  });
+  const thinkingDropdown = createDropdown(el.thinkingDD, onThinkingSelect, {
+    staticIcon: "codicon-thinking",
+    ariaLabel: "Thinking effort"
+  });
 
   // Icon shown on the model button: sparkle for Adaptive, the brand codicon for
   // Claude / OpenAI, and a generic chip otherwise. Grok has no codicon, so it
@@ -132,20 +141,48 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
 
   function familyById(id) { return modelFamilies.find((f) => f.id === id); }
   function familyOfUid(uid) { return modelFamilies.find((f) => (f.variants || []).some((v) => v.value === uid)); }
+  function variantFor(fam, uid) {
+    return (fam?.variants || []).find((v) => v.value === uid)
+      || (fam?.variants || []).find((v) => v.value === fam.default)
+      || fam?.variants?.[0];
+  }
+  function variantDetails(v) {
+    return [v?.costTier, v?.costSummary].filter(Boolean).join(" · ");
+  }
+  function variantBadges(v) {
+    return [v?.isNew ? "New" : "", v?.isBeta ? "Beta" : ""].filter(Boolean);
+  }
+  function savePinnedModels() {
+    vscode.setState({ ...(vscode.getState() || {}), pinnedModels: [...pinnedModelIds] });
+  }
+  function toggleModelPin(item) {
+    if (!item?.value) return;
+    if (pinnedModelIds.has(item.value)) pinnedModelIds.delete(item.value);
+    else pinnedModelIds.add(item.value);
+    savePinnedModels();
+    applyModelOptions(modelFamilies, currentModelUid);
+    modelDropdown.close();
+  }
 
   function onModelSelect(familyId) {
     const fam = familyById(familyId);
     if (!fam) return;
+    currentModelUid = fam.default;
     currentModelLabel = fam.name || "";
     vscode.postMessage({ type: "setModel", model: fam.default });
     updateThinking(fam, fam.default);
   }
   function onThinkingSelect(uid) {
+    currentModelUid = uid;
     vscode.postMessage({ type: "setModel", model: uid });
   }
   function updateThinking(fam, currentUid) {
     if (fam && (fam.variants || []).length > 1) {
-      thinkingDropdown.set(fam.variants, currentUid);
+      thinkingDropdown.set(fam.variants.map((v) => ({
+        ...v,
+        detail: variantDetails(v),
+        badges: variantBadges(v)
+      })), currentUid);
       el.thinkingDD.classList.remove("hidden");
     } else {
       el.thinkingDD.classList.add("hidden");
@@ -158,18 +195,35 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     const adaptive = list.filter(isAdaptive);
     const rest = list.filter((f) => !isAdaptive(f)).sort((a, b) => (a.name || "").localeCompare(b.name || ""));
     modelFamilies = [...adaptive, ...rest];
-    const items = [];
-    modelFamilies.forEach((f) => items.push({ value: f.id, name: f.name }));
-    // Separator after Adaptive, before the alphabetical list.
-    if (adaptive.length && rest.length) items.splice(adaptive.length, 0, { sep: true });
     const fam = familyOfUid(currentModel) || modelFamilies[0];
+    currentModelUid = currentModel || fam?.default || "";
     currentModelLabel = fam ? fam.name || "" : currentModelLabel;
+    const item = (family, group) => {
+      const variant = variantFor(family, currentModelUid);
+      return {
+        value: family.id,
+        name: family.name,
+        detail: variantDetails(variant),
+        badges: variantBadges(variant),
+        pinned: pinnedModelIds.has(family.id),
+        group
+      };
+    };
+    const pinned = modelFamilies.filter((f) => pinnedModelIds.has(f.id));
+    const unpinned = modelFamilies.filter((f) => !pinnedModelIds.has(f.id));
+    const items = [];
+    if (pinned.length) {
+      items.push(...pinned.map((f) => item(f, "Pinned")));
+      if (unpinned.length) items.push({ sep: true });
+    }
+    items.push(...unpinned.map((f) => item(f, pinned.length ? "Models" : undefined)));
     modelDropdown.set(items, fam ? fam.id : "");
-    updateThinking(fam, currentModel);
+    updateThinking(fam, currentModelUid);
   }
   function selectModelUid(uid) {
     const fam = familyOfUid(uid);
     if (!fam) return;
+    currentModelUid = uid;
     currentModelLabel = fam.name || "";
     modelDropdown.setCurrent(fam.id);
     updateThinking(fam, uid);
@@ -1418,6 +1472,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     btn.className = "dd-btn";
     btn.setAttribute("aria-haspopup", "true");
     btn.setAttribute("aria-expanded", "false");
+    if (opts.ariaLabel) btn.setAttribute("aria-label", opts.ariaLabel);
     const btnIcon = document.createElement("span");
     btnIcon.className = "dd-icon";
     const label = document.createElement("span");
@@ -1480,9 +1535,39 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         ic.className = "codicon dd-item-icon " + it.icon;
         row.appendChild(ic);
       }
+      const content = document.createElement("span");
+      content.className = "dd-item-content";
       const txt = document.createElement("span");
+      txt.className = "dd-item-name";
       txt.textContent = it.name;
-      row.appendChild(txt);
+      content.appendChild(txt);
+      if (it.detail) {
+        const detail = document.createElement("span");
+        detail.className = "dd-item-detail";
+        detail.textContent = it.detail;
+        content.appendChild(detail);
+      }
+      for (const badge of it.badges || []) {
+        const badgeEl = document.createElement("span");
+        badgeEl.className = "dd-item-badge";
+        badgeEl.textContent = badge;
+        content.appendChild(badgeEl);
+      }
+      row.appendChild(content);
+      if (opts.itemAction && it.value) {
+        const action = document.createElement("button");
+        const label = it.pinned ? `Unpin ${it.name}` : `Pin ${it.name}`;
+        action.type = "button";
+        action.className = "dd-item-action";
+        action.title = label;
+        action.setAttribute("aria-label", label);
+        action.appendChild(mkIcon(it.pinned ? "pinned" : "pin"));
+        action.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          opts.itemAction(it);
+        });
+        row.appendChild(action);
+      }
       row.addEventListener("click", (ev) => {
         ev.stopPropagation();
         current = it.value;
@@ -1563,7 +1648,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         updateBtnIcon();
         container.classList.toggle("hidden", items.length === 0);
       },
-      setCurrent(v) { current = v; label.textContent = labelFor(v); updateBtnIcon(); }
+      setCurrent(v) { current = v; label.textContent = labelFor(v); updateBtnIcon(); },
+      close
     };
   }
 
@@ -6978,7 +7064,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         if (m.sessionId) { curSessionId = m.sessionId; views.delete(m.sessionId); dirtyViews.delete(m.sessionId); }
         // Remembered so an editor tab restored after a window reload comes back to
         // the chat it was holding instead of an empty tab.
-        vscode.setState({ sessionId: curSessionId });
+        vscode.setState({ ...(vscode.getState() || {}), sessionId: curSessionId, pinnedModels: [...pinnedModelIds] });
         // Refresh the header so the title and code badge reflect the session now
         // shown (e.g. after starting a new session).
         renderHeader();

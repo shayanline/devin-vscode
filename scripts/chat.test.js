@@ -395,6 +395,29 @@ test("a staged file goes with one message, not with both of them", posixOnly, as
   await h.dispose();
 });
 
+test("a later queued image stays on its own message", posixOnly, async () => {
+  const h = createChat({ promptDelay: 60000 });
+  await h.ready();
+  await h.startChat("turn in progress");
+  await h.until(() => h.postsOf("busy").some((m) => m.value));
+
+  h.send({ type: "send", text: "text only" });
+  await h.until(() => (h.last("queued") || { items: [] }).items.length === 1);
+
+  h.send({ type: "attachImage", name: "later.png", mime: "image/png", data: PNG });
+  await h.until(() => ((h.last("attachments") || {}).items || []).length === 1);
+  h.send({ type: "send", text: "with image" });
+  await h.until(() => (h.last("queued") || { items: [] }).items.length === 2);
+
+  const items = h.last("queued").items;
+  assert.deepStrictEqual(items.map((q) => q.text), ["text only", "with image"]);
+  assert.deepStrictEqual(
+    items.map((q) => (q.attachments || []).map((a) => a.label)),
+    [[], ["later.png"]]
+  );
+  await h.dispose();
+});
+
 test("a second send never puts a second prompt on the same channel", posixOnly, async () => {
   // Opening a chat drains whatever was typed while it opened, so the turn that starts
   // can be in flight exactly when the send that asked for the wake resumes. ACP has no
