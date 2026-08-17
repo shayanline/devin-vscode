@@ -4942,8 +4942,8 @@ test("model picker follows the adaptive pinned and models layout", async () => {
             costSummary: "$2 / MTok In · $10 / MTok Out · $0.2 / MTok Cache Read · $2.5 / MTok Cache Write",
             longContextCostSummary: "$4 / MTok In · $20 / MTok Out · $0.4 / MTok Cache Read · $5 / MTok Cache Write",
             description: "Powerful",
-            maxContextTokens: 1000000,
-            maxOutputTokens: 128000,
+            maxContextTokens: 1048576,
+            maxOutputTokens: 131072,
             isNew: true,
             promotion: "PROMO"
           },
@@ -4954,7 +4954,7 @@ test("model picker follows the adaptive pinned and models layout", async () => {
         id: "terra",
         name: "Terra",
         default: "terra-medium",
-        variants: [{ value: "terra-medium", name: "Medium" }]
+        variants: [{ value: "terra-medium", name: "Medium", costTier: "Low cost", costSummary: "$1 / MTok In · $2 / MTok Out" }]
       }
     ]
   });
@@ -4988,7 +4988,7 @@ test("model picker follows the adaptive pinned and models layout", async () => {
   assert.match(hover.textContent, /\$2/);
   assert.match(hover.textContent, /\$4/);
   assert.match(hover.textContent, /1M tokens/);
-  assert.match(hover.textContent, /128K tokens/);
+  assert.match(hover.textContent, /131K tokens/);
   assert.match(hover.textContent, /Configurable/);
   assert.ok([...hover.querySelectorAll("button")].some((button) => button.textContent === "Thinking Level"));
   assert.match(hover.textContent, /PROMO/);
@@ -4998,6 +4998,19 @@ test("model picker follows the adaptive pinned and models layout", async () => {
   assert.ok(h.document.querySelector(".model-hover"), "the hover remains during the hide delay");
   await h.settle(250);
   assert.strictEqual(h.document.querySelector(".model-hover"), null, "the hover closes after the hide delay");
+
+  const css = fs.readFileSync(path.join(ROOT, "media", "main.css"), "utf8");
+  assert.match(css, /\.model-hover-header\.no-description\s*\{/, "the badge has a dedicated no-description header layout");
+  assert.match(css, /\.dv-floater\.model-hover-floater\s*\{[\s\S]*max-width: calc\(100vw - 8px\);/, "the hover card fits the viewport width");
+  assert.match(css, /\.dv-floater\.model-hover-floater\s*\{[\s\S]*max-height: calc\(100vh - 8px\);/, "the hover card fits the viewport height");
+  assert.match(css, /#model-dd \.dd-menu\s*\{[\s\S]*width: min\(200px, calc\(100vw - 16px\)\);/, "the model picker has a compact width");
+
+  const terra = rows.find((item) => /Terra/.test(item.textContent));
+  terra.dispatchEvent(new h.window.MouseEvent("mouseenter", { bubbles: true }));
+  await h.settle(550);
+  assert.ok(h.document.querySelector(".model-hover-header.no-description"), "a model without a description keeps the badge aligned");
+  terra.dispatchEvent(new h.window.MouseEvent("mouseleave", { bubbles: true }));
+  await h.settle(350);
 
   pin.click();
   await h.settle(20);

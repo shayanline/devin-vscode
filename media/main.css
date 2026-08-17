@@ -882,6 +882,17 @@ body {
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.36);
 }
 
+#model-dd .dd-menu {
+  width: min(200px, calc(100vw - 16px));
+  min-width: 0;
+  max-width: calc(100vw - 16px);
+  box-sizing: border-box;
+}
+
+#model-dd .dd-filter {
+  box-sizing: border-box;
+}
+
 .dd.right .dd-menu {
   left: auto;
   right: 0;
@@ -1016,8 +1027,12 @@ body {
 }
 
 .dv-floater.model-hover-floater {
-  min-width: 320px;
-  max-width: 520px;
+  width: min(520px, calc(100vw - 8px));
+  min-width: 0;
+  max-width: calc(100vw - 8px);
+  max-height: calc(100vh - 8px);
+  overflow: auto;
+  box-sizing: border-box;
   padding: 0;
 }
 
@@ -1033,6 +1048,10 @@ body {
   align-items: center;
   gap: 12px;
   margin-bottom: 14px;
+}
+
+.model-hover-header.no-description {
+  grid-template-columns: minmax(0, 1fr) auto;
 }
 
 .model-hover-name {

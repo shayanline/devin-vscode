@@ -177,8 +177,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   function formatTokenCount(value) {
     const n = Number(value);
     if (!Number.isFinite(n) || n <= 0) return "";
-    if (n >= 1000000) return `${n / 1000000}M tokens`;
-    if (n >= 1000) return `${n / 1000}K tokens`;
+    if (n >= 900000) return `${Math.round(n / 1000000)}M tokens`;
+    if (n >= 1000) return `${Math.round(n / 1000)}K tokens`;
     return `${n} tokens`;
   }
   function modelHoverContent(item) {
@@ -197,7 +197,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     const card = document.createElement("div");
     card.className = "model-hover";
     const header = document.createElement("div");
-    header.className = "model-hover-header";
+    header.className = "model-hover-header" + (item.description ? "" : " no-description");
     header.appendChild(Object.assign(document.createElement("strong"), { className: "model-hover-name", textContent: item.name || "Model" }));
     if (item.description) header.appendChild(Object.assign(document.createElement("span"), { className: "model-hover-description", textContent: item.description }));
     if (item.costTier) header.appendChild(Object.assign(document.createElement("span"), { className: `model-hover-tier ${costTierClass(item.costTier)}`, textContent: costTierLabel(item.costTier) }));
@@ -296,7 +296,6 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       card.addEventListener("mouseenter", cancelModelHoverClose);
       card.addEventListener("mouseleave", scheduleModelHoverClose);
       modelHoverFloater = makeFloater(anchor, card, "outside-right", () => { modelHoverFloater = null; });
-      modelHoverFloater.el.classList.add("model-hover-floater");
     }, 500);
   }
   function savePinnedModels() {
@@ -581,7 +580,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // it would overflow the bottom.
   function makeFloater(anchor, content, align, onClose) {
     const boxEl = document.createElement("div");
-    boxEl.className = "dv-floater";
+    boxEl.className = "dv-floater" + (content.classList.contains("model-hover") ? " model-hover-floater" : "");
     boxEl.appendChild(content);
     document.body.appendChild(boxEl);
     const r = anchor.getBoundingClientRect();
