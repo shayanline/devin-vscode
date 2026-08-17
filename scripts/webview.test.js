@@ -72,6 +72,24 @@ test("assistant file references render as clickable links", async () => {
   assert.strictEqual(h.errors().length, 0, "webview handler threw: " + JSON.stringify(h.errors()));
 });
 
+test("code wrapped file links become file pills without changing code", async () => {
+  const h = createHarness();
+  const href = "file:///Users/shayan.khaksar/VSCode/OpenIPTV/package.json";
+  h.replay([{
+    role: "assistant",
+    text: `The version is in \`[package.json](${href})\`, \`[config](src/config.ts)\`, \`[spaced](<src/config file.ts>)\`, and \`[web](<https://example.com>)\`.\n\n\`\`\`text\n[leave this alone](file:///tmp/example.ts)\n\`\`\``
+  }]);
+  await h.settle();
+
+  const links = [...h.thread().querySelectorAll(".resp-text a.file-pill")];
+  assert.strictEqual(links.length, 3, "code wrapped file links become file pills");
+  assert.deepStrictEqual(links.map((link) => link.querySelector(".file-pill-name").textContent), ["package.json", "config", "spaced"]);
+  assert.ok([...h.thread().querySelectorAll("code")].some((code) => code.textContent.includes("[web]")),
+    "angle wrapped external links remain code");
+  assert.ok(h.thread().querySelector("pre code").textContent.includes("leave this alone"),
+    "fenced code remains code");
+});
+
 test("external links stay external and relative links open decoded paths", async () => {
   const h = createHarness();
   h.replay([{

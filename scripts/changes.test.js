@@ -75,6 +75,38 @@ test("keeping a change leaves the diff rendering against the real original", asy
   assert.strictEqual(fs.readFileSync(file, "utf8"), "line one\nline two\nline three\n", "Keep does not touch the file");
 });
 
+test("Keep All keeps a file shared with another chat", () => {
+  const tracker = new ChangeTracker();
+  tracker.register();
+  const file = write("shared-keep.ts", "v2\n");
+  const vscode = globalThis.__dvVscode;
+  vscode.window.shown.warning.length = 0;
+
+  tracker.recordDiff(file, "v1\n", "v2\n", "A");
+  tracker.recordDiff(file, "v2\n", "v3\n", "B");
+  tracker.acceptAll("A");
+
+  assert.deepStrictEqual(tracker.pathsFor("A"), [], "Keep All resolves the current chat's file");
+  assert.deepStrictEqual(tracker.changedPaths(), [], "the shared file leaves the working set");
+  assert.deepStrictEqual(vscode.window.shown.warning, [], "Keep All does not warn about a safe operation");
+});
+
+test("a later Undo All does not inherit a kept chat's session ownership", async () => {
+  const tracker = new ChangeTracker();
+  tracker.register();
+  const file = write("shared-undo.ts", "v2\n");
+  const vscode = globalThis.__dvVscode;
+  vscode.window.shown.warning.length = 0;
+
+  tracker.recordDiff(file, "v1\n", "v2\n", "A");
+  tracker.acceptAll("A");
+  tracker.recordDiff(file, "v2\n", "v3\n", "B");
+  await tracker.rejectAll("B");
+
+  assert.strictEqual(fs.readFileSync(file, "utf8"), "v2\n", "Undo All restores the later edit");
+  assert.deepStrictEqual(vscode.window.shown.warning, [], "the later edit is not treated as shared");
+});
+
 test("undoing a change restores the file and still resolves its original", async () => {
   const tracker = new ChangeTracker();
   tracker.register();

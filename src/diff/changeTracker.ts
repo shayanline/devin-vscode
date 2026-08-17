@@ -386,7 +386,6 @@ export class ChangeTracker
       snap.removed = stat?.removed;
       snap.agentHash = contentHash(newText);
       snap.agentStat = statOf(fsPath);
-      snap.sessions.add(sessionId);
       if (snap.resolved) {
         // Kept or undone, and now edited again. The review starts from what was
         // kept, not from what the file was before Devin first touched it: keeping
@@ -394,7 +393,10 @@ export class ChangeTracker
         // again, including the ones already dealt with. `oldText` is what the file
         // held immediately before this edit, which is exactly that baseline.
         snap.original = oldText;
+        snap.sessions = new Set([sessionId]);
         snap.resolved = false;
+      } else {
+        snap.sessions.add(sessionId);
       }
     } else {
       this.snapshots.set(key(fsPath), {
@@ -645,12 +647,12 @@ export class ChangeTracker
     return doc.save();
   }
 
-  // With a session, only that chat's files: the tray these come from says "N
-  // changed files" for one chat, and another chat's edits are not the user's to
-  // lose from a button they cannot see. Without one, everything, which is what the
-  // Source Control title actions mean.
+  // Keep is safe even when another chat also changed the file: it leaves the current
+  // content alone. With a session, only that chat's files are kept. Without one,
+  // everything is kept, which is what the Source Control title action means.
   acceptAll(sessionId?: string): void {
-    for (const p of this.bulkPaths(sessionId)) {
+    const paths = sessionId ? this.unresolvedFor(sessionId).map((s) => s.path) : this.changedPaths();
+    for (const p of paths) {
       this.accept(p);
     }
   }
@@ -661,7 +663,7 @@ export class ChangeTracker
     }
   }
 
-  // What a bulk action from one chat may touch. A file is held once, with one
+  // What a bulk undo from one chat may touch. A file is held once, with one
   // original, from before whichever chat edited it first, so a file two chats have
   // both edited cannot be undone for one of them: writing that original back would
   // discard the other chat's later work, from a button in a tray that does not
@@ -678,7 +680,7 @@ export class ChangeTracker
     if (shared.length) {
       void vscode.window.showWarningMessage(
         shared.length === 1
-          ? `${path.basename(shared[0])} was also changed by another chat, so it was left alone. Keep or undo it from its own row.`
+          ? `${path.basename(shared[0])} was also changed by another chat, so it was left alone. Undo it from its own row.`
           : `${shared.length} files were also changed by another chat, so they were left alone.`
       );
     }

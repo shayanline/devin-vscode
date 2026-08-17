@@ -8,6 +8,13 @@ the commit messages carry the detail.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
+## [0.11.12] - 2026-08-17
+
+### Highlights
+- Keep All accepts files from this chat when another chat touched them.
+- File links wrapped in code formatting still open as file pills.
+- Undo All continues to protect files changed by another chat.
+
 ## [0.11.11] - 2026-08-16
 
 ### Highlights

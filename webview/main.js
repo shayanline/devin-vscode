@@ -2660,8 +2660,26 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     a.removeAttribute("role");
     delete a.dataset.anchored;
   }
+  function enhanceCodeFileReferences(container) {
+    if (!container) return;
+    container.querySelectorAll("code").forEach((code) => {
+      if (code.closest("pre")) return;
+      const match = /^\[([^\]]+)\]\((.+)\)$/i.exec((code.textContent || "").trim());
+      if (!match) return;
+      const rawTarget = match[2].trim().replace(/\s+(?:"[^"]*"|'[^']*'|\([^)]*\))$/, "");
+      const target = rawTarget.startsWith("<") && rawTarget.endsWith(">")
+        ? rawTarget.slice(1, -1)
+        : rawTarget;
+      if (!isFileReference(target)) return;
+      const link = document.createElement("a");
+      link.setAttribute("href", target);
+      link.textContent = match[1];
+      code.replaceWith(link);
+    });
+  }
   function enhanceAnchors(container) {
     if (!container) return;
+    enhanceCodeFileReferences(container);
     container.querySelectorAll("a[href]").forEach((a) => {
       const href = a.getAttribute("href") || "";
       if (caps.inlineReferencesStyle === "link") {
