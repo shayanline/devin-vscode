@@ -1027,9 +1027,9 @@ body {
 }
 
 .dv-floater.model-hover-floater {
-  width: min(520px, calc(100vw - 8px));
-  min-width: 0;
-  max-width: calc(100vw - 8px);
+  width: max-content;
+  min-width: 300px;
+  max-width: min(380px, calc(100vw - 8px));
   max-height: calc(100vh - 8px);
   overflow: auto;
   box-sizing: border-box;
@@ -1189,27 +1189,47 @@ body {
 .model-hover-configurable {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   margin-top: 14px;
   color: var(--vscode-descriptionForeground, var(--vscode-foreground));
 }
 
 .model-hover-configurable-label {
-  margin-right: auto;
+  flex: 0 0 auto;
+}
+
+.model-hover-configurable-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  margin-left: auto;
 }
 
 .model-hover-configurable-button {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  box-sizing: border-box;
   padding: 4px 10px;
-  border: 1px solid var(--vscode-button-secondaryBackground, var(--vscode-widget-border));
-  border-radius: 5px;
-  color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
-  background: var(--vscode-button-secondaryBackground, transparent);
+  border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+  border-radius: 6px;
+  color: var(--vscode-foreground);
+  background: transparent;
   font: inherit;
+  font-size: 0.95em;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+button.model-hover-configurable-button {
   cursor: pointer;
 }
 
-.model-hover-configurable-button:hover {
-  background: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground));
+button.model-hover-configurable-button:hover {
+  background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
 }
 
 #thinking-dd .dd-icon {

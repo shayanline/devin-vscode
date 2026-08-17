@@ -191,7 +191,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       ["Max context", formatTokenCount(item.maxContextTokens)],
       ["Max output", formatTokenCount(item.maxOutputTokens)]
     ].filter(([, value]) => value);
-    const hasConfigurable = !!item.thinkingLevels;
+    const hasConfigurable = !!item.thinkingLevels || !!item.maxContextTokens;
     if (!item.description && !item.costTier && !rowLabels.length && !promotion && !contextRows.length && !hasConfigurable) return null;
 
     const card = document.createElement("div");
@@ -251,16 +251,28 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       const configurable = document.createElement("div");
       configurable.className = "model-hover-configurable";
       configurable.appendChild(Object.assign(document.createElement("span"), { className: "model-hover-configurable-label", textContent: "Configurable" }));
-      const effort = document.createElement("button");
-      effort.type = "button";
-      effort.className = "model-hover-configurable-button";
-      effort.textContent = "Thinking Level";
-      effort.addEventListener("click", (event) => {
-        event.stopPropagation();
-        modelDropdown.close();
-        el.thinkingDD.querySelector(".dd-btn")?.click();
-      });
-      configurable.appendChild(effort);
+      const controls = document.createElement("div");
+      controls.className = "model-hover-configurable-controls";
+      if (item.thinkingLevels) {
+        const effort = document.createElement("button");
+        effort.type = "button";
+        effort.className = "model-hover-configurable-button";
+        effort.textContent = "Thinking Level";
+        effort.addEventListener("click", (event) => {
+          event.stopPropagation();
+          modelDropdown.close();
+          el.thinkingDD.querySelector(".dd-btn")?.click();
+        });
+        controls.appendChild(effort);
+      }
+      if (item.maxContextTokens) {
+        controls.appendChild(Object.assign(document.createElement("span"), {
+          className: "model-hover-configurable-button model-hover-configurable-badge",
+          title: `Maximum context: ${formatTokenCount(item.maxContextTokens)}`,
+          textContent: "Context Size"
+        }));
+      }
+      configurable.appendChild(controls);
       card.appendChild(configurable);
     }
     return card;

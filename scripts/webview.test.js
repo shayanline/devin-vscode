@@ -4990,6 +4990,10 @@ test("model picker follows the adaptive pinned and models layout", async () => {
   assert.match(hover.textContent, /1M tokens/);
   assert.match(hover.textContent, /131K tokens/);
   assert.match(hover.textContent, /Configurable/);
+  assert.deepStrictEqual(
+    [...hover.querySelectorAll(".model-hover-configurable-button")].map((button) => button.textContent),
+    ["Thinking Level", "Context Size"]
+  );
   assert.ok([...hover.querySelectorAll("button")].some((button) => button.textContent === "Thinking Level"));
   assert.match(hover.textContent, /PROMO/);
 
@@ -5001,9 +5005,12 @@ test("model picker follows the adaptive pinned and models layout", async () => {
 
   const css = fs.readFileSync(path.join(ROOT, "media", "main.css"), "utf8");
   assert.match(css, /\.model-hover-header\.no-description\s*\{/, "the badge has a dedicated no-description header layout");
-  assert.match(css, /\.dv-floater\.model-hover-floater\s*\{[\s\S]*max-width: calc\(100vw - 8px\);/, "the hover card fits the viewport width");
+  assert.match(css, /\.dv-floater\.model-hover-floater\s*\{[\s\S]*width: max-content;/, "the hover card sizes to its content");
+  assert.match(css, /\.dv-floater\.model-hover-floater\s*\{[\s\S]*max-width: min\(380px, calc\(100vw - 8px\)\);/, "the hover card fits the viewport width");
   assert.match(css, /\.dv-floater\.model-hover-floater\s*\{[\s\S]*max-height: calc\(100vh - 8px\);/, "the hover card fits the viewport height");
   assert.match(css, /#model-dd \.dd-menu\s*\{[\s\S]*width: min\(200px, calc\(100vw - 16px\)\);/, "the model picker has a compact width");
+  assert.match(css, /\.model-hover-configurable-controls\s*\{/, "configurable items use a right aligned control group");
+  assert.match(css, /\.model-hover-configurable-button\s*\{[\s\S]*border: 1px solid var\(--vscode-widget-border/, "configurable items use the Copilot badge border");
 
   const terra = rows.find((item) => /Terra/.test(item.textContent));
   terra.dispatchEvent(new h.window.MouseEvent("mouseenter", { bubbles: true }));
