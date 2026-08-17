@@ -2187,6 +2187,10 @@ body {
   color: var(--vscode-textLink-foreground);
 }
 
+.bubble a.file-pill {
+  color: var(--dv-dim);
+}
+
 .bubble table {
   border-collapse: collapse;
   margin: 0 0 8px;
@@ -3547,7 +3551,7 @@ body {
 
 /* File / symbol references as bordered pills (VS Code chat-codeblock-pill /
    inline-anchor style): a file-type icon, the name, and +/- line counts. */
-.file-change {
+.file-pill {
   display: inline-flex;
   align-items: center;
   gap: var(--dv-space-2);
@@ -3555,17 +3559,25 @@ body {
   border: 1px solid var(--dv-border);
   border-radius: var(--dv-radius-sm);
   color: var(--dv-dim);
-  cursor: pointer;
   text-decoration: none;
   vertical-align: baseline;
   max-width: 100%;
   min-width: 0;
 }
 
-.file-change:hover {
+.file-change {
+  cursor: pointer;
+}
+
+.file-pill:hover {
   background: var(--vscode-list-hoverBackground);
   color: var(--vscode-textLink-foreground, var(--vscode-foreground));
   text-decoration: none;
+}
+
+.file-pill:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
 }
 
 .file-pill-icon {
@@ -3588,29 +3600,6 @@ body {
 .label-removed {
   color: var(--vscode-chat-linesRemovedForeground, var(--vscode-charts-red, #f85149));
   flex: 0 0 auto;
-}
-
-/* Inline anchor chip: a file/symbol reference inside assistant prose. */
-.anchor-chip {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 3px;
-  padding: 1px 3px;
-  border: 0.5px solid var(--dv-border);
-  border-radius: var(--dv-radius-sm);
-  color: var(--vscode-textLink-foreground, var(--vscode-foreground));
-  text-decoration: none;
-  white-space: nowrap;
-}
-
-.anchor-chip:hover {
-  background: var(--vscode-list-hoverBackground);
-  text-decoration: none;
-}
-
-.anchor-chip-icon {
-  font-size: 11px;
-  align-self: center;
 }
 
 /* The question and permission trays sit above the composer and grow with what

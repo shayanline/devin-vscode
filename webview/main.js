@@ -1245,6 +1245,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     const path = href.split(/[?#]/, 1)[0];
     try { return decodeURIComponent(path); } catch { return path; }
   }
+  function fileReferenceIconTarget(href) {
+    return fileReferenceTarget(href).split(/[?#]/, 1)[0];
+  }
 
   // Clickable anchors in assistant/user text. External links are opened by VS Code's
   // own webview link handling, so we only open file and relative links in the editor.
@@ -1783,8 +1786,13 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       if (anchor) anchorAfterToggle(root, anchorTop);
       if (opts.onUserToggle) opts.onUserToggle();
     };
-    header.addEventListener("click", (e) => { e.stopPropagation(); userToggle(); });
+    header.addEventListener("click", (e) => {
+      if (e.target.closest && e.target.closest(".file-pill")) return;
+      e.stopPropagation();
+      userToggle();
+    });
     header.addEventListener("keydown", (e) => {
+      if (e.target.closest && e.target.closest(".file-pill")) return;
       if (e.key === "Enter" || e.key === " ") { e.preventDefault(); userToggle(); }
     });
     sync();
@@ -1876,6 +1884,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       } else {
         const icon = document.createElement("i");
         icon.className = "codicon " + fileIconFor(a.label) + " attachment-icon";
+        icon.setAttribute("aria-hidden", "true");
         pill.appendChild(icon);
       }
       const name = document.createElement("span");
@@ -2638,17 +2647,47 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // chips: a bordered pill with a file-type icon. External links stay plain. With
   // inlineReferences.style === "link" they stay as plain links. Clicks are handled
   // by the delegated thread listener.
+  function unenhanceAnchor(a) {
+    const label = a.querySelector(".file-pill-name");
+    if (label) {
+      while (label.firstChild) a.insertBefore(label.firstChild, label);
+      label.remove();
+    }
+    const icon = a.querySelector(".file-pill-icon");
+    if (icon) icon.remove();
+    a.classList.remove("file-change", "file-pill");
+    a.removeAttribute("tabindex");
+    a.removeAttribute("role");
+    delete a.dataset.anchored;
+  }
   function enhanceAnchors(container) {
-    if (!container || caps.inlineReferencesStyle === "link") return;
+    if (!container) return;
     container.querySelectorAll("a[href]").forEach((a) => {
-      if (a.dataset.anchored) return;
       const href = a.getAttribute("href") || "";
-      if (!href || href.startsWith("#") || !isFileReference(href)) return;
+      if (caps.inlineReferencesStyle === "link") {
+        if (a.dataset.anchored) unenhanceAnchor(a);
+        return;
+      }
+      if (!href || href.startsWith("#") || !isFileReference(href) || a.dataset.anchored) return;
       a.dataset.anchored = "1";
-      a.classList.add("anchor-chip");
+      a.classList.add("file-change", "file-pill");
+      a.tabIndex = 0;
+      a.setAttribute("role", "button");
+      if (!a.dataset.filePillKeys) {
+        a.dataset.filePillKeys = "1";
+        a.addEventListener("keydown", (e) => {
+          if (!a.classList.contains("file-pill")) return;
+          if (e.key === "Enter" || e.key === " ") { e.preventDefault(); a.click(); }
+        });
+      }
       const icon = document.createElement("i");
-      icon.className = "codicon " + fileIconFor(a.textContent || href) + " anchor-chip-icon";
+      icon.className = "codicon " + fileIconFor(fileReferenceIconTarget(href)) + " file-pill-icon";
+      icon.setAttribute("aria-hidden", "true");
       a.insertBefore(icon, a.firstChild);
+      const label = document.createElement("span");
+      label.className = "file-pill-name";
+      while (a.childNodes.length > 1) label.appendChild(a.childNodes[1]);
+      a.appendChild(label);
     });
   }
   function sameMid(a, b) { return (a || null) === (b || null); }
@@ -2689,6 +2728,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
           '<div class="thinking-item-content">' + renderMarkdown(step) + "</div></div>"
       )
       .join("");
+    b.body.querySelectorAll(".thinking-item-content").forEach(enhanceAnchors);
   }
   function renderOpenBlock() {
     if (!block) return;
@@ -3741,6 +3781,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     }
     sub.prose.buffer += m.text;
     sub.prose.content.innerHTML = renderMarkdown(sub.prose.buffer);
+    enhanceAnchors(sub.prose.content);
     scrollToBottom();
   }
 
@@ -4552,10 +4593,13 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
 
   function filePill(f) {
     const link = document.createElement("a");
-    link.className = "file-change";
+    link.className = "file-change file-pill";
+    link.tabIndex = 0;
+    link.setAttribute("role", "button");
     link.title = f.path;
     const icon = document.createElement("i");
     icon.className = "codicon " + fileIconFor(f.path) + " file-pill-icon";
+    icon.setAttribute("aria-hidden", "true");
     const name = document.createElement("span");
     name.className = "file-pill-name";
     name.textContent = baseName(f.path) + (f.line ? ":" + f.line : "");
@@ -4573,9 +4617,13 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       r.textContent = "-" + f.removed;
       link.appendChild(r);
     }
-    link.addEventListener("click", () => {
+    const open = () => {
       if (f.diff) vscode.postMessage({ type: "openDiff", path: f.path, editId: f.editId });
       else vscode.postMessage({ type: "openFile", path: f.path, line: f.line });
+    };
+    link.addEventListener("click", open);
+    link.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
     });
     return link;
   }
@@ -5387,9 +5435,12 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       const row = document.createElement("div");
       row.className = "ws-file";
       const link = document.createElement("a");
-      link.className = "file-change";
+      link.className = "file-change file-pill";
+      link.tabIndex = 0;
+      link.setAttribute("role", "button");
       const icon = document.createElement("i");
       icon.className = "codicon " + fileIconFor(f.name) + " file-pill-icon";
+      icon.setAttribute("aria-hidden", "true");
       const nm = document.createElement("span");
       nm.className = "file-pill-name";
       nm.textContent = f.name;
@@ -5398,7 +5449,11 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       const c = wsCounts.get(f.path);
       if (c) countBadges(link, c.added, c.removed);
       link.title = f.path;
-      link.addEventListener("click", () => vscode.postMessage({ type: "openDiff", path: f.path }));
+      const open = () => vscode.postMessage({ type: "openDiff", path: f.path });
+      link.addEventListener("click", open);
+      link.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
+      });
       const grp = document.createElement("div");
       grp.className = "ws-file-actions";
       grp.appendChild(iconBtn("codicon-check", "Keep", () => vscode.postMessage({ type: "acceptFile", path: f.path })));
@@ -5609,6 +5664,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
           : a.type === "selection" ? "codicon-selection"
           : a.type === "directory" ? "codicon-folder"
           : fileIconFor(a.label));
+      icon.setAttribute("aria-hidden", "true");
       chip.appendChild(icon);
     }
     const label = document.createElement("span");
@@ -5642,6 +5698,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     toggle.addEventListener("click", (e) => { e.stopPropagation(); vscode.postMessage({ type: "setImplicit", enabled: !ic.enabled }); });
     const icon = document.createElement("i");
     icon.className = "codicon " + fileIconFor(ic.name);
+    icon.setAttribute("aria-hidden", "true");
     const label = document.createElement("span");
     label.className = "chip-label";
     const range = ic.line1 ? ":" + ic.line1 + (ic.line2 && ic.line2 !== ic.line1 ? "-" + ic.line2 : "") : "";
@@ -6137,6 +6194,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     if (!v) return;
     el.thread.innerHTML = "";
     el.thread.appendChild(v.frag);
+    el.thread.querySelectorAll(".resp-text, .subagent-prose-content, .subagent-section-body, .thinking-item-content")
+      .forEach(enhanceAnchors);
     turns = v.turns;
     currentTurn = v.currentTurn;
     turnSeq = v.turnSeq;
@@ -7070,6 +7129,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
           surface: m.surface || caps.surface
         });
         applyCapPrefs();
+        document.querySelectorAll(".resp-text, .subagent-prose-content, .subagent-section-body, .thinking-item-content")
+          .forEach(enhanceAnchors);
         refreshTurnChrome();
         break;
       case "turnHead":

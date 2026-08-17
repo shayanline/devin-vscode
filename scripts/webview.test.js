@@ -51,14 +51,22 @@ test("live user message renders without a handler error", async () => {
 
 test("assistant file references render as clickable links", async () => {
   const h = createHarness();
-  const href = "file:///Users/shayan.khaksar/VSCode/devin-vscode/src/acp/client.ts";
+  const href = "file:///Users/shayan.khaksar/VSCode/devin-vscode/src/acp/client.ts#L20";
   h.replay([{ role: "assistant", text: `See [client.ts:243-251](${href})` }]);
   await h.settle();
 
   const link = h.thread().querySelector(".resp-text a");
   assert.ok(link, "file references should render as anchors");
-  assert.strictEqual(link.textContent, "client.ts:243-251");
+  assert.ok(link.classList.contains("file-change"), "file references use the normal file pill class");
+  assert.ok(link.classList.contains("file-pill"), "file references use the shared file pill base");
+  assert.strictEqual(link.querySelector(".file-pill-name").textContent, "client.ts:243-251");
+  assert.ok(link.querySelector(".file-pill-icon.codicon-file-code"), "file references use the path based file icon");
+  assert.strictEqual(link.querySelector(".file-pill-icon").getAttribute("aria-hidden"), "true");
   assert.strictEqual(link.getAttribute("href"), href);
+  assert.strictEqual(link.tabIndex, 0);
+  assert.strictEqual(link.getAttribute("role"), "button");
+  link.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  link.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: " ", bubbles: true }));
   link.dispatchEvent(new h.window.MouseEvent("click", { bubbles: true }));
   assert.deepStrictEqual(h.posted.at(-1), { type: "openFile", path: href });
   assert.strictEqual(h.errors().length, 0, "webview handler threw: " + JSON.stringify(h.errors()));
@@ -75,11 +83,11 @@ test("external links stay external and relative links open decoded paths", async
 
   const [ftp, doc, drive, query, section] = h.thread().querySelectorAll(".resp-text a");
   assert.ok(ftp && doc && drive && query && section, "all links should render");
-  assert.ok(!ftp.classList.contains("anchor-chip"), "external links stay plain");
-  assert.ok(doc.classList.contains("anchor-chip"), "relative links use file styling");
-  assert.ok(drive.classList.contains("anchor-chip"), "drive paths use file styling");
-  assert.ok(!query.classList.contains("anchor-chip"), "query links stay plain");
-  assert.ok(!section.classList.contains("anchor-chip"), "empty relative fragments stay plain");
+  assert.ok(!ftp.classList.contains("file-pill"), "external links stay plain");
+  assert.ok(doc.classList.contains("file-pill"), "relative links use file styling");
+  assert.ok(drive.classList.contains("file-pill"), "drive paths use file styling");
+  assert.ok(!query.classList.contains("file-pill"), "query links stay plain");
+  assert.ok(!section.classList.contains("file-pill"), "empty relative fragments stay plain");
   ftp.dispatchEvent(new h.window.MouseEvent("click", { bubbles: true }));
   query.dispatchEvent(new h.window.MouseEvent("click", { bubbles: true }));
   section.dispatchEvent(new h.window.MouseEvent("click", { bubbles: true }));
@@ -88,6 +96,24 @@ test("external links stay external and relative links open decoded paths", async
   assert.deepStrictEqual(h.posted.at(-1), { type: "openFile", path: "C:/repo/src/app.ts" });
   doc.dispatchEvent(new h.window.MouseEvent("click", { bubbles: true }));
   assert.deepStrictEqual(h.posted.at(-1), { type: "openFile", path: "docs/C#.md" });
+});
+
+test("changing inline reference style updates existing links", async () => {
+  const h = createHarness();
+  h.replay([{ role: "assistant", text: "See [client.ts](src/client.ts)" }]);
+  await h.settle();
+  const link = h.thread().querySelector(".resp-text a");
+  assert.ok(link.classList.contains("file-pill"));
+
+  h.post({ type: "capabilities", inlineReferencesStyle: "link" });
+  await h.settle();
+  assert.ok(!link.classList.contains("file-pill"), "link mode removes existing pill styling");
+  assert.strictEqual(link.querySelector(".file-pill-icon"), null, "link mode removes the file icon");
+
+  h.post({ type: "capabilities", inlineReferencesStyle: "box" });
+  await h.settle();
+  assert.ok(link.classList.contains("file-pill"), "box mode restores existing pill styling");
+  assert.ok(link.querySelector(".file-pill-icon"), "box mode restores the file icon");
 });
 
 test("elicitation renders oneOf/anyOf options and submits the chosen consts", async () => {
@@ -567,6 +593,7 @@ test("a subagent nests its prompt, tools, output and report on one timeline", as
   h.post({ type: "subagentStart", id: "sa1", profile: "Explore", background: true,
     title: "Map session persistence", task: "Work out how sessions persist.\n\nStart at sessionStore.ts." });
   h.post({ type: "subagentChunk", parentId: "sa1", stream: "thought", text: "Reading the store first." });
+  h.post({ type: "subagentChunk", parentId: "sa1", stream: "message", text: "See [client.ts](src/client.ts)." });
   h.post({ type: "toolCall", id: "sa1-t1", parentId: "sa1", title: "Read src/session/sessionStore.ts", kind: "read", status: "pending" });
   h.post({ type: "toolCallUpdate", id: "sa1-t1", parentId: "sa1", status: "in_progress" });
   await h.settle(15);
@@ -583,6 +610,20 @@ test("a subagent nests its prompt, tools, output and report on one timeline", as
     "the running tool is appended to the header");
   assert.ok(sub.querySelector(".subagent-item.subagent-prompt"), "the prompt opens the timeline");
   assert.ok(sub.querySelector(".subagent-item.subagent-thought"), "its reasoning is on the timeline");
+  const subLink = sub.querySelector(".subagent-prose-content a");
+  assert.ok(subLink && subLink.classList.contains("file-pill"), "subagent file references use the file pill");
+  assert.ok(subLink.querySelector(".file-pill-icon"), "subagent file references use the file icon");
+  subLink.click();
+  subLink.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  subLink.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: " ", bubbles: true }));
+  assert.ok(h.posted.some((m) => m.type === "openFile" && m.path === "src/client.ts"),
+    "subagent file references open from mouse and keyboard");
+  h.post({ type: "capabilities", inlineReferencesStyle: "link" });
+  await h.settle(5);
+  assert.ok(!subLink.classList.contains("file-pill"), "link mode updates subagent references");
+  h.post({ type: "capabilities", inlineReferencesStyle: "box" });
+  await h.settle(5);
+  assert.ok(subLink.classList.contains("file-pill"), "box mode restores subagent references");
   assert.ok(sub.querySelector(".subagent-item.subagent-tool > .tool"), "its tool call nests as a row");
   assert.ok(sub.querySelector(".subagent-item.subagent-spinner"), "a working row shows while it runs");
   assert.strictEqual(h.document.querySelectorAll("#thread > .turn .tool-group").length, 0,
@@ -1930,6 +1971,7 @@ test("a request keeps what was attached to it, above the message", async () => {
     "above the bubble, where VS Code puts it");
   const pills = [...row.querySelectorAll(".chat-attached-context-attachment")];
   assert.deepStrictEqual(pills.map((p) => p.textContent), ["main.css", "Screenshot.png"]);
+  assert.ok(!pills[0].classList.contains("file-pill"), "attached context keeps its own pill styling");
   assert.ok(pills[0].querySelector(".attachment-icon"), "a file gets its file glyph");
   const img = pills[1].querySelector("img.chat-attached-context-pill-image");
   assert.ok(img, "a picture is its own thumbnail");
@@ -2346,7 +2388,7 @@ test("reasoning inside a run is text on the chain, not a section to open", async
   h.post({ type: "body", body: "thread" });
   h.post({ type: "clear" });
   h.post({ type: "toolCall", id: "t1", kind: "read", status: "completed", rawInput: { path: "/w/a.ts" } });
-  h.post({ type: "thoughtChunk", text: "The callers still import the old helpers." });
+  h.post({ type: "thoughtChunk", text: "See [a.ts](src/a.ts)." });
   h.post({ type: "toolCall", id: "t2", kind: "edit", status: "completed", rawInput: { path: "/w/b.ts" } });
   await h.settle(30);
 
@@ -2355,7 +2397,7 @@ test("reasoning inside a run is text on the chain, not a section to open", async
   // The stylesheet keys the headerless treatment off being inside a run, so this
   // is the invariant that decides how it is drawn.
   assert.ok(think.closest(".tool-group-body"), "and it sits on the run's chain with the work it led to");
-  assert.match(think.textContent, /The callers still import the old helpers/, "the reasoning reads as itself");
+  assert.match(think.textContent, /See a\.ts/, "the reasoning reads as itself");
   // A thought is a row of the run like any other, so it leads with a codicon in
   // the same column as the rows around it, and the chain treats it the same. The
   // stylesheet measures the node from those, so they are the invariant.
@@ -2363,6 +2405,18 @@ test("reasoning inside a run is text on the chain, not a section to open", async
   assert.ok(bullet, "the row leads with its glyph, before the text");
   assert.ok(bullet.classList.contains("codicon-circle-filled"), "a codicon, not a dot drawn by hand");
   assert.strictEqual(bullet.nextElementSibling.className, "thinking-item-content", "then what it thought");
+  const thoughtLink = think.querySelector(".thinking-item-content a");
+  assert.ok(thoughtLink && thoughtLink.classList.contains("file-pill"), "thinking references use the file pill");
+  thoughtLink.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  thoughtLink.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: " ", bubbles: true }));
+  assert.ok(h.posted.some((m) => m.type === "openFile" && m.path === "src/a.ts"),
+    "thinking references open from the keyboard");
+  h.post({ type: "capabilities", inlineReferencesStyle: "link" });
+  await h.settle(5);
+  assert.ok(!thoughtLink.classList.contains("file-pill"), "link mode updates thinking references");
+  h.post({ type: "capabilities", inlineReferencesStyle: "box" });
+  await h.settle(5);
+  assert.ok(thoughtLink.classList.contains("file-pill"), "box mode restores thinking references");
   assert.ok(!think.classList.contains("dv-collapsed"), "and it is open: there is no header left to open it with");
 
   // A thought on its own is a section of its own, and keeps its header: it is
@@ -4219,8 +4273,14 @@ test("a permission prompt with only a tool call names that tool", async () => {
   });
   await h.settle(10);
   const p3 = h.document.querySelector('#permission-tray [data-request-id="p3"]');
-  assert.strictEqual(p3.querySelector(".file-change .file-pill-name").textContent, "token.ts",
+  const p3File = p3.querySelector(".file-change");
+  assert.strictEqual(p3File.querySelector(".file-pill-name").textContent, "token.ts",
     "and names the file it would touch");
+  assert.ok(p3File.classList.contains("file-pill"), "normal file references use the shared file pill class");
+  assert.ok(p3File.querySelector(".file-pill-icon"), "normal file references use the shared file icon class");
+  p3File.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  assert.ok(h.posted.some((m) => m.type === "openFile" && m.path === "/w/src/auth/token.ts"),
+    "normal file references open from the keyboard");
   assert.strictEqual(h.errors().length, 0);
 });
 
