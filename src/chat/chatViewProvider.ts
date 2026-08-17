@@ -4649,13 +4649,13 @@ export class ChatController implements AcpHost {
     const command = typeof tc._meta?.["cognition.ai/editableCommand"] === "string"
       ? (tc._meta["cognition.ai/editableCommand"] as string).trim()
       : undefined;
-    if (command && this.cfg().get<boolean>("autoApproveCommands", false)) {
+    const rt = this.runtimeBySessionId(params.sessionId);
+    if (command && rt?.mode === "bypass") {
       const allow = params.options.find((option) => option.optionId === "allow_once");
       if (allow) {
         return Promise.resolve({ outcome: { outcome: "selected", optionId: allow.optionId } });
       }
     }
-    const rt = this.runtimeBySessionId(params.sessionId);
     const requestId = `perm-${++ChatController.permissionSeq}`;
     const payload = {
       type: "permission",

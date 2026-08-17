@@ -8,6 +8,13 @@ the commit messages carry the detail.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
+## [0.12.1] - 2026-08-17
+
+### Highlights
+- Make the integrated terminal opt in by default.
+- Let Bypass approve Devin command requests without an extra setting.
+- Remove the redundant auto approve command setting.
+
 ## [0.12.0] - 2026-08-17
 
 ### Highlights

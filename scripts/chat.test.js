@@ -25,10 +25,12 @@ const posixOnly = { skip: process.platform === "win32" };
 
 const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
 
-test("auto approve commands answers permission requests without showing them", async () => {
-  const h = createChat({ config: { autoApproveCommands: true } });
+test("bypass mode answers command permission requests without showing them", posixOnly, async () => {
+  const h = createChat({ config: { defaultMode: "" } });
+  h.setAgentMode("bypass");
+  const id = await h.startChat("bypass commands");
   const pending = h.controller.requestPermission({
-    sessionId: "session",
+    sessionId: id,
     toolCall: {
       toolCallId: "command",
       _meta: { "cognition.ai/editableCommand": "gh api graphql" }

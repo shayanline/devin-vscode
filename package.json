@@ -2,7 +2,7 @@
   "name": "devin-vscode",
   "displayName": "Devin for VS Code",
   "description": "A native chat panel for the Devin CLI, powered by the Agent Client Protocol. Streaming replies, per workspace sessions, and trackable diffs.",
-  "version": "0.12.0",
+  "version": "0.12.1",
   "publisher": "shayanline",
   "author": "Shayan Khaksar",
   "license": "AGPL-3.0-or-later",
@@ -366,11 +366,6 @@
           "default": "accept-edits",
           "markdownDescription": "Mode that chats started in this extension begin in. The picker in the chat composer offers whatever modes your Devin CLI reports, which may be more than are listed here."
         },
-        "devin.autoApproveCommands": {
-          "type": "boolean",
-          "default": false,
-          "markdownDescription": "Automatically approve every shell command in this extension without showing a prompt, including destructive commands and commands subject to a team ask policy. Enable this only when you fully trust the agent and the task."
-        },
         "devin.sandbox": {
           "type": "boolean",
           "default": false,
@@ -394,8 +389,8 @@
         },
         "devin.useIntegratedTerminal": {
           "type": "boolean",
-          "default": true,
-          "markdownDescription": "Run the agent's commands in a real VS Code terminal, so you can watch them, open them and take them over. Needs [shell integration](https://code.visualstudio.com/docs/terminal/shell-integration), which is on by default for bash, zsh, fish, pwsh and Git Bash. Commands fall back to running in the background when it is unavailable."
+          "default": false,
+          "markdownDescription": "Run the agent's commands in a real VS Code terminal when enabled, so you can watch them, open them and take them over. Needs [shell integration](https://code.visualstudio.com/docs/terminal/shell-integration), which is on by default for bash, zsh, fish, pwsh and Git Bash. Commands fall back to running in the background when it is unavailable."
         },
         "devin.showMcpWarnings": {
           "type": "boolean",
