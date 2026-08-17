@@ -1001,10 +1001,103 @@ body {
   color: var(--vscode-icon-foreground, var(--vscode-foreground));
   background: transparent;
   cursor: pointer;
+  opacity: 0;
+  transition: opacity 100ms ease-in-out;
+}
+
+.dd-item:hover .dd-item-action,
+.dd-item:focus-within .dd-item-action,
+.dd-item-action:focus-visible {
+  opacity: 1;
 }
 
 .dd-item-action:hover {
   background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
+}
+
+.model-hover {
+  min-width: 280px;
+  padding: 8px;
+}
+
+.model-hover-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.model-hover-name {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 1.05em;
+}
+
+.model-hover-tier {
+  flex: 0 0 auto;
+  padding: 3px 7px;
+  border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+  border-radius: 12px;
+  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+  font-size: 0.85em;
+}
+
+.model-hover-status {
+  display: flex;
+  gap: 4px;
+  margin: 4px 0 8px;
+}
+
+.model-hover-description {
+  margin: 4px 0 10px;
+  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+  font-size: 0.9em;
+}
+
+.model-hover-section {
+  margin: 10px 0 4px;
+  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+  font-size: 0.85em;
+  font-weight: 600;
+}
+
+.model-hover-table {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  column-gap: 20px;
+  row-gap: 6px;
+}
+
+.model-hover-label {
+  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+}
+
+.model-hover-value {
+  font-variant-numeric: tabular-nums;
+}
+
+.model-hover-promotion {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--vscode-panel-border);
+  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+}
+
+.model-hover-promotion strong {
+  color: var(--vscode-charts-green, var(--vscode-foreground));
+}
+
+#thinking-dd .dd-icon {
+  display: none;
+}
+
+#input-box.cmp-sm #thinking-dd .dd-icon {
+  display: inline-flex;
 }
 
 .dd-item.selected {

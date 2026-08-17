@@ -6,6 +6,7 @@ export interface ModelVariant {
   name: string; // effort label, e.g. "Medium", "High", "No Thinking"
   costTier?: string;
   costSummary?: string;
+  promotion?: string;
   isNew?: boolean;
   isBeta?: boolean;
 }
@@ -27,6 +28,10 @@ interface ModelsJson {
       label?: string;
       cost_tier?: string;
       cost_summary?: string;
+      promotion?: string;
+      promo?: string;
+      promotion_label?: string;
+      is_promo?: boolean;
       is_new?: boolean;
       is_beta?: boolean;
     }[];
@@ -122,6 +127,7 @@ function run(cliPath: string, env?: NodeJS.ProcessEnv): Promise<ModelFamily[]> {
                   name: effortLabel(label, v.label || v.model_uid),
                   costTier: v.cost_tier,
                   costSummary: v.cost_summary,
+                  promotion: v.promotion || v.promo || v.promotion_label || (v.is_promo ? "PROMO" : undefined),
                   isNew: v.is_new,
                   isBeta: v.is_beta
                 });

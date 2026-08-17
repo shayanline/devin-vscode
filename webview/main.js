@@ -110,9 +110,13 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // detail). ACP does not report a per-turn model, so this is the model
   // selected at send time.
   let currentModelLabel = "";
+  let modelHoverFloater = null;
   const modelDropdown = createDropdown(el.modelDD, onModelSelect, {
     buttonIcon: modelButtonIcon,
-    itemAction: toggleModelPin
+    itemAction: toggleModelPin,
+    itemHover: showModelHover,
+    itemLeave: scheduleModelHoverClose,
+    onClose: closeModelHover
   });
   const thinkingDropdown = createDropdown(el.thinkingDD, onThinkingSelect, {
     staticIcon: "codicon-thinking",
@@ -146,11 +150,86 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       || (fam?.variants || []).find((v) => v.value === fam.default)
       || fam?.variants?.[0];
   }
-  function variantDetails(v) {
-    return [v?.costTier, v?.costSummary].filter(Boolean).join(" · ");
+  function promotionLabel(v) {
+    return typeof v?.promotion === "string" && v.promotion.trim() ? v.promotion.trim() : "";
   }
   function variantBadges(v) {
-    return [v?.isNew ? "New" : "", v?.isBeta ? "Beta" : ""].filter(Boolean);
+    return [v?.isNew ? "NEW" : "", v?.isBeta ? "BETA" : "", promotionLabel(v)].filter(Boolean);
+  }
+  function costTierLabel(tier) {
+    return String(tier || "").replace(/^med\b/i, "Medium").trim();
+  }
+  function costRows(summary) {
+    return String(summary || "").split("·").map((part) => {
+      const match = /^(.+?)\s*\/\s*MTok\s+(In|Out|Cache Read|Cache Write)$/i.exec(part.trim());
+      if (!match) return null;
+      const labels = { in: "Input", out: "Output", "cache read": "Cache Read", "cache write": "Cache Write" };
+      return { label: labels[match[2].toLowerCase()], value: match[1].trim() };
+    }).filter(Boolean);
+  }
+  function modelHoverContent(item) {
+    if (!item) return null;
+    const rows = costRows(item.costSummary);
+    const promotion = promotionLabel(item);
+    if (!item.description && !item.costTier && !rows.length && !promotion && !item.isNew && !item.isBeta) {
+      return null;
+    }
+    const card = document.createElement("div");
+    card.className = "model-hover";
+    const header = document.createElement("div");
+    header.className = "model-hover-header";
+    header.appendChild(Object.assign(document.createElement("strong"), { className: "model-hover-name", textContent: item.name || "Model" }));
+    if (item.costTier) header.appendChild(Object.assign(document.createElement("span"), { className: "model-hover-tier", textContent: costTierLabel(item.costTier) }));
+    card.appendChild(header);
+    const badges = variantBadges(item);
+    if (badges.length) {
+      const status = document.createElement("div");
+      status.className = "model-hover-status";
+      badges.forEach((badge) => status.appendChild(Object.assign(document.createElement("span"), { className: "dd-item-badge", textContent: badge })));
+      card.appendChild(status);
+    }
+    if (item.description) card.appendChild(Object.assign(document.createElement("p"), { className: "model-hover-description", textContent: item.description }));
+    if (rows.length) {
+      card.appendChild(Object.assign(document.createElement("div"), { className: "model-hover-section", textContent: "Cost per 1M tokens" }));
+      const table = document.createElement("div");
+      table.className = "model-hover-table";
+      rows.forEach((row) => {
+        table.appendChild(Object.assign(document.createElement("span"), { className: "model-hover-label", textContent: row.label }));
+        table.appendChild(Object.assign(document.createElement("strong"), { className: "model-hover-value", textContent: row.value }));
+      });
+      card.appendChild(table);
+    }
+    if (promotion) {
+      const promo = document.createElement("div");
+      promo.className = "model-hover-promotion";
+      promo.appendChild(Object.assign(document.createElement("span"), { textContent: "Promotion" }));
+      promo.appendChild(Object.assign(document.createElement("strong"), { textContent: promotion }));
+      card.appendChild(promo);
+    }
+    return card;
+  }
+  let modelHoverCloseTimer = null;
+  function cancelModelHoverClose() {
+    if (modelHoverCloseTimer) clearTimeout(modelHoverCloseTimer);
+    modelHoverCloseTimer = null;
+  }
+  function closeModelHover() {
+    cancelModelHoverClose();
+    if (modelHoverFloater) modelHoverFloater.close();
+    modelHoverFloater = null;
+  }
+  function scheduleModelHoverClose() {
+    cancelModelHoverClose();
+    modelHoverCloseTimer = setTimeout(closeModelHover, 150);
+  }
+  function showModelHover(anchor, item) {
+    cancelModelHoverClose();
+    closeModelHover();
+    const card = modelHoverContent(item.hover);
+    if (!card) return;
+    card.addEventListener("mouseenter", cancelModelHoverClose);
+    card.addEventListener("mouseleave", scheduleModelHoverClose);
+    modelHoverFloater = makeFloater(anchor, card, "outside-right", () => { modelHoverFloater = null; });
   }
   function savePinnedModels() {
     vscode.setState({ ...(vscode.getState() || {}), pinnedModels: [...pinnedModelIds] });
@@ -180,7 +259,6 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     if (fam && (fam.variants || []).length > 1) {
       thinkingDropdown.set(fam.variants.map((v) => ({
         ...v,
-        detail: variantDetails(v),
         badges: variantBadges(v)
       })), currentUid);
       el.thinkingDD.classList.remove("hidden");
@@ -203,20 +281,25 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       return {
         value: family.id,
         name: family.name,
-        detail: variantDetails(variant),
         badges: variantBadges(variant),
         pinned: pinnedModelIds.has(family.id),
+        hover: { ...variant, name: family.name },
         group
       };
     };
-    const pinned = modelFamilies.filter((f) => pinnedModelIds.has(f.id));
-    const unpinned = modelFamilies.filter((f) => !pinnedModelIds.has(f.id));
+    const adaptiveFamily = adaptive[0];
+    const pinned = modelFamilies.filter((f) => !isAdaptive(f) && pinnedModelIds.has(f.id));
+    const models = modelFamilies.filter((f) => !isAdaptive(f) && !pinnedModelIds.has(f.id));
     const items = [];
+    if (adaptiveFamily) {
+      items.push(item(adaptiveFamily));
+      if (pinned.length || models.length) items.push({ sep: true });
+    }
     if (pinned.length) {
       items.push(...pinned.map((f) => item(f, "Pinned")));
-      if (unpinned.length) items.push({ sep: true });
+      if (models.length) items.push({ sep: true });
     }
-    items.push(...unpinned.map((f) => item(f, pinned.length ? "Models" : undefined)));
+    items.push(...models.map((f) => item(f, "Models")));
     modelDropdown.set(items, fam ? fam.id : "");
     updateThinking(fam, currentModelUid);
   }
@@ -425,7 +508,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   }
 
   // A small floating popover/menu anchored to a header button. `align` is
-  // "center" | "left" | "right" relative to the anchor; the box is clamped to
+  // "center" | "left" | "right" | "outside-right" relative to the anchor; the box is clamped to
   // the viewport so it never renders off-screen, and flips above the anchor if
   // it would overflow the bottom.
   function makeFloater(anchor, content, align, onClose) {
@@ -441,7 +524,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     let left;
     if (align === "center") left = r.left + r.width / 2 - bw / 2;
     else if (align === "left") left = r.left;
+    else if (align === "outside-right") left = r.right + 4;
     else left = r.right - bw;
+    if (align === "outside-right" && left + bw > vw - 4 && r.left - bw - 4 >= 0) left = r.left - bw - 4;
     left = Math.max(4, Math.min(left, vw - bw - 4));
     let top = r.bottom + 4;
     if (top + bh > vh - 4 && r.top - bh - 4 >= 0) top = r.top - bh - 4;
@@ -1518,6 +1603,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       menu.classList.add("hidden");
       btn.classList.remove("open");
       btn.setAttribute("aria-expanded", "false");
+      opts.onClose?.();
     }
     function labelFor(v) {
       const it = items.find((x) => x.value === v);
@@ -1568,6 +1654,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         });
         row.appendChild(action);
       }
+      if (opts.itemHover) row.addEventListener("mouseenter", () => opts.itemHover(row, it));
+      if (opts.itemLeave) row.addEventListener("mouseleave", () => opts.itemLeave(row, it));
       row.addEventListener("click", (ev) => {
         ev.stopPropagation();
         current = it.value;

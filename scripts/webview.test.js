@@ -4914,7 +4914,7 @@ test("the mode picker offers whatever modes the agent reports", async () => {
   assert.strictEqual(h.errors().length, 0);
 });
 
-test("model picker shows available metadata and supports pinning", async () => {
+test("model picker follows the adaptive pinned and models layout", async () => {
   const h = createHarness();
   h.post({ type: "ready" });
   h.post({ type: "body", body: "thread" });
@@ -4923,33 +4923,66 @@ test("model picker shows available metadata and supports pinning", async () => {
     currentMode: "accept-edits",
     currentModel: "claude-medium",
     modes: [],
-    models: [{
-      id: "claude",
-      name: "Claude",
-      default: "claude-medium",
-      variants: [{
-        value: "claude-medium",
-        name: "Medium",
-        costTier: "Med cost",
-        costSummary: "$2 / MTok In · $10 / MTok Out",
-        isNew: true
-      }]
-    }]
+    models: [
+      {
+        id: "adaptive",
+        name: "Adaptive",
+        default: "adaptive",
+        variants: [{ value: "adaptive", name: "Adaptive" }]
+      },
+      {
+        id: "claude",
+        name: "Claude",
+        default: "claude-medium",
+        variants: [{
+          value: "claude-medium",
+          name: "Medium",
+          costTier: "Med cost",
+          costSummary: "$2 / MTok In · $10 / MTok Out",
+          isNew: true,
+          promotion: "PROMO"
+        }]
+      },
+      {
+        id: "terra",
+        name: "Terra",
+        default: "terra-medium",
+        variants: [{ value: "terra-medium", name: "Medium" }]
+      }
+    ]
   });
   await h.settle(20);
 
   const dd = h.document.querySelector("#model-dd");
   dd.querySelector(".dd-btn").click();
-  const row = dd.querySelector(".dd-item");
-  assert.match(row.textContent, /Med cost/);
-  assert.match(row.textContent, /\$2 \/ MTok In/);
-  assert.ok(row.querySelector(".dd-item-badge"), "the new model badge is shown");
+  const rows = [...dd.querySelectorAll(".dd-item")];
+  assert.match(rows[0].textContent, /Adaptive/);
+  const row = rows.find((item) => /Claude/.test(item.textContent));
+  assert.ok(row, "the Claude family is listed");
+  assert.doesNotMatch(row.textContent, /Med cost|MTok/, "cost stays out of the model row");
+  assert.match(row.textContent, /NEW/);
+  assert.match(row.textContent, /PROMO/);
   const pin = row.querySelector(".dd-item-action");
   assert.ok(pin, "the model row has a pin action");
+
+  row.dispatchEvent(new h.window.MouseEvent("mouseenter", { bubbles: true }));
+  await h.settle(10);
+  const hover = h.document.querySelector(".model-hover");
+  assert.ok(hover, "the model opens a hover card");
+  assert.match(hover.textContent, /Medium cost/);
+  assert.match(hover.textContent, /Cost per 1M tokens/);
+  assert.match(hover.textContent, /Input/);
+  assert.match(hover.textContent, /\$2/);
+  assert.match(hover.textContent, /PROMO/);
+
   pin.click();
   await h.settle(20);
   dd.querySelector(".dd-btn").click();
-  assert.match(dd.textContent, /Pinned/);
+  assert.deepStrictEqual(
+    [...dd.querySelectorAll(".dd-group")].map((group) => group.textContent.trim()),
+    ["Pinned", "Models"]
+  );
+  assert.strictEqual([...dd.querySelectorAll(".dd-item")].filter((item) => /Claude/.test(item.textContent)).length, 1);
   dd.querySelector(".dd-btn").click();
 
   h.post({
@@ -4997,7 +5030,9 @@ test("thinking picker keeps a thought icon in compact mode", async () => {
   assert.strictEqual(thinking.querySelector(".dd-btn").getAttribute("aria-label"), "Thinking effort");
 
   const css = fs.readFileSync(path.join(ROOT, "media", "main.css"), "utf8");
-  assert.doesNotMatch(css, /#input-box\.cmp-sm #thinking-dd/, "the small tier keeps the thinking control");
+  assert.match(css, /#thinking-dd \.dd-icon\s*\{\s*display: none;/, "the normal control hides the thought icon");
+  assert.match(css, /#input-box\.cmp-sm #thinking-dd \.dd-icon\s*\{\s*display: inline-flex;/, "compact mode shows the thought icon");
+  assert.doesNotMatch(css, /#input-box\.cmp-sm #thinking-dd \{/, "the small tier keeps the thinking control");
   assert.match(css, /#input-box\.cmp-xxs #mode-dd,\s*\n#input-box\.cmp-xxs #attach,\s*\n#input-box\.cmp-xxs #thinking-dd/, "the smallest tier hides it with the other controls");
   assert.strictEqual(h.errors().length, 0);
 });

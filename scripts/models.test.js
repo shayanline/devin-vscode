@@ -37,6 +37,7 @@ test("model listing preserves cost and status metadata", async () => {
         label: "Claude Medium",
         cost_tier: "Med cost",
         cost_summary: "$2 / MTok In · $10 / MTok Out",
+        promotion: "PROMO",
         is_new: true,
         is_beta: false
       }]
@@ -48,6 +49,7 @@ test("model listing preserves cost and status metadata", async () => {
     name: "Medium",
     costTier: "Med cost",
     costSummary: "$2 / MTok In · $10 / MTok Out",
+    promotion: "PROMO",
     isNew: true,
     isBeta: false
   });
