@@ -168,9 +168,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   }
   function costRows(summary) {
     return String(summary || "").split("·").map((part) => {
-      const match = /^(.+?)\s*\/\s*MTok\s+(In|Out|Cache Read|Cache Write)$/i.exec(part.trim());
+      const match = /^(.+?)\s*\/\s*(?:MTok|1M)\s+(In|Input|Out|Output|Cache Read|Cached input|Cache Write)$/i.exec(part.trim());
       if (!match) return null;
-      const labels = { in: "Input", out: "Output", "cache read": "Cache Read", "cache write": "Cache Write" };
+      const labels = { in: "Input", input: "Input", out: "Output", output: "Output", "cache read": "Cache Read", "cached input": "Cache Read", "cache write": "Cache Write" };
       return { label: labels[match[2].toLowerCase()], value: match[1].trim() };
     }).filter(Boolean);
   }
@@ -218,13 +218,17 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       const defaultByLabel = new Map(defaultRows.map((row) => [row.label, row.value]));
       const longByLabel = new Map(longRows.map((row) => [row.label, row.value]));
       rowLabels.forEach((label) => {
-        table.appendChild(Object.assign(document.createElement("span"), { className: "model-hover-cost-label", textContent: label }));
-        table.appendChild(Object.assign(document.createElement("span"), { className: "model-hover-cost-leader" }));
-        table.appendChild(Object.assign(document.createElement("strong"), { className: "model-hover-cost-value", textContent: defaultByLabel.get(label) || "" }));
+        const row = document.createElement("div");
+        row.className = "model-hover-cost-row" + (longRows.length ? " has-long-context" : "");
+        row.append(
+          Object.assign(document.createElement("span"), { className: "model-hover-cost-line" }),
+          Object.assign(document.createElement("span"), { className: "model-hover-cost-label", textContent: label }),
+          Object.assign(document.createElement("strong"), { className: "model-hover-cost-value", textContent: defaultByLabel.get(label) || "" })
+        );
         if (longRows.length) {
-          table.appendChild(Object.assign(document.createElement("span"), { className: "model-hover-cost-leader" }));
-          table.appendChild(Object.assign(document.createElement("strong"), { className: "model-hover-cost-value", textContent: longByLabel.get(label) || "" }));
+          row.append(Object.assign(document.createElement("strong"), { className: "model-hover-cost-value", textContent: longByLabel.get(label) || "" }));
         }
+        table.appendChild(row);
       });
       cost.appendChild(table);
       card.appendChild(cost);

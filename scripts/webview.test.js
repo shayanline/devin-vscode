@@ -5014,8 +5014,8 @@ test("model picker follows the adaptive pinned and models layout", async () => {
 
   const css = fs.readFileSync(path.join(ROOT, "media", "main.css"), "utf8");
   assert.match(css, /\.model-hover-header\.no-description\s*\{/, "the badge has a dedicated no-description header layout");
-  assert.match(css, /\.dv-floater\.model-hover-floater\s*\{[\s\S]*width: max-content;/, "the hover card sizes to its content");
-  assert.match(css, /\.dv-floater\.model-hover-floater\s*\{[\s\S]*max-width: min\(380px, calc\(100vw - 8px\)\);/, "the hover card fits the viewport width");
+  assert.match(css, /\.dv-floater\.model-hover-floater\s*\{[\s\S]*width: min\(300px, calc\(100vw - 8px\)\);/, "the hover card uses the compact target width");
+  assert.match(css, /\.dv-floater\.model-hover-floater\s*\{[\s\S]*max-width: min\(300px, calc\(100vw - 8px\)\);/, "the hover card fits the viewport width");
   assert.match(css, /\.dv-floater\.model-hover-floater\s*\{[\s\S]*max-height: calc\(100vh - 8px\);/, "the hover card fits the viewport height");
   assert.match(css, /#model-dd \.dd-menu\s*\{[\s\S]*width: min\(200px, calc\(100vw - 16px\)\);/, "the model picker has a compact width");
   assert.match(css, /\.model-hover-configurable-controls\s*\{/, "configurable items use a right aligned control group");
@@ -5055,6 +5055,85 @@ test("model picker follows the adaptive pinned and models layout", async () => {
   await h.settle(20);
   dd.querySelector(".dd-btn").click();
   assert.doesNotMatch(dd.textContent, /Claude/, "an unavailable pinned model is not shown");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("model hover draws a line from each cost label to its prices", async () => {
+  const h = createHarness();
+  h.document.documentElement.style.setProperty("--vscode-descriptionForeground", "#9d9d9d");
+  const stylesheet = h.document.createElement("style");
+  stylesheet.textContent = fs.readFileSync(path.join(ROOT, "media", "main.css"), "utf8");
+  h.document.head.appendChild(stylesheet);
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({
+    type: "options",
+    currentMode: "accept-edits",
+    currentModel: "gpt-terra-medium",
+    modes: [],
+    models: [{
+      id: "gpt-terra",
+      name: "GPT-5.6 Terra",
+      default: "gpt-terra-medium",
+      variants: [{
+        value: "gpt-terra-medium",
+        name: "Medium",
+        costSummary: "$2 / 1M Input · $0.2 / 1M Cached input · $12 / 1M Output",
+        longContextCostSummary: "$4 / 1M Input · $0.4 / 1M Cached input · $24 / 1M Output"
+      }]
+    }]
+  });
+  await h.settle(20);
+
+  const dd = h.document.querySelector("#model-dd");
+  dd.querySelector(".dd-btn").click();
+  dd.querySelector(".dd-item").dispatchEvent(new h.window.MouseEvent("mouseenter", { bubbles: true }));
+  await h.settle(550);
+
+  const hover = h.document.querySelector(".model-hover");
+  assert.ok(hover, "the model hover is shown");
+  const lines = [...hover.querySelectorAll(".model-hover-cost-line")];
+  const rows = [...hover.querySelectorAll(".model-hover-cost-row")];
+  assert.strictEqual(lines.length, 3, "each price row has one dotted line");
+  assert.deepStrictEqual(
+    rows.map((row) => row.querySelector(".model-hover-cost-label").textContent),
+    ["Input", "Cache Read", "Output"],
+    "each cost row keeps its label beside its first line"
+  );
+  assert.deepStrictEqual(
+    [...hover.querySelectorAll(".model-hover-cost-value")].map((value) => value.textContent),
+    ["$2", "$4", "$0.2", "$0.4", "$12", "$24"],
+    "current CLI price values are shown"
+  );
+  assert.ok(
+    lines.every((line) => h.window.getComputedStyle(line).borderBottomStyle === "dotted"),
+    "cost lines use a dotted stroke"
+  );
+  assert.ok(
+    lines.every((line) => {
+      const style = h.window.getComputedStyle(line);
+      return style.marginLeft === "0px" && style.marginRight === "0px";
+    }),
+    "each row uses one uninterrupted line"
+  );
+  assert.ok(
+    [...hover.querySelectorAll(".model-hover-cost-label")].every((label) => h.window.getComputedStyle(label).paddingRight === "6px")
+      && [...hover.querySelectorAll(".model-hover-cost-value")].every((value) => {
+        const style = h.window.getComputedStyle(value);
+        return style.paddingLeft === "6px" && style.paddingRight === "6px";
+      }),
+    "cost text leaves the dotted line a six pixel gap"
+  );
+  assert.strictEqual(
+    h.window.getComputedStyle(hover.querySelector(".model-hover-cost-table")).columnGap,
+    "0",
+    "price columns do not add an extra gap"
+  );
+  assert.deepStrictEqual(
+    lines.map((line) => line.parentElement.querySelector(".model-hover-cost-label").textContent),
+    ["Input", "Cache Read", "Output"],
+    "each dotted line belongs to its cost row"
+  );
   assert.strictEqual(h.errors().length, 0);
 });
 

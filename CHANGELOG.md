@@ -8,6 +8,12 @@ the commit messages carry the detail.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
+## [0.12.3] - 2026-09-02
+
+### Highlights
+- Make model hover price details compact with connected cost lines.
+- Show current CLI price formats in model hover cards.
+
 ## [0.12.2] - 2026-08-17
 
 ### Highlights
