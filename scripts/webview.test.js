@@ -5190,6 +5190,47 @@ test("model hover links context limits to their values", async () => {
   assert.strictEqual(h.errors().length, 0);
 });
 
+test("model hover balances padding without configuration", async () => {
+  const h = createHarness();
+  const stylesheet = h.document.createElement("style");
+  stylesheet.textContent = fs.readFileSync(path.join(ROOT, "media", "main.css"), "utf8");
+  h.document.head.appendChild(stylesheet);
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({
+    type: "options",
+    currentMode: "accept-edits",
+    currentModel: "no-configuration",
+    modes: [],
+    models: [{
+      id: "no-configuration",
+      name: "No Configuration",
+      default: "no-configuration",
+      variants: [{
+        value: "no-configuration",
+        name: "Base",
+        maxContextTokens: 1000000,
+        maxOutputTokens: 128000
+      }]
+    }]
+  });
+  await h.settle(20);
+
+  const dd = h.document.querySelector("#model-dd");
+  dd.querySelector(".dd-btn").click();
+  dd.querySelector(".dd-item").dispatchEvent(new h.window.MouseEvent("mouseenter", { bubbles: true }));
+  await h.settle(550);
+
+  const hover = h.document.querySelector(".model-hover");
+  assert.ok(hover, "the model hover is shown");
+  assert.ok(!hover.classList.contains("compact"), "the context limits use the full tooltip layout");
+  assert.ok(hover.classList.contains("no-configurable"), "the tooltip records that configuration is absent");
+  const style = h.window.getComputedStyle(hover);
+  assert.strictEqual(style.paddingTop, "10px");
+  assert.strictEqual(style.paddingBottom, "13px");
+  assert.strictEqual(h.errors().length, 0);
+});
+
 test("thinking picker keeps a thought icon in compact mode", async () => {
   const h = createHarness();
   h.post({ type: "ready" });

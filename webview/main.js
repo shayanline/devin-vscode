@@ -196,7 +196,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     const compact = !rowLabels.length && !promotion && !contextRows.length && !hasConfigurable;
 
     const card = document.createElement("div");
-    card.className = "model-hover" + (compact ? " compact" : "");
+    card.className = "model-hover" + (compact ? " compact" : "") + (!hasConfigurable ? " no-configurable" : "");
     const header = document.createElement("div");
     header.className = "model-hover-header" + (item.description ? "" : " no-description");
     header.appendChild(Object.assign(document.createElement("strong"), { className: "model-hover-name", textContent: item.name || "Model" }));

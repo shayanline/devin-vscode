@@ -1046,6 +1046,10 @@ body {
   padding: 8px 10px;
 }
 
+.model-hover.no-configurable:not(.compact) {
+  padding-bottom: 13px;
+}
+
 .model-hover-header {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto;

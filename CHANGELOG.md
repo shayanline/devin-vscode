@@ -8,6 +8,11 @@ the commit messages carry the detail.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
+## [0.12.5] - 2026-09-02
+
+### Highlights
+- Balance padding in model hover cards without configuration controls.
+
 ## [0.12.4] - 2026-09-02
 
 ### Highlights
