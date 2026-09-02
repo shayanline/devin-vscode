@@ -5137,6 +5137,59 @@ test("model hover draws a line from each cost label to its prices", async () => 
   assert.strictEqual(h.errors().length, 0);
 });
 
+test("model hover links context limits to their values", async () => {
+  const h = createHarness();
+  h.document.documentElement.style.setProperty("--vscode-descriptionForeground", "#9d9d9d");
+  const stylesheet = h.document.createElement("style");
+  stylesheet.textContent = fs.readFileSync(path.join(ROOT, "media", "main.css"), "utf8");
+  h.document.head.appendChild(stylesheet);
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({
+    type: "options",
+    currentMode: "accept-edits",
+    currentModel: "context-model",
+    modes: [],
+    models: [{
+      id: "context",
+      name: "Context Model",
+      default: "context-model",
+      variants: [{
+        value: "context-model",
+        name: "Base",
+        maxContextTokens: 1000000,
+        maxOutputTokens: 128000
+      }]
+    }]
+  });
+  await h.settle(20);
+
+  const dd = h.document.querySelector("#model-dd");
+  dd.querySelector(".dd-btn").click();
+  dd.querySelector(".dd-item").dispatchEvent(new h.window.MouseEvent("mouseenter", { bubbles: true }));
+  await h.settle(550);
+
+  const limits = h.document.querySelector(".model-hover-limits");
+  assert.ok(limits, "the model hover shows its context limits");
+  const rows = [...limits.querySelectorAll(".model-hover-cost-row")];
+  const lines = [...limits.querySelectorAll(".model-hover-cost-line")];
+  assert.strictEqual(rows.length, 2, "each context limit has a row");
+  assert.strictEqual(lines.length, 2, "each context limit has one dotted line");
+  assert.deepStrictEqual(
+    rows.map((row) => row.querySelector(".model-hover-cost-label").textContent),
+    ["Max context", "Max output"]
+  );
+  assert.deepStrictEqual(
+    [...limits.querySelectorAll(".model-hover-cost-value")].map((value) => value.textContent),
+    ["1M tokens", "128K tokens"]
+  );
+  assert.ok(
+    lines.every((line) => h.window.getComputedStyle(line).borderBottomStyle === "dotted"),
+    "context lines use the same dotted stroke"
+  );
+  assert.strictEqual(h.errors().length, 0);
+});
+
 test("thinking picker keeps a thought icon in compact mode", async () => {
   const h = createHarness();
   h.post({ type: "ready" });

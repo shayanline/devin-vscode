@@ -8,6 +8,11 @@ the commit messages carry the detail.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
+## [0.12.4] - 2026-09-02
+
+### Highlights
+- Connect model context limits to their values with dotted lines.
+
 ## [0.12.3] - 2026-09-02
 
 ### Highlights

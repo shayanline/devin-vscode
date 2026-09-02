@@ -1220,8 +1220,9 @@ body {
 
 .model-hover-limits {
   display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 4px 12px;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  column-gap: 0;
+  row-gap: 4px;
   margin-top: 10px;
   padding-top: 8px;
   border-top: 1px solid var(--vscode-panel-border);

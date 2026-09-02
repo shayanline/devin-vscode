@@ -246,8 +246,14 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       const limits = document.createElement("div");
       limits.className = "model-hover-limits";
       contextRows.forEach(([label, value]) => {
-        limits.appendChild(Object.assign(document.createElement("span"), { textContent: label }));
-        limits.appendChild(Object.assign(document.createElement("strong"), { textContent: value }));
+        const row = document.createElement("div");
+        row.className = "model-hover-cost-row";
+        row.append(
+          Object.assign(document.createElement("span"), { className: "model-hover-cost-line" }),
+          Object.assign(document.createElement("span"), { className: "model-hover-cost-label", textContent: label }),
+          Object.assign(document.createElement("strong"), { className: "model-hover-cost-value", textContent: value })
+        );
+        limits.appendChild(row);
       });
       card.appendChild(limits);
     }
