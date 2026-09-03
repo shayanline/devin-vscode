@@ -306,10 +306,15 @@ function createChat(opts = {}) {
     // Start a chat and wait until it is really open, the common setup.
     async startChat(text = "hello") {
       const before = controller.activeId;
+      const promptsBefore = api.agentSaw("session/prompt").length;
       api.send({ type: "send", text, newSession: true });
       const opened = await api.until(() => controller.activeId && controller.activeId !== before);
       if (!opened) {
         throw new Error("the chat never opened. Agent log: " + logs.join(" | "));
+      }
+      const prompted = await api.until(() => api.agentSaw("session/prompt").length > promptsBefore);
+      if (!prompted) {
+        throw new Error("the chat opened without sending its prompt. Agent log: " + logs.join(" | "));
       }
       return controller.activeId;
     },

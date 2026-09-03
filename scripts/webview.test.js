@@ -4974,13 +4974,13 @@ test("model picker follows the adaptive pinned and models layout", async () => {
   assert.match(rows[0].textContent, /Adaptive/);
   const adaptiveRow = rows[0];
   adaptiveRow.dispatchEvent(new h.window.MouseEvent("mouseenter", { bubbles: true }));
-  await h.settle(550);
+  await h.until(() => h.document.querySelector(".model-hover"), 2000);
   const adaptiveHover = h.document.querySelector(".model-hover");
   assert.ok(adaptiveHover.classList.contains("compact"), "Adaptive uses the compact hover card");
   assert.match(adaptiveHover.textContent, /Automatically balances quality and cost/);
   assert.strictEqual(adaptiveHover.querySelector(".model-hover-configurable"), null, "Adaptive has no configurable controls");
   adaptiveRow.dispatchEvent(new h.window.MouseEvent("mouseleave", { bubbles: true }));
-  await h.settle(350);
+  await h.until(() => !h.document.querySelector(".model-hover"), 2000);
   const row = rows.find((item) => /Claude/.test(item.textContent));
   assert.ok(row, "the Claude family is listed");
   assert.doesNotMatch(row.textContent, /Med cost|MTok/, "cost stays out of the model row");
@@ -4992,7 +4992,7 @@ test("model picker follows the adaptive pinned and models layout", async () => {
   row.dispatchEvent(new h.window.MouseEvent("mouseenter", { bubbles: true }));
   await h.settle(100);
   assert.strictEqual(h.document.querySelector(".model-hover"), null, "the model hover waits before opening");
-  await h.settle(500);
+  await h.until(() => h.document.querySelector(".model-hover"), 2000);
   const hover = h.document.querySelector(".model-hover");
   assert.ok(hover, "the model opens a hover card after the delay");
   assert.match(hover.textContent, /Powerful/);
@@ -5017,7 +5017,7 @@ test("model picker follows the adaptive pinned and models layout", async () => {
   row.dispatchEvent(new h.window.MouseEvent("mouseleave", { bubbles: true }));
   await h.settle(100);
   assert.ok(h.document.querySelector(".model-hover"), "the hover remains during the hide delay");
-  await h.settle(250);
+  await h.until(() => !h.document.querySelector(".model-hover"), 2000);
   assert.strictEqual(h.document.querySelector(".model-hover"), null, "the hover closes after the hide delay");
 
   const css = fs.readFileSync(path.join(ROOT, "media", "main.css"), "utf8");
@@ -5033,10 +5033,10 @@ test("model picker follows the adaptive pinned and models layout", async () => {
 
   const terra = rows.find((item) => /Terra/.test(item.textContent));
   terra.dispatchEvent(new h.window.MouseEvent("mouseenter", { bubbles: true }));
-  await h.settle(550);
+  await h.until(() => h.document.querySelector(".model-hover"), 2000);
   assert.ok(h.document.querySelector(".model-hover-header.no-description"), "a model without a description keeps the badge aligned");
   terra.dispatchEvent(new h.window.MouseEvent("mouseleave", { bubbles: true }));
-  await h.settle(350);
+  await h.until(() => !h.document.querySelector(".model-hover"), 2000);
 
   pin.click();
   await h.settle(20);
@@ -5096,7 +5096,7 @@ test("model hover draws a line from each cost label to its prices", async () => 
   const dd = h.document.querySelector("#model-dd");
   dd.querySelector(".dd-btn").click();
   dd.querySelector(".dd-item").dispatchEvent(new h.window.MouseEvent("mouseenter", { bubbles: true }));
-  await h.settle(550);
+  await h.until(() => h.document.querySelector(".model-hover"), 2000);
 
   const hover = h.document.querySelector(".model-hover");
   assert.ok(hover, "the model hover is shown");
@@ -5175,7 +5175,7 @@ test("model hover links context limits to their values", async () => {
   const dd = h.document.querySelector("#model-dd");
   dd.querySelector(".dd-btn").click();
   dd.querySelector(".dd-item").dispatchEvent(new h.window.MouseEvent("mouseenter", { bubbles: true }));
-  await h.settle(550);
+  await h.until(() => h.document.querySelector(".model-hover"), 2000);
 
   const limits = h.document.querySelector(".model-hover-limits");
   assert.ok(limits, "the model hover shows its context limits");
@@ -5227,7 +5227,7 @@ test("model hover balances padding without configuration", async () => {
   const dd = h.document.querySelector("#model-dd");
   dd.querySelector(".dd-btn").click();
   dd.querySelector(".dd-item").dispatchEvent(new h.window.MouseEvent("mouseenter", { bubbles: true }));
-  await h.settle(550);
+  await h.until(() => h.document.querySelector(".model-hover"), 2000);
 
   const hover = h.document.querySelector(".model-hover");
   assert.ok(hover, "the model hover is shown");
