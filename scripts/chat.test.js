@@ -895,6 +895,7 @@ test("a cold surface lists sessions through another surface's live ACP client", 
     surfaceHost: {
       sessionListClient: () => source.controller.sessionListClient(),
       elsewhere: () => [],
+      statuses: () => ({}),
       titlesChanged: () => {}
     }
   });

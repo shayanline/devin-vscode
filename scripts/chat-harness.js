@@ -301,8 +301,7 @@ function createChat(opts = {}) {
     answerWith: (choice) => { vscode.window.answer = choice; return api; },
     // Announce the page is listening, which is what unblocks anything waiting on it.
     async ready() {
-      api.send({ type: "ready" });
-      await api.settle(20);
+      await toHost({ type: "ready" });
       return api;
     },
     // Start a chat and wait until it is really open, the common setup.
