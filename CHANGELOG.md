@@ -8,6 +8,12 @@ the commit messages carry the detail.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
+## [0.12.7] - 2026-09-03
+
+### Highlights
+- Point editor chat return controls to the right side panel.
+- Show editor chat activity correctly in the session list.
+
 ## [0.12.6] - 2026-09-03
 
 ### Highlights

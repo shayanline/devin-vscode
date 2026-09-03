@@ -155,6 +155,12 @@ export class ChatManager implements vscode.WebviewViewProvider, vscode.WebviewPa
     return [...ids];
   }
 
+  statuses(except: ChatController) {
+    return Object.assign({}, ...this.controllers()
+      .filter((controller) => controller !== except)
+      .map((controller) => controller.liveSessionStatuses()));
+  }
+
   sessionListClient(except: ChatController) {
     for (const controller of this.controllers()) {
       if (controller !== except) {

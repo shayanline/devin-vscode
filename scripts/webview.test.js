@@ -3950,8 +3950,8 @@ test("an editor tab is one chat: no list, no back, no terminate", async () => {
   assert.strictEqual(h.document.getElementById("detach-btn").title, "Move this chat to the side panel");
   assert.match(
     h.document.getElementById("detach-btn").querySelector(".codicon").className,
-    /layout-sidebar-left-dock/,
-    "the icon follows the panel side"
+    /layout-sidebar-right-dock/,
+    "the return icon points to the right sidebar"
   );
   assert.ok(h.document.getElementById("title-btn").classList.contains("as-heading"), "the title is a name, not a control");
   h.document.getElementById("title-btn").click();
@@ -3974,15 +3974,16 @@ test("a chat open on the other surface says so instead of showing a stale copy",
   h.post({
     type: "sessions",
     activeId: null,
-    statuses: {},
+    statuses: { B: "running" },
     elsewhere: ["B"],
     sessions: [{ id: "B", short_id: "B", title: "In a tab", working_directory: "/w" }]
   });
   await h.settle(10);
   // The row is honest about it before it is even clicked.
   const row = h.document.querySelector("#sessions-list .session-item");
-  assert.ok(row.querySelector(".session-dot").className.includes("dot-idle"), "it is alive, just not here");
+  assert.ok(row.querySelector(".session-dot").className.includes("dot-running"), "it shows the editor tab's real status");
   assert.strictEqual(row.querySelector(".session-elsewhere").title, "Open in an editor tab");
+  assert.ok(!row.querySelector(".kill-glyph"), "only the surface that owns the session can terminate it");
 
   row.querySelector(".session-main").click();
   await h.settle(10);

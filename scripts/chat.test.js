@@ -910,6 +910,30 @@ test("a cold surface lists sessions through another surface's live ACP client", 
   await source.dispose();
 });
 
+test("a session running in an editor tab reports its status to the sidebar", posixOnly, async () => {
+  const chats = [];
+  const surfaceHost = {
+    elsewhere: (except) => chats.filter((chat) => chat.controller !== except).flatMap((chat) => chat.controller.liveSessions()),
+    statuses: (except) => Object.assign({}, ...chats.filter((chat) => chat.controller !== except).map((chat) => chat.controller.liveSessionStatuses())),
+    sessionsChanged: (except) => chats.filter((chat) => chat.controller !== except).forEach((chat) => chat.controller.surfacesChanged()),
+    sessionListClient: () => undefined,
+    titlesChanged: () => {}
+  };
+  const editor = createChat({ kind: "editor", promptDelay: 2000, surfaceHost });
+  chats.push(editor);
+  await editor.ready();
+  const id = await editor.startChat("keep working");
+  const sidebar = createChat({ surfaceHost });
+  chats.push(sidebar);
+
+  sidebar.controller.surfacesChanged();
+
+  assert.ok(await sidebar.until(() => sidebar.last("sessionStatuses")?.statuses[id] === "running"));
+  assert.ok(await sidebar.until(() => sidebar.last("sessionStatuses")?.statuses[id] === "idle"));
+  await sidebar.dispose();
+  await editor.dispose();
+});
+
 test("a background runtime does not receive the visible editor documents", posixOnly, async () => {
   const h = createChat({ documentLifecycle: true });
   await h.ready();

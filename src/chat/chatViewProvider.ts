@@ -168,10 +168,11 @@ export interface SurfaceHost {
   reveal(controller: ChatController): void;
   // Live session ids held by every surface other than this one.
   elsewhere(except: ChatController): string[];
+  statuses(except: ChatController): Record<string, SessionStatus>;
   sessionListClient(except: ChatController): AcpClient | undefined;
   // Half given answers for a request that has moved to another surface.
   saveAnswerDraft(requestId: string, state: unknown, except: ChatController): void;
-  // One surface's set of live sessions changed, so every other surface's list,
+  // One surface's live session state changed, so every other surface's list,
   // status dots and "running elsewhere" badges are now out of date.
   sessionsChanged(except: ChatController): void;
   // A session was renamed, or the CLI finally reported its name, so any editor
@@ -831,6 +832,9 @@ export class ChatController implements AcpHost {
   liveSessions(): string[] {
     return [...this.runtimes.keys()].filter(Boolean);
   }
+  liveSessionStatuses(): Record<string, SessionStatus> {
+    return this.statusMap();
+  }
   async waitForSessionLoad(id: string): Promise<void> {
     await this.loading.get(id);
   }
@@ -1290,14 +1294,15 @@ export class ChatController implements AcpHost {
   // --- Status dots ---------------------------------------------------------
 
   // What this surface is running, and which of them it is showing. Every other
-  // surface lists these too (grayed, badged as running elsewhere), so a change
-  // here has to reach them: without it a chat started in a tab is missing from
-  // the side panel's list until it is refreshed by hand.
+  // surface lists these statuses too, so a change here has to reach them: without
+  // it a chat started in a tab is missing from the side panel's list until it is
+  // refreshed by hand.
   private ownership = "";
 
   private broadcastStatuses(): void {
-    this.post({ type: "sessionStatuses", statuses: this.statusMap(), activeId: this.activeId, elsewhere: this.elsewhere() });
-    const owned = `${[...this.runtimes.keys()].sort().join(",")}|${this.activeId || ""}`;
+    const own = this.statusMap();
+    this.post({ type: "sessionStatuses", statuses: { ...this.surfaces?.statuses(this), ...own }, activeId: this.activeId, elsewhere: this.elsewhere() });
+    const owned = `${Object.keys(own).sort().map((id) => `${id}:${own[id]}`).join(",")}|${this.activeId || ""}`;
     if (owned !== this.ownership) {
       this.ownership = owned;
       this.surfaces?.sessionsChanged(this);
@@ -2742,7 +2747,7 @@ export class ChatController implements AcpHost {
       type: "sessions",
       sessions,
       activeId: this.activeId,
-      statuses: this.statusMap(),
+      statuses: this.allStatuses(),
       // Rows another surface is running, so they can say so before being clicked.
       elsewhere: this.elsewhere(),
       folders: folders.map((f) => ({ path: f, name: path.basename(f) }))
@@ -2754,10 +2759,14 @@ export class ChatController implements AcpHost {
     return this.surfaces?.elsewhere(this) || [];
   }
 
+  private allStatuses(): Record<string, SessionStatus> {
+    return { ...this.surfaces?.statuses(this), ...this.statusMap() };
+  }
+
   // Another surface started, moved or stopped a chat: re-list, so this surface's
   // rows, dots and "running elsewhere" badges say what is actually true.
   surfacesChanged(): void {
-    this.post({ type: "sessionStatuses", statuses: this.statusMap(), activeId: this.activeId, elsewhere: this.elsewhere() });
+    this.post({ type: "sessionStatuses", statuses: this.allStatuses(), activeId: this.activeId, elsewhere: this.elsewhere() });
     void this.refreshSessionsIfVisible();
   }
 

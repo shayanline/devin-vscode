@@ -836,7 +836,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     el.detachBtn.classList.toggle("hidden", !show);
     updateHeaderDivider();
     if (!show) return;
-    setBtnIcon(el.detachBtn, inEditor() ? "layout-sidebar-" + panelSide() + "-dock" : "link-external");
+    setBtnIcon(el.detachBtn, inEditor() ? "layout-sidebar-right-dock" : "link-external");
     el.detachBtn.title = inEditor() ? "Move this chat to the side panel" : "Open this chat in an editor tab";
     el.detachBtn.setAttribute("aria-label", el.detachBtn.title);
   }
@@ -6627,8 +6627,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     title.className = "session-title";
     title.textContent = s.title || s.short_id || s.id;
     // Liveness dot: green = running, amber = waiting for you, gray = not running.
-    // A chat on the other surface is alive, but only that surface knows how it is
-    // getting on, so it reads as running there rather than as dead here.
+    // A chat on another surface keeps the status reported by the controller that
+    // owns it, so a running editor chat is green here too.
     const away = elsewhereIds.includes(s.id);
     const st = sessionStatuses[s.id];
     const dot = document.createElement("span");
@@ -6677,7 +6677,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     actions.className = "session-actions";
     // Terminate is only offered for a live session (kills its process, keeps
     // the conversation). Delete removes the conversation entirely.
-    if (isAliveStatus(sessionStatuses[s.id])) {
+    if (!away && isAliveStatus(sessionStatuses[s.id])) {
       const term = iconBtn(KILL_GLYPH, "Terminate (stop this session's process)", (e) => {
         e.stopPropagation();
         vscode.postMessage({ type: "terminateSession", id: s.id, title: s.title || s.id });
