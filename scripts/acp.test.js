@@ -456,7 +456,7 @@ test("a folder that is itself a drive root still contains its files", () => {
   // the code had no problems at all.
   const items = diagnosticItems([
     [vscode.Uri.file(abs("anywhere", "a.ts")), [diag("a real error", ERROR)]]
-  ], { roots: [path.sep] });
+  ], { roots: [path.parse(W).root] });
   assert.deepStrictEqual(items.map((i) => i.message), ["a real error"]);
 });
 

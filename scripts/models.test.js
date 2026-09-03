@@ -20,11 +20,15 @@ const { listModelFamilies } = require(outfile);
 
 function fakeCli(stdout) {
   const js = path.join(TMP, "devin.js");
-  const sh = path.join(TMP, "devin.sh");
+  const shim = path.join(TMP, process.platform === "win32" ? "devin.cmd" : "devin.sh");
   fs.writeFileSync(js, `process.stdout.write(${JSON.stringify(stdout)});`);
-  fs.writeFileSync(sh, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(js)}\n`);
-  fs.chmodSync(sh, 0o755);
-  return sh;
+  if (process.platform === "win32") {
+    fs.writeFileSync(shim, `@echo off\r\n"${process.execPath}" "${js}"\r\n`);
+  } else {
+    fs.writeFileSync(shim, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(js)}\n`);
+    fs.chmodSync(shim, 0o755);
+  }
+  return shim;
 }
 
 test("model listing preserves cost, limits, promotion, and status metadata", async () => {
