@@ -8,6 +8,17 @@ the commit messages carry the detail.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
+## [0.12.6] - 2026-09-03
+
+### Highlights
+- Restore chats and visible session lists without avoidable startup work.
+- Keep session handovers, terminal output, and editor context correct.
+- Bound retained session, terminal, replay, and diff resources.
+
+### Under the hood
+- Share session lists across ACP connections and bound CLI fallback time.
+- Add timing summaries for health checks, loads, wakes, and session lists.
+
 ## [0.12.5] - 2026-09-02
 
 ### Highlights
