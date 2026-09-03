@@ -299,8 +299,12 @@ test("a chat that finishes starting in the background does not take the panel", 
   // can be told from the visible chat's.
   h.setDelays({ newDelay: 700 });
   h.setAgentMode("plan");
+  const newSessionRequests = h.agentSaw("session/new").length;
   h.send({ type: "send", text: "a new chat", newSession: true });
-  await h.settle(120);
+  assert.ok(
+    await h.until(() => h.agentSaw("session/new").length > newSessionRequests, 60000),
+    "The second session/new request was sent."
+  );
   h.send({ type: "loadSession", id: first });
   await h.until(() => h.activeId() === first);
   // The background chat really did finish starting: without this every assertion below
