@@ -64,6 +64,7 @@ case "$1" in
   # reach the ACP loop below, it would sit on a stdin nobody writes to until the CLI's
   # own timeout killed it, tracked by nothing that could stop it.
   list) echo '[]'; exit 0 ;;
+  models) echo '{"families":[]}'; exit 0 ;;
 esac
 exec ${JSON.stringify(process.execPath)} ${JSON.stringify(js)}
 `

@@ -546,6 +546,8 @@
     "check-types": "tsc --noEmit && tsc --noEmit -p scripts/tsconfig.json",
     "pretest": "npm run compile",
     "test": "node --test \"scripts/*.test.js\"",
+    "pretest:one": "npm run compile",
+    "test:one": "node --test",
     "harness": "node scripts/webview-harness.js",
     "probe": "node scripts/acp-probe.js",
     "preview": "npm run compile && node scripts/preview.js",

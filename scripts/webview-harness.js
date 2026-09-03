@@ -58,6 +58,14 @@ function createHarness({ surface = "view" } = {}) {
   const post = (msg) => window.dispatchEvent(new window.MessageEvent("message", { data: msg }));
   // Let queued rAF renders (assistant streaming is throttled) flush.
   const settle = (ms = 150) => new Promise((resolve) => setTimeout(resolve, ms));
+  const until = async (predicate, timeout = 1000) => {
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+      if (predicate()) return true;
+      await settle(5);
+    }
+    return false;
+  };
 
   return {
     window,
@@ -67,6 +75,7 @@ function createHarness({ surface = "view" } = {}) {
     consoleErrors,
     post,
     settle,
+    until,
     thread,
     state: () => state,
     reqTexts: () => [...thread().querySelectorAll(".req-text")].map((e) => e.textContent.trim()),

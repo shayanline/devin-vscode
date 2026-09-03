@@ -7,13 +7,21 @@
 // end test below proves that: one stream is fed to a first webview, then only the
 // log's replay is fed to a second, and the two transcripts must match.
 
-const test = require("node:test");
+const { after, test } = require("node:test");
 const assert = require("node:assert");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const esbuild = require("esbuild");
-const { createHarness } = require("./webview-harness");
+const { createHarness: mountHarness } = require("./webview-harness");
+
+const harnesses = [];
+const createHarness = (...args) => {
+  const harness = mountHarness(...args);
+  harnesses.push(harness);
+  return harness;
+};
+after(() => harnesses.forEach(({ window }) => window.close()));
 
 const ROOT = path.resolve(__dirname, "..");
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "devin-transcript-"));

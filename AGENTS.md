@@ -57,6 +57,7 @@ Everything runs through npm scripts. Prefer these over ad hoc commands.
 | Production build | `npm run build` |
 | Type check | `npm run check-types` |
 | Run the tests | `npm test` |
+| Run one test file | `npm run test:one -- scripts/webview.test.js` |
 | Package a `.vsix` | `npm run package` |
 | Preview the chat UI in a browser | `npm run preview -- --scenario full` |
 | Preview the settings panel | `npm run preview:settings` |

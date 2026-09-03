@@ -5,14 +5,22 @@
 // inside buildTurnChrome left user request bubbles empty on session load and
 // skipped scroll-to-bottom on live sends.
 
-const test = require("node:test");
+const { after, describe, test } = require("node:test");
 const assert = require("node:assert");
 const fs = require("node:fs");
 const path = require("node:path");
-const { createHarness } = require("./webview-harness");
+const { createHarness: mountHarness } = require("./webview-harness");
 
 const ROOT = path.resolve(__dirname, "..");
+const harnesses = [];
+const createHarness = (...args) => {
+  const harness = mountHarness(...args);
+  harnesses.push(harness);
+  return harness;
+};
+after(() => harnesses.forEach(({ window }) => window.close()));
 
+describe("webview", { concurrency: 8 }, () => {
 test("session load replays user request bubbles with their text", async () => {
   const h = createHarness();
   h.replay([
@@ -1570,7 +1578,7 @@ test("an image the agent cannot decode is attached as a file, never as an image"
     }
   });
   h.document.getElementById("chat-main").dispatchEvent(drop);
-  await h.settle(30);
+  await h.until(() => h.posted.filter((m) => m.type === "attachImage" || m.type === "attachDroppedText").length === 2);
 
   const images = h.posted.filter((m) => m.type === "attachImage");
   assert.deepStrictEqual(images.map((m) => m.name), ["shot.png"], "only the png goes inline as an image");
@@ -1594,7 +1602,7 @@ test("a pasted image the agent cannot decode is attached as a file too", async (
     value: { items: [{ kind: "file", type: "image/svg+xml", getAsFile: () => file }] }
   });
   h.document.getElementById("input").dispatchEvent(paste);
-  await h.settle(30);
+  await h.until(() => h.posted.some((m) => m.type === "attachDroppedText"));
 
   assert.ok(!h.posted.some((m) => m.type === "attachImage"), "it does not go inline as an image");
   const text = h.posted.find((m) => m.type === "attachDroppedText");
@@ -5356,4 +5364,5 @@ test("turning the changed files summary off turns it off", async () => {
   await h.settle(20);
   assert.ok(ws.classList.contains("hidden"), "and turning it off takes it away now, not next turn");
   assert.strictEqual(h.errors().length, 0);
+});
 });

@@ -7,10 +7,18 @@
 //   2. Simplifying the layout removed no control. Every action a section offered
 //      is still reachable, and every config key still has a row.
 
-const test = require("node:test");
+const { after, test } = require("node:test");
 const assert = require("node:assert");
-const { createSettings } = require("./settings-harness");
+const { createSettings: mountSettings } = require("./settings-harness");
 const { DEFAULTS, GLOBAL_SET, FOLDER_SET } = require("./settings-fixture");
+
+const settings = [];
+const createSettings = (...args) => {
+  const instance = mountSettings(...args);
+  settings.push(instance);
+  return instance;
+};
+after(() => settings.forEach(({ window }) => window.close()));
 
 const SECTIONS = ["General", "Instructions", "Skills", "Plugins", "MCP Servers", "Hooks", "Permissions", "Advanced"];
 
