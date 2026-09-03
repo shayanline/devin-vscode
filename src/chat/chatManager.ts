@@ -155,6 +155,18 @@ export class ChatManager implements vscode.WebviewViewProvider, vscode.WebviewPa
     return [...ids];
   }
 
+  sessionListClient(except: ChatController) {
+    for (const controller of this.controllers()) {
+      if (controller !== except) {
+        const client = controller.sessionListClient();
+        if (client) {
+          return client;
+        }
+      }
+    }
+    return undefined;
+  }
+
   // Move a session into a brand new editor tab, beside the current one.
   async detach(id: string): Promise<void> {
     if (!id) {
@@ -207,9 +219,10 @@ export class ChatManager implements vscode.WebviewViewProvider, vscode.WebviewPa
   // The handover itself: the live agent, its terminals and anything it is waiting
   // on leave one surface and are adopted by the other. Nothing restarts.
   private async move(from: ChatController, to: ChatController, id: string): Promise<void> {
-    // Wait for the destination first: export and import then run back to back with
-    // nothing in between, so the agent is never left with no listener, no host and
-    // no owner while a webview loads.
+    // Wait for the destination, then for any source replay, before export and import
+    // run back to back. The second destination check catches a tab closed meanwhile.
+    await to.whenReady();
+    await from.waitForSessionLoad(id);
     await to.whenReady();
     // What only the old page knows (the draft being typed, a question's half given
     // answers) is written back before the chat leaves, so the new page has it.
@@ -232,7 +245,9 @@ export class ChatManager implements vscode.WebviewViewProvider, vscode.WebviewPa
       try {
         await from.importRuntime(transfer);
       } catch {
-        // Both surfaces refused it; the runtime exit handler cleans up.
+        // Both surfaces refused it, so stop the runtime rather than leave its lock alive.
+        transfer.rt.terminals.disposeAll();
+        await transfer.rt.client.shutdown().catch(() => undefined);
       }
       throw err;
     } finally {

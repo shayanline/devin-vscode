@@ -92,6 +92,7 @@ export async function deactivate(): Promise<void> {
   const changes = working;
   manager = undefined;
   working = undefined;
+  SettingsPanel.disposeCurrent();
   // The chats, and the agent the settings panel opens to ask what is loaded, which
   // belongs to no chat and so is in no pool for `shutdown` to find. Plus the
   // working set, whose last Keep or Undo is still sitting behind a debounce.

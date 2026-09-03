@@ -40,6 +40,84 @@ test("session load replays user request bubbles with their text", async () => {
   );
 });
 
+test("ready reveals the chat before session data arrives", async () => {
+  const h = createHarness();
+  const boot = h.document.getElementById("boot");
+  assert.ok(!boot.classList.contains("hidden"));
+
+  h.post({ type: "ready" });
+  await h.settle();
+
+  assert.ok(boot.classList.contains("hidden"));
+});
+
+test("a thread send reports that its transcript can be preserved", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "userMessage", text: "an earlier message" });
+  h.post({ type: "busy", value: false });
+  const input = h.document.getElementById("input");
+  input.value = "continue";
+  input.dispatchEvent(new h.window.Event("input", { bubbles: true }));
+  h.document.getElementById("send").click();
+  await h.settle();
+
+  const sent = h.posted.filter((m) => m.type === "send").pop();
+  assert.deepStrictEqual(sent, { type: "send", text: "continue", newSession: false, preserveTranscript: true });
+});
+
+test("a replay batch preserves historical update order", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear", loading: true });
+  h.post({
+    type: "replay",
+    items: [
+      { type: "userChunk", text: "earlier question", messageId: "u1" },
+      { type: "assistantChunk", text: "earlier answer", messageId: "a1" }
+    ]
+  });
+  h.post({ type: "loaded" });
+  await h.settle();
+
+  assert.deepStrictEqual(h.reqTexts(), ["earlier question"]);
+  assert.deepStrictEqual(h.respTexts(), ["earlier answer"]);
+});
+
+test("terminal output cache releases the oldest completed entry", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  for (let i = 0; i < 51; i++) {
+    h.post({ type: "terminalOutput", terminalId: `term-${i}`, output: `output ${i}`, exitStatus: { exitCode: 0 } });
+  }
+  h.post({ type: "toolCall", id: "old", kind: "execute", status: "completed", rawInput: { command: "old" }, content: [{ type: "terminal", terminalId: "term-0" }] });
+  h.post({ type: "toolCall", id: "new", kind: "execute", status: "completed", rawInput: { command: "new" }, content: [{ type: "terminal", terminalId: "term-50" }] });
+  await h.settle();
+
+  assert.strictEqual(h.thread().querySelector('pre[data-terminal="term-0"]').textContent, "…");
+  assert.match(h.thread().querySelector('pre[data-terminal="term-50"]').textContent, /output 50/);
+});
+
+test("terminal output cache retains an oldest running terminal", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  for (let i = 0; i < 50; i++) {
+    h.post({ type: "terminalOutput", terminalId: `running-${i}`, output: `running ${i}`, exitStatus: null });
+  }
+  h.post({ type: "terminalOutput", terminalId: "completed", output: "finished", exitStatus: { exitCode: 0 } });
+  h.post({ type: "toolCall", id: "running", kind: "execute", status: "in_progress", rawInput: { command: "watch" }, content: [{ type: "terminal", terminalId: "running-0" }] });
+  await h.settle();
+
+  assert.match(h.thread().querySelector('pre[data-terminal="running-0"]').textContent, /running 0/);
+});
+
 test("live user message renders without a handler error", async () => {
   const h = createHarness();
   h.post({ type: "ready" });
@@ -201,6 +279,21 @@ test("elicitation renders oneOf/anyOf options and submits the chosen consts", as
   assert.strictEqual(resp.action, "accept");
   assert.deepStrictEqual(resp.content, { q0: "A", q1: ["X"] });
   assert.strictEqual(h.errors().length, 0);
+});
+
+test("opening the session list delegates refresh to its visibility signal", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  await h.settle();
+  h.posted.length = 0;
+
+  h.document.getElementById("history-btn").click();
+  await h.settle();
+
+  assert.ok(h.posted.some((message) => message.type === "listVisible" && message.value === true));
+  assert.strictEqual(h.posted.some((message) => message.type === "refreshSessions"), false);
 });
 
 test("leaving a running session to the list detaches the composer", async () => {
@@ -866,6 +959,69 @@ test("a second Enter while an edit is being checked does not send it twice", asy
     "the edit is sent once"
   );
   assert.strictEqual(h.errors().length, 0);
+});
+
+test("clearing a transcript cancels its pending revert preview timer", async () => {
+  const h = createHarness();
+  const setTimeout = h.window.setTimeout.bind(h.window);
+  const clearTimeout = h.window.clearTimeout.bind(h.window);
+  const timer = {};
+  let cleared = false;
+  h.window.setTimeout = (fn, delay, ...args) => delay === 4000 ? timer : setTimeout(fn, delay, ...args);
+  h.window.clearTimeout = (value) => {
+    if (value === timer) cleared = true;
+    else clearTimeout(value);
+  };
+  try {
+    h.post({ type: "ready" });
+    h.post({ type: "body", body: "thread" });
+    h.post({ type: "clear" });
+    h.post({ type: "capabilities", revert: true, editRequests: "inline", checkpoints: true, confirmRemoval: true });
+    h.post({ type: "sessionReady", sessionId: "S" });
+    h.post({ type: "userMessage", text: "first" });
+    h.post({ type: "assistantStart" }); h.post({ type: "assistantEnd" });
+    h.post({ type: "turnHead", head: 10, reliable: true });
+    h.post({ type: "busy", value: false });
+    h.post({ type: "userMessage", text: "second" });
+    h.post({ type: "assistantStart" }); h.post({ type: "assistantEnd" });
+    h.post({ type: "turnHead", head: 20, reliable: true });
+    h.post({ type: "busy", value: false });
+    await h.settle(10);
+    h.document.querySelectorAll("#thread .turn-request .req-body")[1].click();
+    await h.settle(5);
+    const input = h.document.querySelector(".req-editor-input");
+    input.value = "revised";
+    input.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await h.settle(5);
+    assert.strictEqual(h.posted.filter((message) => message.type === "revertPreview").length, 1);
+
+    h.post({ type: "clear" });
+
+    assert.strictEqual(cleared, true);
+  } finally {
+    h.window.setTimeout = setTimeout;
+    h.window.clearTimeout = clearTimeout;
+  }
+});
+
+test("a delayed revert preview cannot execute against a newly selected session", async () => {
+  const h = createHarness();
+  twoLiveTurns(h);
+  await h.settle(10);
+  h.document.querySelectorAll("#thread .turn-request .req-body")[1].click();
+  await h.settle(5);
+  const input = h.document.querySelector(".req-editor-input");
+  input.value = "revised";
+  input.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  await h.settle(5);
+  const preview = h.posted.find((message) => message.type === "revertPreview");
+  assert.ok(preview);
+
+  h.post({ type: "sessionReady", sessionId: "other" });
+  h.post({ type: "revertPreview", token: preview.token, head: preview.head, result: { fileActions: [], irreversibleWarnings: [] }, pendingFiles: 0 });
+  await h.settle(20);
+
+  assert.strictEqual(h.posted.filter((message) => message.type === "revertExecute").length, 0);
 });
 
 test("only one inline request edits at a time and Cancel closes it", async () => {

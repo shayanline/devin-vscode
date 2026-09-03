@@ -557,4 +557,681 @@ test("stopping a turn does not let the next message contend with it", posixOnly,
   await h.dispose();
 });
 
+test("a closed surface does not start an ACP agent after delayed startup", posixOnly, async () => {
+  const h = createChat();
+  h.controller.autoNewSession = true;
+  const runHealthCheck = h.controller.runHealthCheck.bind(h.controller);
+  h.controller.runHealthCheck = async () => {
+    await h.settle(400);
+    await runHealthCheck();
+  };
+
+  h.send({ type: "ready" });
+  await h.settle(50);
+  h.controller.markClosed();
+  h.controller.dispose();
+  await h.settle(1200);
+
+  assert.strictEqual(h.agentSaw("initialize").length, 0, "no ACP process starts after disposal");
+  assert.strictEqual(h.liveChats(), 0, "no runtime is retained after disposal");
+  await h.dispose();
+});
+
+test("a closed destination rejects pending readiness waiters", async () => {
+  const h = createChat();
+  const ready = h.controller.whenReady().then(() => false, () => true);
+
+  h.controller.markClosed();
+  const released = await Promise.race([ready, h.settle(100).then(() => false)]);
+
+  assert.strictEqual(released, true, "a closed surface stops a move before it exports a runtime");
+  await h.dispose();
+});
+
+test("a restored chat starts loading before a slow session list returns", posixOnly, async () => {
+  const h = createChat();
+  const id = "restored";
+  h.store.add(id, h.cwd);
+  h.store.setViewing(id);
+  let releaseListing;
+  h.controller.refreshSessions = async () => {
+    await new Promise((resolve) => { releaseListing = resolve; });
+  };
+
+  h.send({ type: "ready" });
+  const loaded = await h.until(() => h.agentSaw("session/load").length === 1, 4000);
+  releaseListing?.();
+
+  assert.ok(loaded, "session/load starts without waiting for session listing");
+  await h.dispose();
+});
+
+test("a visible session list loads its initial rows", posixOnly, async () => {
+  const h = createChat();
+  await h.ready();
+  await h.until(() => h.postsOf("ready").length > 0, 4000);
+  h.send({ type: "listVisible", value: true });
+
+  const listed = await h.until(() => h.postsOf("sessions").length === 1, 2000);
+
+  assert.ok(listed, "the visible list receives its initial session rows");
+  await h.dispose();
+});
+
+test("concurrent session refreshes share one ACP list request", posixOnly, async () => {
+  const h = createChat();
+  await h.ready();
+  const id = await h.startChat("keep the agent live");
+  const rt = h.controller.runtimes.get(id);
+  const listSessions = rt.client.listSessions.bind(rt.client);
+  rt.client.listSessions = async () => {
+    await h.settle(300);
+    return listSessions();
+  };
+  h.controller.sessionsCache = undefined;
+  const before = h.agentSaw("session/list").length;
+
+  await Promise.all(Array.from({ length: 5 }, () => h.controller.refreshSessions(true)));
+
+  assert.strictEqual(h.agentSaw("session/list").length - before, 1, "all callers share one ACP list request");
+  await h.dispose();
+});
+
+test("a completed turn does not list sessions while the list is hidden", posixOnly, async () => {
+  const h = createChat({ promptDelay: 100 });
+  await h.ready();
+  await h.startChat("first turn");
+  await h.until(() => h.postsOf("busy").filter((m) => m.value === false).length === 1, 5000);
+  await h.settle(200);
+  const before = h.agentSaw("session/list").length;
+
+  h.send({ type: "send", text: "second turn" });
+  await h.until(() => h.postsOf("busy").filter((m) => m.value === false).length === 2, 5000);
+  await h.settle(300);
+
+  assert.strictEqual(h.agentSaw("session/list").length - before, 0, "a hidden list does not use ACP");
+  await h.dispose();
+});
+
+test("a stored session list paints before a cold revalidation", posixOnly, async () => {
+  const cached = {
+    id: "stored",
+    short_id: "stored",
+    working_directory: "/workspace",
+    title: "Stored chat",
+    tracked: true
+  };
+  const h = createChat({ state: { "devin.sessionList.v1": { at: 1, sessions: [cached] } } });
+  h.controller.listOverProtocol = () => new Promise(() => {});
+  await h.ready();
+  h.send({ type: "listVisible", value: true });
+
+  const painted = await h.until(() => h.postsOf("sessions").some((m) => m.sessions.some((s) => s.id === "stored")), 1000);
+
+  assert.ok(painted, "cached rows appear before the cold request settles");
+  await h.dispose();
+});
+
+test("a visible session list revalidates after its surface returns", posixOnly, async () => {
+  const h = createChat();
+  await h.ready();
+  await h.startChat("keep the agent live");
+  h.send({ type: "listVisible", value: true });
+  await h.until(() => h.agentSaw("session/list").length === 1, 5000);
+  await h.until(() => h.postsOf("sessions").length === 1, 5000);
+  const before = h.agentSaw("session/list").length;
+
+  h.controller.setSurfaceVisible(false);
+  h.controller.setSurfaceVisible(true);
+  const refreshed = await h.until(() => h.agentSaw("session/list").length === before + 1, 1000);
+
+  assert.ok(refreshed, "returning to a visible list revalidates its rows");
+  await h.dispose();
+});
+
+test("a direct send wakes a visible retained transcript without clearing it", posixOnly, async () => {
+  const h = createChat({ promptDelay: 150 });
+  await h.ready();
+  const id = await h.startChat("first");
+  await h.until(() => h.postsOf("busy").some((m) => m.value === false), 5000);
+  h.answerWith("Terminate");
+  h.send({ type: "terminateSession", id });
+  await h.until(() => h.liveChats() === 0, 5000);
+  h.answerWith(undefined);
+  h.controller.activeId = id;
+  h.setDelays({ loadDelay: 900 });
+  const clears = h.postsOf("clear").length;
+
+  h.send({ type: "send", text: "continue", preserveTranscript: true });
+  await h.settle(250);
+
+  assert.strictEqual(h.postsOf("clear").slice(clears).filter((m) => m.loading).length, 0, "the retained thread stays on screen while waking");
+  await h.dispose();
+});
+
+test("a queued send does not wait for the wake checkpoint query", posixOnly, async () => {
+  const h = createChat({ promptDelay: 100, stepsDelay: 1000 });
+  await h.ready();
+  const id = await h.startChat("first");
+  await h.until(() => h.postsOf("busy").some((m) => m.value === false), 5000);
+  h.answerWith("Terminate");
+  h.send({ type: "terminateSession", id });
+  await h.until(() => h.liveChats() === 0, 5000);
+  h.answerWith(undefined);
+  const promptsBefore = h.agentSaw("session/prompt").length;
+
+  h.send({ type: "wakeSession", id });
+  await h.settle(100);
+  h.send({ type: "send", text: "after wake" });
+  const sent = await h.until(() => h.agentSaw("session/prompt").length === promptsBefore + 1, 500);
+
+  assert.ok(sent, "the prompt is sent before the delayed checkpoint query returns");
+  await h.dispose();
+});
+
+test("a queued send does not wait for the load checkpoint query", posixOnly, async () => {
+  const h = createChat({ promptDelay: 100, stepsDelay: 1000 });
+  await h.ready();
+  const id = await h.startChat("first");
+  await h.until(() => h.postsOf("busy").some((m) => m.value === false), 5000);
+  h.answerWith("Terminate");
+  h.send({ type: "terminateSession", id });
+  await h.until(() => h.liveChats() === 0, 5000);
+  h.answerWith(undefined);
+  const promptsBefore = h.agentSaw("session/prompt").length;
+
+  h.send({ type: "loadSession", id });
+  await h.settle(100);
+  h.send({ type: "send", text: "after load" });
+  const sent = await h.until(() => h.agentSaw("session/prompt").length === promptsBefore + 1, 500);
+
+  assert.ok(sent, "the prompt is sent before the delayed checkpoint query returns");
+  await h.dispose();
+});
+
+test("editor lifecycle events go only to a visible chat surface", posixOnly, async () => {
+  const h = createChat({ documentLifecycle: true });
+  await h.ready();
+  await h.startChat("keep the agent live");
+  const doc = {
+    uri: globalThis.__dvVscode.Uri.file(path.join(h.cwd, "src", "active.ts")),
+    languageId: "typescript",
+    isDirty: false
+  };
+  globalThis.__dvVscode.window.activeTextEditor = { document: doc };
+  const before = h.agentSaw("_cognition.ai/document/didFocus").length;
+
+  h.controller.setSurfaceVisible(false);
+  globalThis.__dvVscode.window.__fire.editorChanged.fire({ document: doc });
+  await h.settle(100);
+  assert.strictEqual(h.agentSaw("_cognition.ai/document/didFocus").length, before, "a hidden surface sends no editor context");
+
+  h.controller.setSurfaceVisible(true);
+  globalThis.__dvVscode.window.__fire.editorChanged.fire({ document: doc });
+  const sent = await h.until(() => h.agentSaw("_cognition.ai/document/didFocus").length >= before + 1, 1000);
+  assert.ok(sent, "the visible surface still sends editor context");
+  globalThis.__dvVscode.window.activeTextEditor = undefined;
+  await h.dispose();
+});
+
+test("completed subagents release their runtime identifier mapping", posixOnly, async () => {
+  const h = createChat();
+  await h.ready();
+  const id = await h.startChat("keep the agent live");
+  const rt = h.controller.runtimes.get(id);
+
+  h.controller.onSubagentUpdate({ _meta: { "cognition.ai/subagent_started": { agentId: "worker", title: "Worker" } } }, rt);
+  h.controller.onSubagentUpdate({ _meta: { "cognition.ai/subagent_completed": { agentId: "worker", success: true } } }, rt);
+
+  assert.strictEqual(rt.subagentIds.size, 0);
+  await h.dispose();
+});
+
+test("a session evicted from history releases its staged attachments", posixOnly, async () => {
+  const h = createChat();
+  await h.ready();
+  await h.until(() => h.postsOf("ready").length > 0, 5000);
+  for (let i = 0; i < 200; i++) {
+    h.store.add(`s${i}`, h.cwd);
+  }
+  h.controller.staged.set("s0", [{ id: "attachment", label: "image", type: "image", block: { type: "image", mimeType: "image/png", data: "a" } }]);
+
+  await h.controller.createSession();
+  await h.settle(100);
+
+  assert.strictEqual(h.controller.staged.has("s0"), false);
+  await h.dispose();
+});
+
+test("a session pruned from the list releases its staged attachments", posixOnly, async () => {
+  const h = createChat();
+  await h.ready();
+  await h.startChat("keep the agent live");
+  h.store.add("gone", h.cwd);
+  h.controller.staged.set("gone", [{ id: "attachment", label: "image", type: "image", block: { type: "image", mimeType: "image/png", data: "a" } }]);
+
+  await h.controller.refreshSessions(true);
+  await h.settle(100);
+
+  assert.strictEqual(h.store.has("gone"), false);
+  assert.strictEqual(h.controller.staged.has("gone"), false);
+  await h.dispose();
+});
+
+test("an idle runtime cap releases the oldest background session", posixOnly, async () => {
+  const h = createChat({ promptDelay: 100, config: { maxIdleSessions: 1 } });
+  await h.ready();
+  const first = await h.startChat("first");
+  await h.until(() => h.postsOf("busy").some((m) => m.value === false), 5000);
+  h.send({ type: "newSession" });
+  await h.until(() => h.liveChats() === 2 && h.activeId() !== first, 5000);
+
+  h.controller.reapIdleRuntimes();
+  await h.settle(100);
+
+  assert.strictEqual(h.controller.runtimes.has(first), false);
+  assert.strictEqual(h.liveChats(), 1);
+  await h.dispose();
+});
+
+test("transcript replay is sent in bounded batches", posixOnly, async () => {
+  const h = createChat();
+  await h.ready();
+  const id = await h.startChat("keep the agent live");
+  const rt = h.controller.runtimes.get(id);
+  rt.log = Array.from({ length: 201 }, (_, i) => ({ type: "toolCall", id: `t${i}` }));
+  h.posted.length = 0;
+
+  h.controller.replayLog(rt);
+
+  const batches = h.postsOf("replay");
+  assert.deepStrictEqual(batches.map((batch) => batch.items.length), [100, 100, 2]);
+  assert.strictEqual(h.posted.at(-1).type, "loaded");
+  await h.dispose();
+});
+
+test("an idle handover replays a complete local transcript without loading", posixOnly, async () => {
+  const from = createChat({ promptDelay: 100 });
+  await from.ready();
+  const id = await from.startChat("first");
+  await from.until(() => from.postsOf("busy").some((m) => m.value === false), 5000);
+  const transfer = from.controller.exportRuntime(id);
+  const to = createChat();
+  await to.ready();
+  const before = from.agentSaw("session/load").length;
+
+  await to.controller.importRuntime(transfer);
+
+  assert.strictEqual(from.agentSaw("session/load").length, before);
+  assert.ok(to.postsOf("replay").length > 0, "the local transcript is replayed into the destination");
+  await to.dispose();
+  await from.dispose();
+});
+
+test("an idle handover replays retained terminal output", posixOnly, async () => {
+  const from = createChat({ promptDelay: 100 });
+  await from.ready();
+  const id = await from.startChat("first");
+  await from.until(() => from.postsOf("busy").some((m) => m.value === false), 5000);
+  const rt = from.controller.runtimes.get(id);
+  const terminalId = rt.terminals.create({ sessionId: id, command: "printf saved" }).terminalId;
+  await rt.terminals.waitForExit(terminalId);
+  const transfer = from.controller.exportRuntime(id);
+  const to = createChat();
+  await to.ready();
+
+  await to.controller.importRuntime(transfer);
+
+  assert.ok(to.postsOf("terminalOutput").some((message) => message.terminalId === terminalId && /saved/.test(message.output)));
+  await to.dispose();
+  await from.dispose();
+});
+
+test("a cold surface lists sessions through another surface's live ACP client", posixOnly, async () => {
+  const source = createChat();
+  await source.ready();
+  await source.startChat("keep the agent live");
+  const target = createChat({
+    surfaceHost: {
+      sessionListClient: () => source.controller.sessionListClient(),
+      elsewhere: () => [],
+      titlesChanged: () => {}
+    }
+  });
+  await target.ready();
+  target.store.add("tracked", target.cwd);
+  const before = source.agentSaw("session/list").length;
+
+  await target.controller.refreshSessions(true);
+
+  assert.strictEqual(source.agentSaw("session/list").length, before + 1);
+  await target.dispose();
+  await source.dispose();
+});
+
+test("a background runtime does not receive the visible editor documents", posixOnly, async () => {
+  const h = createChat({ documentLifecycle: true });
+  await h.ready();
+  const id = await h.startChat("keep the agent live");
+  const rt = h.controller.runtimes.get(id);
+  const doc = {
+    uri: globalThis.__dvVscode.Uri.file(path.join(h.cwd, "src", "active.ts")),
+    languageId: "typescript",
+    isDirty: false
+  };
+  globalThis.__dvVscode.workspace.textDocuments = [doc];
+  globalThis.__dvVscode.window.activeTextEditor = { document: doc };
+  h.controller.activeId = undefined;
+  const before = h.agentSaw("_cognition.ai/document/didOpen").length;
+
+  h.controller.sendOpenDocuments(rt);
+  await h.settle(100);
+
+  assert.strictEqual(h.agentSaw("_cognition.ai/document/didOpen").length, before);
+  globalThis.__dvVscode.workspace.textDocuments = [];
+  globalThis.__dvVscode.window.activeTextEditor = undefined;
+  await h.dispose();
+});
+
+test("a closed destination refuses a live runtime handover", posixOnly, async () => {
+  const from = createChat({ promptDelay: 100 });
+  await from.ready();
+  const id = await from.startChat("first");
+  await from.until(() => from.postsOf("busy").some((m) => m.value === false), 5000);
+  const transfer = from.controller.exportRuntime(id);
+  const to = createChat();
+  to.controller.markClosed();
+
+  await assert.rejects(() => to.controller.importRuntime(transfer), /closed/);
+
+  assert.strictEqual(to.liveChats(), 0);
+  await transfer.rt.client.shutdown();
+  await to.dispose();
+  await from.dispose();
+});
+
+test("resolving a takeover clears its timeout", async () => {
+  const h = createChat();
+  const setTimeout = global.setTimeout;
+  const clearTimeout = global.clearTimeout;
+  const timer = { unref() {} };
+  let cleared = false;
+  global.setTimeout = () => timer;
+  global.clearTimeout = (value) => { if (value === timer) cleared = true; };
+  try {
+    const pending = h.controller.askTakeover("session");
+    h.controller.resolveTakeover("lock-1", "cancel");
+    await pending;
+    assert.strictEqual(cleared, true);
+  } finally {
+    global.setTimeout = setTimeout;
+    global.clearTimeout = clearTimeout;
+    await h.dispose();
+  }
+});
+
+test("a pushed revert step list avoids a follow-up ACP query", posixOnly, async () => {
+  const h = createChat();
+  await h.ready();
+  const id = await h.startChat("keep the agent live");
+  const rt = h.controller.runtimes.get(id);
+  rt.steps = [{ stepNumber: 1, revertTargetNodeId: 1, forkTargetNodeId: 2 }];
+  rt.stepsKnown = true;
+  const before = h.agentSaw("_cognition.ai/revert/listSteps").length;
+
+  await h.controller.postTurnHead(false);
+
+  assert.strictEqual(h.agentSaw("_cognition.ai/revert/listSteps").length, before);
+  assert.ok(h.postsOf("turnHead").some((message) => message.head === 2));
+  await h.dispose();
+});
+
+test("session loading starts ACP while staged attachments are restored", posixOnly, async () => {
+  const h = createChat();
+  await h.ready();
+  await h.until(() => h.postsOf("ready").length > 0, 5000);
+  h.store.add("stored", h.cwd);
+  const loadStaged = h.controller.loadStaged.bind(h.controller);
+  let spawned = false;
+  const spawnRuntime = h.controller.spawnRuntime.bind(h.controller);
+  h.controller.loadStaged = async (...args) => {
+    await h.settle(500);
+    return loadStaged(...args);
+  };
+  h.controller.spawnRuntime = (...args) => {
+    spawned = true;
+    return spawnRuntime(...args);
+  };
+
+  h.send({ type: "loadSession", id: "stored" });
+  await h.settle(100);
+
+  assert.strictEqual(spawned, true);
+  await h.dispose();
+});
+
+test("a session list refresh records one timing summary", posixOnly, async () => {
+  const h = createChat();
+  await h.ready();
+  await h.startChat("keep the agent live");
+  h.logs.length = 0;
+
+  await h.controller.refreshSessions(true);
+
+  assert.strictEqual(h.logs.filter((line) => /^\[perf\] session-list /.test(line)).length, 1);
+  await h.dispose();
+});
+
+test("a session load records one timing summary", posixOnly, async () => {
+  const h = createChat();
+  await h.ready();
+  await h.until(() => h.postsOf("ready").length > 0, 5000);
+  h.store.add("stored", h.cwd);
+  h.logs.length = 0;
+
+  h.send({ type: "loadSession", id: "stored" });
+  await h.until(() => h.postsOf("loaded").length > 0, 5000);
+
+  assert.strictEqual(h.logs.filter((line) => /^\[perf\] session-load /.test(line)).length, 1);
+  await h.dispose();
+});
+
+test("an optimistic ready hint refreshes a list after health succeeds", posixOnly, async () => {
+  const h = createChat({ state: { "devin.readyHint.v1": true } });
+  const healthCheck = h.controller.runHealthCheck.bind(h.controller);
+  let release;
+  h.controller.runHealthCheck = async () => new Promise((resolve) => { release = resolve; }).then(healthCheck);
+
+  h.send({ type: "ready" });
+  assert.strictEqual(await h.until(() => h.postsOf("ready").length === 1, 1000), true);
+  h.send({ type: "listVisible", value: true });
+  await h.settle(25);
+  assert.strictEqual(h.postsOf("sessions").length, 0);
+
+  release();
+  assert.strictEqual(await h.until(() => h.postsOf("sessions").length === 1, 5000), true);
+  await h.dispose();
+});
+
+test("a successful recheck resumes the last viewed session", posixOnly, async () => {
+  const h = createChat({ state: { "devin.viewingSession.v1": "stored" } });
+  const healthCheck = h.controller.runHealthCheck.bind(h.controller);
+  h.controller.runHealthCheck = async () => {
+    h.controller.health = { found: false, loggedIn: false, path: "devin" };
+  };
+
+  h.send({ type: "ready" });
+  assert.strictEqual(await h.until(() => h.postsOf("setup").length > 0, 1000), true);
+  h.controller.runHealthCheck = healthCheck;
+  h.send({ type: "recheck" });
+
+  assert.strictEqual(await h.until(() => h.agentSaw("session/load").some((message) => message.params.sessionId === "stored"), 5000), true);
+  await h.dispose();
+});
+
+test("the idle runtime cap keeps a session that is still loading", posixOnly, async () => {
+  const h = createChat({ promptDelay: 100, loadDelay: 1000, config: { maxIdleSessions: 1 } });
+  await h.ready();
+  const first = await h.startChat("keep the first session idle");
+  assert.strictEqual(await h.until(() => h.postsOf("busy").some((message) => message.value === false), 5000), true);
+  h.store.add("loading", h.cwd);
+  h.send({ type: "loadSession", id: "loading" });
+  assert.strictEqual(await h.until(() => h.controller.runtimes.get("loading")?.replaying === true, 1000), true);
+  h.controller.activeId = first;
+
+  h.controller.reapIdleRuntimes();
+
+  assert.strictEqual(h.controller.runtimes.has("loading"), true);
+  await h.dispose();
+});
+
+test("revealing a chat reconciles documents changed while hidden", posixOnly, async () => {
+  const h = createChat({ documentLifecycle: true });
+  await h.ready();
+  const id = await h.startChat("keep the agent live");
+  const rt = h.controller.runtimes.get(id);
+  const first = { uri: globalThis.__dvVscode.Uri.file(path.join(h.cwd, "first.ts")), languageId: "typescript", isDirty: false };
+  const second = { uri: globalThis.__dvVscode.Uri.file(path.join(h.cwd, "second.ts")), languageId: "typescript", isDirty: true };
+  globalThis.__dvVscode.workspace.textDocuments = [first];
+  globalThis.__dvVscode.window.activeTextEditor = { document: first };
+  h.controller.sendOpenDocuments(rt);
+  await h.settle(50);
+  h.controller.setSurfaceVisible(false);
+  globalThis.__dvVscode.workspace.textDocuments = [second];
+  globalThis.__dvVscode.window.activeTextEditor = { document: second };
+  const beforeClose = h.agentSaw("_cognition.ai/document/didClose").length;
+  const beforeOpen = h.agentSaw("_cognition.ai/document/didOpen").length;
+
+  h.controller.setSurfaceVisible(true);
+
+  assert.strictEqual(await h.until(() => h.agentSaw("_cognition.ai/document/didClose").length === beforeClose + 1, 1000), true);
+  assert.strictEqual(await h.until(() => h.agentSaw("_cognition.ai/document/didOpen").length === beforeOpen + 1, 1000), true);
+  globalThis.__dvVscode.workspace.textDocuments = [];
+  globalThis.__dvVscode.window.activeTextEditor = undefined;
+  await h.dispose();
+});
+
+test("a replaying runtime is not exported before loading settles", posixOnly, async () => {
+  const h = createChat();
+  await h.ready();
+  const id = await h.startChat("keep the agent live");
+  const rt = h.controller.runtimes.get(id);
+  rt.replaying = true;
+  let transfer;
+  try {
+    transfer = h.controller.exportRuntime(id);
+    assert.strictEqual(transfer, undefined);
+  } finally {
+    if (transfer) {
+      rt.replaying = false;
+      await h.controller.importRuntime(transfer);
+    }
+  }
+  await h.dispose();
+});
+
+test("history eviction retains attachments for a live session", posixOnly, async () => {
+  const h = createChat();
+  await h.ready();
+  const id = await h.startChat("keep this session live");
+  h.controller.staged.set(id, [{ id: "attachment", label: "image", type: "image", block: { type: "image", mimeType: "image/png", data: "a" } }]);
+  for (let i = 0; i < 199; i++) {
+    h.store.add(`older-${i}`, h.cwd);
+  }
+
+  h.controller.rememberSession("new", h.cwd);
+  await h.settle(50);
+
+  assert.strictEqual(h.controller.staged.has(id), true);
+  await h.dispose();
+});
+
+test("a forced refresh follows a stale list request after session removal", posixOnly, async () => {
+  const h = createChat();
+  await h.ready();
+  assert.strictEqual(await h.until(() => h.postsOf("ready").length > 0, 5000), true);
+  h.store.add("gone", h.cwd);
+  let resolve;
+  let calls = 0;
+  h.controller.listOverProtocol = () => {
+    calls++;
+    if (calls === 1) {
+      return new Promise((done) => { resolve = done; });
+    }
+    return Promise.resolve({ sessions: [], prunedIds: [] });
+  };
+
+  const initial = h.controller.refreshSessions(true);
+  await h.settle(25);
+  h.store.remove("gone");
+  const forced = h.controller.refreshSessions(true);
+  resolve({ sessions: [{ id: "gone", short_id: "gone", working_directory: h.cwd }], prunedIds: [] });
+  await Promise.all([initial, forced]);
+
+  assert.strictEqual(calls, 2);
+  assert.strictEqual(h.last("sessions").sessions.some((session) => session.id === "gone"), false);
+  await h.dispose();
+});
+
+test("a new prompt invalidates its previous revert step list", posixOnly, async () => {
+  const h = createChat({ promptDelay: 100 });
+  await h.ready();
+  const id = await h.startChat("first");
+  assert.strictEqual(await h.until(() => h.postsOf("busy").some((message) => message.value === false), 5000), true);
+  await h.settle(100);
+  const rt = h.controller.runtimes.get(id);
+  rt.steps = [{ stepNumber: 1, revertTargetNodeId: 1, forkTargetNodeId: 2 }];
+  rt.stepsKnown = true;
+  const before = h.agentSaw("_cognition.ai/revert/listSteps").length;
+
+  h.send({ type: "send", text: "second" });
+
+  assert.strictEqual(await h.until(() => h.agentSaw("_cognition.ai/revert/listSteps").length > before, 5000), true);
+  await h.dispose();
+});
+
+test("a busy handover replays retained terminal output", posixOnly, async () => {
+  const from = createChat({ promptDelay: 60000 });
+  await from.ready();
+  const id = await from.startChat("keep the turn running");
+  assert.strictEqual(await from.until(() => from.postsOf("busy").some((message) => message.value), 5000), true);
+  const rt = from.controller.runtimes.get(id);
+  const terminalId = rt.terminals.create({ sessionId: id, command: "printf saved" }).terminalId;
+  await rt.terminals.waitForExit(terminalId);
+  const transfer = from.controller.exportRuntime(id);
+  const to = createChat();
+  await to.ready();
+
+  await to.controller.importRuntime(transfer);
+
+  assert.ok(to.postsOf("terminalOutput").some((message) => message.terminalId === terminalId && /saved/.test(message.output)));
+  await to.dispose();
+  await from.dispose();
+});
+
+test("a watched list update follows an in-flight session refresh", posixOnly, async () => {
+  const h = createChat();
+  await h.ready();
+  assert.strictEqual(await h.until(() => h.postsOf("ready").length > 0, 5000), true);
+  h.controller.listVisible = true;
+  let resolve;
+  let calls = 0;
+  h.controller.listOverProtocol = () => {
+    calls++;
+    if (calls === 1) {
+      return new Promise((done) => { resolve = done; });
+    }
+    return Promise.resolve({ sessions: [], prunedIds: [] });
+  };
+
+  const initial = h.controller.refreshSessions(true);
+  await h.settle(25);
+  h.controller.relistIfWatched();
+  resolve({ sessions: [], prunedIds: [] });
+  await initial;
+
+  assert.strictEqual(await h.until(() => calls === 2, 1000), true);
+  await h.dispose();
+});
+
 test.after(() => cleanup());

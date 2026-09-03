@@ -110,6 +110,23 @@ test("removing the only hook for an event takes the event with it", async () => 
   assert.deepStrictEqual(JSON.parse(fs.readFileSync(file, "utf8")), {}, "no empty group, no empty event");
 });
 
+test("disposing the current settings panel clears its watcher state", () => {
+  const root = fs.mkdtempSync(path.join(TMP, "ws-"));
+  const panel = makePanel(root);
+  let stopped = false;
+  let panelDisposed = false;
+  panel.stopWatching = () => { stopped = true; };
+  panel.panel.dispose = () => { panelDisposed = true; };
+  SettingsPanel.current = panel;
+
+  SettingsPanel.disposeCurrent();
+
+  assert.strictEqual(stopped, true);
+  assert.strictEqual(panelDisposed, true);
+  assert.strictEqual(panel.disposed, true);
+  assert.strictEqual(SettingsPanel.current, undefined);
+});
+
 test.after(() => {
   fs.rmSync(TMP, { recursive: true, force: true });
 });

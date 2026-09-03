@@ -87,6 +87,7 @@ interface Runtime {
   // that moves surface can be rebuilt on the new one. The CLI cannot be asked for
   // it mid turn: `session/load` over a live channel kills the running prompt.
   log: Record<string, unknown>[];
+  replay: Record<string, unknown>[];
   // False once the oldest entries were dropped, which makes a rebuild partial.
   logFull: boolean;
   // Messages the user submitted while a turn was in flight. The implicit context
@@ -115,10 +116,13 @@ interface Runtime {
   // Pushed after each turn, so this is the authoritative source of the node ids
   // checkpoints and edit-and-resubmit rewind to.
   steps: RevertStep[];
+  stepsKnown: boolean;
+  openDocuments: Map<string, { uri: string; languageId: string; isDirty: boolean }>;
 }
 
 // Cap on a backgrounded session's replay buffer (oldest dropped past this).
 const BG_BUFFER_MAX = 6000;
+const REPLAY_BATCH_SIZE = 100;
 
 // Shown in place of a transcript that could not be opened. The reason itself goes
 // to the output channel, which the notification points at.
@@ -164,6 +168,7 @@ export interface SurfaceHost {
   reveal(controller: ChatController): void;
   // Live session ids held by every surface other than this one.
   elsewhere(except: ChatController): string[];
+  sessionListClient(except: ChatController): AcpClient | undefined;
   // Half given answers for a request that has moved to another surface.
   saveAnswerDraft(requestId: string, state: unknown, except: ChatController): void;
   // One surface's set of live sessions changed, so every other surface's list,
@@ -215,6 +220,8 @@ const SYMBOL_FALLBACK_AT = 5;
 // treated as declined. Long enough to walk away from and come back to, short of
 // leaving the session unopenable for the rest of the window.
 const TAKEOVER_TIMEOUT_MS = 3 * 60_000;
+const SESSION_LIST_ACP_TIMEOUT_MS = 8_000;
+const SESSION_LIST_CLI_TIMEOUT_MS = 12_000;
 
 // A real file the user is working in, worth telling the agent about. The diff
 // views git opens are a second scheme, but git also opens true files inside
@@ -356,6 +363,7 @@ export class ChatController implements AcpHost {
       this.post({ type: "changesResolved", paths: e.paths, action: e.action })
     );
     this.implicitEnabled = this.cfg().get<boolean>("implicitContext.enabled", true);
+    this.sessionsCache = this.store.sessionList();
     // Keep the implicit "current file" pill in sync with the active editor and
     // its selection (the latter debounced, since selection changes fire often).
     // Stored per controller so an editor/window surface cleans them up on close.
@@ -422,16 +430,17 @@ export class ChatController implements AcpHost {
   // multiply every keystroke by the number of open chats.
   private sendDocumentEvent(kind: "didOpen" | "didClose" | "didChangeDirty" | "didFocus", doc: vscode.TextDocument): void {
     const rt = this.active();
-    if (!rt || !rt.initialized || !isEditorDocument(doc)) {
+    if (!this.surfaceVisible || !rt || !rt.initialized || !rt.client.supportsDocumentLifecycle() || !isEditorDocument(doc)) {
       return;
     }
-    rt.client.documentEvent(kind, {
-      sessionId: rt.id,
-      // A URI, not a path: a path is rejected outright by the agent.
-      uri: doc.uri.toString(),
-      languageId: doc.languageId,
-      isDirty: doc.isDirty
-    });
+    // A URI, not a path: a path is rejected outright by the agent.
+    const state = { uri: doc.uri.toString(), languageId: doc.languageId, isDirty: doc.isDirty };
+    rt.client.documentEvent(kind, { sessionId: rt.id, ...state });
+    if (kind === "didClose") {
+      rt.openDocuments.delete(state.uri);
+    } else if (kind !== "didFocus") {
+      rt.openDocuments.set(state.uri, state);
+    }
   }
 
   // Typing fires a change event per keystroke, so the dirty signal is coalesced:
@@ -454,19 +463,30 @@ export class ChatController implements AcpHost {
   // Everything the user has open right now, sent to a session that has just
   // started so its context is not empty until the next editor event.
   private sendOpenDocuments(rt: Runtime): void {
-    if (!rt.client.supportsDocumentLifecycle()) {
+    if (!this.surfaceVisible || this.activeId !== rt.id || !rt.client.supportsDocumentLifecycle()) {
       return;
     }
+    const documents = new Map<string, { uri: string; languageId: string; isDirty: boolean }>();
     for (const doc of vscode.workspace.textDocuments) {
       if (isEditorDocument(doc)) {
-        rt.client.documentEvent("didOpen", {
-          sessionId: rt.id,
-          uri: doc.uri.toString(),
-          languageId: doc.languageId,
-          isDirty: doc.isDirty
-        });
+        const state = { uri: doc.uri.toString(), languageId: doc.languageId, isDirty: doc.isDirty };
+        documents.set(state.uri, state);
       }
     }
+    for (const [uri, state] of rt.openDocuments) {
+      if (!documents.has(uri)) {
+        rt.client.documentEvent("didClose", { sessionId: rt.id, ...state });
+      }
+    }
+    for (const [uri, state] of documents) {
+      const previous = rt.openDocuments.get(uri);
+      if (!previous) {
+        rt.client.documentEvent("didOpen", { sessionId: rt.id, ...state });
+      } else if (previous.languageId !== state.languageId || previous.isDirty !== state.isDirty) {
+        rt.client.documentEvent("didChangeDirty", { sessionId: rt.id, ...state });
+      }
+    }
+    rt.openDocuments = documents;
     const active = vscode.window.activeTextEditor?.document;
     if (active && isEditorDocument(active)) {
       rt.client.documentEvent("didFocus", {
@@ -574,20 +594,38 @@ export class ChatController implements AcpHost {
   // Set when the page this controller was bound to has gone for good (its editor
   // tab closed), so nothing waits on a reply that can never come.
   private webviewGone = false;
+  private closed = false;
   // Whether a chat has been painted into the current page. The readiness chain
   // restores the last chat only when nothing has, so a session handed to this
   // surface is not immediately reloaded on top of itself.
   private painted = false;
-  private readyWaiters: (() => void)[] = [];
+  private readyWaiters: { resolve: () => void; reject: (reason: Error) => void }[] = [];
   whenReady(): Promise<void> {
+    if (this.closed) {
+      return Promise.reject(new Error("Chat surface is closed"));
+    }
     if (this.webviewReady) {
       return Promise.resolve();
     }
-    return new Promise<void>((resolve) => this.readyWaiters.push(resolve));
+    return new Promise<void>((resolve, reject) => this.readyWaiters.push({ resolve, reject }));
+  }
+
+  private releaseReadyWaiters(error?: Error): void {
+    const waiters = this.readyWaiters;
+    this.readyWaiters = [];
+    for (const waiter of waiters) {
+      if (error) {
+        waiter.reject(error);
+      } else {
+        waiter.resolve();
+      }
+    }
   }
 
   markClosed(): void {
     this.webviewGone = true;
+    this.closed = true;
+    this.releaseReadyWaiters(new Error("Chat surface is closed"));
   }
 
   // What the composer holds is only known to the page: the draft is debounced and
@@ -647,6 +685,8 @@ export class ChatController implements AcpHost {
   // `shutdown()` when the extension host itself is going away, since that timer
   // will not fire once it has exited.
   dispose(): void {
+    this.closed = true;
+    this.releaseReadyWaiters(new Error("Chat surface is closed"));
     this.stopLocalState();
     // A surface that has gone cannot be the one holding the keyboard.
     this.setFocused(false);
@@ -674,6 +714,8 @@ export class ChatController implements AcpHost {
   // the next window can say the turn was interrupted rather than losing it
   // silently.
   async shutdown(): Promise<void> {
+    this.closed = true;
+    this.releaseReadyWaiters(new Error("Chat surface is closed"));
     // Everything with a process, not just everything with a session id: a chat
     // still waiting on session/new is not in the pool yet, and it is exactly as
     // unable to outlive us as the rest.
@@ -748,10 +790,9 @@ export class ChatController implements AcpHost {
       e.resolve({ action: "cancel" });
     }
     this.elicitationResolvers.clear();
-    for (const [, e] of this.takeoverResolvers) {
-      e.resolve("cancel");
+    for (const [requestId] of [...this.takeoverResolvers]) {
+      this.resolveTakeover(requestId, "cancel");
     }
-    this.takeoverResolvers.clear();
     this.loading.clear();
     this.changeListSub?.dispose();
     this.changeListSub = undefined;
@@ -790,6 +831,12 @@ export class ChatController implements AcpHost {
   liveSessions(): string[] {
     return [...this.runtimes.keys()].filter(Boolean);
   }
+  async waitForSessionLoad(id: string): Promise<void> {
+    await this.loading.get(id);
+  }
+  sessionListClient(): AcpClient | undefined {
+    return this.anyLiveClient();
+  }
 
   // The chat is being opened on another surface and has no live agent to hand
   // over, so this surface simply stops showing it.
@@ -809,7 +856,7 @@ export class ChatController implements AcpHost {
   // it. The agent is untouched, so nothing restarts and no lock changes hands.
   exportRuntime(id: string): RuntimeTransfer | undefined {
     const rt = this.runtimes.get(id);
-    if (!rt) {
+    if (!rt || rt.replaying) {
       return undefined;
     }
     this.runtimes.delete(id);
@@ -851,8 +898,7 @@ export class ChatController implements AcpHost {
     // waiting on an answer that can never arrive.
     for (const [rid, entry] of [...this.takeoverResolvers]) {
       if (entry.rid === id) {
-        this.takeoverResolvers.delete(rid);
-        entry.resolve("cancel");
+        this.resolveTakeover(rid, "cancel");
       }
     }
     if (visible) {
@@ -866,7 +912,7 @@ export class ChatController implements AcpHost {
       }
     }
     this.broadcastStatuses();
-    void this.refreshSessions();
+    void this.refreshSessionsIfVisible();
     return transfer;
   }
 
@@ -875,6 +921,9 @@ export class ChatController implements AcpHost {
   // has (about a second, no new process); one mid turn cannot be reloaded over
   // its live channel, so it picks up from here and says so.
   async importRuntime(transfer: RuntimeTransfer): Promise<void> {
+    if (this.closed) {
+      throw new Error("Chat surface is closed");
+    }
     const rt = transfer.rt;
     this.runtimes.set(rt.id, rt);
     rt.client.setHost(this);
@@ -904,7 +953,7 @@ export class ChatController implements AcpHost {
     // This surface is responsible for stopping it now.
     this.spawnedRuntimes.add(rt);
     this.activeId = rt.id;
-    this.store.add(rt.id, rt.cwd);
+    this.rememberSession(rt.id, rt.cwd);
     this.markVisible(rt.id);
     this.ensureIdleTimer();
     // The agent can die during the handover, when its exit has no listener and is
@@ -933,9 +982,18 @@ export class ChatController implements AcpHost {
       // Only what the record could not hold is worth asking the CLI for later.
       rt.needsReplay = !rt.logFull;
       await this.activateSession(rt.id);
+    } else if (rt.logFull) {
+      this.replayLog(rt);
+      await this.activateSession(rt.id);
+      this.log(`[move] ${rt.id} arrived from ${transfer.from} idle: restored from the local transcript`);
     } else {
       await this.doLoadSession(rt.id);
       this.log(`[move] ${rt.id} arrived from ${transfer.from} idle: reloaded from the agent`);
+    }
+    if (this.runtimes.get(rt.id) === rt && this.activeId === rt.id) {
+      for (const terminal of rt.terminals.snapshots()) {
+        this.postTerminal(rt.terminals, terminal.terminalId, terminal.output, terminal.exitStatus);
+      }
     }
     if (transfer.attachments.length) {
       this.staged.set(this.stagedKey(rt.id), transfer.attachments);
@@ -980,6 +1038,9 @@ export class ChatController implements AcpHost {
   // Spawn a fresh `devin acp` process and wire its events. The runtime is not
   // yet in the pool: its session id is unknown until session/new or /load.
   private spawnRuntime(cwd: string): Runtime {
+    if (this.closed) {
+      throw new Error("Chat surface is closed");
+    }
     const client = new AcpClient({
       cliPath: this.resolvedCli || "devin",
       cwd,
@@ -1015,9 +1076,12 @@ export class ChatController implements AcpHost {
       queued: [],
       bgBuffer: [],
       log: [],
+      replay: [],
       logFull: true,
       mcpProblems: new Map(),
       steps: [],
+      stepsKnown: false,
+      openDocuments: new Map(),
       pendingTerminals: [],
       subagentSpawns: [],
       subagentIds: new Map()
@@ -1253,33 +1317,45 @@ export class ChatController implements AcpHost {
 
   private reapIdleRuntimes(): void {
     const minutes = this.cfg().get<number>("idleSessionKeepAliveMinutes", 60);
-    if (!minutes || minutes <= 0) {
-      return; // 0 disables auto-exit
-    }
-    const maxIdleMs = minutes * 60000;
+    const limit = Math.floor(this.cfg().get<number>("maxIdleSessions", 3));
     const now = Date.now();
-    let changed = false;
-    for (const rt of [...this.runtimes.values()]) {
-      // A command the user chose to leave running means this chat is not finished
-      // with, whatever the conversation is doing: exiting would stop the dev server
-      // they asked to keep and dispose the terminal it is running in.
-      const idle = !rt.busy && rt.awaiting === 0 && !rt.terminals.hasRunning();
-      if (idle && now - rt.lastActivityAt > maxIdleMs) {
-        this.log(`[idle-exit] session ${rt.id} exceeded ${minutes}m idle; exiting`);
-        this.settleRequestsFor(rt.id);
-        this.keepQueued(rt);
-        this.destroyRuntime(rt);
-        this.runtimes.delete(rt.id);
-        this.starting.delete(rt.id);
-        if (this.activeId === rt.id) {
-          // The visible session died; it stays on screen as history and will be
-          // re-woken on the next send.
-          this.setBusy(false);
+    const idle = [...this.runtimes.values()].filter((rt) => !rt.replaying && !rt.waking && !rt.busy && rt.awaiting === 0 && !rt.terminals.hasRunning());
+    const reaped = new Set<Runtime>();
+    if (minutes > 0) {
+      const maxIdleMs = minutes * 60000;
+      for (const rt of idle) {
+        if (now - rt.lastActivityAt > maxIdleMs) {
+          this.log(`[idle-exit] session ${rt.id} exceeded ${minutes}m idle; exiting`);
+          reaped.add(rt);
         }
-        changed = true;
       }
     }
-    if (changed) {
+    if (limit > 0) {
+      const remaining = idle.filter((rt) => !reaped.has(rt));
+      const excess = remaining.length - limit;
+      if (excess > 0) {
+        for (const rt of remaining
+          .filter((rt) => rt.id !== this.activeId)
+          .sort((a, b) => a.lastActivityAt - b.lastActivityAt)
+          .slice(0, excess)) {
+          this.log(`[idle-exit] session ${rt.id} exceeded the idle session limit; exiting`);
+          reaped.add(rt);
+        }
+      }
+    }
+    for (const rt of reaped) {
+      this.settleRequestsFor(rt.id);
+      this.keepQueued(rt);
+      this.destroyRuntime(rt);
+      this.runtimes.delete(rt.id);
+      this.starting.delete(rt.id);
+      if (this.activeId === rt.id) {
+        // The visible session died; it stays on screen as history and will be
+        // re-woken on the next send.
+        this.setBusy(false);
+      }
+    }
+    if (reaped.size) {
       this.broadcastStatuses();
     }
   }
@@ -1327,7 +1403,7 @@ export class ChatController implements AcpHost {
           await this.onWebviewReady();
           return;
         case "send":
-          await this.handleSend(String(msg.text || ""), !!msg.newSession);
+          await this.handleSend(String(msg.text || ""), !!msg.newSession, !!msg.preserveTranscript);
           return;
         case "stopAndSend":
           this.stopAndSend(String(msg.text || ""));
@@ -1400,9 +1476,16 @@ export class ChatController implements AcpHost {
         case "leaveToList":
           this.leaveToList();
           return;
-        case "listVisible":
-          this.listVisible = msg.value === true;
+        case "listVisible": {
+          const visible = msg.value === true;
+          if (this.listVisible !== visible) {
+            this.listVisible = visible;
+            if (visible && this.surfaceVisible) {
+              void this.refreshSessionsFast();
+            }
+          }
           return;
+        }
         case "detachSession":
           await this.surfaces?.detach(String(msg.id || this.activeId || ""));
           return;
@@ -1548,6 +1631,7 @@ export class ChatController implements AcpHost {
         case "recheck":
           await this.runHealthCheck();
           await this.pushReadiness();
+          await this.restoreAfterReady();
           return;
         case "authenticate":
           await this.authenticate();
@@ -1576,11 +1660,7 @@ export class ChatController implements AcpHost {
 
   private async onWebviewReady(): Promise<void> {
     this.webviewReady = true;
-    const waiters = this.readyWaiters;
-    this.readyWaiters = [];
-    for (const w of waiters) {
-      w();
-    }
+    this.releaseReadyWaiters();
     this.post({ type: "workspace", name: this.workspaceName() });
     // Which surface this is decides the whole chrome (an editor tab is one chat,
     // with no session list and no back button), so it is settled before anything
@@ -1599,8 +1679,15 @@ export class ChatController implements AcpHost {
       void this.publishInitialOptions();
     }
     await this.runHealthCheck();
+    if (this.closed) {
+      return;
+    }
     await this.pushReadiness();
-    if (!this.isReady() || this.activeId) {
+    await this.restoreAfterReady();
+  }
+
+  private async restoreAfterReady(): Promise<void> {
+    if (this.closed || !this.isReady() || this.activeId) {
       return;
     }
     // A freshly opened editor/window surface starts a new session immediately
@@ -1610,10 +1697,32 @@ export class ChatController implements AcpHost {
       this.autoNewSession = false;
       this.post({ type: "body", body: "thread" });
       await this.newSession();
-    } else if (this.openOnReady) {
+      return;
+    }
+    if (this.openOnReady) {
       const id = this.openOnReady;
       this.openOnReady = undefined;
       await this.openSession(id);
+      return;
+    }
+    // Auto-resume only applies to the sidebar surface. Editor/window surfaces
+    // that were freshly opened start a new session instead (see onWebviewReady).
+    // A window reload builds a brand new webview with an empty transcript, so
+    // the session the panel was showing is reopened: without that, the chat you
+    // were reading comes back blank until you go to the list and pick it again.
+    const viewing = this.store.viewing();
+    const last = viewing || this.store.activeId();
+    // Always reopen a session whose turn we had to kill on the way out, even
+    // when auto-resume is off: landing on the session list with no word of the
+    // interruption is the one case where it is genuinely confusing.
+    const wasInterrupted = !!last && this.store.interrupted().includes(last);
+    const resume = !!viewing || wasInterrupted || this.cfg().get<boolean>("autoResumeLast", false);
+    // Another surface may already be running it (an editor tab that outlived a
+    // reload), in which case it belongs there and this panel stays on the list.
+    const heldElsewhere = !!last && !!this.surfaces?.owner(last, this);
+    if (this.kind === "view" && resume && last && !heldElsewhere && !this.painted) {
+      this.post({ type: "body", body: "thread" });
+      await this.loadSession(last);
     }
   }
 
@@ -1632,26 +1741,7 @@ export class ChatController implements AcpHost {
     if (this.isReady()) {
       this.post({ type: "ready" });
       void this.publishInitialOptions();
-      await this.refreshSessions();
-      // Auto-resume only applies to the sidebar surface. Editor/window surfaces
-      // that were freshly opened start a new session instead (see onWebviewReady).
-      // A window reload builds a brand new webview with an empty transcript, so
-      // the session the panel was showing is reopened: without that, the chat you
-      // were reading comes back blank until you go to the list and pick it again.
-      const viewing = this.store.viewing();
-      const last = viewing || this.store.activeId();
-      // Always reopen a session whose turn we had to kill on the way out, even
-      // when auto-resume is off: landing on the session list with no word of the
-      // interruption is the one case where it is genuinely confusing.
-      const wasInterrupted = !!last && this.store.interrupted().includes(last);
-      const resume = !!viewing || wasInterrupted || this.cfg().get<boolean>("autoResumeLast", false);
-      // Another surface may already be running it (an editor tab that outlived a
-      // reload), in which case it belongs there and this panel stays on the list.
-      const heldElsewhere = !!last && !!this.surfaces?.owner(last, this);
-      if (this.kind === "view" && !this.autoNewSession && resume && last && !heldElsewhere && !this.painted) {
-        this.post({ type: "body", body: "thread" });
-        await this.loadSession(last);
-      }
+      void this.refreshSessionsIfVisible();
     } else if (this.runtimes.size === 0) {
       this.post({ type: "setup", health: this.publicHealth() });
     }
@@ -1717,6 +1807,7 @@ export class ChatController implements AcpHost {
   }
 
   private async runHealthCheck(): Promise<void> {
+    const startedAt = Date.now();
     const setting = this.cfg().get<string>("cliPath", "devin") || "devin";
     this.health = await checkHealth(setting);
     this.resolvedCli = this.health.path || "devin";
@@ -1726,6 +1817,7 @@ export class ChatController implements AcpHost {
     );
     this.statusBar?.setInfo({ version: this.health.version, account: this.health.account });
     this.statusBar?.set({ connected: this.isReady(), mode: this.currentMode, model: this.currentModel });
+    this.log(`[perf] health-check ${Date.now() - startedAt}ms`);
   }
 
   private async browseCli(): Promise<void> {
@@ -1741,6 +1833,7 @@ export class ChatController implements AcpHost {
     await this.cfg().update("cliPath", picked[0].fsPath, vscode.ConfigurationTarget.Global);
     await this.runHealthCheck();
     await this.pushReadiness();
+    await this.restoreAfterReady();
   }
 
   private async authenticate(): Promise<void> {
@@ -1814,7 +1907,7 @@ export class ChatController implements AcpHost {
         rt.id = res.sessionId;
         rt.lastActivityAt = Date.now();
         this.runtimes.set(rt.id, rt);
-        this.store.add(rt.id, cwd);
+        this.rememberSession(rt.id, cwd);
         // Starting a chat takes seconds, and the user can open an existing one
         // while it does. It is a real session either way, so it stays in the pool
         // and runs in the background, but it must not take the panel back from
@@ -1850,7 +1943,7 @@ export class ChatController implements AcpHost {
         }
         this.ensureIdleTimer();
         this.broadcastStatuses();
-        void this.refreshSessions();
+        void this.refreshSessionsIfVisible();
         return rt;
       } catch (err) {
         this.destroyRuntime(rt);
@@ -1902,26 +1995,27 @@ export class ChatController implements AcpHost {
   // Ask the webview whether to force take-over a session held by a live process.
   // `rid` is the session the question belongs to, so a chat that moves surface
   // takes only its own with it.
-  private readonly takeoverResolvers = new Map<string, { resolve: (d: "takeover" | "cancel") => void; rid: string }>();
+  private readonly takeoverResolvers = new Map<string, { resolve: (d: "takeover" | "cancel") => void; rid: string; timer?: NodeJS.Timeout }>();
   private takeoverSeq = 0;
   private askTakeover(id: string, pid?: number): Promise<"takeover" | "cancel"> {
     const requestId = `lock-${++this.takeoverSeq}`;
     this.post({ type: "lockConflict", requestId, id, pid });
     return new Promise((resolve) => {
-      this.takeoverResolvers.set(requestId, { resolve, rid: id });
+      const entry: { resolve: (d: "takeover" | "cancel") => void; rid: string; timer?: NodeJS.Timeout } = { resolve, rid: id };
+      this.takeoverResolvers.set(requestId, entry);
       // An unanswered question held the load open for ever, and a load that never
       // returns pins the session: every later attempt to open it waits on the same
       // promise, its row keeps a starting dot, and everything sent to it is queued
       // behind a replay that will not finish. Left long enough to be answered, but
       // not left for the life of the window.
-      const t = setTimeout(() => {
+      entry.timer = setTimeout(() => {
         if (!this.takeoverResolvers.has(requestId)) {
           return;
         }
         this.log(`[takeover] no answer for ${id}, treating it as cancelled`);
         this.resolveTakeover(requestId, "cancel");
       }, TAKEOVER_TIMEOUT_MS);
-      t.unref?.();
+      entry.timer.unref?.();
     });
   }
   private resolveTakeover(requestId: string, decision: string): void {
@@ -1930,6 +2024,9 @@ export class ChatController implements AcpHost {
       return;
     }
     this.takeoverResolvers.delete(requestId);
+    if (entry.timer) {
+      clearTimeout(entry.timer);
+    }
     entry.resolve(decision === "takeover" ? "takeover" : "cancel");
   }
 
@@ -2002,7 +2099,7 @@ export class ChatController implements AcpHost {
     if (returnToList || wasActive) {
       await this.closeOutSession();
     } else {
-      void this.refreshSessions();
+      void this.refreshSessionsIfVisible();
     }
   }
 
@@ -2107,6 +2204,7 @@ export class ChatController implements AcpHost {
       await this.activateSession(id);
       return;
     }
+    const startedAt = Date.now();
     this.activeId = id;
     // A full reload rebuilds the whole transcript, so any buffered background
     // stream for this runtime is superseded, as is any replay it was owed.
@@ -2116,7 +2214,10 @@ export class ChatController implements AcpHost {
       // The transcript is about to be rebuilt from the agent, so the record of
       // what is painted starts again with it.
       already.log = [];
+      already.replay = [];
       already.logFull = true;
+      already.steps = [];
+      already.stepsKnown = false;
     }
     // "Waking session…" while a fresh acp spins up; a live one loads instantly.
     this.post({ type: "clear", loading: true, waking: !already });
@@ -2129,7 +2230,7 @@ export class ChatController implements AcpHost {
     // none of them away.
     this.postWorkingSet();
     this.postDraft();
-    await this.loadStaged(id);
+    const staged = this.loadStaged(id);
     if (!already) {
       this.starting.add(id);
     }
@@ -2149,8 +2250,9 @@ export class ChatController implements AcpHost {
       }
       this.postCapabilities();
       const res = await this.loadWithTakeover(rt, id, cwd);
+      await staged;
       rt.lastActivityAt = Date.now();
-      this.store.add(id, cwd);
+      this.rememberSession(id, cwd);
       // Loading a chat means spawning an agent and replaying its history, which
       // takes seconds, and nothing stops the user picking a different chat while
       // it runs. Everything below speaks for the panel, so it only applies if this
@@ -2183,6 +2285,9 @@ export class ChatController implements AcpHost {
       loadFailed = err instanceof Error ? err.message : String(err);
     } finally {
       rt.replaying = false;
+      if (loadFailed) {
+        rt.replay = [];
+      }
       this.starting.delete(id);
       if (loadFailed) {
         // The agent aborted the load (commonly because a configured MCP server
@@ -2202,12 +2307,13 @@ export class ChatController implements AcpHost {
           this.log(`[load-failed] ${id} (no longer on screen): ${loadFailed}`);
         }
       } else {
-        if (this.activeId === id) {
+        const updateHead = this.activeId === id;
+        if (updateHead) {
+          this.flushReplay(rt);
           this.post({ type: "loaded" });
           this.reportInterrupted(id);
-          // The head read right after a reload is NOT a reliable revert target: the
-          // next prompt re-expands the conversation and orphans it.
-          await this.postTurnHead(false);
+        } else {
+          rt.replay = [];
         }
         this.broadcastStatuses();
         // Re-surface permissions/questions this session raised while it was in
@@ -2226,8 +2332,14 @@ export class ChatController implements AcpHost {
         if (opened) {
           this.flushQueue(opened);
         }
-        void this.refreshSessions();
+        if (updateHead && !opened?.busy) {
+          // The head read right after a reload is NOT a reliable revert target: the
+          // next prompt re-expands the conversation and orphans it.
+          void this.postTurnHead(false);
+        }
+        void this.refreshSessionsIfVisible();
       }
+      this.log(`[perf] session-load ${already ? "live" : "cold"} ${Date.now() - startedAt}ms`);
     }
   }
 
@@ -2243,6 +2355,7 @@ export class ChatController implements AcpHost {
     }
     this.activeId = id;
     this.markVisible(id);
+    this.sendOpenDocuments(rt);
     this.postWorkingSet();
     // The composer belongs to this chat now, so it shows this chat's own unsent
     // text and staged files, not the ones from wherever we just were.
@@ -2284,7 +2397,7 @@ export class ChatController implements AcpHost {
     }
     // Restore the composer's queued-message rows for this session.
     this.postQueued(rt);
-    void this.refreshSessions();
+    void this.refreshSessionsIfVisible();
   }
 
   // A session is already running on another surface. Two panels cannot share one
@@ -2302,7 +2415,7 @@ export class ChatController implements AcpHost {
       here: this.kind === "view" ? "the side panel" : "this tab",
       title: this.store.titles()[id]
     });
-    void this.refreshSessions();
+    void this.refreshSessionsIfVisible();
     return true;
   }
 
@@ -2355,10 +2468,11 @@ export class ChatController implements AcpHost {
   }
 
   private async doWakeSession(id: string): Promise<void> {
+    const startedAt = Date.now();
     this.activeId = id;
     this.postWorkingSet();
     this.postDraft();
-    await this.loadStaged(id);
+    const staged = this.loadStaged(id);
     const cwd = this.store.cwds()[id] || this.resolveNewSessionCwd();
     const rt = this.spawnRuntime(cwd);
     rt.id = id;
@@ -2373,8 +2487,9 @@ export class ChatController implements AcpHost {
     try {
       await this.ensureInitialized(rt);
       const res = await this.loadWithTakeover(rt, id, cwd);
+      await staged;
       rt.lastActivityAt = Date.now();
-      this.store.add(id, cwd);
+      this.rememberSession(id, cwd);
       // A wake takes seconds too, so this only speaks for the panel while the panel
       // is still showing this chat, the same as loading one does. Recording it as
       // the chat being viewed regardless sent the next window reload to the chat the
@@ -2423,14 +2538,22 @@ export class ChatController implements AcpHost {
         } else {
           this.log(`[wake-failed] ${id} (no longer on screen): ${wakeFailed}`);
         }
-      } else if (this.activeId === id) {
-        await this.postTurnHead(false);
       }
+      const updateHead = !wakeFailed && this.activeId === id;
       done();
+      if (updateHead) {
+        void this.postTurnHead(false);
+      }
+      this.log(`[perf] session-wake ${Date.now() - startedAt}ms`);
     }
   }
 
   private sessionsCache?: { at: number; sessions: DevinSession[] };
+  private sessionsRefreshing?: Promise<void>;
+  private sessionsRefreshingIds?: string;
+  private sessionsRefreshingGeneration?: number;
+  private sessionsForcePending = false;
+  private sessionListGeneration = 0;
 
   // `force` bypasses the short TTL cache (used for explicit refresh/rename/delete);
   // implicit refreshes after a load/prompt reuse the cache to avoid respawning
@@ -2443,13 +2566,13 @@ export class ChatController implements AcpHost {
   // roughly the same cost as spawning an agent purely to ask, so there is nothing
   // to gain by starting one).
   private listOverProtocol(): Promise<ListResult> | undefined {
-    const client = this.anyLiveClient();
+    const client = this.anyLiveClient() || this.surfaces?.sessionListClient(this);
     if (!client) {
       return undefined;
     }
     const ids = this.store.ids();
     return client
-      .listSessions()
+      .listSessions(SESSION_LIST_ACP_TIMEOUT_MS)
       .then((rows) => {
         // No rows at all, from an agent that has a session of its own to report, is
         // not an answer about the user's sessions: it is the call not working (a
@@ -2466,7 +2589,8 @@ export class ChatController implements AcpHost {
         this.log(`[list-over-acp-failed] ${err instanceof Error ? err.message : String(err)}`);
         return listSessions({
           cliPath: this.resolvedCli || "devin",
-          env: this.env,
+          env: this.clientEnv(),
+          timeoutMs: SESSION_LIST_CLI_TIMEOUT_MS,
           folders: this.folders(),
           trackedIds: ids,
           cwdById: this.store.cwds()
@@ -2486,10 +2610,47 @@ export class ChatController implements AcpHost {
   }
 
   async refreshSessions(force = false, staleOk = false): Promise<void> {
+    const inflight = this.sessionsRefreshing;
+    if (inflight) {
+      if (!force) {
+        return inflight;
+      }
+      if (
+        this.sessionsRefreshingIds !== this.store.ids().join("\u0000") ||
+        this.sessionsRefreshingGeneration !== this.sessionListGeneration
+      ) {
+        this.sessionsForcePending = true;
+      }
+      await inflight;
+      if (this.sessionsForcePending) {
+        this.sessionsForcePending = false;
+        await this.refreshSessions(true);
+      }
+      return;
+    }
+    const refresh = this.refreshSessionsNow(force, staleOk);
+    this.sessionsRefreshing = refresh;
+    this.sessionsRefreshingIds = this.store.ids().join("\u0000");
+    this.sessionsRefreshingGeneration = this.sessionListGeneration;
+    try {
+      await refresh;
+    } finally {
+      if (this.sessionsRefreshing === refresh) {
+        this.sessionsRefreshing = undefined;
+        this.sessionsRefreshingIds = undefined;
+        this.sessionsRefreshingGeneration = undefined;
+      }
+    }
+  }
+
+  private async refreshSessionsNow(force = false, staleOk = false): Promise<void> {
     if (!this.isReady()) {
       return;
     }
+    const startedAt = Date.now();
     const folders = this.folders();
+    const trackedAtStart = new Set(this.store.ids());
+    let source = "cache";
     let sessions: DevinSession[] = [];
     if (!force && this.sessionsCache && (staleOk || Date.now() - this.sessionsCache.at < 4000)) {
       sessions = this.sessionsCache.sessions;
@@ -2498,18 +2659,17 @@ export class ChatController implements AcpHost {
       // Never let a slow/failed `devin list` leave the list stuck on its
       // spinner: cap the wait and fall back to the cache (or empty).
       try {
-        const listing = this.listOverProtocol() || listSessions({
+        const protocol = this.listOverProtocol();
+        source = protocol ? "acp" : "cli";
+        const listing = protocol || listSessions({
           cliPath: this.resolvedCli || "devin",
-          env: this.env,
+          env: this.clientEnv(),
+          timeoutMs: SESSION_LIST_CLI_TIMEOUT_MS,
           folders,
           trackedIds: this.store.ids(),
           cwdById: this.store.cwds()
         });
-        const timeout = new Promise<never>((_, reject) => {
-          const t = setTimeout(() => reject(new Error("devin list timed out")), 20000);
-          t.unref?.();
-        });
-        const { sessions: live, prunedIds } = await Promise.race([listing, timeout]);
+        const { sessions: live, prunedIds } = await listing;
         // Drop tracked ids Devin no longer knows about so stale rows self-heal,
         // but NEVER prune a session we still hold a live runtime for (or are
         // starting): a freshly created session is not in `devin list` until its
@@ -2518,15 +2678,19 @@ export class ChatController implements AcpHost {
           const held = this.runtimes.has(id) || this.starting.has(id) || !!this.surfaces?.owner(id);
           if (!held) {
             this.store.remove(id);
+            void this.dropStaged(id);
           }
         }
         sessions = live;
         this.sessionsCache = { at: Date.now(), sessions };
+        this.store.cacheSessionList(this.sessionsCache);
       } catch (err) {
         this.log(`[list-failed] ${err instanceof Error ? err.message : String(err)}`);
         sessions = this.sessionsCache?.sessions ?? [];
       }
     }
+    const trackedNow = new Set(this.store.ids());
+    sessions = sessions.filter((session) => !trackedAtStart.has(session.id) || trackedNow.has(session.id));
     // List every live session even when `devin list` has not caught up yet (a
     // brand-new session appears there only after its first turn persists), so a
     // chat started from the list shows up immediately. Sessions running on
@@ -2583,6 +2747,7 @@ export class ChatController implements AcpHost {
       elsewhere: this.elsewhere(),
       folders: folders.map((f) => ({ path: f, name: path.basename(f) }))
     });
+    this.log(`[perf] session-list ${source} ${Date.now() - startedAt}ms`);
   }
 
   private elsewhere(): string[] {
@@ -2593,7 +2758,7 @@ export class ChatController implements AcpHost {
   // rows, dots and "running elsewhere" badges say what is actually true.
   surfacesChanged(): void {
     this.post({ type: "sessionStatuses", statuses: this.statusMap(), activeId: this.activeId, elsewhere: this.elsewhere() });
-    void this.refreshSessions();
+    void this.refreshSessionsIfVisible();
   }
 
   // Whether a session list is on screen here (the full list, the docked panel, or
@@ -2604,13 +2769,32 @@ export class ChatController implements AcpHost {
   private surfaceVisible = true;
 
   setSurfaceVisible(visible: boolean): void {
+    const changed = this.surfaceVisible !== visible;
     this.surfaceVisible = visible;
+    if (changed && visible) {
+      const rt = this.active();
+      if (rt) {
+        this.sendOpenDocuments(rt);
+      }
+      void this.refreshSessionsIfVisible(true);
+    }
+  }
+
+  private refreshSessionsIfVisible(force = false, staleOk = false): Promise<void> {
+    if (this.closed || !this.listVisible || !this.surfaceVisible) {
+      return Promise.resolve();
+    }
+    return this.refreshSessions(force, staleOk);
+  }
+
+  private invalidateSessionList(): void {
+    this.sessionsCache = undefined;
+    this.sessionListGeneration++;
   }
 
   relistIfWatched(): void {
-    if (this.listVisible && this.surfaceVisible) {
-      void this.refreshSessions(true);
-    }
+    this.invalidateSessionList();
+    void this.refreshSessionsIfVisible(true);
   }
 
   private statusMap(): Record<string, SessionStatus> {
@@ -2672,12 +2856,13 @@ export class ChatController implements AcpHost {
     // Name it here rather than waiting for the CLI's next listing, so the header,
     // the lists and the editor tab all follow straight away.
     this.store.setTitle(id, title);
+    this.invalidateSessionList();
     if (this.activeId === id) {
       this.post({ type: "sessionReady", sessionId: id, title });
     }
     this.surfaces?.titlesChanged();
     this.surfaces?.sessionsChanged(this);
-    await this.refreshSessions(true);
+    await this.refreshSessionsIfVisible(true);
   }
 
   // A name the agent chose itself, rather than one the user typed. Painted like a
@@ -2696,7 +2881,7 @@ export class ChatController implements AcpHost {
     this.surfaces?.sessionsChanged(this);
     // Repaint the list from the cached listing rather than shelling out for a
     // fresh one: the only thing that changed is a name we already hold.
-    void this.refreshSessions(false, true);
+    void this.refreshSessionsIfVisible(false, true);
   }
 
   // Rename through the agent this surface holds the session in, so its own copy of
@@ -2734,6 +2919,7 @@ export class ChatController implements AcpHost {
       this.log(`[delete-failed] ${err instanceof Error ? err.message : String(err)}`);
     }
     this.store.remove(id);
+    this.invalidateSessionList();
     // A deleted chat has nothing left to stage for, and what it was holding can be
     // images: kilobytes to megabytes of base64 that would otherwise sit in the
     // workspace's storage for good, since nothing else ever looks at that file again.
@@ -2743,7 +2929,7 @@ export class ChatController implements AcpHost {
       this.post({ type: "clear" });
     }
     this.broadcastStatuses();
-    await this.refreshSessions(true);
+    await this.refreshSessionsIfVisible(true);
   }
 
   // --- Mode + model --------------------------------------------------------
@@ -3023,6 +3209,14 @@ export class ChatController implements AcpHost {
 
   private stagedKey(id?: string): string {
     return id || ChatController.NEW_CHAT_ATTACHMENTS;
+  }
+
+  private rememberSession(id: string, cwd: string): void {
+    for (const evicted of this.store.add(id, cwd)) {
+      if (!this.runtimes.has(evicted) && !this.surfaces?.owner(evicted)) {
+        void this.dropStaged(evicted);
+      }
+    }
   }
 
   // What is staged for one chat. The array is live: pushing to it stages a file.
@@ -3566,7 +3760,7 @@ export class ChatController implements AcpHost {
 
   // --- Prompting -----------------------------------------------------------
 
-  private async handleSend(text: string, startNew = false): Promise<void> {
+  private async handleSend(text: string, startNew = false, preserveTranscript = false): Promise<void> {
     if (!text.trim()) {
       return;
     }
@@ -3640,7 +3834,7 @@ export class ChatController implements AcpHost {
           // The session this was written in was idle-exited: wake it, then send. The
           // wake takes seconds, so the message belongs to the session it was written
           // in, not to whichever one is on screen when the wake finishes.
-          await this.loadSession(target);
+          await (preserveTranscript ? this.wakeSession(target) : this.loadSession(target));
           rt = this.runtimes.get(target);
         } else {
           rt = await this.createSession();
@@ -3693,6 +3887,8 @@ export class ChatController implements AcpHost {
     // sat in the queue), and an image block the model cannot decode does not fail
     // the turn, it breaks the session for good.
     blocks = this.withoutUnreadableImages(rt, blocks);
+    rt.steps = [];
+    rt.stepsKnown = false;
     this.setRuntimeBusy(rt, true);
     if (this.activeId === rt.id) {
       this.post({ type: "assistantStart" });
@@ -3731,7 +3927,7 @@ export class ChatController implements AcpHost {
     // extra round trip on the same channel, and awaiting it here is what used
     // to leave a visible gap before a queued message went out.
     this.flushQueue(rt);
-    void this.refreshSessions();
+    void this.refreshSessionsIfVisible();
     // A chat moved here mid turn has no history on this surface, and now that the
     // channel is free it can be asked for. Only when the queue did not start
     // another turn, and it is still what the user is looking at.
@@ -3951,14 +4147,27 @@ export class ChatController implements AcpHost {
     }
   }
 
+  private postReplay(items: Record<string, unknown>[]): void {
+    for (let start = 0; start < items.length; start += REPLAY_BATCH_SIZE) {
+      this.post({ type: "replay", items: items.slice(start, start + REPLAY_BATCH_SIZE) });
+    }
+  }
+
+  private flushReplay(rt: Runtime): void {
+    if (!rt.replay.length) {
+      return;
+    }
+    const items = rt.replay;
+    rt.replay = [];
+    this.postReplay(items);
+  }
+
   // Rebuild a transcript from what this session has already painted. This is how
   // a chat keeps its history when it moves surface mid turn, when asking the agent
   // for it would abort the turn.
   private replayLog(rt: Runtime): void {
     this.post({ type: "clear", loading: true });
-    for (const payload of paintedReplay(rt.log)) {
-      this.post(payload);
-    }
+    this.postReplay(paintedReplay(rt.log));
     this.post({ type: "loaded" });
     // The log is a superset of anything buffered while the session was hidden.
     rt.bgBuffer = [];
@@ -4019,6 +4228,7 @@ export class ChatController implements AcpHost {
   // runtime so a session switch can restore it without a round trip.
   private onRevertSteps(rt: Runtime, update: RevertStepsUpdate): void {
     rt.steps = Array.isArray(update.steps) ? update.steps : [];
+    rt.stepsKnown = true;
     if (this.activeId !== rt.id || rt.silentReplay) {
       return;
     }
@@ -4073,9 +4283,9 @@ export class ChatController implements AcpHost {
       }
       // The fork is a separate session with its own agent, so it is opened the way
       // any other existing chat is.
-      this.store.add(forked, rt.cwd);
+      this.rememberSession(forked, rt.cwd);
       await this.loadSession(forked);
-      await this.refreshSessions(true);
+      await this.refreshSessionsIfVisible(true);
     } catch (err) {
       this.post({ type: "error", text: err instanceof Error ? err.message : String(err) });
     }
@@ -4090,13 +4300,21 @@ export class ChatController implements AcpHost {
     if (!rt || !rt.client.supportsRevert()) {
       return;
     }
-    try {
-      const steps = await rt.client.listRevertSteps(rt.id);
-      rt.steps = steps;
+    const post = (steps: RevertStep[]): void => {
       const head = headOf(steps);
       if (head != null && this.activeId === rt.id) {
         this.post({ type: "turnHead", head, reliable });
       }
+    };
+    if (rt.stepsKnown) {
+      post(rt.steps);
+      return;
+    }
+    try {
+      const steps = await rt.client.listRevertSteps(rt.id);
+      rt.steps = steps;
+      rt.stepsKnown = true;
+      post(steps);
     } catch (err) {
       this.log(`[turn-head-failed] ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -4329,7 +4547,7 @@ export class ChatController implements AcpHost {
       rt.lastActivityAt = Date.now();
       // A finished turn is when the CLI names a new chat, so this is what puts
       // that name in the header and the lists without anyone asking for it.
-      void this.refreshSessions(true);
+      void this.refreshSessionsIfVisible(true);
     }
     if (this.activeId === rt.id) {
       this.post({ type: "busy", value });
@@ -4392,7 +4610,14 @@ export class ChatController implements AcpHost {
     // active session/load replay (rt.replaying), which is how a reload paints its
     // history; a silent background wake is suppressed (its cached view is shown).
     if (this.activeId === rt.id && !rt.silentReplay) {
-      this.post(payload);
+      if (rt.replaying) {
+        rt.replay.push(payload);
+        if (rt.replay.length >= REPLAY_BATCH_SIZE) {
+          this.flushReplay(rt);
+        }
+      } else {
+        this.post(payload);
+      }
       return;
     }
     // A live background turn (not a history replay): buffer so the user sees the
@@ -4552,9 +4777,11 @@ export class ChatController implements AcpHost {
     }
     const completed = subagentCompleted(u);
     if (completed) {
+      const id = this.subagentBlockId(rt, completed.agentId);
+      rt.subagentIds.delete(completed.agentId);
       this.emit(rt, {
         type: "subagentEnd",
-        id: this.subagentBlockId(rt, completed.agentId),
+        id,
         success: completed.success !== false,
         summary: completed.summary
       });

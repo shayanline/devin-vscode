@@ -47,25 +47,38 @@ interface ModelsJson {
 }
 
 let cache: { at: number; families: ModelFamily[] } | undefined;
+let pendingListing: Promise<ModelFamily[]> | undefined;
 // variant uid -> family, so a session's flat currentValue can be resolved.
 const familyByValue = new Map<string, ModelFamily>();
 
 // Lists the account's models as families (with effort variants) via
 // `devin models list --format json`. Needs no ACP session, and the uids match
 // what the ACP `model` config option accepts. Cached in-memory for a few minutes.
-export async function listModelFamilies(cliPath: string, env?: NodeJS.ProcessEnv): Promise<ModelFamily[]> {
+export function listModelFamilies(cliPath: string, env?: NodeJS.ProcessEnv): Promise<ModelFamily[]> {
   if (cache && Date.now() - cache.at < 300000) {
-    return cache.families;
+    return Promise.resolve(cache.families);
   }
-  const families = await run(cliPath, env);
-  if (families.length) {
-    setCache(families);
-    return families;
+  if (pendingListing) {
+    return pendingListing;
   }
-  // The CLI call failed or returned nothing: keep serving the last successful
-  // families (even if now stale) so the dropdowns don't empty out on a
-  // transient error.
-  return cache?.families ?? families;
+  const pending = (async () => {
+    const families = await run(cliPath, env);
+    if (families.length) {
+      setCache(families);
+      return families;
+    }
+    // The CLI call failed or returned nothing: keep serving the last successful
+    // families (even if now stale) so the dropdowns don't empty out on a
+    // transient error.
+    return cache?.families ?? families;
+  })();
+  pendingListing = pending;
+  void pending.finally(() => {
+    if (pendingListing === pending) {
+      pendingListing = undefined;
+    }
+  });
+  return pending;
 }
 
 // Families from the last successful fetch, synchronously (may be empty).

@@ -4,6 +4,8 @@ import { ChildProcessWithoutNullStreams } from "child_process";
 // newline-delimited JSON framing (as spoken by `devin acp`).
 
 type RpcId = number;
+const MAX_FRAME_CHARS = 8 * 1024 * 1024;
+const MAX_STDERR_CHARS = 64 * 1024;
 
 interface PendingCall {
   resolve: (value: unknown) => void;
@@ -17,6 +19,8 @@ export class JsonRpcConnection {
   private nextId: RpcId = 1;
   private readonly pending = new Map<RpcId, PendingCall>();
   private buffer = "";
+  private discardingFrame = false;
+  private stderr = "";
   private closed = false;
 
   constructor(
@@ -28,7 +32,7 @@ export class JsonRpcConnection {
     this.child.stdout.setEncoding("utf8");
     this.child.stdout.on("data", (chunk: string) => this.onData(chunk));
     this.child.stderr.setEncoding("utf8");
-    this.child.stderr.on("data", (chunk: string) => this.onLog?.(chunk.toString()));
+    this.child.stderr.on("data", (chunk: string) => this.onStderr(chunk));
     this.child.on("close", () => this.handleClose());
     // `close` waits for the pipes as well as the process, and the agent starts
     // its MCP servers as children that inherit them: one of those outliving a
@@ -46,15 +50,54 @@ export class JsonRpcConnection {
   }
 
   private onData(chunk: string): void {
+    if (this.discardingFrame) {
+      const index = chunk.indexOf("\n");
+      if (index < 0) {
+        return;
+      }
+      this.discardingFrame = false;
+      chunk = chunk.slice(index + 1);
+    }
     this.buffer += chunk;
     let index: number;
     while ((index = this.buffer.indexOf("\n")) >= 0) {
-      const line = this.buffer.slice(0, index).trim();
+      const frame = this.buffer.slice(0, index);
       this.buffer = this.buffer.slice(index + 1);
+      if (frame.length > MAX_FRAME_CHARS) {
+        this.onLog?.("[protocol-error] ACP frame exceeded 8 MiB");
+        continue;
+      }
+      const line = frame.trim();
       if (line.length === 0) {
         continue;
       }
       this.dispatch(line);
+    }
+    if (this.buffer.length > MAX_FRAME_CHARS) {
+      this.buffer = "";
+      this.discardingFrame = true;
+      this.onLog?.("[protocol-error] ACP frame exceeded 8 MiB");
+    }
+  }
+
+  private onStderr(chunk: string): void {
+    this.stderr += chunk;
+    let index: number;
+    while ((index = this.stderr.indexOf("\n")) >= 0) {
+      const output = this.stderr.slice(0, index);
+      this.stderr = this.stderr.slice(index + 1);
+      if (output.length > MAX_STDERR_CHARS) {
+        this.onLog?.("[protocol-error] ACP stderr line exceeded 64 KiB");
+        continue;
+      }
+      const line = output.trim();
+      if (isActionableLog(line)) {
+        this.onLog?.(redactLog(line));
+      }
+    }
+    if (this.stderr.length > MAX_STDERR_CHARS) {
+      this.stderr = "";
+      this.onLog?.("[protocol-error] ACP stderr line exceeded 64 KiB");
     }
   }
 
@@ -172,6 +215,11 @@ export class JsonRpcConnection {
 
   private handleClose(): void {
     this.closed = true;
+    const stderr = this.stderr.trim();
+    this.stderr = "";
+    if (isActionableLog(stderr)) {
+      this.onLog?.(redactLog(stderr));
+    }
     for (const [, pending] of this.pending) {
       pending.reject(new Error("ACP process exited"));
     }
@@ -188,4 +236,14 @@ export class JsonRpcConnection {
     // the agent was disposed hung for ever, and its caller with it.
     this.handleClose();
   }
+}
+
+function isActionableLog(line: string): boolean {
+  return /\b(?:warn|error|failed|failure|panic|exception|denied)\b/i.test(line);
+}
+
+function redactLog(line: string): string {
+  return line
+    .replace(/(authorization\s*:\s*(?:bearer\s+|basic\s+)?)[^\s,;"']+/gi, "$1[redacted]")
+    .replace(/((?:api[_-]?key|token|secret|password)\s*[=:]\s*)[^\s,;"']+/gi, "$1[redacted]");
 }

@@ -683,3 +683,43 @@ test("a file rewritten with other line endings is not mistaken for work to prote
   assert.strictEqual(await tracker.reject(file), true);
   assert.deepStrictEqual(vscode.window.shown.warning, [], "no question for a line ending");
 });
+
+test("resolved snapshots spill old originals beyond their byte budget", async () => {
+  const budget = ChangeTracker.MAX_RESOLVED_BYTES;
+  ChangeTracker.MAX_RESOLVED_BYTES = 20;
+  try {
+    const tracker = new ChangeTracker();
+    tracker.register();
+    await tracker.useStore(globalThis.__dvVscode.Uri.file(path.join(TMP, "resolved-store")));
+    const first = write("first-resolved.ts", "after one\n");
+    const second = write("second-resolved.ts", "after two\n");
+    tracker.recordDiff(first, "before one\n", "after one\n", "A");
+    tracker.accept(first);
+    tracker.recordDiff(second, "before two\n", "after two\n", "A");
+    tracker.accept(second);
+
+    assert.strictEqual(original(tracker, first), "before one\n");
+    assert.strictEqual(original(tracker, second), "before two\n");
+    assert.strictEqual(await tracker.reject(first), true);
+    assert.strictEqual(fs.readFileSync(first, "utf8"), "before one\n");
+    const spilled = [...tracker.spilledResolved.values()][0];
+    assert.strictEqual(fs.existsSync(spilled), true);
+    tracker.dispose();
+    assert.strictEqual(fs.existsSync(spilled), false);
+  } finally {
+    ChangeTracker.MAX_RESOLVED_BYTES = budget;
+  }
+});
+
+test("opening change storage removes stale resolved-original spill directories", async () => {
+  const root = path.join(TMP, "stale-resolved-store");
+  const stale = path.join(root, "resolved-originals", "99999999-stale");
+  fs.mkdirSync(stale, { recursive: true });
+  fs.writeFileSync(path.join(stale, "original"), "before\n");
+  const tracker = new ChangeTracker();
+
+  await tracker.useStore(globalThis.__dvVscode.Uri.file(root));
+
+  assert.strictEqual(fs.existsSync(stale), false);
+  tracker.dispose();
+});

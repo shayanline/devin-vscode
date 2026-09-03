@@ -326,8 +326,8 @@ export class AcpClient extends EventEmitter {
   // its own, so any live agent can answer it. Unlike `devin list`, which is exact
   // match on cwd, this is not scoped: a session created in a subdirectory of the
   // workspace comes back too.
-  async listSessions(): Promise<AcpSessionRow[]> {
-    const res = await this.rpc<{ sessions?: AcpSessionRow[] }>("session/list", {}, QUERY_TIMEOUT_MS);
+  async listSessions(timeoutMs = QUERY_TIMEOUT_MS): Promise<AcpSessionRow[]> {
+    const res = await this.rpc<{ sessions?: AcpSessionRow[] }>("session/list", {}, timeoutMs || QUERY_TIMEOUT_MS);
     return res?.sessions || [];
   }
 

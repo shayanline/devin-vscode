@@ -114,6 +114,8 @@ export class ChangeTracker
   static readonly editScheme = "devin-edit";
 
   private readonly snapshots = new Map<string, Snapshot>();
+  private readonly spilledResolved = new Map<string, string>();
+  private resolvedBytes = 0;
   private readonly contentChanged = new vscode.EventEmitter<vscode.Uri>();
   private readonly listChanged = new vscode.EventEmitter<string[]>();
   // A change was kept or undone, wherever from: the chat, the Source Control view
@@ -133,6 +135,7 @@ export class ChangeTracker
   // do with the agent: forgetting it on a reload lost the diffs and left Keep and
   // Undo with nothing to act on, so the next edit looked like a brand new set.
   private store?: vscode.Uri;
+  private spillDir?: string;
   // Originals being resolved right now, so two clicks do not race each other to
   // create the same model.
   private readonly warming = new Map<string, Promise<void>>();
@@ -144,6 +147,8 @@ export class ChangeTracker
       return;
     }
     this.store = vscode.Uri.joinPath(dir, "changes.json");
+    this.removeStaleSpills(dir.fsPath);
+    this.spillDir = path.join(dir.fsPath, "resolved-originals", `${process.pid}-${crypto.randomBytes(8).toString("hex")}`);
     try {
       const raw = Buffer.from(await vscode.workspace.fs.readFile(this.store)).toString("utf8");
       const parsed = JSON.parse(raw) as StoredSnapshot[];
@@ -193,6 +198,10 @@ export class ChangeTracker
     this.contentChanged.dispose();
     this.listChanged.dispose();
     this.resolved.dispose();
+    for (const file of this.spilledResolved.values()) {
+      try { fs.unlinkSync(file); } catch {}
+    }
+    this.spilledResolved.clear();
   }
 
   private scheduleSave(): void {
@@ -325,7 +334,9 @@ export class ChangeTracker
       const edit = this.edits.get(id);
       return (side === "after" ? edit?.after : edit?.before) ?? "";
     }
-    return this.snapshots.get(key(uri.query || uri.fsPath))?.original ?? "";
+    const snapshotKey = key(uri.query || uri.fsPath);
+    const snap = this.snapshots.get(snapshotKey);
+    return snap ? this.resolvedOriginal(snapshotKey, snap) ?? "" : "";
   }
 
   // --- One edit's own diff ---------------------------------------------------
@@ -338,6 +349,7 @@ export class ChangeTracker
   private readonly edits = new Map<string, { path: string; before: string; after: string }>();
   private editBytes = 0;
   private static readonly MAX_EDIT_BYTES = 8 * 1024 * 1024;
+  private static readonly MAX_RESOLVED_BYTES = 8 * 1024 * 1024;
 
   // Extend the edit under `id` (the first call sets what it started from, later
   // ones move its end), so a row that reports a file several times still opens
@@ -380,7 +392,8 @@ export class ChangeTracker
   }
 
   recordDiff(fsPath: string, oldText: string | null, newText: string, sessionId: string, stat?: { added: number; removed: number }): void {
-    const snap = this.snapshots.get(key(fsPath));
+    const snapshotKey = key(fsPath);
+    const snap = this.snapshots.get(snapshotKey);
     if (snap) {
       snap.added = stat?.added;
       snap.removed = stat?.removed;
@@ -392,6 +405,8 @@ export class ChangeTracker
         // the older text made the next diff show every change of the session over
         // again, including the ones already dealt with. `oldText` is what the file
         // held immediately before this edit, which is exactly that baseline.
+        this.resolvedBytes -= Buffer.byteLength(snap.original ?? "", "utf8");
+        this.forgetSpilled(snapshotKey);
         snap.original = oldText;
         snap.sessions = new Set([sessionId]);
         snap.resolved = false;
@@ -399,7 +414,7 @@ export class ChangeTracker
         snap.sessions.add(sessionId);
       }
     } else {
-      this.snapshots.set(key(fsPath), {
+      this.snapshots.set(snapshotKey, {
         path: fsPath,
         original: oldText,
         agentHash: contentHash(newText),
@@ -457,6 +472,8 @@ export class ChangeTracker
         continue;
       }
       this.snapshots.delete(k);
+      this.resolvedBytes -= snap.resolved ? Buffer.byteLength(snap.original ?? "", "utf8") : 0;
+      this.forgetSpilled(k);
       this.contentChanged.fire(this.originalUri(snap.path));
     }
     this.refreshGroup();
@@ -525,8 +542,83 @@ export class ChangeTracker
   }
 
   // Out of the working set, whichever way it was dealt with.
+  private removeStaleSpills(root: string): void {
+    const spills = path.join(root, "resolved-originals");
+    try {
+      for (const entry of fs.readdirSync(spills, { withFileTypes: true })) {
+        if (!entry.isDirectory() || !/^\d+-/.test(entry.name)) {
+          continue;
+        }
+        const pid = Number(entry.name.split("-", 1)[0]);
+        try {
+          process.kill(pid, 0);
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === "EPERM") {
+            continue;
+          }
+          fs.rmSync(path.join(spills, entry.name), { recursive: true, force: true });
+        }
+      }
+    } catch {}
+  }
+
+  private resolvedOriginal(snapshotKey: string, snap: Snapshot): string | null | undefined {
+    const file = this.spilledResolved.get(snapshotKey);
+    if (!file) {
+      return snap.original;
+    }
+    try {
+      return fs.readFileSync(file, "utf8");
+    } catch {
+      return undefined;
+    }
+  }
+
+  private spillResolved(snapshotKey: string, snap: Snapshot): boolean {
+    if (!this.spillDir || typeof snap.original !== "string") {
+      return false;
+    }
+    try {
+      fs.mkdirSync(this.spillDir, { recursive: true });
+      const file = path.join(this.spillDir, crypto.randomBytes(16).toString("hex"));
+      fs.writeFileSync(file, snap.original, "utf8");
+      this.spilledResolved.set(snapshotKey, file);
+      snap.original = null;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private forgetSpilled(snapshotKey: string): void {
+    const file = this.spilledResolved.get(snapshotKey);
+    if (!file) {
+      return;
+    }
+    this.spilledResolved.delete(snapshotKey);
+    try { fs.unlinkSync(file); } catch {}
+  }
+
+  private trimResolved(): void {
+    for (const [snapshotKey, snap] of this.snapshots) {
+      if (this.resolvedBytes <= ChangeTracker.MAX_RESOLVED_BYTES) {
+        return;
+      }
+      if (snap.resolved && typeof snap.original === "string") {
+        const bytes = Buffer.byteLength(snap.original, "utf8");
+        if (this.spillResolved(snapshotKey, snap)) {
+          this.resolvedBytes -= bytes;
+        }
+      }
+    }
+  }
+
   private settle(snap: Snapshot, action: "accept" | "reject"): void {
-    snap.resolved = true;
+    if (!snap.resolved) {
+      snap.resolved = true;
+      this.resolvedBytes += Buffer.byteLength(snap.original ?? "", "utf8");
+      this.trimResolved();
+    }
     this.resolved.fire({ paths: [snap.path], action });
     this.refreshGroup();
   }
@@ -537,7 +629,8 @@ export class ChangeTracker
   // Answers whether the file really was put back, so a caller that goes on to
   // forget it does not forget one that is still holding the agent's content.
   async reject(fsPath?: string): Promise<boolean> {
-    const snap = fsPath ? this.snapshots.get(key(fsPath)) : undefined;
+    const snapshotKey = fsPath ? key(fsPath) : undefined;
+    const snap = snapshotKey ? this.snapshots.get(snapshotKey) : undefined;
     if (!snap) {
       return false;
     }
@@ -553,11 +646,16 @@ export class ChangeTracker
     if (!(await this.confirmNoLaterWork(snap))) {
       return false;
     }
+    const original = this.resolvedOriginal(snapshotKey!, snap);
+    if (original === undefined) {
+      void vscode.window.showErrorMessage(`Couldn't undo ${path.basename(snap.path)}: the original is unavailable.`);
+      return false;
+    }
     try {
-      if (snap.original === null) {
+      if (original === null) {
         await fs.promises.rm(snap.path, { force: true });
-      } else if (!(await this.writeThroughEditor(snap.path, snap.original))) {
-        await fs.promises.writeFile(snap.path, snap.original, "utf8");
+      } else if (!(await this.writeThroughEditor(snap.path, original))) {
+        await fs.promises.writeFile(snap.path, original, "utf8");
       }
     } catch (err) {
       // A read only file, a lock held by another process, a directory that has

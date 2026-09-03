@@ -15,6 +15,7 @@ export interface DevinSession {
 interface ListOptions {
   cliPath: string;
   env?: NodeJS.ProcessEnv;
+  timeoutMs?: number;
   // Session ids this VS Code window owns (from workspaceState).
   trackedIds: string[];
   // Exact directory each tracked id was created in.
@@ -30,6 +31,8 @@ export interface ListResult {
   prunedIds: string[];
 }
 
+const LIST_CONCURRENCY = 4;
+
 // Membership is workspaceState (tracked ids); the CLI is only the source of
 // truth for existence and metadata. `devin list --format json` is exact-match
 // on cwd, so we query each distinct directory a tracked session was created in,
@@ -37,27 +40,43 @@ export interface ListResult {
 // queried successfully but no longer contains them are pruned; ids whose query
 // failed are left untouched so a transient CLI error never wipes the list.
 export async function listSessions(opts: ListOptions): Promise<ListResult> {
+  if (!opts.trackedIds.length) {
+    return { sessions: [], prunedIds: [] };
+  }
   const dirs = new Set<string>();
+  let missingCwd = false;
   for (const id of opts.trackedIds) {
     const cwd = opts.cwdById[id];
     if (cwd) {
       dirs.add(cwd);
+    } else {
+      missingCwd = true;
     }
   }
-  for (const f of opts.folders) {
-    dirs.add(f);
+  if (missingCwd) {
+    for (const f of opts.folders) {
+      dirs.add(f);
+    }
   }
   if (dirs.size === 0) {
     dirs.add(process.cwd());
   }
 
-  const queried = await Promise.all([...dirs].map((d) => runList(opts.cliPath, d, opts.env)));
+  const dirList = [...dirs];
+  const timeoutMs = opts.timeoutMs ?? 15_000;
+  const deadline = Date.now() + timeoutMs;
+  const queried = await mapLimited(
+    dirList,
+    LIST_CONCURRENCY,
+    (d) => runList(opts.cliPath, d, opts.env, Math.max(1, deadline - Date.now())),
+    deadline
+  );
 
   const byId = new Map<string, DevinSession>();
   const okDirs = new Set<string>();
   queried.forEach((res, i) => {
-    const dir = [...dirs][i];
-    if (!res.ok) {
+    const dir = dirList[i];
+    if (!res?.ok) {
       return;
     }
     okDirs.add(dir);
@@ -143,13 +162,26 @@ interface RunResult {
   sessions: DevinSession[];
 }
 
-function runList(cliPath: string, cwd: string, env?: NodeJS.ProcessEnv): Promise<RunResult> {
+async function mapLimited<T, R>(items: T[], limit: number, run: (item: T) => Promise<R>, deadline: number): Promise<(R | undefined)[]> {
+  const results = new Array<R | undefined>(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length && Date.now() < deadline) {
+      const index = next++;
+      results[index] = await run(items[index]);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+function runList(cliPath: string, cwd: string, env?: NodeJS.ProcessEnv, timeoutMs = 15_000): Promise<RunResult> {
   return new Promise((resolve) => {
     const cmd = cliCommand(cliPath, ["list", "--format", "json"]);
     execFile(
       cmd.file,
       cmd.args,
-      { cwd, env, windowsHide: true, timeout: 15000, maxBuffer: 8 * 1024 * 1024, shell: cmd.shell },
+      { cwd, env, windowsHide: true, timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024, shell: cmd.shell },
       (err, stdout) => {
         if (err && !stdout) {
           resolve({ ok: false, sessions: [] });

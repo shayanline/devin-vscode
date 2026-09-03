@@ -66,6 +66,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   let block = null; // { kind: "user"|"assistant"|"thinking", mid, bubble|body, buffer, start?, label? }
   const toolEls = new Map();
   const terminalCache = new Map();
+  const TERMINAL_CACHE_MAX = 50;
   const collapsedGroups = new Set();
   let lastSessions = [];
   let lastActiveId = null;
@@ -565,7 +566,6 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     } else {
       panelCtrl.refresh();
     }
-    vscode.postMessage({ type: "refreshSessions" });
     updatePanelToggle();
     reportListVisible();
   }
@@ -897,7 +897,6 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     snapshotCurrent();
     curSessionId = null;
     vscode.postMessage({ type: "leaveToList" });
-    vscode.postMessage({ type: "refreshSessions" });
     setBody("list");
   });
   el.titleBtn.addEventListener("click", (e) => {
@@ -932,7 +931,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       currentTitle = "Chat";
       setBody("thread");
     }
-    vscode.postMessage({ type: "send", text, newSession: startNew });
+    vscode.postMessage({ type: "send", text, newSession: startNew, preserveTranscript: !startNew && threadHasContent() });
     el.input.value = "";
     savedDraft = "";
     closeAutocomplete();
@@ -1947,6 +1946,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // Pending revert-preview requests keyed by token.
   const previewWaiters = new Map();
   let previewSeq = 0;
+  function cancelPreviewWaiters() {
+    for (const waiter of [...previewWaiters.values()]) waiter(null);
+  }
   // A revert we asked the host to perform but has not yet confirmed. We only
   // trim the transcript once the host replies "reverted", so a failed revert
   // (which leaves the conversation unchanged) does not desync the UI.
@@ -2378,6 +2380,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       e.stopPropagation();
       if (confirming) { setConfirming(false); doRestore(turn); return; }
       const needs = await revertNeedsConfirm(turn);
+      if (needs === null) return;
       if (needs) { staying = needs.staying || 0; setConfirming(true); }
       else doRestore(turn);
     });
@@ -2555,21 +2558,30 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   function revertNeedsConfirm(turn) {
     if (!caps.confirmRemoval || turn.headBefore == null) return Promise.resolve(false);
     const token = "pv" + (++previewSeq);
+    const sessionId = curSessionId;
     return new Promise((resolve) => {
+      let timer;
+      const finish = (value) => {
+        if (!previewWaiters.has(token)) return;
+        previewWaiters.delete(token);
+        clearTimeout(timer);
+        resolve(sessionId === curSessionId ? value : null);
+      };
       previewWaiters.set(token, (msg) => {
+        if (!msg) { finish(null); return; }
         // Files this chat has changed that the agent's plan does not cover. They
         // stay on disk through the rewind, so this is the case most worth stopping
         // for, and it is the one the agent reports nothing about.
         const staying = msg.pendingFiles || 0;
-        if (msg.error || !msg.result) { resolve(staying > 0 ? { staying } : false); return; }
+        if (msg.error || !msg.result) { finish(staying > 0 ? { staying } : false); return; }
         const r = msg.result;
         const planned = (r.fileActions && r.fileActions.length) || 0;
         const warnings = (r.irreversibleWarnings && r.irreversibleWarnings.length) || 0;
-        if (!planned && !warnings && !staying) { resolve(false); return; }
-        resolve({ staying: planned ? 0 : staying });
+        if (!planned && !warnings && !staying) { finish(false); return; }
+        finish({ staying: planned ? 0 : staying });
       });
+      timer = setTimeout(() => finish(false), 4000);
       vscode.postMessage({ type: "revertPreview", head: turn.headBefore, token });
-      setTimeout(() => { if (previewWaiters.has(token)) { previewWaiters.delete(token); resolve(false); } }, 4000);
     });
   }
 
@@ -2682,6 +2694,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     turn.submitting = true;
     try {
       const needs = await revertNeedsConfirm(turn);
+      if (needs === null) return;
       if (needs && !(await confirmDiscard())) return;
       if (!canEditTurn(turn)) return;
       finishEditing(turn);
@@ -2725,6 +2738,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     turn.submitting = true;
     try {
       const needs = await revertNeedsConfirm(turn);
+      if (needs === null) return;
       if (needs && !(await confirmDiscard())) return;
       if (!canEditTurn(turn)) return;
       cancelInputEditing();
@@ -6312,7 +6326,6 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   function toggleTitleMenu() {
     if (inEditor()) return;
     if (document.getElementById("title-menu")) { closeTitleMenu(); return; }
-    vscode.postMessage({ type: "refreshSessions" });
     const menu = document.createElement("div");
     menu.id = "title-menu";
     menu.className = "title-menu";
@@ -6358,6 +6371,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // the eviction below, or it would be restored from a cache entry that no longer
   // exists and come up blank.
   function snapshotCurrent(opening) {
+    cancelPreviewWaiters();
     if (!curSessionId) return;
     // Abandon any in-progress queued-message edit (releases the host's queue
     // hold) so it does not carry over to the next session.
@@ -7106,7 +7120,16 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       revealed: !!m.revealed
     };
     const before = terminalCache.get(m.terminalId);
+    if (before) terminalCache.delete(m.terminalId);
     terminalCache.set(m.terminalId, state);
+    if (terminalCache.size > TERMINAL_CACHE_MAX) {
+      for (const [terminalId, cached] of terminalCache) {
+        if (cached.exitStatus) {
+          terminalCache.delete(terminalId);
+          break;
+        }
+      }
+    }
     let wrote = false;
     el.thread.querySelectorAll(`pre[data-terminal="${cssEscape(m.terminalId)}"]`).forEach((pre) => {
       // Write into the box that is already there, and keep it pinned to the newest
@@ -7174,7 +7197,10 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       // Readiness is announced more than once (the cached fast path, then the real
       // health check) and can land while a chat is being painted into this
       // surface, so it must never send a thread back to the list.
-      case "ready": setView("chat"); if (body !== "thread") setBody("list"); break;
+      case "ready": hideBoot(); setView("chat"); if (body !== "thread") setBody("list"); break;
+      case "replay":
+        for (const item of m.items || []) handleMessage(item);
+        break;
       case "body":
         setView("chat");
         if (m.body === "list") {
@@ -7208,7 +7234,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         updateTerminateBtn();
         break;
       case "sessionStatuses": applyStatuses(m.statuses, m.activeId, m.elsewhere); break;
-      case "sessionActivity": if (m.id) dirtyViews.add(m.id); break;
+      case "sessionActivity": if (m.id && views.has(m.id)) dirtyViews.add(m.id); break;
       case "openSession":
         // Host-initiated open (e.g. the "needs your input" notification). Reuse
         // the same path as a click so view restore / wake / load all apply.
@@ -7230,6 +7256,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       case "sessionReady":
         if (m.title) { currentTitle = m.title; el.chatTitle.textContent = currentTitle; }
         // The thread now shows this session; retire any retained snapshot for it.
+        if (m.sessionId && curSessionId !== m.sessionId) cancelPreviewWaiters();
         if (m.sessionId) { curSessionId = m.sessionId; views.delete(m.sessionId); dirtyViews.delete(m.sessionId); }
         // Remembered so an editor tab restored after a window reload comes back to
         // the chat it was holding instead of an empty tab.
@@ -7273,7 +7300,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         lastHead = null;
         lastHeadReliable = false;
         pendingRevert = null;
-        previewWaiters.clear();
+        cancelPreviewWaiters();
         // Not the two trays by hand: the permission scope menu is anchored to a
         // button in one of them but lives on the body, so wiping the tray left it
         // floating over the new thread, still answering for a request that had
@@ -7434,7 +7461,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       }
       case "revertPreview": {
         const w = previewWaiters.get(m.token);
-        if (w) { previewWaiters.delete(m.token); w(m); }
+        if (w) w(m);
         break;
       }
       default: break;

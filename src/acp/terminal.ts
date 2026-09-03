@@ -77,6 +77,7 @@ interface Term {
   child?: ChildProcess;
   run?: TerminalRun;
   output: string;
+  bytes: number;
   limit: number;
   truncated: boolean;
   exitStatus: TerminalExitStatus | null;
@@ -86,6 +87,7 @@ interface Term {
   skipped?: boolean;
   // Its terminal has been shown, so it is no longer hidden from the user.
   revealed?: boolean;
+  released?: boolean;
   // Asked to stop before it had anything to stop. Starting is asynchronous (a real
   // terminal reports its shell integration first, which can take seconds), and a
   // Stop pressed in that window used to signal nothing at all, so the command the
@@ -100,6 +102,7 @@ interface Term {
 export class TerminalManager {
   private readonly terminals = new Map<string, Term>();
   private seq = 0;
+  private static readonly MAX_RELEASED_TERMINALS = 50;
 
   constructor(
     private readonly baseEnv: NodeJS.ProcessEnv,
@@ -126,6 +129,7 @@ export class TerminalManager {
     const terminalId = `term-${++this.seq}`;
     const term: Term = {
       output: "",
+      bytes: 0,
       limit: params.outputByteLimit && params.outputByteLimit > 0 ? params.outputByteLimit : 1_048_576,
       truncated: false,
       exitStatus: null,
@@ -175,11 +179,11 @@ export class TerminalManager {
     // on every write flattens the string each time, which is quadratic in the output
     // and put back on the extension host exactly the cost the coalescing above took
     // out of the panel.
-    let bytes = 0;
     const append = (text: string) => {
       term.output += text;
-      bytes += Buffer.byteLength(text, "utf8");
-      while (bytes > term.limit) {
+      term.bytes += Buffer.byteLength(text, "utf8");
+      const limit = term.released && term.exitStatus ? Math.min(term.limit, RELEASED_OUTPUT_BYTES) : term.limit;
+      while (term.bytes > limit) {
         term.truncated = true;
         let cut = Math.ceil(term.output.length * 0.1) || 1;
         // Never between the halves of a surrogate pair: a lone one is not valid text,
@@ -188,7 +192,7 @@ export class TerminalManager {
         if (code >= 0xdc00 && code <= 0xdfff) {
           cut++;
         }
-        bytes -= Buffer.byteLength(term.output.slice(0, cut), "utf8");
+        term.bytes -= Buffer.byteLength(term.output.slice(0, cut), "utf8");
         term.output = term.output.slice(cut);
       }
       postSoon();
@@ -198,7 +202,13 @@ export class TerminalManager {
       for (const w of term.waiters.splice(0)) {
         w(status);
       }
+      if (term.released) {
+        this.trim(term, RELEASED_OUTPUT_BYTES);
+      }
       flush();
+      if (term.released) {
+        this.trimReleased();
+      }
       this.log?.(`[terminal] ${terminalId} exited code=${status.exitCode} signal=${status.signal || ""}`);
     };
 
@@ -314,6 +324,10 @@ export class TerminalManager {
       return { output: "", truncated: false, exitStatus: null };
     }
     return { output: term.output, truncated: term.truncated, exitStatus: term.exitStatus };
+  }
+
+  snapshots(): { terminalId: string; output: string; exitStatus: TerminalExitStatus | null }[] {
+    return [...this.terminals].map(([terminalId, term]) => ({ terminalId, output: term.output, exitStatus: term.exitStatus }));
   }
 
   waitForExit(terminalId: string): Promise<TerminalExitStatus> {
@@ -442,6 +456,24 @@ export class TerminalManager {
     }
   }
 
+  private trimReleased(): void {
+    let released = 0;
+    for (const [, term] of this.terminals) {
+      if (term.released) {
+        released++;
+      }
+    }
+    for (const [id, term] of this.terminals) {
+      if (released <= TerminalManager.MAX_RELEASED_TERMINALS) {
+        return;
+      }
+      if (term.released) {
+        this.terminals.delete(id);
+        released--;
+      }
+    }
+  }
+
   // The agent releases a terminal once it is done with it, and the protocol says a
   // release kills whatever is still running. That is right for a command it waited
   // for, and wrong for one the user chose to leave running: "Continue in
@@ -458,6 +490,7 @@ export class TerminalManager {
       this.log?.(`[terminal] ${terminalId} released while left running, so it keeps going`);
       return;
     }
+    term.released = true;
     if (term.exitStatus) {
       // Over and done with. The entry stays: the row can still be asked for its
       // output, and answering an empty one wiped a finished command's output out of
@@ -465,6 +498,8 @@ export class TerminalManager {
       // of it, held for the rest of the chat: a build loop's worth of released
       // commands added up to hundreds of megabytes that nothing could free.
       this.trim(term, RELEASED_OUTPUT_BYTES);
+      this.onOutput?.(terminalId, term.output, term.exitStatus);
+      this.trimReleased();
       return;
     }
     // Still running and not something the user asked to keep, so stop it the way
@@ -479,7 +514,9 @@ export class TerminalManager {
   // called once the command has exited, so the running byte count its writer
   // keeps cannot be left disagreeing with the buffer.
   private trim(term: Term, limit: number): void {
-    if (Buffer.byteLength(term.output, "utf8") <= limit) {
+    const bytes = Buffer.byteLength(term.output, "utf8");
+    if (bytes <= limit) {
+      term.bytes = bytes;
       return;
     }
     let out = term.output.slice(-limit);
@@ -493,6 +530,7 @@ export class TerminalManager {
       out = out.slice(1);
     }
     term.output = out;
+    term.bytes = Buffer.byteLength(out, "utf8");
     term.truncated = true;
   }
 

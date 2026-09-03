@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import type { DevinSession } from "./sessionList";
 
 // Tracks which Devin session ids belong to the current VS Code window.
 // `workspaceState` is automatically scoped per `.code-workspace` file and per
@@ -13,6 +14,7 @@ export class SessionStore {
   private static readonly CWDS_KEY = "devin.sessionCwd.v1";
   private static readonly INTERRUPTED_KEY = "devin.interrupted.v1";
   private static readonly DRAFTS_KEY = "devin.drafts.v1";
+  private static readonly SESSION_LIST_KEY = "devin.sessionList.v1";
   // The composer in the sessions list is a "new chat" box with no session of its
   // own, so its unsent text is stored under this key.
   private static readonly NEW_DRAFT = "__new__";
@@ -58,6 +60,18 @@ export class SessionStore {
 
   cacheOptions(payload: unknown): void {
     void this.state.update(SessionStore.OPTIONS_KEY, payload);
+  }
+
+  sessionList(): { at: number; sessions: DevinSession[] } | undefined {
+    const cached = this.state.get<{ at?: unknown; sessions?: unknown } | undefined>(SessionStore.SESSION_LIST_KEY, undefined);
+    if (typeof cached?.at !== "number" || !Array.isArray(cached.sessions)) {
+      return undefined;
+    }
+    return { at: cached.at, sessions: cached.sessions as DevinSession[] };
+  }
+
+  cacheSessionList(list: { at: number; sessions: DevinSession[] }): void {
+    void this.state.update(SessionStore.SESSION_LIST_KEY, list);
   }
 
   titles(): Record<string, string> {
@@ -179,13 +193,14 @@ export class SessionStore {
     void this.state.update(SessionStore.CWDS_KEY, map);
   }
 
-  add(id: string, cwd?: string): void {
+  add(id: string, cwd?: string): string[] {
     if (!id) {
-      return;
+      return [];
     }
     const ids = this.ids().filter((x) => x !== id);
     ids.unshift(id);
     const capped = ids.slice(0, 200);
+    const evicted = ids.slice(200);
     void this.state.update(SessionStore.IDS_KEY, capped);
     if (cwd) {
       this.setCwd(id, cwd);
@@ -197,6 +212,8 @@ export class SessionStore {
     // list.)
     this.pruneCwds(capped);
     this.pruneDrafts(capped);
+    this.pruneSessionList(capped);
+    return evicted;
   }
 
   private pruneCwds(ids: string[]): void {
@@ -229,8 +246,22 @@ export class SessionStore {
     }
   }
 
+  private pruneSessionList(ids: string[]): void {
+    const list = this.sessionList();
+    if (!list) {
+      return;
+    }
+    const keep = new Set(ids);
+    const sessions = list.sessions.filter((session) => keep.has(session.id));
+    if (sessions.length !== list.sessions.length) {
+      this.cacheSessionList({ at: list.at, sessions });
+    }
+  }
+
   remove(id: string): void {
-    void this.state.update(SessionStore.IDS_KEY, this.ids().filter((x) => x !== id));
+    const ids = this.ids().filter((x) => x !== id);
+    void this.state.update(SessionStore.IDS_KEY, ids);
+    this.pruneSessionList(ids);
     const pins = this.pinnedTitles();
     if (id in pins) {
       delete pins[id];

@@ -109,7 +109,7 @@ process.stdin.on("data", async (chunk) => {
           agentCapabilities: {
             loadSession: true,
             promptCapabilities: { image: true, embeddedContext: true },
-            _meta: { "cognition.ai/revert": true, "cognition.ai/sessionShare": true }
+            _meta: { "cognition.ai/revert": true, "cognition.ai/sessionShare": true, ...(process.env.DV_DOCUMENT_LIFECYCLE === "1" ? { "cognition.ai/documentLifecycle": true } : {}) }
           }
         });
         break;
@@ -134,7 +134,7 @@ process.stdin.on("data", async (chunk) => {
         await delay(num("DV_PROMPT_DELAY") || 60000);
         reply({ stopReason: "end_turn" });
         break;
-      case "_cognition.ai/revert/listSteps": reply({ steps: [] }); break;
+      case "_cognition.ai/revert/listSteps": await delay(num("DV_STEPS_DELAY")); reply({ steps: [] }); break;
       case "session/list": reply({ sessions: [] }); break;
       default: reply({});
     }
@@ -201,7 +201,9 @@ function createChat(opts = {}) {
     DV_LOG: agentLog,
     DV_NEW_DELAY: String(opts.newDelay || 0),
     DV_LOAD_DELAY: String(opts.loadDelay || 0),
-    DV_PROMPT_DELAY: String(opts.promptDelay || 0)
+    DV_PROMPT_DELAY: String(opts.promptDelay || 0),
+    DV_STEPS_DELAY: String(opts.stepsDelay || 0),
+    DV_DOCUMENT_LIFECYCLE: opts.documentLifecycle ? "1" : ""
   };
   globalThis.__dvConfig = Object.assign(
     {
@@ -231,7 +233,7 @@ function createChat(opts = {}) {
     globalState: state
   };
   const output = { appendLine: (l) => logs.push(l), dispose() {} };
-  const controller = new ChatController(context, store, changes, undefined, output, opts.kind || "view");
+  const controller = new ChatController(context, store, changes, undefined, output, opts.kind || "view", opts.surfaceHost);
   const webview = webviewDouble(posted);
   controller.bind(webview, () => {});
   const toHost = webviewDouble.last;

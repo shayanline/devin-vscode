@@ -20,6 +20,8 @@ export interface CliHealth {
 }
 
 let cachedEnv: NodeJS.ProcessEnv | undefined;
+let pendingEnv: Promise<NodeJS.ProcessEnv> | undefined;
+const pendingHealth = new Map<string, Promise<CliHealth>>();
 
 // GUI apps on macOS/Linux do not inherit the shell PATH, so resolve it from a
 // login shell once and reuse it. The Devin CLI also spawns MCP servers
@@ -28,11 +30,14 @@ export function loginShellEnv(): Promise<NodeJS.ProcessEnv> {
   if (cachedEnv) {
     return Promise.resolve(cachedEnv);
   }
+  if (pendingEnv) {
+    return pendingEnv;
+  }
   if (process.platform === "win32") {
     cachedEnv = process.env;
     return Promise.resolve(cachedEnv);
   }
-  return new Promise((resolve) => {
+  const pending = new Promise<NodeJS.ProcessEnv>((resolve) => {
     const shell = process.env.SHELL || "/bin/sh";
     // In fish `$PATH` is a list, so quoting it yields space separated garbage.
     const script = /(^|\/)fish$/.test(shell)
@@ -49,6 +54,13 @@ export function loginShellEnv(): Promise<NodeJS.ProcessEnv> {
       }
     );
   });
+  pendingEnv = pending;
+  void pending.finally(() => {
+    if (pendingEnv === pending) {
+      pendingEnv = undefined;
+    }
+  });
+  return pending;
 }
 
 export function expandHome(p: string): string {
@@ -170,7 +182,23 @@ function run(bin: string, args: string[], env: NodeJS.ProcessEnv): Promise<{ ok:
   });
 }
 
-export async function checkHealth(setting: string): Promise<CliHealth> {
+export function checkHealth(setting: string): Promise<CliHealth> {
+  const key = setting || "devin";
+  const existing = pendingHealth.get(key);
+  if (existing) {
+    return existing;
+  }
+  const pending = checkHealthNow(setting);
+  pendingHealth.set(key, pending);
+  void pending.finally(() => {
+    if (pendingHealth.get(key) === pending) {
+      pendingHealth.delete(key);
+    }
+  });
+  return pending;
+}
+
+async function checkHealthNow(setting: string): Promise<CliHealth> {
   const env = await loginShellEnv();
   const resolved = await resolveCliPath(setting);
   if (!resolved) {

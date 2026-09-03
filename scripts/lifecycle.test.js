@@ -280,6 +280,57 @@ test("a finished terminal stops holding its whole output once the agent lets it 
   assert.strictEqual(terms.output(terminalId).truncated, true, "and saying it was cut");
 });
 
+test("a terminal honors its requested output limit", async () => {
+  let emit = () => {};
+  let settle = () => {};
+  const run = { exit: new Promise((resolve) => { settle = resolve; }), show() {}, kill() {} };
+  const runner = { run: async (_command, _cwd, onData) => { emit = onData; return run; }, dispose() {} };
+  const terms = new TerminalManager(process.env, TMP, undefined, undefined, runner);
+  const id = terms.create({ sessionId: "s1", command: "build", outputByteLimit: 2 * 1024 * 1024 }).terminalId;
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  emit("x".repeat(1_200_000));
+  settle({ exitCode: 0, signal: null });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.strictEqual(Buffer.byteLength(terms.output(id).output, "utf8"), 1_200_000);
+});
+
+test("late output after release keeps the terminal retention bound", async () => {
+  let emit = () => {};
+  let settle = () => {};
+  const run = { exit: new Promise((resolve) => { settle = resolve; }), show() {}, kill() {} };
+  const runner = { run: async (_command, _cwd, onData) => { emit = onData; return run; }, dispose() {} };
+  const terms = new TerminalManager(process.env, TMP, undefined, undefined, runner);
+  const id = terms.create({ sessionId: "s1", command: "build" }).terminalId;
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  emit("x".repeat(100_000));
+  terms.release(id);
+  settle({ exitCode: 0, signal: null });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  emit("y".repeat(100_000));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.ok(Buffer.byteLength(terms.output(id).output, "utf8") <= 64 * 1024);
+});
+
+test("released terminal history evicts the oldest completed output", async () => {
+  const runner = {
+    run: async () => ({ exit: Promise.resolve({ exitCode: 0, signal: null }), show() {}, kill() {} }),
+    dispose() {}
+  };
+  const terms = new TerminalManager(process.env, TMP, undefined, undefined, runner);
+  const ids = [];
+  for (let i = 0; i < 51; i++) {
+    const id = terms.create({ sessionId: "s1", command: "echo done" }).terminalId;
+    await terms.waitForExit(id);
+    terms.release(id);
+    ids.push(id);
+  }
+
+  assert.strictEqual(terms.output(ids[0]).exitStatus, null);
+  assert.deepStrictEqual(terms.output(ids.at(-1)).exitStatus, { exitCode: 0, signal: null });
+});
+
 // --- Commands in the user's own terminal -----------------------------------
 
 // Stands in for a shell that reports what it runs. `chunks` are written into the

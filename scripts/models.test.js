@@ -7,16 +7,20 @@ const esbuild = require("esbuild");
 
 const ROOT = path.resolve(__dirname, "..");
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "devin-models-"));
-const outfile = path.join(TMP, "models.js");
-esbuild.buildSync({
-  entryPoints: [path.join(ROOT, "src/cli/models.ts")],
-  outfile,
-  bundle: true,
-  platform: "node",
-  format: "cjs",
-  logLevel: "error"
-});
-const { listModelFamilies } = require(outfile);
+function loadModels(name) {
+  const outfile = path.join(TMP, name + ".js");
+  esbuild.buildSync({
+    entryPoints: [path.join(ROOT, "src/cli/models.ts")],
+    outfile,
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    logLevel: "error"
+  });
+  return require(outfile);
+}
+
+const { listModelFamilies } = loadModels("models");
 
 function fakeCli(stdout) {
   const js = path.join(TMP, "devin.js");
@@ -65,6 +69,23 @@ test("model listing preserves cost, limits, promotion, and status metadata", asy
     isNew: true,
     isBeta: false
   });
+});
+
+test("concurrent model listings share one CLI process", { skip: process.platform === "win32" }, async () => {
+  const { listModelFamilies: list } = loadModels("models-concurrent");
+  const log = path.join(TMP, "models.log");
+  const js = path.join(TMP, "slow-models.js");
+  const cli = path.join(TMP, "slow-models.sh");
+  fs.writeFileSync(js, `require("fs").appendFileSync(process.env.MODELS_LOG, "x"); setTimeout(() => process.stdout.write('{"families":[]}'), 100);`);
+  fs.writeFileSync(cli, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(js)}\n`);
+  fs.chmodSync(cli, 0o755);
+
+  await Promise.all([
+    list(cli, { ...process.env, MODELS_LOG: log }),
+    list(cli, { ...process.env, MODELS_LOG: log })
+  ]);
+
+  assert.strictEqual(fs.readFileSync(log, "utf8"), "x");
 });
 
 test.after(() => fs.rmSync(TMP, { recursive: true, force: true }));

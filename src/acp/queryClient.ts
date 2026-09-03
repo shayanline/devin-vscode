@@ -20,8 +20,10 @@ import { RequestDiagnosticsResult, TerminalExitStatus, TerminalRef } from "./typ
 // the seconds a question takes left it running with its MCP servers and the CLI's
 // lock, which on Windows nothing reaps.
 const live = new Set<AcpClient>();
+let stopping = false;
 
 export function shutdownQueryAgents(): Promise<void[]> {
+  stopping = true;
   return Promise.all([...live].map((c) => c.shutdown().catch(() => undefined) as Promise<void>));
 }
 
@@ -31,6 +33,9 @@ export async function withQuerySession<T>(
   env: NodeJS.ProcessEnv | undefined,
   work: (client: AcpClient, sessionId: string) => Promise<T>
 ): Promise<T | undefined> {
+  if (stopping) {
+    return undefined;
+  }
   const client = new AcpClient({ cliPath, cwd, env });
   live.add(client);
   // The agent can ask things of a client mid session. Nothing here runs a tool, so

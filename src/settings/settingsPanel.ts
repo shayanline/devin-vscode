@@ -103,6 +103,15 @@ export class SettingsPanel {
 
   static readonly viewType = "devin.settings";
 
+  static disposeCurrent(): void {
+    const current = SettingsPanel.current;
+    if (!current) {
+      return;
+    }
+    current.panel.dispose();
+    current.dispose();
+  }
+
   static show(context: vscode.ExtensionContext): void {
     if (SettingsPanel.current) {
       SettingsPanel.current.panel.reveal();
@@ -168,15 +177,20 @@ export class SettingsPanel {
       // A folder added or removed changes the scope tabs, so never skip it.
       vscode.workspace.onDidChangeWorkspaceFolders(() => this.queueRefresh(true))
     );
-    panel.onDidDispose(() => {
-      this.disposed = true;
-      this.stopWatching();
-      for (const d of this.disposables) d.dispose();
-      this.disposables.length = 0;
-      if (SettingsPanel.current === this) {
-        SettingsPanel.current = undefined;
-      }
-    });
+    panel.onDidDispose(() => this.dispose());
+  }
+
+  private dispose(): void {
+    if (this.disposed) {
+      return;
+    }
+    this.disposed = true;
+    this.stopWatching();
+    for (const d of this.disposables) d.dispose();
+    this.disposables.length = 0;
+    if (SettingsPanel.current === this) {
+      SettingsPanel.current = undefined;
+    }
   }
 
   // The active workspace folder for project-scoped reads/writes, following the

@@ -33,7 +33,10 @@ function load(rel, name) {
   return require(outfile);
 }
 const { AcpClient } = load("src/acp/client.ts", "client");
+const { loginShellEnv } = load("src/cli/locate.ts", "locate");
+const { checkHealth } = load("src/cli/locate.ts", "locate-health");
 const { JsonRpcConnection } = load("src/acp/connection.ts", "connection");
+const { withQuerySession, shutdownQueryAgents } = load("src/acp/queryClient.ts", "query-client");
 const { diagnosticItems, MAX_DIAGNOSTICS } = load("src/acp/diagnostics.ts", "diagnostics");
 const vscode = globalThis.__dvVscode;
 
@@ -138,6 +141,42 @@ async function settle(ms = 150) {
   await new Promise((r) => setTimeout(r, ms));
 }
 
+test("concurrent login shell lookups share one process", { skip: process.platform === "win32" }, async () => {
+  const shell = path.join(TMP, "slow-shell.sh");
+  const log = path.join(TMP, "shell.log");
+  fs.writeFileSync(shell, `#!/bin/sh\nprintf x >> "$LOGIN_LOG"\nsleep 0.1\nprintf '__PATH__=%s' "$PATH"\n`);
+  fs.chmodSync(shell, 0o755);
+  const previousShell = process.env.SHELL;
+  const previousLog = process.env.LOGIN_LOG;
+  process.env.SHELL = shell;
+  process.env.LOGIN_LOG = log;
+  try {
+    await Promise.all([loginShellEnv(), loginShellEnv()]);
+    assert.strictEqual(fs.readFileSync(log, "utf8"), "x");
+  } finally {
+    if (previousShell === undefined) delete process.env.SHELL;
+    else process.env.SHELL = previousShell;
+    if (previousLog === undefined) delete process.env.LOGIN_LOG;
+    else process.env.LOGIN_LOG = previousLog;
+  }
+});
+
+test("concurrent health checks share version and authentication probes", { skip: process.platform === "win32" }, async () => {
+  const cli = path.join(TMP, "health-cli.sh");
+  const log = path.join(TMP, "health.log");
+  fs.writeFileSync(cli, `#!/bin/sh\nprintf x >> "$HEALTH_LOG"\nsleep 0.1\ncase "$1" in\n  --version) echo "devin 1.0.0" ;;\n  auth) echo "Logged in." ;;\nesac\n`);
+  fs.chmodSync(cli, 0o755);
+  const previousLog = process.env.HEALTH_LOG;
+  process.env.HEALTH_LOG = log;
+  try {
+    await Promise.all([checkHealth(cli), checkHealth(cli)]);
+    assert.strictEqual(fs.readFileSync(log, "utf8"), "xx");
+  } finally {
+    if (previousLog === undefined) delete process.env.HEALTH_LOG;
+    else process.env.HEALTH_LOG = previousLog;
+  }
+});
+
 test("a call that must not hang gives up, and one that may run long is left alone", async () => {
   // A reply is otherwise settled only by the agent answering or its process
   // closing, so an agent that is alive and silent (a blocking MCP server, a token
@@ -163,6 +202,64 @@ test("a call that must not hang gives up, and one that may run long is left alon
     void conn.request("session/prompt", {}).then(() => { settled = true; }, () => { settled = true; });
     await new Promise((r) => setTimeout(r, 400));
     assert.strictEqual(settled, false, "an unbounded call is still waiting");
+  } finally {
+    conn.dispose();
+    child.kill("SIGKILL");
+  }
+});
+
+test("ACP stderr keeps actionable lines without credentials", async () => {
+  const { spawn } = require("child_process");
+  const child = spawn(process.execPath, ["-e", "process.stderr.write('INFO startup Authorization:secret\\nWARN connection failed Authorization:secret\\n')"], { stdio: ["pipe", "pipe", "pipe"] });
+  const logs = [];
+  const conn = new JsonRpcConnection(child, async () => ({}), () => {}, (line) => logs.push(line));
+  try {
+    await settle();
+    assert.deepStrictEqual(logs, ["WARN connection failed Authorization:[redacted]"]);
+  } finally {
+    conn.dispose();
+    child.kill("SIGKILL");
+  }
+});
+
+test("ACP stdout drops an oversized unterminated frame", async () => {
+  const { spawn } = require("child_process");
+  const child = spawn(process.execPath, ["-e", "process.stdout.write('x'.repeat(8 * 1024 * 1024 + 1)); setTimeout(() => {}, 1000)"], { stdio: ["pipe", "pipe", "pipe"] });
+  const logs = [];
+  const conn = new JsonRpcConnection(child, async () => ({}), () => {}, (line) => logs.push(line));
+  try {
+    await settle(300);
+    assert.strictEqual(conn.buffer, "");
+    assert.ok(logs.some((line) => line.includes("frame exceeded")));
+  } finally {
+    conn.dispose();
+    child.kill("SIGKILL");
+  }
+});
+
+test("ACP stdout drops an oversized complete frame", async () => {
+  const { spawn } = require("child_process");
+  const child = spawn(process.execPath, ["-e", "process.stdout.write('x'.repeat(8 * 1024 * 1024 + 1) + '\\n'); setTimeout(() => {}, 1000)"], { stdio: ["pipe", "pipe", "pipe"] });
+  const logs = [];
+  const conn = new JsonRpcConnection(child, async () => ({}), () => {}, (line) => logs.push(line));
+  try {
+    await settle(300);
+    assert.ok(logs.some((line) => line.includes("frame exceeded")));
+  } finally {
+    conn.dispose();
+    child.kill("SIGKILL");
+  }
+});
+
+test("ACP stderr drops an oversized unterminated line", async () => {
+  const { spawn } = require("child_process");
+  const child = spawn(process.execPath, ["-e", "process.stderr.write('x'.repeat(64 * 1024 + 1)); setTimeout(() => {}, 1000)"], { stdio: ["pipe", "pipe", "pipe"] });
+  const logs = [];
+  const conn = new JsonRpcConnection(child, async () => ({}), () => {}, (line) => logs.push(line));
+  try {
+    await settle(150);
+    assert.strictEqual(conn.stderr, "");
+    assert.ok(logs.some((line) => line.includes("stderr line exceeded")));
   } finally {
     conn.dispose();
     child.kill("SIGKILL");
@@ -259,6 +356,18 @@ test("a diagnostics pull is answered in the shape the agent demands", async () =
   assert.strictEqual(item.severity, "error");
   assert.strictEqual(item.range.start.line, 41, "ranges stay zero based, the agent renders them one based itself");
   await client.shutdown();
+});
+
+test("session listing accepts a caller supplied timeout", async () => {
+  const client = new AcpClient({ cliPath: "devin", cwd: TMP });
+  let timeout;
+  client.rpc = async (_method, _params, value) => {
+    timeout = value;
+    return { sessions: [] };
+  };
+
+  assert.deepStrictEqual(await client.listSessions(125), []);
+  assert.strictEqual(timeout, 125);
 });
 
 test("document lifecycle is only sent to an agent that supports it", async () => {
@@ -495,6 +604,16 @@ test("a touched file still wins after the cap is applied", () => {
 
   assert.strictEqual(items.length, MAX_DIAGNOSTICS);
   assert.strictEqual(items[0].message, "the one that matters", "the cap must not throw away the relevant one");
+});
+
+test("query sessions do not start after shutdown begins", async () => {
+  const { cli, log } = fakeAgent("query-shutdown", {});
+  await shutdownQueryAgents();
+
+  const result = await withQuerySession(cli, TMP, process.env, async () => "started");
+
+  assert.strictEqual(result, undefined);
+  assert.strictEqual(seen(log).some((m) => m.method === "initialize"), false);
 });
 
 test.after(() => {

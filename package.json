@@ -387,6 +387,12 @@
           "minimum": 0,
           "description": "How long to keep an idle live session (waiting for you) alive before it is automatically exited. Running sessions are never auto-exited. Set to 0 to keep idle sessions alive indefinitely."
         },
+        "devin.maxIdleSessions": {
+          "type": "number",
+          "default": 3,
+          "minimum": 0,
+          "description": "Maximum number of idle live sessions to keep. Running sessions are never auto-exited. Set to 0 to keep an unlimited number."
+        },
         "devin.useIntegratedTerminal": {
           "type": "boolean",
           "default": false,

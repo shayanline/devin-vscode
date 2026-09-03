@@ -31,7 +31,7 @@ function build(rel) {
   return require(outfile);
 }
 
-const { fromAcpRows } = build("src/session/sessionList.ts");
+const { fromAcpRows, listSessions } = build("src/session/sessionList.ts");
 const { SessionStore } = build("src/session/sessionStore.ts");
 
 // A Memento over a plain object, which is all SessionStore asks for.
@@ -43,6 +43,36 @@ function memento() {
     keys: () => [...map.keys()]
   };
 }
+
+function listCli(log) {
+  const file = path.join(TMP, `list-${Date.now()}-${Math.random()}.js`);
+  fs.writeFileSync(file, `#!/usr/bin/env node\nrequire("fs").appendFileSync(process.env.LIST_LOG, process.cwd() + "\\n");\nprocess.stdout.write("[]");\n`);
+  fs.chmodSync(file, 0o755);
+  return file;
+}
+
+const posixOnly = { skip: process.platform === "win32" };
+
+function slowListCli(state, delay = 200) {
+  const file = path.join(TMP, `slow-list-${Date.now()}-${Math.random()}.js`);
+  fs.writeFileSync(file, `#!/usr/bin/env node\nconst fs = require("fs");\nconst path = require("path");\nconst marker = path.join(process.env.LIST_STATE, String(process.pid));\nfs.writeFileSync(marker, "");\nsetTimeout(() => { fs.rmSync(marker, { force: true }); process.stdout.write("[]"); }, ${delay});\n`);
+  fs.chmodSync(file, 0o755);
+  return file;
+}
+
+test("an empty tracked list does not start the CLI", posixOnly, async () => {
+  const log = path.join(TMP, "empty-list.log");
+  const result = await listSessions({
+    cliPath: listCli(log),
+    env: { ...process.env, LIST_LOG: log },
+    trackedIds: [],
+    cwdById: {},
+    folders: [TMP]
+  });
+
+  assert.deepStrictEqual(result, { sessions: [], prunedIds: [] });
+  assert.strictEqual(fs.existsSync(log), false, "no CLI list process is needed");
+});
 
 test("a session the agent did not mention is pruned, unless it mentioned none at all", () => {
   const tracked = ["kept", "gone"];
@@ -84,6 +114,89 @@ test("a session that is gone takes its interrupted mark and its title with it", 
   store.remove("s1");
   assert.deepStrictEqual(store.interrupted(), [], "nothing left pointing at a session that has gone");
   assert.deepStrictEqual(store.titles(), {}, "and no name kept for it for ever");
+});
+
+test("known session directories do not also list workspace roots", posixOnly, async () => {
+  const known = fs.mkdtempSync(path.join(TMP, "known-"));
+  const extra = fs.mkdtempSync(path.join(TMP, "extra-"));
+  const log = path.join(TMP, "known-list.log");
+  await listSessions({
+    cliPath: listCli(log),
+    env: { ...process.env, LIST_LOG: log },
+    trackedIds: ["known"],
+    cwdById: { known },
+    folders: [known, extra]
+  });
+
+  const listed = fs.readFileSync(log, "utf8").trim().split("\n").sort();
+  assert.deepStrictEqual(listed, [fs.realpathSync(known)]);
+});
+
+test("CLI fallback limits concurrent session list processes", posixOnly, async () => {
+  const state = fs.mkdtempSync(path.join(TMP, "state-"));
+  const dirs = Array.from({ length: 9 }, () => fs.mkdtempSync(path.join(TMP, "cwd-")));
+  const ids = dirs.map((_, i) => `s${i}`);
+  let peak = 0;
+  const sample = setInterval(() => {
+    peak = Math.max(peak, fs.readdirSync(state).length);
+  }, 5);
+  try {
+    await listSessions({
+      cliPath: slowListCli(state),
+      env: { ...process.env, LIST_STATE: state },
+      trackedIds: ids,
+      cwdById: Object.fromEntries(ids.map((id, i) => [id, dirs[i]])),
+      folders: []
+    });
+  } finally {
+    clearInterval(sample);
+  }
+
+  assert.ok(peak <= 4, `at most four CLI list processes run at once, saw ${peak}`);
+});
+
+test("CLI fallback uses one deadline across all session directories", posixOnly, async () => {
+  const state = fs.mkdtempSync(path.join(TMP, "deadline-"));
+  const dirs = Array.from({ length: 9 }, () => fs.mkdtempSync(path.join(TMP, "deadline-cwd-")));
+  const ids = dirs.map((_, i) => `s${i}`);
+  const startedAt = Date.now();
+
+  await listSessions({
+    cliPath: slowListCli(state, 1000),
+    env: { ...process.env, LIST_STATE: state },
+    timeoutMs: 400,
+    trackedIds: ids,
+    cwdById: Object.fromEntries(ids.map((id, i) => [id, dirs[i]])),
+    folders: []
+  });
+
+  assert.ok(Date.now() - startedAt < 750, `session listing exceeded its 400ms total deadline`);
+});
+
+test("adding a session reports the tracked ids it evicts", () => {
+  const store = new SessionStore(memento());
+  for (let i = 0; i < 200; i++) {
+    store.add(`s${i}`, "/w");
+  }
+
+  assert.deepStrictEqual(store.add("new", "/w"), ["s0"]);
+});
+
+test("removing a session also removes its cached list row", () => {
+  const store = new SessionStore(memento());
+  store.add("kept", "/w");
+  store.add("gone", "/w");
+  store.cacheSessionList({
+    at: 1,
+    sessions: [
+      { id: "kept", short_id: "kept", working_directory: "/w" },
+      { id: "gone", short_id: "gone", working_directory: "/w" }
+    ]
+  });
+
+  store.remove("gone");
+
+  assert.deepStrictEqual(store.sessionList().sessions.map((session) => session.id), ["kept"]);
 });
 
 test.after(() => {
