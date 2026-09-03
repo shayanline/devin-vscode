@@ -12,12 +12,18 @@ the commit messages carry the detail.
 
 ### Highlights
 - Restore chats and visible session lists without avoidable startup work.
+- Keep messages, queued attachments, and staged files with the right chat.
 - Keep session handovers, terminal output, and editor context correct.
-- Bound retained session, terminal, replay, and diff resources.
+- Make Keep, Undo, and file links reliable across concurrent chats.
+- Show model pricing, context limits, status badges, and model pins.
+- Make the integrated terminal opt in and simplify Bypass command approval.
+- Keep model and changed file controls readable at narrow widths.
 
 ### Under the hood
+- Bound retained session, terminal, replay, and diff resources.
 - Share session lists across ACP connections and bound CLI fallback time.
 - Add timing summaries for health checks, loads, wakes, and session lists.
+- Cut test and CI runtime while keeping all platform checks.
 
 ## [0.12.5] - 2026-09-02
 
