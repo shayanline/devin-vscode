@@ -1,7 +1,10 @@
 # Devin for VS Code
 
 [![VS Code Marketplace](https://badgen.net/vs-marketplace/v/shayanline.devin-vscode?label=Marketplace)](https://marketplace.visualstudio.com/items?itemName=shayanline.devin-vscode)
+[![Marketplace installs](https://badgen.net/vs-marketplace/i/shayanline.devin-vscode?label=Installs)](https://marketplace.visualstudio.com/items?itemName=shayanline.devin-vscode)
 [![Latest release](https://img.shields.io/github/v/release/shayanline/devin-vscode?label=Release)](https://github.com/shayanline/devin-vscode/releases/latest)
+[![CI](https://github.com/shayanline/devin-vscode/actions/workflows/ci.yml/badge.svg)](https://github.com/shayanline/devin-vscode/actions/workflows/ci.yml)
+[![License: AGPL-3.0-or-later](https://img.shields.io/badge/License-AGPL--3.0--or--later-blue.svg)](LICENSE.md)
 
 Use [Devin CLI](https://docs.devin.ai/cli) as a coding assistant without leaving VS Code. Ask Devin to explain code, fix bugs, build features, run commands, or edit files from a native chat panel.
 

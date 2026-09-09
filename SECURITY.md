@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Security fixes are released for the latest version published on the VS Code Marketplace and Open VSX. Earlier versions do not receive separate security fixes, so update the extension before reporting a problem.
+Security fixes are released for the latest version published on the VS Code Marketplace. Earlier versions do not receive separate security fixes, so update the extension before reporting a problem.
 
 | Version | Security support |
 | --- | --- |

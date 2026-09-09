@@ -2,14 +2,15 @@ name: Release
 
 # Streamlined release: push a version tag and this builds the extension, creates
 # a GitHub Release with the packaged VSIX attached, and publishes to the VS Code
-# Marketplace (and Open VSX). The tag must match package.json, e.g.
+# Marketplace. Open VSX publishing runs when OVSX_PAT is configured. The tag must
+# match package.json, e.g.
 #
 #     npm version patch            # bumps package.json and creates the tag
 #     git push --follow-tags       # triggers this workflow
 #
 # One-time setup (repo Settings -> Secrets and variables -> Actions):
 #   VSCE_PAT  Azure DevOps token for the "shayanline" Marketplace publisher.
-#   OVSX_PAT  Open VSX token (optional; that step is best effort).
+#   OVSX_PAT  Open VSX token. This optional step is best effort.
 
 on:
   push:

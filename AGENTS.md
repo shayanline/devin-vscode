@@ -12,8 +12,7 @@ tool calls you can approve, and file edits shown as diffs you keep or undo. Each
 chat is a real Devin CLI session, driven over the Agent Client Protocol (ACP),
 and saved per workspace.
 
-It is a personal, open source project published on the VS Code Marketplace and
-Open VSX under the `shayanline` publisher.
+It is a personal, open source project published on the VS Code Marketplace under the `shayanline` publisher. The release workflow can also publish to Open VSX when `OVSX_PAT` is configured.
 
 ## How it fits together
 
@@ -219,9 +218,7 @@ npm version patch   # or minor / major
 git push --follow-tags
 ```
 
-The tag push triggers the release workflow, which type checks, tests, builds,
-creates a GitHub Release with the `.vsix` attached, and publishes to the
-Marketplace and Open VSX.
+The tag push triggers the release workflow, which type checks, tests, builds, creates a GitHub Release with the `.vsix` attached, and publishes to the Marketplace. It also publishes to Open VSX when `OVSX_PAT` is configured.
 
 The release body is taken from the matching `CHANGELOG.md` section by
 `scripts/changelog-notes.js`, with GitHub's own "Full Changelog" link appended.
@@ -312,7 +309,8 @@ Not: three lines on what the panel used to do and why that was wrong.
 
 ## Before you call it done
 
-1. `npm run check-types` passes.
-2. `npm test` passes.
-3. Review your own diff for dead code and style drift.
-4. Clean up any temporary files or scratch scripts.
+1. Choose checks from the files changed, and run only checks that can detect a problem introduced by those changes.
+2. For documentation, badges, links, or prose comments, inspect the rendered Markdown, verify links, review wording and style, and run `git diff --check`. Do not run TypeScript checks, builds, or application tests.
+3. Run `npx vsce ls --no-dependencies` only when `package.json`, `.vscodeignore`, or bundled extension contents change.
+4. For TypeScript or runtime behaviour changes, run `npm run check-types` and the relevant tests. Run the full `npm test` suite when the scope can affect shared behaviour.
+5. Review your own diff for dead code and style drift, then clean up temporary files or scratch scripts.
