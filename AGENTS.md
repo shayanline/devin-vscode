@@ -280,6 +280,7 @@ descriptions, code comments, and any other prose in the repo.
 - No semicolons in prose. Use a full stop or a comma. This does not apply to
   code.
 - No bare URLs in prose. Link a short descriptive phrase instead.
+- Keep each paragraph and list item on one physical source line. Never insert manual line breaks to enforce a column width. Use blank lines only to separate semantic blocks. Preserve line breaks required by Markdown syntax, code blocks, tables, or renderer specific formats.
 
 ## Changelog
 
