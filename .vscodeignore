@@ -5,6 +5,7 @@ src/**
 webview/**
 scripts/**
 .playwright-cli/**
+.superpowers/**
 node_modules/**
 .gitignore
 .vscodeignore
