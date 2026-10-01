@@ -105,11 +105,14 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // variants of the selected family (Copilot-style).
   let modelFamilies = [];
   let modelChoices = {};
-  let thoughtLevels = [];
-  // The Fusion picker needs the effort list even while a normal model is
-  // active and reporting none, so the last non empty list is kept here while
-  // thoughtLevels stays live for the normal model thinking dropdown.
-  let knownThoughtLevels = [];
+  // thought_level is reported for the active model only, so each family's
+  // effort list is filed under that family rather than applied to whichever
+  // model is on screen. A missing key means not known yet, an empty array
+  // means the family really has no efforts.
+  let thoughtLevelsByFamily = {};
+  // Whether the thinking picker is currently listing efforts rather than the
+  // family's own variants, since the two need different messages on select.
+  let thinkingShowsEfforts = false;
   let currentThoughtLevel = "";
   let currentModelUid = "";
   const savedState = vscode.getState() || {};
@@ -165,6 +168,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
 
   function familyById(id) { return modelFamilies.find((f) => f.id === id); }
   function familyOfUid(uid) { return modelFamilies.find((f) => (f.variants || []).some((v) => v.value === uid)); }
+  function effortsFor(fam) { return (fam && thoughtLevelsByFamily[fam.id]) || []; }
   function variantFor(fam, uid) {
     return (fam?.variants || []).find((v) => v.value === uid)
       || (fam?.variants || []).find((v) => v.value === fam.default)
@@ -362,7 +366,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     updateModelConfig(fam, fam.default);
   }
   function onThinkingSelect(value) {
-    if (thoughtLevels.length) {
+    if (thinkingShowsEfforts) {
       currentThoughtLevel = value;
       vscode.postMessage({ type: "setConfigOption", configId: "thought_level", value });
       return;
@@ -376,7 +380,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   }
   function fusionChoice(choice) {
     const identity = fusionIdentity(choice.value);
-    const [lead = choice.name || choice.value, sidekick = ""] = String(choice.name || choice.value).replace(/^Fusion \(/, "").replace(/\)$/, "").split(" + ");
+    const [lead = choice.name || choice.value, sidekick = ""] = String(choice.name || choice.value).replace(/^Fusion\s*/i, "").replace(/^\(/, "").replace(/\)$/, "").split(" + ");
     return {
       ...choice,
       ...identity,
@@ -462,7 +466,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         const check = document.createElement("span");
         check.className = "dd-check";
         item.appendChild(check);
-        item.appendChild(document.createTextNode(option.name));
+        item.appendChild(Object.assign(document.createElement("span"), { className: "fusion-config-text", textContent: option.name }));
         item.addEventListener("click", (event) => {
           event.stopPropagation();
           choose(kind, option.value);
@@ -509,26 +513,33 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     };
   }
   function updateModelConfig(fam, currentUid) {
-    const pairs = isFusion(fam) ? modelChoices.fusion || [] : [];
-    if (pairs.length) {
-      fusionPicker.set(pairs, currentUid, knownThoughtLevels, currentThoughtLevel);
-      el.fusionDD.classList.remove("hidden");
+    const levels = effortsFor(fam);
+    if (isFusion(fam)) {
+      // Fusion's own variants are the whole lead times sidekick cross product,
+      // so they are never a thinking list. The picker waits for real pairs.
+      fusionPicker.set(fusionPairs(fam), currentUid, levels, currentThoughtLevel);
       el.thinkingDD.classList.add("hidden");
-    } else {
-      el.fusionDD.classList.add("hidden");
-      if (thoughtLevels.length) {
-        thinkingDropdown.set(thoughtLevels, currentThoughtLevel);
-        el.thinkingDD.classList.remove("hidden");
-      } else if (fam && (fam.variants || []).length > 1) {
-        thinkingDropdown.set(fam.variants.map((v) => ({
-          ...v,
-          badges: variantBadges(v)
-        })), currentUid);
-        el.thinkingDD.classList.remove("hidden");
-      } else {
-        el.thinkingDD.classList.add("hidden");
-      }
+      thinkingShowsEfforts = false;
+      return;
     }
+    el.fusionDD.classList.add("hidden");
+    if (levels.length) {
+      thinkingDropdown.set(levels, currentThoughtLevel);
+      el.thinkingDD.classList.remove("hidden");
+      thinkingShowsEfforts = true;
+    } else if (fam && (fam.variants || []).length > 1) {
+      thinkingDropdown.set(fam.variants.map((v) => ({ ...v, badges: variantBadges(v) })), currentUid);
+      el.thinkingDD.classList.remove("hidden");
+      thinkingShowsEfforts = false;
+    } else {
+      el.thinkingDD.classList.add("hidden");
+      thinkingShowsEfforts = false;
+    }
+  }
+  // The grouped choices only exist once a session has reported its options, so
+  // fall back to the family's own variants, which carry the same pair uids.
+  function fusionPairs(fam) {
+    return modelChoices.fusion?.length ? modelChoices.fusion : (fam?.variants || []);
   }
   function isAdaptive(f) { return f.id === "adaptive" || /adaptive/i.test(f.name || ""); }
   function isFusion(f) { return f?.id === "fusion" || /^fusion$/i.test(f?.name || ""); }
@@ -7406,11 +7417,17 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         // Fusion group entirely, and losing it would empty the Fusion picker.
         const incoming = m.modelChoices || {};
         for (const key of Object.keys(incoming)) modelChoices[key] = incoming[key];
-        // thoughtLevels stays live, since the normal model thinking dropdown is
-        // shown only when the active model really has a thought level.
-        thoughtLevels = Array.isArray(m.thoughtLevels) ? m.thoughtLevels : [];
-        if (thoughtLevels.length) knownThoughtLevels = thoughtLevels;
-        currentThoughtLevel = m.currentThoughtLevel || currentThoughtLevel;
+        // Families come from this response, because modelFamilies is still
+        // empty on the first one.
+        const famOf = (uid) => (m.models || []).find((f) => (f.variants || []).some((v) => v.value === uid));
+        const responseFamily = famOf(m.currentModel);
+        const shownFamily = famOf(currentModelUid) || responseFamily;
+        if (responseFamily) {
+          thoughtLevelsByFamily[responseFamily.id] = Array.isArray(m.thoughtLevels) ? m.thoughtLevels : [];
+          // Only the family the response is about can report its effort, and an
+          // empty string is the host clearing a model that has none.
+          if (responseFamily.id === shownFamily?.id && typeof m.currentThoughtLevel === "string") currentThoughtLevel = m.currentThoughtLevel;
+        }
         // The user may have already picked a different model before this async
         // options response arrived. Keep their local selection.
         applyModelOptions(m.models, currentModelUid || m.currentModel);

@@ -932,7 +932,26 @@ body {
 }
 
 .fusion-config-options.effort {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  display: flex;
+  flex-wrap: wrap;
+}
+
+.fusion-config-options.effort .fusion-config-option {
+  flex: 1 1 auto;
+  justify-content: center;
+  padding-inline: 6px;
+  text-align: center;
+}
+
+/* The effort row reads as a segmented control, so the selection is the
+   background and the weight. A tick would cost a third of each button. */
+.fusion-config-options.effort .dd-check {
+  display: none;
+}
+
+.fusion-config-options.effort .fusion-config-option.selected {
+  background: var(--vscode-list-activeSelectionBackground, var(--vscode-list-hoverBackground));
+  color: var(--vscode-list-activeSelectionForeground, inherit);
 }
 
 .fusion-config-option {
@@ -949,6 +968,12 @@ body {
   color: var(--vscode-menu-foreground, var(--vscode-foreground));
   font: inherit;
   text-align: left;
+  white-space: nowrap;
+}
+
+.fusion-config-text {
+  min-width: 0;
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -961,11 +986,6 @@ body {
 
 .fusion-config-option .dd-check .codicon {
   font-size: 13px;
-}
-
-.fusion-config-options.effort .fusion-config-option {
-  padding-inline: 3px;
-  text-align: center;
 }
 
 .fusion-config-option:hover {

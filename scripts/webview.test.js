@@ -5654,6 +5654,159 @@ test("a normal model with no thought level keeps the ACP thinking picker hidden"
   assert.strictEqual(h.errors().length, 0);
 });
 
+test("each model family keeps its own effort levels", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  const allModels = [
+    { id: "fusion", name: "Fusion", default: "fusion-claude-opus-5-high-sidekick-swe-2-medium", variants: [{ value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "Fusion" }] },
+    { id: "gpt", name: "GPT-5", default: "gpt-5-medium", variants: [
+      { value: "gpt-5-low", name: "GPT-5 Low" },
+      { value: "gpt-5-medium", name: "GPT-5 Medium" },
+      { value: "gpt-5-xhigh", name: "GPT-5 XHigh" }
+    ] }
+  ];
+  const fusionChoices = [
+    { value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "Fusion (Claude Opus 5 High + SWE-2 Medium)" },
+    { value: "fusion-claude-opus-5-high-sidekick-swe-2-high", name: "Fusion (Claude Opus 5 High + SWE-2 High)" }
+  ];
+  const levels = [{ value: "low", name: "Low" }, { value: "high", name: "High" }];
+
+  // Start on Fusion so its effort list is the one already known.
+  h.post({
+    type: "options", currentMode: "accept-edits",
+    currentModel: "fusion-claude-opus-5-high-sidekick-swe-2-medium",
+    currentThoughtLevel: "low", thoughtLevels: levels,
+    modelChoices: { fusion: fusionChoices }, models: allModels, modes: []
+  });
+  await h.settle(20);
+
+  // Switching to a normal model must not leave Fusion's levels on screen. GPT
+  // has no effort of its own yet, so until the host reports one the picker
+  // lists the family's own variants instead.
+  const modelDD = h.document.querySelector("#model-dd");
+  modelDD.querySelector(".dd-btn").click();
+  [...modelDD.querySelectorAll(".dd-item")].find((el) => el.textContent.includes("GPT-5")).click();
+
+  const thinking = h.document.querySelector("#thinking-dd");
+  const itemNames = () => [...thinking.querySelectorAll(".dd-item-name")].map((el) => el.textContent);
+  assert.ok(!thinking.classList.contains("hidden"), "the thinking picker shows the family's variants");
+  thinking.querySelector(".dd-btn").click();
+  assert.deepStrictEqual(itemNames(), ["GPT-5 Low", "GPT-5 Medium", "GPT-5 XHigh"], "not Fusion's efforts");
+  thinking.querySelector(".dd-btn").click();
+
+  // The host then reports that GPT really does have a thought level.
+  h.post({
+    type: "options", currentMode: "accept-edits",
+    currentModel: "gpt-5-medium", currentThoughtLevel: "medium",
+    thoughtLevels: [{ value: "medium", name: "Medium" }, { value: "xhigh", name: "XHigh" }],
+    modelChoices: {}, models: allModels, modes: []
+  });
+  await h.settle(20);
+
+  thinking.querySelector(".dd-btn").click();
+  assert.deepStrictEqual(itemNames(), ["Medium", "XHigh"], "only GPT's own effort levels are listed");
+  thinking.querySelector(".dd-btn").click();
+
+  // Switching back to Fusion still shows Fusion's levels, not GPT's.
+  modelDD.querySelector(".dd-btn").click();
+  [...modelDD.querySelectorAll(".dd-item")].find((el) => el.textContent.includes("Fusion")).click();
+  const picker = h.document.querySelector("#fusion-dd");
+  picker.querySelector(".dd-btn").click();
+  const effortSection = [...picker.querySelectorAll(".fusion-config-label")].find((el) => el.textContent === "Lead effort");
+  assert.ok(effortSection, "Fusion keeps its effort section");
+  const effortNames = [...effortSection.parentElement.querySelectorAll(".fusion-config-option")].map((el) => el.textContent);
+  assert.deepStrictEqual(effortNames, ["Low", "High"], "Fusion's levels were not overwritten by GPT's");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a model that reports no effort clears the previous model's effort", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  const allModels = [
+    { id: "fusion", name: "Fusion", default: "fusion-claude-opus-5-high-sidekick-swe-2-medium", variants: [{ value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "Fusion" }] },
+    { id: "gpt", name: "GPT-5", default: "gpt-5-xhigh", variants: [{ value: "gpt-5-xhigh", name: "GPT-5 XHigh" }] }
+  ];
+  const fusionChoices = [
+    { value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "Fusion (Claude Opus 5 High + SWE-2 Medium)" },
+    { value: "fusion-claude-opus-5-high-sidekick-swe-2-high", name: "Fusion (Claude Opus 5 High + SWE-2 High)" }
+  ];
+  const levels = [{ value: "low", name: "Low" }, { value: "high", name: "High" }];
+
+  h.post({
+    type: "options", currentMode: "accept-edits",
+    currentModel: "fusion-claude-opus-5-high-sidekick-swe-2-medium",
+    currentThoughtLevel: "high", thoughtLevels: levels,
+    modelChoices: { fusion: fusionChoices }, models: allModels, modes: []
+  });
+  await h.settle(20);
+  const picker = h.document.querySelector("#fusion-dd");
+  assert.strictEqual(picker.querySelector(".fusion-config-lead-title").textContent, "Opus 5 · High", "the reported effort is on the button");
+
+  // The user moves to a model with no thought level and the host answers with
+  // an empty currentThoughtLevel, which is a deliberate clear, not a gap.
+  const modelDD = h.document.querySelector("#model-dd");
+  modelDD.querySelector(".dd-btn").click();
+  [...modelDD.querySelectorAll(".dd-item")].find((el) => el.textContent.includes("GPT-5")).click();
+  h.post({
+    type: "options", currentMode: "accept-edits",
+    currentModel: "gpt-5-xhigh", currentThoughtLevel: "",
+    thoughtLevels: [], modelChoices: {}, models: allModels, modes: []
+  });
+  await h.settle(20);
+  assert.ok(h.document.querySelector("#thinking-dd").classList.contains("hidden"), "no effort and one variant means no picker");
+  assert.ok(picker.classList.contains("hidden"), "the Fusion picker is hidden on a normal model");
+
+  // Back on Fusion the cleared effort must not come back. If "high" had been
+  // kept the button would read "Opus 5 · High", instead it falls back to the
+  // first level.
+  modelDD.querySelector(".dd-btn").click();
+  [...modelDD.querySelectorAll(".dd-item")].find((el) => el.textContent.includes("Fusion")).click();
+  assert.strictEqual(picker.querySelector(".fusion-config-lead-title").textContent, "Opus 5 · Low", "the cleared effort does not come back");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("Fusion is configurable before a session reports grouped choices", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  // The pre session options carry the family with the whole lead times
+  // sidekick cross product in variants, named "(Lead + Sidekick)", and no
+  // grouped choices yet.
+  const fusionVariants = [];
+  const leads = [["claude-opus-5-high", "Claude Opus 5 High"], ["gpt-6-astra-high", "GPT-6 Astra High"], ["claude-sonnet-6-medium", "Claude Sonnet 6 Medium"]];
+  const sidekicks = [["swe-2-low", "SWE-2 Low"], ["swe-2-medium", "SWE-2 Medium"], ["swe-2-high", "SWE-2 High"], ["swe-2-xhigh", "SWE-2 XHigh"]];
+  for (const [leadUid, leadName] of leads) {
+    for (const [sidekickUid, sidekickName] of sidekicks) {
+      fusionVariants.push({ value: `fusion-${leadUid}-sidekick-${sidekickUid}`, name: `(${leadName} + ${sidekickName})` });
+    }
+  }
+  h.post({
+    type: "options", currentMode: "accept-edits",
+    currentModel: "fusion-claude-opus-5-high-sidekick-swe-2-medium",
+    currentThoughtLevel: "", thoughtLevels: [],
+    modelChoices: {},
+    models: [{ id: "fusion", name: "Fusion", default: "fusion-claude-opus-5-high-sidekick-swe-2-medium", variants: fusionVariants }],
+    modes: []
+  });
+  await h.settle(20);
+
+  // The cross product is configuration for the Fusion picker, not a thinking
+  // list, so the twelve raw pair names must never land in the thinking
+  // dropdown (which would also grow a filter box at that length).
+  assert.ok(h.document.querySelector("#thinking-dd").classList.contains("hidden"), "the cross product is not dumped into the thinking picker");
+  const picker = h.document.querySelector("#fusion-dd");
+  assert.ok(!picker.classList.contains("hidden"), "the Fusion picker works off the family variants alone");
+  picker.querySelector(".dd-btn").click();
+  const leadSection = [...picker.querySelectorAll(".fusion-config-label")].find((el) => el.textContent === "Lead model");
+  assert.ok(leadSection, "the Lead model section renders");
+  const leadOptions = [...leadSection.parentElement.querySelectorAll(".fusion-config-option")].map((el) => el.textContent);
+  assert.strictEqual(leadOptions.length, 3, "one option per lead, not per pair");
+  assert.ok(!leadOptions[0].startsWith("("), "the bracketed variant name parses cleanly");
+  assert.strictEqual(h.errors().length, 0);
+});
+
 test("thinking picker keeps a thought icon in compact mode", async () => {
   const h = createHarness();
   h.post({ type: "ready" });
