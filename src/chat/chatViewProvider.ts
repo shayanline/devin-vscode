@@ -1539,6 +1539,9 @@ export class ChatController implements AcpHost {
         case "setModel":
           await this.setModel(String(msg.model || ""));
           return;
+        case "setFusionModel":
+          await this.setFusionModel(String(msg.model || ""), String(msg.thoughtLevel || ""));
+          return;
         case "setConfigOption":
           await this.setSessionConfig(String(msg.configId || ""), msg.value);
           return;
@@ -3230,6 +3233,11 @@ export class ChatController implements AcpHost {
     } catch (err) {
       this.log(`[set-config-failed] ${err instanceof Error ? err.message : String(err)}`);
     }
+  }
+
+  private async setFusionModel(model: string, thoughtLevel: string): Promise<void> {
+    await this.setModel(model);
+    await this.setSessionConfig("thought_level", thoughtLevel);
   }
 
   private async setModel(model: string): Promise<void> {

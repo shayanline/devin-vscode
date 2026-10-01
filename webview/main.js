@@ -123,10 +123,17 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     itemLeave: scheduleModelHoverClose,
     onClose: closeModelHover
   });
-  const fusionDropdown = createDropdown(el.fusionDD, onFusionSelect, {
-    staticIcon: "codicon-git-compare",
-    ariaLabel: "Fusion pairing"
-  });
+  const fusionPicker = createFusionPicker(
+    el.fusionDD,
+    (model) => {
+      currentModelUid = model;
+      vscode.postMessage({ type: "setFusionModel", model, thoughtLevel: currentThoughtLevel });
+    },
+    (value) => {
+      currentThoughtLevel = value;
+      vscode.postMessage({ type: "setConfigOption", configId: "thought_level", value });
+    }
+  );
   const thinkingDropdown = createDropdown(el.thinkingDD, onThinkingSelect, {
     staticIcon: "codicon-thinking",
     ariaLabel: "Thinking effort"
@@ -175,12 +182,12 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     if (value.includes("med")) return "cost-medium";
     return "cost-low";
   }
-  function costRows(summary) {
+  function costRows(summary, sidekick = false) {
     return String(summary || "").split("·").map((part) => {
-      const match = /^(.+?)\s*\/\s*(?:MTok|1M)\s+(In|Input|Out|Output|Cache Read|Cached input|Cache Write)$/i.exec(part.trim());
-      if (!match) return null;
+      const match = /^(.+?)\s*\/\s*(?:MTok|1M)\s+(Sidekick )?(In|Input|Out|Output|Cache Read|Cached input|Cache Write)$/i.exec(part.trim());
+      if (!match || !!match[2] !== sidekick) return null;
       const labels = { in: "Input", input: "Input", out: "Output", output: "Output", "cache read": "Cache Read", "cached input": "Cache Read", "cache write": "Cache Write" };
-      return { label: labels[match[2].toLowerCase()], value: match[1].trim() };
+      return { label: labels[match[3].toLowerCase()], value: match[1].trim() };
     }).filter(Boolean);
   }
   function formatTokenCount(value) {
@@ -194,15 +201,22 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     if (!item) return null;
     const defaultRows = costRows(item.costSummary);
     const longRows = costRows(item.longContextCostSummary);
-    const rowLabels = [...new Set([...defaultRows, ...longRows].map((row) => row.label))];
+    const sidekickDefaultRows = costRows(item.costSummary, true);
+    const sidekickLongRows = costRows(item.longContextCostSummary, true);
+    const hasSidekickCosts = sidekickDefaultRows.length > 0 || sidekickLongRows.length > 0;
+    const costSections = [
+      { title: hasSidekickCosts ? "Lead cost per 1M tokens" : "Cost per 1M tokens", defaultRows, longRows },
+      ...(hasSidekickCosts ? [{ title: "Sidekick cost per 1M tokens", defaultRows: sidekickDefaultRows, longRows: sidekickLongRows }] : [])
+    ];
+    const hasCosts = costSections.some((section) => section.defaultRows.length || section.longRows.length);
     const promotion = promotionLabel(item);
     const contextRows = [
       ["Max context", formatTokenCount(item.maxContextTokens)],
       ["Max output", formatTokenCount(item.maxOutputTokens)]
     ].filter(([, value]) => value);
-    const hasConfigurable = !!item.thinkingLevels;
-    if (!item.description && !item.costTier && !rowLabels.length && !promotion && !contextRows.length && !hasConfigurable) return null;
-    const compact = !rowLabels.length && !promotion && !contextRows.length && !hasConfigurable;
+    const hasConfigurable = !!item.thinkingLevels || !!item.fusion;
+    if (!item.description && !item.costTier && !hasCosts && !promotion && !contextRows.length && !hasConfigurable) return null;
+    const compact = !hasCosts && !promotion && !contextRows.length && !hasConfigurable;
 
     const card = document.createElement("div");
     card.className = "model-hover" + (compact ? " compact" : "") + (!hasConfigurable ? " no-configurable" : "");
@@ -213,35 +227,37 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     if (item.costTier) header.appendChild(Object.assign(document.createElement("span"), { className: `model-hover-tier ${costTierClass(item.costTier)}`, textContent: costTierLabel(item.costTier) }));
     card.appendChild(header);
 
-    if (rowLabels.length) {
-      card.appendChild(Object.assign(document.createElement("div"), { className: "model-hover-section", textContent: "Cost per 1M tokens" }));
+    costSections.forEach((section) => {
+      const rowLabels = [...new Set([...section.defaultRows, ...section.longRows].map((row) => row.label))];
+      if (!rowLabels.length) return;
+      card.appendChild(Object.assign(document.createElement("div"), { className: "model-hover-section", textContent: section.title }));
       const cost = document.createElement("div");
       cost.className = "model-hover-cost";
       const headings = document.createElement("div");
-      headings.className = "model-hover-cost-heading-row" + (longRows.length ? " has-long-context" : "");
+      headings.className = "model-hover-cost-heading-row" + (section.longRows.length ? " has-long-context" : "");
       headings.appendChild(Object.assign(document.createElement("span"), { className: "model-hover-cost-heading", textContent: "Default" }));
-      if (longRows.length) headings.appendChild(Object.assign(document.createElement("span"), { className: "model-hover-cost-heading", textContent: "Long Context" }));
+      if (section.longRows.length) headings.appendChild(Object.assign(document.createElement("span"), { className: "model-hover-cost-heading", textContent: "Long Context" }));
       cost.appendChild(headings);
       const table = document.createElement("div");
-      table.className = "model-hover-cost-table" + (longRows.length ? " has-long-context" : "");
-      const defaultByLabel = new Map(defaultRows.map((row) => [row.label, row.value]));
-      const longByLabel = new Map(longRows.map((row) => [row.label, row.value]));
+      table.className = "model-hover-cost-table" + (section.longRows.length ? " has-long-context" : "");
+      const defaultByLabel = new Map(section.defaultRows.map((row) => [row.label, row.value]));
+      const longByLabel = new Map(section.longRows.map((row) => [row.label, row.value]));
       rowLabels.forEach((label) => {
         const row = document.createElement("div");
-        row.className = "model-hover-cost-row" + (longRows.length ? " has-long-context" : "");
+        row.className = "model-hover-cost-row" + (section.longRows.length ? " has-long-context" : "");
         row.append(
           Object.assign(document.createElement("span"), { className: "model-hover-cost-line" }),
           Object.assign(document.createElement("span"), { className: "model-hover-cost-label", textContent: label }),
           Object.assign(document.createElement("strong"), { className: "model-hover-cost-value", textContent: defaultByLabel.get(label) || "" })
         );
-        if (longRows.length) {
+        if (section.longRows.length) {
           row.append(Object.assign(document.createElement("strong"), { className: "model-hover-cost-value", textContent: longByLabel.get(label) || "" }));
         }
         table.appendChild(row);
       });
       cost.appendChild(table);
       card.appendChild(cost);
-    }
+    });
 
     if (promotion) {
       const promo = document.createElement("div");
@@ -276,11 +292,11 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       const effort = document.createElement("button");
       effort.type = "button";
       effort.className = "model-hover-configurable-button";
-      effort.textContent = "Thinking Level";
+      effort.textContent = item.fusion ? "Configure Fusion" : "Thinking Level";
       effort.addEventListener("click", (event) => {
         event.stopPropagation();
         modelDropdown.close();
-        el.thinkingDD.querySelector(".dd-btn")?.click();
+        (item.fusion ? el.fusionDD : el.thinkingDD).querySelector(".dd-btn")?.click();
       });
       controls.appendChild(effort);
       configurable.appendChild(controls);
@@ -341,10 +357,6 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     vscode.postMessage({ type: "setModel", model: fam.default });
     updateModelConfig(fam, fam.default);
   }
-  function onFusionSelect(uid) {
-    currentModelUid = uid;
-    vscode.postMessage({ type: "setModel", model: uid });
-  }
   function onThinkingSelect(value) {
     if (thoughtLevels.length) {
       currentThoughtLevel = value;
@@ -354,38 +366,168 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     currentModelUid = value;
     vscode.postMessage({ type: "setModel", model: value });
   }
-  function pairingName(choice) {
-    const name = String(choice.name || choice.value).replace(/^Fusion \(/, "").replace(/\)$/, "").replace(/ High(?: Thinking)?(?= \+)/, "");
-    return { ...choice, name };
+  function fusionIdentity(uid) {
+    const [lead = "", sidekick = ""] = String(uid || "").replace(/^fusion-/, "").split("-sidekick-");
+    return { lead: lead.replace(/-(?:none|low|medium|high|xhigh)$/, ""), sidekick };
+  }
+  function fusionChoice(choice) {
+    const identity = fusionIdentity(choice.value);
+    const [lead = choice.name || choice.value, sidekick = ""] = String(choice.name || choice.value).replace(/^Fusion \(/, "").replace(/\)$/, "").split(" + ");
+    return {
+      ...choice,
+      ...identity,
+      leadName: lead.replace(/ (?:No Thinking|Low|Medium|High(?: Thinking)?|XHigh)$/, ""),
+      sidekickName: sidekick
+    };
+  }
+  function compactFusionLead(name) {
+    return String(name || "").replace(/^Claude /, "");
+  }
+  function compactFusionSidekick(name) {
+    return String(name || "").replace(/ (Low|Medium|High|XHigh)$/, " · $1");
+  }
+  function createFusionPicker(container, onModel, onEffort) {
+    const button = document.createElement("button");
+    button.className = "dd-btn";
+    button.setAttribute("aria-haspopup", "true");
+    button.setAttribute("aria-expanded", "false");
+    button.setAttribute("aria-label", "Configure Fusion");
+    button.innerHTML = '<span class="dd-icon"><i class="codicon codicon-git-compare"></i></span><span class="dd-label fusion-config-selection"><span class="fusion-config-lead-title"></span><span class="fusion-config-separator"> + </span><span class="fusion-config-sidekick-title"></span></span><i class="codicon codicon-chevron-down"></i>';
+    const leadTitle = button.querySelector(".fusion-config-lead-title");
+    const sidekickTitle = button.querySelector(".fusion-config-sidekick-title");
+    const menu = document.createElement("div");
+    menu.className = "dd-menu fusion-config-menu hidden";
+    container.append(button, menu);
+
+    let pairs = [];
+    let levels = [];
+    let lead = "";
+    let sidekick = "";
+    let effort = "";
+
+    function pair() {
+      return pairs.find((item) => item.lead === lead && item.sidekick === sidekick)
+        || pairs.find((item) => item.lead === lead)
+        || pairs[0];
+    }
+    function sync() {
+      const selected = pair();
+      const effortName = levels.find((item) => item.value === effort)?.name || effort;
+      if (selected) {
+        leadTitle.textContent = `${compactFusionLead(selected.leadName)} · ${effortName}`;
+        sidekickTitle.textContent = compactFusionSidekick(selected.sidekickName);
+        button.title = `${selected.leadName} · ${effortName} + ${selected.sidekickName}`;
+      }
+      menu.querySelectorAll(".fusion-config-option").forEach((item) => {
+        const value = item.dataset.value;
+        const selectedValue = item.dataset.kind === "lead" ? lead : item.dataset.kind === "effort" ? effort : sidekick;
+        const selected = value === selectedValue;
+        item.classList.toggle("selected", selected);
+        item.setAttribute("aria-checked", selected ? "true" : "false");
+      });
+    }
+    function choose(kind, value) {
+      if (kind === "effort") {
+        effort = value;
+        onEffort(value);
+      } else {
+        if (kind === "lead") lead = value;
+        else sidekick = value;
+        const selected = pair();
+        if (selected) onModel(selected.value);
+      }
+      sync();
+    }
+    function section(title, kind, options) {
+      const root = document.createElement("div");
+      root.className = "fusion-config-section";
+      root.appendChild(Object.assign(document.createElement("div"), { className: "fusion-config-label", textContent: title }));
+      const rows = document.createElement("div");
+      rows.className = "fusion-config-options" + (kind === "effort" ? " effort" : "");
+      rows.setAttribute("role", "radiogroup");
+      rows.setAttribute("aria-label", title);
+      options.forEach((option) => {
+        const item = document.createElement("button");
+        item.type = "button";
+        item.className = "fusion-config-option";
+        item.setAttribute("role", "radio");
+        item.dataset.kind = kind;
+        item.dataset.value = option.value;
+        item.textContent = option.name;
+        item.addEventListener("click", (event) => {
+          event.stopPropagation();
+          choose(kind, option.value);
+        });
+        rows.appendChild(item);
+      });
+      root.appendChild(rows);
+      return root;
+    }
+    function renderMenu() {
+      menu.innerHTML = "";
+      const leads = [...new Map(pairs.map((item) => [item.lead, { value: item.lead, name: item.leadName }])).values()];
+      const sidekicks = [...new Map(pairs.map((item) => [item.sidekick, { value: item.sidekick, name: item.sidekickName }])).values()];
+      menu.append(
+        section("Lead model", "lead", leads),
+        section("Lead effort", "effort", levels),
+        section("Sidekick", "sidekick", sidekicks)
+      );
+      sync();
+    }
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      document.querySelectorAll(".dd-menu").forEach((item) => { if (item !== menu) item.classList.add("hidden"); });
+      document.querySelectorAll(".dd-btn.open").forEach((item) => { if (item !== button) item.classList.remove("open"); });
+      renderMenu();
+      menu.classList.toggle("hidden");
+      const open = !menu.classList.contains("hidden");
+      button.classList.toggle("open", open);
+      button.setAttribute("aria-expanded", open ? "true" : "false");
+    });
+    return {
+      set(choices, currentModel, effortOptions, currentEffort) {
+        pairs = (choices || []).map(fusionChoice);
+        levels = effortOptions || [];
+        const current = fusionIdentity(currentModel);
+        lead = current.lead || pairs[0]?.lead || "";
+        sidekick = current.sidekick || pairs[0]?.sidekick || "";
+        effort = currentEffort || levels[0]?.value || "";
+        sync();
+        container.classList.toggle("hidden", !pairs.length);
+      }
+    };
   }
   function updateModelConfig(fam, currentUid) {
-    const pairs = fam?.id === "fusion" ? modelChoices.fusion || [] : [];
+    const pairs = isFusion(fam) ? modelChoices.fusion || [] : [];
     if (pairs.length) {
-      fusionDropdown.set(pairs.map(pairingName), currentUid);
+      fusionPicker.set(pairs, currentUid, thoughtLevels, currentThoughtLevel);
       el.fusionDD.classList.remove("hidden");
+      el.thinkingDD.classList.add("hidden");
     } else {
       el.fusionDD.classList.add("hidden");
-    }
-    if (thoughtLevels.length) {
-      thinkingDropdown.set(thoughtLevels, currentThoughtLevel);
-      el.thinkingDD.classList.remove("hidden");
-    } else if (fam && (fam.variants || []).length > 1) {
-      thinkingDropdown.set(fam.variants.map((v) => ({
-        ...v,
-        badges: variantBadges(v)
-      })), currentUid);
-      el.thinkingDD.classList.remove("hidden");
-    } else {
-      el.thinkingDD.classList.add("hidden");
+      if (thoughtLevels.length) {
+        thinkingDropdown.set(thoughtLevels, currentThoughtLevel);
+        el.thinkingDD.classList.remove("hidden");
+      } else if (fam && (fam.variants || []).length > 1) {
+        thinkingDropdown.set(fam.variants.map((v) => ({
+          ...v,
+          badges: variantBadges(v)
+        })), currentUid);
+        el.thinkingDD.classList.remove("hidden");
+      } else {
+        el.thinkingDD.classList.add("hidden");
+      }
     }
   }
   function isAdaptive(f) { return f.id === "adaptive" || /adaptive/i.test(f.name || ""); }
+  function isFusion(f) { return f?.id === "fusion" || /^fusion$/i.test(f?.name || ""); }
 
   function applyModelOptions(families, currentModel) {
     const list = Array.isArray(families) ? families.slice() : [];
     const adaptive = list.filter(isAdaptive);
-    const rest = list.filter((f) => !isAdaptive(f)).sort((a, b) => (a.name || "").localeCompare(b.name || ""));
-    modelFamilies = [...adaptive, ...rest];
+    const fusion = list.filter(isFusion);
+    const rest = list.filter((f) => !isAdaptive(f) && !isFusion(f)).sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+    modelFamilies = [...adaptive, ...fusion, ...rest];
     const fam = familyOfUid(currentModel) || modelFamilies[0];
     currentModelUid = currentModel || fam?.default || "";
     currentModelLabel = fam ? fam.name || "" : currentModelLabel;
@@ -396,18 +538,18 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         name: family.name,
         badges: variantBadges(variant),
         pinned: pinnedModelIds.has(family.id),
-        hover: { ...variant, name: family.name, thinkingLevels: (family.variants || []).length > 1 },
+        hover: { ...variant, name: family.name, thinkingLevels: (family.variants || []).length > 1, fusion: isFusion(family) },
         group
       };
     };
     const adaptiveFamily = adaptive[0];
-    const pinned = modelFamilies.filter((f) => !isAdaptive(f) && pinnedModelIds.has(f.id));
-    const models = modelFamilies.filter((f) => !isAdaptive(f) && !pinnedModelIds.has(f.id));
+    const fusionFamily = fusion[0];
+    const pinned = modelFamilies.filter((f) => !isAdaptive(f) && !isFusion(f) && pinnedModelIds.has(f.id));
+    const models = modelFamilies.filter((f) => !isAdaptive(f) && !isFusion(f) && !pinnedModelIds.has(f.id));
     const items = [];
-    if (adaptiveFamily) {
-      items.push(item(adaptiveFamily));
-      if (pinned.length || models.length) items.push({ sep: true });
-    }
+    if (adaptiveFamily) items.push(item(adaptiveFamily));
+    if (fusionFamily) items.push(item(fusionFamily));
+    if ((adaptiveFamily || fusionFamily) && (pinned.length || models.length)) items.push({ sep: true });
     if (pinned.length) {
       items.push(...pinned.map((f) => item(f, "Pinned")));
       if (models.length) items.push({ sep: true });

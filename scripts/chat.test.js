@@ -75,6 +75,15 @@ test("ACP configuration exposes grouped models and applies thinking effort", pos
     const request = h.agentSaw("session/set_config_option").find((item) => item.params.configId === "thought_level");
     assert.strictEqual(request.params.value, "low");
     await h.until(() => h.last("options")?.currentThoughtLevel === "low");
+
+    const before = h.agentSaw("session/set_config_option").length;
+    h.send({ type: "setFusionModel", model: "fusion-gpt-6-astra-high-sidekick-swe-2-high", thoughtLevel: "low" });
+    await h.until(() => h.agentSaw("session/set_config_option").length === before + 2);
+    assert.deepStrictEqual(
+      h.agentSaw("session/set_config_option").slice(before).map((item) => [item.params.configId, item.params.value]),
+      [["model", "fusion-gpt-6-astra-high-sidekick-swe-2-high"], ["thought_level", "low"]],
+      "changing a Fusion pair restores the chosen lead effort after the model resets it"
+    );
   } finally {
     await h.dispose();
   }
