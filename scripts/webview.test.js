@@ -5507,6 +5507,60 @@ test("Fusion keeps lead effort and sidekick in one configuration picker", async 
   assert.strictEqual(h.errors().length, 0);
 });
 
+test("switching from a normal model to Fusion keeps the effort levels", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  const allModels = [
+    { id: "fusion", name: "Fusion", default: "fusion-claude-opus-5-high-sidekick-swe-2-medium", variants: [{ value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "Fusion" }] },
+    { id: "gpt", name: "GPT-5", default: "gpt-5-xhigh", variants: [{ value: "gpt-5-xhigh", name: "GPT-5 XHigh" }] }
+  ];
+  const fusionChoices = [
+    { value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "Fusion (Claude Opus 5 High + SWE-2 Medium)" },
+    { value: "fusion-claude-opus-5-high-sidekick-swe-2-high", name: "Fusion (Claude Opus 5 High + SWE-2 High)" }
+  ];
+  const levels = [{ value: "low", name: "Low" }, { value: "high", name: "High" }];
+
+  // Start on Fusion with thought levels and Fusion choices populated.
+  h.post({
+    type: "options", currentMode: "accept-edits",
+    currentModel: "fusion-claude-opus-5-high-sidekick-swe-2-medium",
+    currentThoughtLevel: "low", thoughtLevels: levels,
+    modelChoices: { fusion: fusionChoices }, models: allModels, modes: []
+  });
+  await h.settle(20);
+  assert.ok(!h.document.querySelector("#fusion-dd").classList.contains("hidden"), "Fusion picker visible initially");
+
+  // Simulate user clicking GPT-5 in the model dropdown. This sets currentModelUid
+  // synchronously, then the host responds with options for the normal model.
+  const modelDD = h.document.querySelector("#model-dd");
+  modelDD.querySelector(".dd-btn").click();
+  const gptItem = [...modelDD.querySelectorAll(".dd-item")].find((el) => el.textContent.includes("GPT-5"));
+  gptItem.click();
+  assert.ok(h.document.querySelector("#fusion-dd").classList.contains("hidden"), "Fusion picker hidden after clicking GPT-5");
+
+  // Host responds with options for GPT-5 (no Fusion groups, no thought levels).
+  h.post({
+    type: "options", currentMode: "accept-edits",
+    currentModel: "gpt-5-xhigh", currentThoughtLevel: "",
+    thoughtLevels: [], modelChoices: {}, models: allModels, modes: []
+  });
+  await h.settle(20);
+
+  // Now the user clicks Fusion in the model dropdown.
+  modelDD.querySelector(".dd-btn").click();
+  const fusionItem = [...modelDD.querySelectorAll(".dd-item")].find((el) => el.textContent.includes("Fusion"));
+  fusionItem.click();
+  const picker = h.document.querySelector("#fusion-dd");
+  assert.ok(!picker.classList.contains("hidden"), "Fusion picker reappears after switching back");
+  picker.querySelector(".dd-btn").click();
+  const effortSection = [...picker.querySelectorAll(".fusion-config-label")].find((el) => el.textContent === "Lead effort");
+  assert.ok(effortSection, "Lead effort section is present after switching from a normal model");
+  const effortOptions = effortSection.parentElement.querySelectorAll(".fusion-config-option");
+  assert.strictEqual(effortOptions.length, 2, "both effort levels are rendered");
+  assert.strictEqual(h.errors().length, 0);
+});
+
 test("thinking picker keeps a thought icon in compact mode", async () => {
   const h = createHarness();
   h.post({ type: "ready" });

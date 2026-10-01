@@ -7395,15 +7395,18 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       case "workspace": break;
       case "options": {
         modeDropdown.set((m.modes || []).map((mode) => mode.value === "bypass" ? { ...mode, name: "Bypass" } : mode), m.currentMode);
-        // The user may have already picked a different model before this
-        // (async) options response arrived. Keep their local selection so a
-        // stale response does not flip the pickers back, and preserve thought
-        // levels and Fusion choices when the response is for a different model.
-        const stale = currentModelUid && m.currentModel && currentModelUid !== m.currentModel;
-        if (!stale || Object.keys(m.modelChoices || {}).length) modelChoices = m.modelChoices || {};
+        // Merge rather than replace: the server reports config options for the
+        // currently active model, so switching to (say) GPT may drop the Fusion
+        // group and the thought_level list. Losing those would leave the Fusion
+        // picker empty when the user switches back. Keep existing groups and
+        // thought levels unless the new response supplies them.
+        const incoming = m.modelChoices || {};
+        for (const key of Object.keys(incoming)) modelChoices[key] = incoming[key];
         const newLevels = Array.isArray(m.thoughtLevels) ? m.thoughtLevels : [];
-        if (!stale || newLevels.length) thoughtLevels = newLevels;
-        if (!stale) currentThoughtLevel = m.currentThoughtLevel || "";
+        if (newLevels.length) thoughtLevels = newLevels;
+        currentThoughtLevel = m.currentThoughtLevel || currentThoughtLevel;
+        // The user may have already picked a different model before this async
+        // options response arrived. Keep their local selection.
         applyModelOptions(m.models, currentModelUid || m.currentModel);
         break;
       }
