@@ -421,9 +421,11 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       menu.querySelectorAll(".fusion-config-option").forEach((item) => {
         const value = item.dataset.value;
         const selectedValue = item.dataset.kind === "lead" ? lead : item.dataset.kind === "effort" ? effort : sidekick;
-        const selected = value === selectedValue;
-        item.classList.toggle("selected", selected);
-        item.setAttribute("aria-checked", selected ? "true" : "false");
+        const isSelected = value === selectedValue;
+        item.classList.toggle("selected", isSelected);
+        item.setAttribute("aria-checked", isSelected ? "true" : "false");
+        const checkEl = item.querySelector(".dd-check");
+        if (checkEl) checkEl.innerHTML = isSelected ? '<i class="codicon codicon-check"></i>' : "";
       });
     }
     function choose(kind, value) {
@@ -453,7 +455,10 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         item.setAttribute("role", "radio");
         item.dataset.kind = kind;
         item.dataset.value = option.value;
-        item.textContent = option.name;
+        const check = document.createElement("span");
+        check.className = "dd-check";
+        item.appendChild(check);
+        item.appendChild(document.createTextNode(option.name));
         item.addEventListener("click", (event) => {
           event.stopPropagation();
           choose(kind, option.value);
@@ -7388,13 +7393,20 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         }
         break;
       case "workspace": break;
-      case "options":
+      case "options": {
         modeDropdown.set((m.modes || []).map((mode) => mode.value === "bypass" ? { ...mode, name: "Bypass" } : mode), m.currentMode);
-        modelChoices = m.modelChoices || {};
-        thoughtLevels = Array.isArray(m.thoughtLevels) ? m.thoughtLevels : [];
-        currentThoughtLevel = m.currentThoughtLevel || "";
-        applyModelOptions(m.models, m.currentModel);
+        // The user may have already picked a different model before this
+        // (async) options response arrived. Keep their local selection so a
+        // stale response does not flip the pickers back, and preserve thought
+        // levels and Fusion choices when the response is for a different model.
+        const stale = currentModelUid && m.currentModel && currentModelUid !== m.currentModel;
+        if (!stale || Object.keys(m.modelChoices || {}).length) modelChoices = m.modelChoices || {};
+        const newLevels = Array.isArray(m.thoughtLevels) ? m.thoughtLevels : [];
+        if (!stale || newLevels.length) thoughtLevels = newLevels;
+        if (!stale) currentThoughtLevel = m.currentThoughtLevel || "";
+        applyModelOptions(m.models, currentModelUid || m.currentModel);
         break;
+      }
       case "commands": commands = Array.isArray(m.commands) ? m.commands : []; break;
       case "fileSuggestions":
         if (m.query === fileQueryToken) {

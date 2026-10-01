@@ -5488,9 +5488,18 @@ test("Fusion keeps lead effort and sidekick in one configuration picker", async 
     ["Lead model", "Lead effort", "Sidekick"]
   );
   const buttons = [...picker.querySelectorAll(".fusion-config-option")];
+  // Selected items show a check icon, matching the effort selector for normal models.
+  const selected = buttons.filter((b) => b.classList.contains("selected"));
+  assert.ok(selected.length >= 1, "at least one option is selected by default");
+  assert.ok(selected.every((b) => b.querySelector(".dd-check .codicon-check")), "selected Fusion options show a check icon");
+  const unselected = buttons.filter((b) => !b.classList.contains("selected"));
+  assert.ok(unselected.every((b) => !b.querySelector(".dd-check .codicon-check")), "unselected Fusion options have no check icon");
   buttons.find((button) => button.textContent === "GPT-6 Astra").click();
   assert.ok(!picker.querySelector(".dd-menu").classList.contains("hidden"), "the menu stays open while configuring");
   assert.ok(h.posted.some((message) => message.type === "setFusionModel" && message.model === "fusion-gpt-6-astra-high-sidekick-swe-2-medium" && message.thoughtLevel === "low"));
+  // After selecting GPT-6 Astra, verify the check icon moved to the new lead.
+  const newLead = buttons.find((b) => b.textContent === "GPT-6 Astra");
+  assert.ok(newLead.querySelector(".dd-check .codicon-check"), "the newly selected lead shows a check icon");
   buttons.find((button) => button.textContent === "High").click();
   assert.ok(h.posted.some((message) => message.type === "setConfigOption" && message.configId === "thought_level" && message.value === "high"));
   buttons.find((button) => button.textContent === "SWE-2 High").click();

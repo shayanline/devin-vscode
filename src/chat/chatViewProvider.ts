@@ -2988,7 +2988,10 @@ export class ChatController implements AcpHost {
     }
     this.currentMode = mode || this.currentMode;
     this.currentModel = model || this.currentModel;
-    this.currentThoughtLevel = thoughtLevel || this.currentThoughtLevel;
+    // When thoughtLevel is undefined the caller did not supply one, so keep the
+    // current value. An explicit empty string means "this model has no thought
+    // level", which must clear the stale value from the previous model.
+    this.currentThoughtLevel = thoughtLevel !== undefined ? thoughtLevel : this.currentThoughtLevel;
     this.statusBar?.set({ connected: this.isReady(), mode: this.currentMode, model: this.currentModel });
     return true;
   }
@@ -3004,7 +3007,13 @@ export class ChatController implements AcpHost {
     const thoughtOpt = thoughtOption(activeOptions);
     const mode = typeof modeOpt?.currentValue === "string" ? modeOpt.currentValue : currentModeId;
     const model = typeof modelOpt?.currentValue === "string" ? modelOpt.currentValue : undefined;
-    const thoughtLevel = typeof thoughtOpt?.currentValue === "string" ? thoughtOpt.currentValue : undefined;
+    // When the agent reports config options but thought_level is absent (the
+    // model does not support it), pass "" so showOptions clears the stale value
+    // left by a previous model. undefined means "not reported at all" (e.g. no
+    // options yet), so the old value is preserved.
+    const thoughtLevel = typeof thoughtOpt?.currentValue === "string"
+      ? thoughtOpt.currentValue
+      : activeOptions ? "" : undefined;
     if (rt) {
       rt.configOptions = activeOptions;
       rt.mode = mode || rt.mode;
@@ -3236,8 +3245,28 @@ export class ChatController implements AcpHost {
   }
 
   private async setFusionModel(model: string, thoughtLevel: string): Promise<void> {
-    await this.setModel(model);
-    await this.setSessionConfig("thought_level", thoughtLevel);
+    this.currentModel = model;
+    const rt = this.active();
+    if (!rt) return;
+    rt.model = model;
+    try {
+      // Apply model first, but do not publish options yet. The model change
+      // may reset thought_level on the server, so the second call restores it.
+      await rt.client.setConfigOption(rt.id, "model", model);
+      const result = await rt.client.setConfigOption(rt.id, "thought_level", thoughtLevel);
+      // Publish once with the final state after both values are applied.
+      this.publishOptions(rt, result.configOptions);
+    } catch (err) {
+      this.log(`[set-fusion-failed] ${err instanceof Error ? err.message : String(err)}`);
+    }
+    try {
+      await this.cfg().update("defaultModel", model, vscode.ConfigurationTarget.Workspace);
+    } catch {}
+    try {
+      await this.cfg().update("defaultThoughtLevel", thoughtLevel, vscode.ConfigurationTarget.Workspace);
+    } catch {}
+    this.statusBar?.set({ connected: this.isReady(), mode: this.currentMode, model: this.currentModel });
+    this.post({ type: "model", model });
   }
 
   private async setModel(model: string): Promise<void> {
