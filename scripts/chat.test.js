@@ -52,6 +52,50 @@ test("bypass mode answers command permission requests without showing them", pos
   }
 });
 
+test("ACP configuration exposes grouped models and applies thinking effort", posixOnly, async () => {
+  const h = createChat({ config: { defaultMode: "", defaultModel: "", defaultThoughtLevel: "" } });
+  try {
+    await h.ready();
+    await h.startChat("configure Fusion");
+
+    const initialize = h.agentSaw("initialize")[0];
+    assert.strictEqual(initialize.params.clientCapabilities._meta["cognition.ai/groupedSessionConfigOptions"], true);
+    assert.strictEqual(initialize.params.clientCapabilities._meta["cognition.ai/multiRootWorkspace"], true);
+
+    const options = h.last("options");
+    assert.deepStrictEqual(options.modelChoices.fusion.map((choice) => choice.value), [
+      "fusion-claude-opus-5-high-sidekick-swe-2-medium",
+      "fusion-gpt-6-astra-high-sidekick-swe-2-high"
+    ]);
+    assert.strictEqual(options.currentThoughtLevel, "high");
+    assert.deepStrictEqual(options.thoughtLevels.map((choice) => choice.value), ["low", "high"]);
+
+    h.send({ type: "setConfigOption", configId: "thought_level", value: "low" });
+    await h.until(() => h.agentSaw("session/set_config_option").some((request) => request.params.configId === "thought_level"));
+    const request = h.agentSaw("session/set_config_option").find((item) => item.params.configId === "thought_level");
+    assert.strictEqual(request.params.value, "low");
+    await h.until(() => h.last("options")?.currentThoughtLevel === "low");
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("standard ACP tool names reach the webview", posixOnly, async () => {
+  const h = createChat({ config: { defaultMode: "", defaultModel: "" } });
+  try {
+    await h.ready();
+    const id = await h.startChat("name the tool");
+    h.controller.runtimes.get(id).client.emit("update", {
+      sessionId: id,
+      update: { sessionUpdate: "tool_call", toolCallId: "search", name: "web_search", kind: "fetch" }
+    });
+    await h.until(() => h.postsOf("toolCall").some((message) => message.id === "search"));
+    assert.strictEqual(h.postsOf("toolCall").find((message) => message.id === "search").meta.inferenceToolName, "web_search");
+  } finally {
+    await h.dispose();
+  }
+});
+
 test("idle sessions do not hand diagnostics to the agent", posixOnly, async () => {
   const h = createChat({ promptDelay: 500, config: { "editorContext.diagnostics": true } });
   await h.ready();

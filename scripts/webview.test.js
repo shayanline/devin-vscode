@@ -5396,6 +5396,53 @@ test("model hover balances padding without configuration", async () => {
   assert.strictEqual(h.errors().length, 0);
 });
 
+test("Fusion exposes pairing and ACP thinking controls", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({
+    type: "options",
+    currentMode: "accept-edits",
+    currentModel: "fusion-claude-opus-5-high-sidekick-swe-2-medium",
+    currentThoughtLevel: "low",
+    thoughtLevels: [{ value: "low", name: "Low" }, { value: "high", name: "High" }],
+    modelChoices: {
+      fusion: [
+        { value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "Fusion (Claude Opus 5 High + SWE-2 Medium)" },
+        { value: "fusion-gpt-6-astra-high-sidekick-swe-2-high", name: "Fusion (GPT-6 Astra High Thinking + SWE-2 High)" }
+      ]
+    },
+    models: [{
+      id: "fusion",
+      name: "Fusion",
+      default: "fusion-claude-opus-5-high-sidekick-swe-2-medium",
+      variants: [{ value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "Claude Opus 5 High + SWE-2 Medium" }]
+    }],
+    modes: []
+  });
+  await h.settle(20);
+
+  const pairing = h.document.querySelector("#fusion-dd");
+  assert.ok(!pairing.classList.contains("hidden"), "Fusion shows its lead and sidekick pairing");
+  assert.strictEqual(pairing.querySelector(".dd-btn").getAttribute("aria-label"), "Fusion pairing");
+  pairing.querySelector(".dd-btn").click();
+  assert.deepStrictEqual(
+    [...pairing.querySelectorAll(".dd-item")].map((item) => item.textContent.trim()),
+    ["Claude Opus 5 + SWE-2 Medium", "GPT-6 Astra + SWE-2 High"],
+    "lead effort stays in the separate thinking control"
+  );
+  [...pairing.querySelectorAll(".dd-item")].find((item) => /GPT-6 Astra/.test(item.textContent)).click();
+  assert.ok(h.posted.some((message) => message.type === "setModel" && message.model === "fusion-gpt-6-astra-high-sidekick-swe-2-high"));
+
+  const thinking = h.document.querySelector("#thinking-dd");
+  assert.ok(!thinking.classList.contains("hidden"), "ACP thinking effort remains available for Fusion");
+  assert.match(thinking.querySelector(".dd-btn").textContent, /Low/);
+  thinking.querySelector(".dd-btn").click();
+  [...thinking.querySelectorAll(".dd-item")].find((item) => /High/.test(item.textContent)).click();
+  assert.ok(h.posted.some((message) => message.type === "setConfigOption" && message.configId === "thought_level" && message.value === "high"));
+  assert.strictEqual(h.errors().length, 0);
+});
+
 test("thinking picker keeps a thought icon in compact mode", async () => {
   const h = createHarness();
   h.post({ type: "ready" });

@@ -1294,10 +1294,12 @@ button.model-hover-configurable-button:hover {
   background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
 }
 
+#fusion-dd .dd-icon,
 #thinking-dd .dd-icon {
   display: none;
 }
 
+#input-box.cmp-sm #fusion-dd .dd-icon,
 #input-box.cmp-sm #thinking-dd .dd-icon {
   display: inline-flex;
 }
@@ -1528,6 +1530,7 @@ button.model-hover-configurable-button:hover {
 #input-box.cmp-sm .usage-pct { display: none; }
 
 #input-box.cmp-xs #model-dd,
+#input-box.cmp-xs #fusion-dd,
 #input-box.cmp-xs #usage { display: none !important; }
 
 #input-box.cmp-xxs #mode-dd,

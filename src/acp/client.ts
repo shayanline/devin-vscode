@@ -6,6 +6,7 @@ import {
   AcpSessionRow,
   AgentStopped,
   CliOutput,
+  ConfigOption,
   ContentBlock,
   CreateTerminalParams,
   DocumentParams,
@@ -241,6 +242,8 @@ export class AcpClient extends EventEmitter {
           "cognition.ai/subagentSupport": true,
           // Unlocks _cognition.ai/subagent/{background,foreground}.
           "cognition.ai/subagentControl": true,
+          "cognition.ai/groupedSessionConfigOptions": true,
+          "cognition.ai/multiRootWorkspace": true,
           // The agent pulls the editor's diagnostics instead of spawning tsc or
           // eslint to find out what the editor already knows. Pairs with
           // documentLifecycle: the agent only reports diagnostics for documents it
@@ -333,7 +336,7 @@ export class AcpClient extends EventEmitter {
 
   // Devin exposes both `mode` and `model` as config options set through this
   // custom method: { sessionId, configId, value }.
-  setConfigOption(sessionId: string, configId: string, value: string): Promise<unknown> {
+  setConfigOption(sessionId: string, configId: string, value: string | boolean): Promise<{ configOptions?: ConfigOption[] }> {
     return this.rpc("session/set_config_option", { sessionId, configId, value }, QUERY_TIMEOUT_MS);
   }
 

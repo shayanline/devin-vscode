@@ -65,6 +65,7 @@ interface Runtime {
   lastActivityAt: number; // for idle auto-exit
   mode?: string;
   model?: string;
+  configOptions?: ConfigOption[];
   // Permission/elicitation requests from a background session, re-surfaced to
   // the webview when the session is next opened. Several can be outstanding at
   // once, so this is a queue rather than a single slot.
@@ -282,8 +283,27 @@ const MODE_ICONS: Record<string, string> = {
 // sends a description for each ("Auto-approve actions the model judges safe"),
 // which the picker has nowhere to show yet, so it is left out rather than passed
 // through unused.
+function configChoices(opt?: ConfigOption): { value: string; name?: string; description?: string; _meta?: Record<string, unknown> }[] {
+  return (opt?.options || []).flatMap((choice) => "group" in choice ? choice.options : [choice]);
+}
+
+function groupedModelChoices(options?: ConfigOption[]): Record<string, { value: string; name?: string; description?: string }[]> {
+  const model = options?.find((option) => option.id === "model" || option.category === "model");
+  const groups: Record<string, { value: string; name?: string; description?: string }[]> = {};
+  for (const choice of model?.options || []) {
+    if ("group" in choice) {
+      groups[choice.group] = choice.options;
+    }
+  }
+  return groups;
+}
+
+function thoughtOption(options?: ConfigOption[]): ConfigOption | undefined {
+  return options?.find((option) => option.id === "thought_level" || option.category === "thought_level");
+}
+
 function modeChoices(opt?: ConfigOption): { value: string; name: string; icon: string }[] {
-  return (opt?.options || []).map((c) => ({
+  return configChoices(opt).map((c) => ({
     value: c.value,
     name: c.name || c.value,
     icon: MODE_ICONS[String(c._meta?.["cognition.ai/icon"] || "")] || "codicon-circle-outline"
@@ -330,6 +350,7 @@ export class ChatController implements AcpHost {
   private env?: NodeJS.ProcessEnv;
   private currentMode?: string;
   private currentModel?: string;
+  private currentThoughtLevel?: string;
 
   private readonly permissionResolvers = new Map<string, { resolve: (res: RequestPermissionResult) => void; rid: string }>();
   // Shared across surfaces: a request id has to stay unique when a session (and
@@ -1518,6 +1539,9 @@ export class ChatController implements AcpHost {
         case "setModel":
           await this.setModel(String(msg.model || ""));
           return;
+        case "setConfigOption":
+          await this.setSessionConfig(String(msg.configId || ""), msg.value);
+          return;
         case "permission":
           this.resolvePermission(String(msg.requestId), msg.optionId);
           return;
@@ -1922,6 +1946,7 @@ export class ChatController implements AcpHost {
           this.activeId = rt.id;
           this.currentMode = undefined;
           this.currentModel = undefined;
+          this.currentThoughtLevel = undefined;
           this.markVisible(rt.id);
           this.painted = true;
           this.postCapabilities();
@@ -2368,8 +2393,9 @@ export class ChatController implements AcpHost {
     this.postDraft();
     this.currentMode = rt.mode;
     this.currentModel = rt.model;
+    this.currentThoughtLevel = thoughtOption(rt.configOptions)?.currentValue as string | undefined;
     this.postCapabilities();
-    this.postModelOptions(rt.model || "adaptive");
+    this.postModelOptions(rt.model || "adaptive", rt.configOptions);
     if (rt.mode) {
       this.post({ type: "mode", mode: rt.mode });
     }
@@ -2953,12 +2979,13 @@ export class ChatController implements AcpHost {
   // chat's, which matters most on the mode, since it says whether permission is asked
   // for before anything runs. Answers whether the panel is really showing this chat, so
   // a caller can post the rest of what it was going to say.
-  private showOptions(rt: Runtime | undefined, mode?: string, model?: string): boolean {
+  private showOptions(rt: Runtime | undefined, mode?: string, model?: string, thoughtLevel?: string): boolean {
     if (rt && this.activeId !== rt.id) {
       return false;
     }
     this.currentMode = mode || this.currentMode;
     this.currentModel = model || this.currentModel;
+    this.currentThoughtLevel = thoughtLevel || this.currentThoughtLevel;
     this.statusBar?.set({ connected: this.isReady(), mode: this.currentMode, model: this.currentModel });
     return true;
   }
@@ -2967,12 +2994,18 @@ export class ChatController implements AcpHost {
   // switching back to it later restores the pickers to what that session is actually set
   // to, rather than to the last session's or to a default.
   private publishOptions(rt: Runtime | undefined, options: ConfigOption[] | undefined, currentModeId?: string): void {
-    const byId = new Map((options || []).map((o) => [o.id, o]));
+    const activeOptions = options || rt?.configOptions;
+    const byId = new Map((activeOptions || []).map((o) => [o.id, o]));
     const modeOpt = byId.get("mode");
     const modelOpt = byId.get("model");
+    const thoughtOpt = thoughtOption(activeOptions);
+    const mode = typeof modeOpt?.currentValue === "string" ? modeOpt.currentValue : currentModeId;
+    const model = typeof modelOpt?.currentValue === "string" ? modelOpt.currentValue : undefined;
+    const thoughtLevel = typeof thoughtOpt?.currentValue === "string" ? thoughtOpt.currentValue : undefined;
     if (rt) {
-      rt.mode = modeOpt?.currentValue || currentModeId || rt.mode;
-      rt.model = modelOpt?.currentValue || rt.model;
+      rt.configOptions = activeOptions;
+      rt.mode = mode || rt.mode;
+      rt.model = model || rt.model;
     }
     // The agent reports the modes it actually has, with their names, descriptions
     // and icons. Remember them so the picker offers whatever this CLI supports
@@ -2984,7 +3017,7 @@ export class ChatController implements AcpHost {
     // Which models can read an image. Not every one can (Inkling cannot), and an
     // image block sent to one that cannot poisons the whole session, so this is
     // recorded whenever the agent reports it.
-    for (const choice of modelOpt?.options || []) {
+    for (const choice of configChoices(modelOpt)) {
       const supported = choice._meta?.["cognition.ai/supportsImages"];
       if (typeof supported === "boolean") {
         this.modelImageSupport.set(choice.value, supported);
@@ -2992,22 +3025,26 @@ export class ChatController implements AcpHost {
     }
     // A background session reports its own mode and model too, and they belong to it
     // alone: recorded on its runtime above, and not painted over the pickers.
-    if (!this.showOptions(rt, modeOpt?.currentValue || currentModeId, modelOpt?.currentValue)) {
+    if (!this.showOptions(rt, mode || currentModeId, model, thoughtLevel)) {
       return;
     }
-    this.postModelOptions(this.currentModel || "adaptive");
+    this.postModelOptions(this.currentModel || "adaptive", activeOptions);
   }
 
   // Posts the mode + model-family options. Model families come from
   // `devin models list` (cached); if not fetched yet, fetch and re-post.
-  private postModelOptions(currentModel: string): void {
+  private postModelOptions(currentModel: string, options = this.active()?.configOptions): void {
     const families = cachedFamilies();
+    const thought = thoughtOption(options);
     const payload = {
       type: "options",
       modes: this.modes,
       currentMode: this.currentMode || DEFAULT_MODE,
       models: families,
-      currentModel
+      currentModel,
+      modelChoices: groupedModelChoices(options),
+      thoughtLevels: configChoices(thought),
+      currentThoughtLevel: typeof thought?.currentValue === "string" ? thought.currentValue : this.currentThoughtLevel || ""
     };
     if (families.length) {
       this.store.cacheOptions(payload);
@@ -3076,12 +3113,17 @@ export class ChatController implements AcpHost {
     const live = this.active();
     const mode = live?.mode || this.currentMode || this.cfg().get<string>("defaultMode", DEFAULT_MODE);
     const model = live?.model || this.currentModel || this.cfg().get<string>("defaultModel", "");
+    const options = live?.configOptions;
+    const thought = thoughtOption(options);
     const payload = {
       type: "options",
       modes: this.modes,
       currentMode: mode || DEFAULT_MODE,
       models: families,
-      currentModel: model || "adaptive"
+      currentModel: model || "adaptive",
+      modelChoices: groupedModelChoices(options),
+      thoughtLevels: configChoices(thought),
+      currentThoughtLevel: typeof thought?.currentValue === "string" ? thought.currentValue : ""
     };
     this.store.cacheOptions(payload);
     this.post(payload);
@@ -3090,6 +3132,7 @@ export class ChatController implements AcpHost {
   private async applyDefaults(rt: Runtime, res: NewSessionResult): Promise<void> {
     const mode = this.cfg().get<string>("defaultMode", DEFAULT_MODE);
     const model = this.cfg().get<string>("defaultModel", "");
+    const thoughtLevel = this.cfg().get<string>("defaultThoughtLevel", "");
     const currentMode = res.modes?.currentModeId;
     // Record the session's own mode first. The `current_mode_update` that
     // announces it arrives before session/new returns, so the runtime is not in
@@ -3100,15 +3143,21 @@ export class ChatController implements AcpHost {
     this.showOptions(rt, rt.mode);
     try {
       if (mode && mode !== currentMode) {
-        await rt.client.setConfigOption(rt.id, "mode", mode);
+        const result = await rt.client.setConfigOption(rt.id, "mode", mode);
         rt.mode = mode;
+        this.publishOptions(rt, result.configOptions);
       }
       // Only re-apply a remembered model if it's still an available model
       // (when we know the list); otherwise keep the session's own default.
       const modelKnown = cachedFamilies().length === 0 || !!familyOf(model);
       if (model && modelKnown) {
-        await rt.client.setConfigOption(rt.id, "model", model);
+        const result = await rt.client.setConfigOption(rt.id, "model", model);
         rt.model = model;
+        this.publishOptions(rt, result.configOptions);
+      }
+      if (thoughtLevel && thoughtOption(rt.configOptions)) {
+        const result = await rt.client.setConfigOption(rt.id, "thought_level", thoughtLevel);
+        this.publishOptions(rt, result.configOptions);
       }
       if (!this.showOptions(rt, rt.mode, rt.model)) {
         return;
@@ -3128,7 +3177,8 @@ export class ChatController implements AcpHost {
     if (rt) {
       rt.mode = mode;
       try {
-        await rt.client.setConfigOption(rt.id, "mode", mode);
+        const result = await rt.client.setConfigOption(rt.id, "mode", mode);
+        this.publishOptions(rt, result.configOptions);
       } catch (err) {
         this.log(`[set-mode-failed] ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -3162,13 +3212,34 @@ export class ChatController implements AcpHost {
     }
   }
 
+  private async setSessionConfig(configId: string, value: unknown): Promise<void> {
+    const rt = this.active();
+    const option = rt?.configOptions?.find((item) => item.id === configId);
+    if (!rt || !option || (typeof value !== "string" && typeof value !== "boolean")) {
+      return;
+    }
+    if (option.type === "select" && (typeof value !== "string" || !configChoices(option).some((choice) => choice.value === value))) {
+      return;
+    }
+    try {
+      const result = await rt.client.setConfigOption(rt.id, configId, value);
+      this.publishOptions(rt, result.configOptions);
+      if (configId === "thought_level" && typeof value === "string") {
+        await this.cfg().update("defaultThoughtLevel", value, vscode.ConfigurationTarget.Workspace);
+      }
+    } catch (err) {
+      this.log(`[set-config-failed] ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   private async setModel(model: string): Promise<void> {
     this.currentModel = model;
     const rt = this.active();
     if (rt) {
       rt.model = model;
       try {
-        await rt.client.setConfigOption(rt.id, "model", model);
+        const result = await rt.client.setConfigOption(rt.id, "model", model);
+        this.publishOptions(rt, result.configOptions);
       } catch (err) {
         this.log(`[set-model-failed] ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -5287,13 +5358,13 @@ function imageOf(content: any): { mimeType?: string; data: string } | null {
 // these so the webview can render web search / fetch / MCP tools distinctly.
 function toolMeta(u: any): { inferenceToolName?: string; toolName?: string; eventType?: string } | undefined {
   const m = u && u._meta;
-  if (!m || typeof m !== "object") {
-    return undefined;
-  }
   const out: { inferenceToolName?: string; toolName?: string; eventType?: string } = {};
-  if (typeof m["cognition.ai/inferenceToolName"] === "string") out.inferenceToolName = m["cognition.ai/inferenceToolName"];
-  if (typeof m["cognition.ai/toolName"] === "string") out.toolName = m["cognition.ai/toolName"];
-  if (typeof m["cognition.ai/eventType"] === "string") out.eventType = m["cognition.ai/eventType"];
+  if (typeof u?.name === "string") out.inferenceToolName = u.name;
+  if (m && typeof m === "object") {
+    if (typeof m["cognition.ai/inferenceToolName"] === "string") out.inferenceToolName = m["cognition.ai/inferenceToolName"];
+    if (typeof m["cognition.ai/toolName"] === "string") out.toolName = m["cognition.ai/toolName"];
+    if (typeof m["cognition.ai/eventType"] === "string") out.eventType = m["cognition.ai/eventType"];
+  }
   return Object.keys(out).length ? out : undefined;
 }
 

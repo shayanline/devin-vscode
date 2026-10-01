@@ -46,6 +46,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     attach: $("attach"),
     modeDD: $("mode-dd"),
     modelDD: $("model-dd"),
+    fusionDD: $("fusion-dd"),
     thinkingDD: $("thinking-dd"),
     inputBox: $("input-box"),
     composer: $("composer"),
@@ -103,6 +104,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // Model picker lists families; a separate thinking picker holds the effort
   // variants of the selected family (Copilot-style).
   let modelFamilies = [];
+  let modelChoices = {};
+  let thoughtLevels = [];
+  let currentThoughtLevel = "";
   let currentModelUid = "";
   const savedState = vscode.getState() || {};
   const pinnedModelIds = new Set(Array.isArray(savedState.pinnedModels) ? savedState.pinnedModels : []);
@@ -118,6 +122,10 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     itemHover: showModelHover,
     itemLeave: scheduleModelHoverClose,
     onClose: closeModelHover
+  });
+  const fusionDropdown = createDropdown(el.fusionDD, onFusionSelect, {
+    staticIcon: "codicon-git-compare",
+    ariaLabel: "Fusion pairing"
   });
   const thinkingDropdown = createDropdown(el.thinkingDD, onThinkingSelect, {
     staticIcon: "codicon-thinking",
@@ -331,14 +339,37 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     currentModelUid = fam.default;
     currentModelLabel = fam.name || "";
     vscode.postMessage({ type: "setModel", model: fam.default });
-    updateThinking(fam, fam.default);
+    updateModelConfig(fam, fam.default);
   }
-  function onThinkingSelect(uid) {
+  function onFusionSelect(uid) {
     currentModelUid = uid;
     vscode.postMessage({ type: "setModel", model: uid });
   }
-  function updateThinking(fam, currentUid) {
-    if (fam && (fam.variants || []).length > 1) {
+  function onThinkingSelect(value) {
+    if (thoughtLevels.length) {
+      currentThoughtLevel = value;
+      vscode.postMessage({ type: "setConfigOption", configId: "thought_level", value });
+      return;
+    }
+    currentModelUid = value;
+    vscode.postMessage({ type: "setModel", model: value });
+  }
+  function pairingName(choice) {
+    const name = String(choice.name || choice.value).replace(/^Fusion \(/, "").replace(/\)$/, "").replace(/ High(?: Thinking)?(?= \+)/, "");
+    return { ...choice, name };
+  }
+  function updateModelConfig(fam, currentUid) {
+    const pairs = fam?.id === "fusion" ? modelChoices.fusion || [] : [];
+    if (pairs.length) {
+      fusionDropdown.set(pairs.map(pairingName), currentUid);
+      el.fusionDD.classList.remove("hidden");
+    } else {
+      el.fusionDD.classList.add("hidden");
+    }
+    if (thoughtLevels.length) {
+      thinkingDropdown.set(thoughtLevels, currentThoughtLevel);
+      el.thinkingDD.classList.remove("hidden");
+    } else if (fam && (fam.variants || []).length > 1) {
       thinkingDropdown.set(fam.variants.map((v) => ({
         ...v,
         badges: variantBadges(v)
@@ -383,7 +414,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     }
     items.push(...models.map((f) => item(f, "Models")));
     modelDropdown.set(items, fam ? fam.id : "");
-    updateThinking(fam, currentModelUid);
+    updateModelConfig(fam, currentModelUid);
   }
   function selectModelUid(uid) {
     const fam = familyOfUid(uid);
@@ -391,7 +422,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     currentModelUid = uid;
     currentModelLabel = fam.name || "";
     modelDropdown.setCurrent(fam.id);
-    updateThinking(fam, uid);
+    updateModelConfig(fam, uid);
   }
 
   // --- View state ----------------------------------------------------------
@@ -7217,6 +7248,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       case "workspace": break;
       case "options":
         modeDropdown.set((m.modes || []).map((mode) => mode.value === "bypass" ? { ...mode, name: "Bypass" } : mode), m.currentMode);
+        modelChoices = m.modelChoices || {};
+        thoughtLevels = Array.isArray(m.thoughtLevels) ? m.thoughtLevels : [];
+        currentThoughtLevel = m.currentThoughtLevel || "";
         applyModelOptions(m.models, m.currentModel);
         break;
       case "commands": commands = Array.isArray(m.commands) ? m.commands : []; break;

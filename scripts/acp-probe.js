@@ -95,6 +95,8 @@ const EXTENSION_CAPS = [
   "revert",
   "subagentSupport",
   "subagentControl",
+  "groupedSessionConfigOptions",
+  "multiRootWorkspace",
   "requestDiagnostics",
   "documentLifecycle",
   "stopOnReject",

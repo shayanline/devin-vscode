@@ -38,14 +38,21 @@ export interface ConfigOption {
   description?: string;
   category?: string;
   type?: string;
-  currentValue?: string;
-  options?: ConfigOptionChoice[];
+  currentValue?: string | boolean;
+  options?: (ConfigOptionChoice | ConfigOptionGroup)[];
 }
 
 export interface ConfigOptionChoice {
   value: string;
   name?: string;
   description?: string;
+  _meta?: Record<string, unknown>;
+}
+
+export interface ConfigOptionGroup {
+  group: string;
+  name?: string;
+  options: ConfigOptionChoice[];
   _meta?: Record<string, unknown>;
 }
 
@@ -67,8 +74,8 @@ export type SessionUpdate =
   | { sessionUpdate: "agent_thought_chunk"; messageId?: string; content: ContentBlock; _meta?: UpdateMeta }
   | { sessionUpdate: "user_message_chunk"; messageId?: string; content: ContentBlock }
   | { sessionUpdate: "plan"; entries: PlanEntry[] }
-  | { sessionUpdate: "tool_call"; toolCallId: string; title?: string; kind?: string; status?: ToolCallStatus; content?: ToolCallContent[]; rawInput?: unknown; locations?: { path: string; line?: number }[]; _meta?: UpdateMeta }
-  | { sessionUpdate: "tool_call_update"; toolCallId: string; title?: string; kind?: string; status?: ToolCallStatus; content?: ToolCallContent[]; rawInput?: unknown; locations?: { path: string; line?: number }[]; _meta?: UpdateMeta }
+  | { sessionUpdate: "tool_call"; toolCallId: string; name?: string; title?: string; kind?: string; status?: ToolCallStatus; content?: ToolCallContent[]; rawInput?: unknown; locations?: { path: string; line?: number }[]; _meta?: UpdateMeta }
+  | { sessionUpdate: "tool_call_update"; toolCallId: string; name?: string; title?: string; kind?: string; status?: ToolCallStatus; content?: ToolCallContent[]; rawInput?: unknown; locations?: { path: string; line?: number }[]; _meta?: UpdateMeta }
   | { sessionUpdate: "usage_update"; used: number; size: number; cost?: { amount: number; currency: string } }
   | { sessionUpdate: "available_commands_update"; availableCommands: AvailableCommand[] }
   | { sessionUpdate: "current_mode_update"; currentModeId: string }
