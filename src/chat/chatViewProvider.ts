@@ -351,6 +351,10 @@ export class ChatController implements AcpHost {
   private currentMode?: string;
   private currentModel?: string;
   private currentThoughtLevel?: string;
+  // Bumped every time setModel or setFusionModel starts. After each await the
+  // caller checks whether the generation moved, and bails if a newer call has
+  // taken over, so only the latest model change publishes options.
+  private modelGen = 0;
 
   private readonly permissionResolvers = new Map<string, { resolve: (res: RequestPermissionResult) => void; rid: string }>();
   // Shared across surfaces: a request id has to stay unique when a session (and
@@ -3153,6 +3157,7 @@ export class ChatController implements AcpHost {
     rt.mode = currentMode || rt.mode;
     // Show it straight away, if this is the chat being shown at all.
     this.showOptions(rt, rt.mode);
+    const gen = ++this.modelGen;
     try {
       if (mode && mode !== currentMode) {
         const result = await rt.client.setConfigOption(rt.id, "mode", mode);
@@ -3164,11 +3169,13 @@ export class ChatController implements AcpHost {
       const modelKnown = cachedFamilies().length === 0 || !!familyOf(model);
       if (model && modelKnown) {
         const result = await rt.client.setConfigOption(rt.id, "model", model);
+        if (gen !== this.modelGen) return;
         rt.model = model;
         this.publishOptions(rt, result.configOptions);
       }
       if (thoughtLevel && thoughtOption(rt.configOptions)) {
         const result = await rt.client.setConfigOption(rt.id, "thought_level", thoughtLevel);
+        if (gen !== this.modelGen) return;
         this.publishOptions(rt, result.configOptions);
       }
       if (!this.showOptions(rt, rt.mode, rt.model)) {
@@ -3233,6 +3240,11 @@ export class ChatController implements AcpHost {
     if (option.type === "select" && (typeof value !== "string" || !configChoices(option).some((choice) => choice.value === value))) {
       return;
     }
+    // Record the thought level immediately so a concurrent setFusionModel sees
+    // the user's latest choice before its own ACP call returns.
+    if (configId === "thought_level" && typeof value === "string") {
+      this.currentThoughtLevel = value;
+    }
     try {
       const result = await rt.client.setConfigOption(rt.id, configId, value);
       this.publishOptions(rt, result.configOptions);
@@ -3245,6 +3257,7 @@ export class ChatController implements AcpHost {
   }
 
   private async setFusionModel(model: string, thoughtLevel: string): Promise<void> {
+    const gen = ++this.modelGen;
     this.currentModel = model;
     const rt = this.active();
     if (!rt) return;
@@ -3252,13 +3265,19 @@ export class ChatController implements AcpHost {
     try {
       // Apply model first, but do not publish options yet. The model change
       // may reset thought_level on the server, so the second call restores it.
-      await rt.client.setConfigOption(rt.id, "model", model);
-      const result = await rt.client.setConfigOption(rt.id, "thought_level", thoughtLevel);
+      let result = await rt.client.setConfigOption(rt.id, "model", model);
+      if (gen !== this.modelGen) return;
+      // If the user changed the effort level while the model call was in
+      // flight, use their latest choice rather than the stale captured value.
+      const latestThought = this.currentThoughtLevel || thoughtLevel;
+      result = await rt.client.setConfigOption(rt.id, "thought_level", latestThought);
+      if (gen !== this.modelGen) return;
       // Publish once with the final state after both values are applied.
       this.publishOptions(rt, result.configOptions);
     } catch (err) {
       this.log(`[set-fusion-failed] ${err instanceof Error ? err.message : String(err)}`);
     }
+    if (gen !== this.modelGen) return;
     try {
       await this.cfg().update("defaultModel", model, vscode.ConfigurationTarget.Workspace);
     } catch {}
@@ -3270,17 +3289,20 @@ export class ChatController implements AcpHost {
   }
 
   private async setModel(model: string): Promise<void> {
+    const gen = ++this.modelGen;
     this.currentModel = model;
     const rt = this.active();
     if (rt) {
       rt.model = model;
       try {
         const result = await rt.client.setConfigOption(rt.id, "model", model);
+        if (gen !== this.modelGen) return;
         this.publishOptions(rt, result.configOptions);
       } catch (err) {
         this.log(`[set-model-failed] ${err instanceof Error ? err.message : String(err)}`);
       }
     }
+    if (gen !== this.modelGen) return;
     try {
       await this.cfg().update("defaultModel", model, vscode.ConfigurationTarget.Workspace);
     } catch (err) {
