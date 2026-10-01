@@ -5467,7 +5467,20 @@ test("Fusion keeps lead effort and sidekick in one configuration picker", async 
       id: "fusion",
       name: "Fusion",
       default: "fusion-claude-opus-5-high-sidekick-swe-2-medium",
-      variants: [{ value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "Claude Opus 5 High + SWE-2 Medium" }]
+      variants: [
+        { value: "fusion-claude-opus-5-low-sidekick-swe-2-medium", name: "(Claude Opus 5 Low + SWE-2 Medium)" },
+        { value: "fusion-claude-opus-5-medium-sidekick-swe-2-medium", name: "(Claude Opus 5 Medium + SWE-2 Medium)" },
+        { value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "(Claude Opus 5 High + SWE-2 Medium)" },
+        { value: "fusion-claude-opus-5-low-sidekick-swe-2-high", name: "(Claude Opus 5 Low + SWE-2 High)" },
+        { value: "fusion-claude-opus-5-medium-sidekick-swe-2-high", name: "(Claude Opus 5 Medium + SWE-2 High)" },
+        { value: "fusion-claude-opus-5-high-sidekick-swe-2-high", name: "(Claude Opus 5 High + SWE-2 High)" },
+        { value: "fusion-gpt-6-astra-low-sidekick-swe-2-medium", name: "(GPT-6 Astra Low + SWE-2 Medium)" },
+        { value: "fusion-gpt-6-astra-medium-sidekick-swe-2-medium", name: "(GPT-6 Astra Medium + SWE-2 Medium)" },
+        { value: "fusion-gpt-6-astra-high-sidekick-swe-2-medium", name: "(GPT-6 Astra High + SWE-2 Medium)" },
+        { value: "fusion-gpt-6-astra-low-sidekick-swe-2-high", name: "(GPT-6 Astra Low + SWE-2 High)" },
+        { value: "fusion-gpt-6-astra-medium-sidekick-swe-2-high", name: "(GPT-6 Astra Medium + SWE-2 High)" },
+        { value: "fusion-gpt-6-astra-high-sidekick-swe-2-high", name: "(GPT-6 Astra High + SWE-2 High)" }
+      ]
     }],
     modes: []
   });
@@ -5496,13 +5509,14 @@ test("Fusion keeps lead effort and sidekick in one configuration picker", async 
   assert.ok(unselected.every((b) => !b.querySelector(".dd-check .codicon-check")), "unselected Fusion options have no check icon");
   buttons.find((button) => button.textContent === "GPT-6 Astra").click();
   assert.ok(!picker.querySelector(".dd-menu").classList.contains("hidden"), "the menu stays open while configuring");
-  assert.ok(h.posted.some((message) => message.type === "setFusionModel" && message.model === "fusion-gpt-6-astra-high-sidekick-swe-2-medium" && message.thoughtLevel === "low"));
+  assert.ok(h.posted.some((message) => message.type === "setFusionModel" && message.model === "fusion-gpt-6-astra-low-sidekick-swe-2-medium" && message.thoughtLevel === "low"));
   // After selecting GPT-6 Astra, verify the check icon moved to the new lead.
-  const newLead = buttons.find((b) => b.textContent === "GPT-6 Astra");
+  const option = (label) => [...picker.querySelectorAll(".fusion-config-option")].find((button) => button.textContent === label);
+  const newLead = option("GPT-6 Astra");
   assert.ok(newLead.querySelector(".dd-check .codicon-check"), "the newly selected lead shows a check icon");
-  buttons.find((button) => button.textContent === "High").click();
-  assert.ok(h.posted.some((message) => message.type === "setConfigOption" && message.configId === "thought_level" && message.value === "high"));
-  buttons.find((button) => button.textContent === "SWE-2 High").click();
+  option("High").click();
+  assert.ok(h.posted.some((message) => message.type === "setConfigOption" && message.configId === "thought_level" && message.value === "high" && message.model === "fusion-gpt-6-astra-high-sidekick-swe-2-medium"));
+  option("SWE-2 High").click();
   assert.ok(h.posted.some((message) => message.type === "setFusionModel" && message.model === "fusion-gpt-6-astra-high-sidekick-swe-2-high" && message.thoughtLevel === "high"));
   assert.strictEqual(h.errors().length, 0);
 });
@@ -5594,10 +5608,12 @@ test("Fusion effort levels that arrive late fill the open configuration menu", a
   assert.ok(!picker.classList.contains("hidden"), "Fusion picker is visible");
   picker.querySelector(".dd-btn").click();
   const labels = () => [...picker.querySelectorAll(".fusion-config-label")].map((el) => el.textContent);
-  assert.deepStrictEqual(labels(), ["Lead model", "Sidekick"], "no Lead effort section while the levels are unknown");
+  const effortValues = () => [...picker.querySelectorAll(".fusion-config-option[data-kind=effort]")].map((el) => el.dataset.value);
+  assert.deepStrictEqual(labels(), ["Lead model", "Lead effort", "Sidekick"], "the catalogue supplies an effort section before ACP does");
+  assert.deepStrictEqual(effortValues(), ["high"], "only the effort the variants prove");
 
   // The options response for the Fusion model lands while the menu is still
-  // open, so the effort section has to appear without closing and reopening.
+  // open, so the effort section has to update without closing and reopening.
   h.post({
     type: "options", currentMode: "accept-edits",
     currentModel: "fusion-claude-opus-5-high-sidekick-swe-2-medium",
@@ -5607,9 +5623,7 @@ test("Fusion effort levels that arrive late fill the open configuration menu", a
   await h.settle(20);
 
   assert.ok(!picker.querySelector(".dd-menu").classList.contains("hidden"), "the menu is still open");
-  const effortSection = [...picker.querySelectorAll(".fusion-config-label")].find((el) => el.textContent === "Lead effort");
-  assert.ok(effortSection, "Lead effort section appears once the levels arrive");
-  assert.strictEqual(effortSection.parentElement.querySelectorAll(".fusion-config-option").length, 2, "both effort levels are rendered");
+  assert.deepStrictEqual(effortValues(), ["low", "high"], "the reported levels replace the catalogue guess");
   assert.strictEqual(h.errors().length, 0);
 });
 
@@ -5725,7 +5739,12 @@ test("a model that reports no effort clears the previous model's effort", async 
   h.post({ type: "ready" });
   h.post({ type: "body", body: "thread" });
   const allModels = [
-    { id: "fusion", name: "Fusion", default: "fusion-claude-opus-5-high-sidekick-swe-2-medium", variants: [{ value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "Fusion" }] },
+    { id: "fusion", name: "Fusion", default: "fusion-claude-opus-5-low-sidekick-swe-2-medium", variants: [
+      { value: "fusion-claude-opus-5-low-sidekick-swe-2-medium", name: "(Claude Opus 5 Low + SWE-2 Medium)" },
+      { value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "(Claude Opus 5 High + SWE-2 Medium)" },
+      { value: "fusion-claude-opus-5-low-sidekick-swe-2-high", name: "(Claude Opus 5 Low + SWE-2 High)" },
+      { value: "fusion-claude-opus-5-high-sidekick-swe-2-high", name: "(Claude Opus 5 High + SWE-2 High)" }
+    ] },
     { id: "gpt", name: "GPT-5", default: "gpt-5-xhigh", variants: [{ value: "gpt-5-xhigh", name: "GPT-5 XHigh" }] }
   ];
   const fusionChoices = [
@@ -5736,7 +5755,7 @@ test("a model that reports no effort clears the previous model's effort", async 
 
   h.post({
     type: "options", currentMode: "accept-edits",
-    currentModel: "fusion-claude-opus-5-high-sidekick-swe-2-medium",
+    currentModel: "fusion-claude-opus-5-low-sidekick-swe-2-medium",
     currentThoughtLevel: "high", thoughtLevels: levels,
     modelChoices: { fusion: fusionChoices }, models: allModels, modes: []
   });
@@ -5754,6 +5773,7 @@ test("a model that reports no effort clears the previous model's effort", async 
     currentModel: "gpt-5-xhigh", currentThoughtLevel: "",
     thoughtLevels: [], modelChoices: {}, models: allModels, modes: []
   });
+  h.post({ type: "modelConfigApplied", requestId: 1, model: "gpt-5-xhigh", thoughtLevel: "" });
   await h.settle(20);
   assert.ok(h.document.querySelector("#thinking-dd").classList.contains("hidden"), "no effort and one variant means no picker");
   assert.ok(picker.classList.contains("hidden"), "the Fusion picker is hidden on a normal model");
@@ -5804,6 +5824,333 @@ test("Fusion is configurable before a session reports grouped choices", async ()
   const leadOptions = [...leadSection.parentElement.querySelectorAll(".fusion-config-option")].map((el) => el.textContent);
   assert.strictEqual(leadOptions.length, 3, "one option per lead, not per pair");
   assert.ok(!leadOptions[0].startsWith("("), "the bracketed variant name parses cleanly");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("Fusion derives its effort levels from the catalogue variants before ACP reports them", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  const fusionVariants = [];
+  for (const lead of ["claude-opus-5", "gpt-6-astra"]) {
+    for (const effort of ["low", "medium", "high"]) {
+      for (const sidekick of ["swe-2-medium", "swe-2-high"]) {
+        fusionVariants.push({ value: `fusion-${lead}-${effort}-sidekick-${sidekick}`, name: `(${lead} ${effort} + ${sidekick})` });
+      }
+    }
+  }
+  const allModels = [
+    { id: "fusion", name: "Fusion", default: "fusion-claude-opus-5-high-sidekick-swe-2-medium", variants: fusionVariants },
+    { id: "gpt", name: "GPT-5", default: "gpt-5-xhigh", variants: [
+      { value: "gpt-5-medium", name: "GPT-5 Medium" },
+      { value: "gpt-5-xhigh", name: "GPT-5 XHigh" }
+    ] }
+  ];
+  h.post({
+    type: "options", currentMode: "accept-edits",
+    currentModel: "gpt-5-xhigh", currentThoughtLevel: "",
+    thoughtLevels: [], modelChoices: {}, models: allModels, modes: []
+  });
+  await h.settle(20);
+
+  const modelDD = h.document.querySelector("#model-dd");
+  modelDD.querySelector(".dd-btn").click();
+  [...modelDD.querySelectorAll(".dd-item")].find((el) => el.textContent.includes("Fusion")).click();
+  const picker = h.document.querySelector("#fusion-dd");
+  assert.ok(!picker.classList.contains("hidden"), "the Fusion picker shows before ACP reports");
+  assert.ok(h.document.querySelector("#thinking-dd").classList.contains("hidden"), "the normal thinking picker stays hidden on Fusion");
+  picker.querySelector(".dd-btn").click();
+  const effortValues = () => [...picker.querySelectorAll(".fusion-config-option[data-kind=effort]")].map((el) => el.dataset.value);
+  assert.deepStrictEqual(effortValues(), ["low", "medium", "high"], "only the lead's real efforts, never GPT's xhigh");
+
+  const postedBefore = h.posted.length;
+  [...picker.querySelectorAll(".fusion-config-option[data-kind=effort]")].find((el) => el.dataset.value === "low").click();
+  const effortPost = h.posted.slice(postedBefore).find((message) => message.type === "setConfigOption");
+  assert.ok(effortPost, "an effort change is sent");
+  assert.strictEqual(effortPost.configId, "thought_level");
+  assert.strictEqual(effortPost.value, "low");
+  assert.strictEqual(effortPost.model, "fusion-claude-opus-5-low-sidekick-swe-2-medium", "the uid carries the chosen effort");
+  assert.strictEqual(typeof effortPost.requestId, "number", "the request is tagged for acknowledgement");
+
+  const grouped = [
+    { value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "Fusion (Claude Opus 5 High + SWE-2 Medium)" },
+    { value: "fusion-gpt-6-astra-high-sidekick-swe-2-high", name: "Fusion (GPT-6 Astra High Thinking + SWE-2 High)" }
+  ];
+  const noCatalogue = [
+    { id: "fusion", name: "Fusion", default: "fusion-claude-opus-5-high-sidekick-swe-2-medium", variants: [] },
+    allModels[1]
+  ];
+  h.post({
+    type: "options", currentMode: "accept-edits",
+    currentModel: "fusion-claude-opus-5-high-sidekick-swe-2-medium",
+    currentThoughtLevel: "", thoughtLevels: [],
+    modelChoices: { fusion: grouped }, models: noCatalogue, modes: []
+  });
+  await h.settle(20);
+  assert.ok(!picker.querySelector(".dd-menu").classList.contains("hidden"), "the menu is still open");
+  const status = picker.querySelector(".fusion-config-loading");
+  assert.ok(status, "a loading status stands in for the missing effort row");
+  assert.strictEqual(status.getAttribute("role"), "status");
+  assert.strictEqual(status.getAttribute("aria-busy"), "true");
+  assert.strictEqual(status.textContent, "Loading effort options...");
+
+  h.post({
+    type: "options", currentMode: "accept-edits",
+    currentModel: "fusion-claude-opus-5-high-sidekick-swe-2-medium",
+    currentThoughtLevel: "", thoughtLevels: [{ value: "low", name: "Low" }, { value: "high", name: "High" }],
+    modelChoices: { fusion: grouped }, models: noCatalogue, modes: []
+  });
+  await h.settle(20);
+  assert.ok(!picker.querySelector(".dd-menu").classList.contains("hidden"), "the menu stays open");
+  assert.deepStrictEqual(effortValues(), ["low", "high"], "the reported levels fill the open menu");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("only the latest model change acknowledgement can reconcile a rapid series of picks", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  const fusionVariants = [];
+  for (const effort of ["low", "medium", "high"]) {
+    for (const sidekick of ["swe-2-medium", "swe-2-high"]) {
+      fusionVariants.push({ value: `fusion-claude-opus-5-${effort}-sidekick-${sidekick}`, name: "(Claude Opus 5 + SWE-2)" });
+    }
+  }
+  const allModels = [
+    { id: "fusion", name: "Fusion", default: "fusion-claude-opus-5-low-sidekick-swe-2-medium", variants: fusionVariants },
+    { id: "gpt", name: "GPT-5", default: "gpt-5-xhigh", variants: [{ value: "gpt-5-xhigh", name: "GPT-5 XHigh" }] }
+  ];
+  const levels = [{ value: "low", name: "Low" }, { value: "medium", name: "Medium" }, { value: "high", name: "High" }];
+  const staleOptions = (thoughtLevel, currentModel) => h.post({
+    type: "options", currentMode: "accept-edits", currentModel, currentThoughtLevel: thoughtLevel,
+    thoughtLevels: levels, modelChoices: {}, models: allModels, modes: []
+  });
+  h.post({
+    type: "options", currentMode: "accept-edits",
+    currentModel: "fusion-claude-opus-5-low-sidekick-swe-2-medium",
+    currentThoughtLevel: "low", thoughtLevels: levels,
+    modelChoices: {}, models: allModels, modes: []
+  });
+  await h.settle(20);
+
+  const picker = h.document.querySelector("#fusion-dd");
+  picker.querySelector(".dd-btn").click();
+  const title = () => picker.querySelector(".fusion-config-lead-title").textContent;
+  const effortButton = (value) => [...picker.querySelectorAll(".fusion-config-option[data-kind=effort]")].find((el) => el.dataset.value === value);
+  const sentEfforts = () => h.posted.filter((message) => message.type === "setConfigOption" && message.configId === "thought_level");
+
+  effortButton("low").click();
+  effortButton("high").click();
+  h.post({ type: "modelConfigApplied", requestId: 1, model: "fusion-claude-opus-5-low-sidekick-swe-2-medium", thoughtLevel: "low" });
+  staleOptions("low", "fusion-claude-opus-5-low-sidekick-swe-2-medium");
+  h.post({ type: "model", model: "fusion-claude-opus-5-low-sidekick-swe-2-medium" });
+  assert.strictEqual(title(), "Opus 5 · High", "an old acknowledgement cannot roll back a newer pick");
+  assert.strictEqual(effortButton("high").classList.contains("selected"), true);
+
+  effortButton("medium").click();
+  h.post({ type: "modelConfigApplied", requestId: 2, model: "fusion-claude-opus-5-high-sidekick-swe-2-medium", thoughtLevel: "high" });
+  staleOptions("high", "fusion-claude-opus-5-high-sidekick-swe-2-medium");
+  assert.strictEqual(title(), "Opus 5 · Medium");
+
+  effortButton("low").click();
+  h.post({ type: "modelConfigApplied", requestId: 3, model: "fusion-claude-opus-5-medium-sidekick-swe-2-medium", thoughtLevel: "medium" });
+  effortButton("high").click();
+  h.post({ type: "modelConfigApplied", requestId: 4, model: "fusion-claude-opus-5-low-sidekick-swe-2-medium", thoughtLevel: "high" });
+  staleOptions("medium", "fusion-claude-opus-5-medium-sidekick-swe-2-medium");
+  assert.strictEqual(title(), "Opus 5 · High", "the guard is released only by the latest request id");
+
+  assert.deepStrictEqual(sentEfforts().map((message) => [message.value, message.requestId]), [
+    ["low", 1], ["high", 2], ["medium", 3], ["low", 4], ["high", 5]
+  ], "every pick went out tagged, in order");
+
+  h.post({ type: "modelConfigApplied", requestId: 5, model: "fusion-claude-opus-5-high-sidekick-swe-2-medium", thoughtLevel: "high" });
+  staleOptions("medium", "fusion-claude-opus-5-high-sidekick-swe-2-medium");
+  await h.settle(20);
+  assert.strictEqual(title(), "Opus 5 · Medium", "a post-ack authoritative update applies normally");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("unchanged Fusion options keep the open menu's nodes and focus", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  const allModels = [
+    { id: "fusion", name: "Fusion", default: "fusion-claude-opus-5-high-sidekick-swe-2-medium", variants: [{ value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "Fusion" }] },
+    { id: "gpt", name: "GPT-5", default: "gpt-5-xhigh", variants: [{ value: "gpt-5-xhigh", name: "GPT-5 XHigh" }] }
+  ];
+  const grouped = [
+    { value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "Fusion (Claude Opus 5 High + SWE-2 Medium)" },
+    { value: "fusion-claude-opus-5-high-sidekick-swe-2-high", name: "Fusion (Claude Opus 5 High + SWE-2 High)" }
+  ];
+  const levels = [{ value: "low", name: "Low" }, { value: "high", name: "High" }];
+  const options = () => ({
+    type: "options", currentMode: "accept-edits",
+    currentModel: "fusion-claude-opus-5-high-sidekick-swe-2-medium",
+    currentThoughtLevel: "low", thoughtLevels: levels,
+    modelChoices: { fusion: grouped }, models: allModels, modes: []
+  });
+  h.post(options());
+  await h.settle(20);
+
+  const picker = h.document.querySelector("#fusion-dd");
+  picker.querySelector(".dd-btn").click();
+  const effortButton = (value) => [...picker.querySelectorAll(".fusion-config-option[data-kind=effort]")].find((el) => el.dataset.value === value);
+  const high = effortButton("high");
+  high.focus();
+  assert.strictEqual(h.document.activeElement, high, "the effort button holds focus");
+
+  h.post(options());
+  await h.settle(20);
+  assert.strictEqual(effortButton("high"), high, "the button node survives an identical options reply");
+  assert.strictEqual(h.document.activeElement, high, "focus survives it too");
+
+  h.post({ ...options(), thoughtLevels: [...levels, { value: "xhigh", name: "XHigh" }] });
+  await h.settle(20);
+  const effortValues = () => [...picker.querySelectorAll(".fusion-config-option[data-kind=effort]")].map((el) => el.dataset.value);
+  assert.notStrictEqual(effortButton("high"), high, "new effort choices rebuild the menu");
+  assert.deepStrictEqual(effortValues(), ["low", "high", "xhigh"], "the new choice is rendered");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a stale model change acknowledgement cannot paint a new session", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  const allModels = [
+    { id: "fusion", name: "Fusion", default: "fusion-claude-opus-5-low-sidekick-swe-2-medium", variants: [
+      { value: "fusion-claude-opus-5-low-sidekick-swe-2-medium", name: "(Claude Opus 5 Low + SWE-2 Medium)" },
+      { value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "(Claude Opus 5 High + SWE-2 Medium)" }
+    ] },
+    { id: "gpt", name: "GPT-5", default: "gpt-5-xhigh", variants: [{ value: "gpt-5-xhigh", name: "GPT-5 XHigh" }] }
+  ];
+  const levels = [{ value: "low", name: "Low" }, { value: "high", name: "High" }];
+  h.post({
+    type: "options", currentMode: "accept-edits",
+    currentModel: "fusion-claude-opus-5-low-sidekick-swe-2-medium",
+    currentThoughtLevel: "low", thoughtLevels: levels,
+    modelChoices: {}, models: allModels, modes: []
+  });
+  await h.settle(20);
+
+  const picker = h.document.querySelector("#fusion-dd");
+  picker.querySelector(".dd-btn").click();
+  [...picker.querySelectorAll(".fusion-config-option[data-kind=effort]")].find((el) => el.dataset.value === "high").click();
+  const effortPost = h.posted.slice().reverse().find((message) => message.type === "setConfigOption");
+  assert.strictEqual(effortPost.requestId, 1, "the pick is tagged");
+  assert.strictEqual(picker.querySelector(".fusion-config-lead-title").textContent, "Opus 5 · High", "the optimistic pick is on the button");
+
+  h.post({ type: "clear", reset: true });
+  h.post({ type: "sessionReady", sessionId: "session-two" });
+  h.post({
+    type: "options", currentMode: "accept-edits",
+    currentModel: "gpt-5-xhigh", currentThoughtLevel: "", thoughtLevels: [],
+    modelChoices: {}, models: allModels, modes: []
+  });
+  h.post({ type: "model", model: "gpt-5-xhigh" });
+  await h.settle(20);
+  assert.strictEqual(h.document.querySelector("#model-dd .dd-label").textContent, "GPT-5", "the new session's own model is on screen");
+  assert.ok(picker.classList.contains("hidden"), "Fusion is not selected in the new session");
+
+  h.post({ type: "modelConfigApplied", requestId: 1, model: "fusion-claude-opus-5-low-sidekick-swe-2-medium", thoughtLevel: "high" });
+  await h.settle(20);
+  assert.strictEqual(h.document.querySelector("#model-dd .dd-label").textContent, "GPT-5", "the stale acknowledgement cannot paint over it");
+  assert.ok(picker.classList.contains("hidden"), "the stale ack does not drag Fusion back on screen");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a session arriving keeps a pending pick guarded", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  const options = (thoughtLevel) => ({
+    type: "options", currentMode: "accept-edits",
+    currentModel: "claude-medium", currentThoughtLevel: thoughtLevel,
+    thoughtLevels: [{ value: "low", name: "Low" }, { value: "high", name: "High" }],
+    modelChoices: {},
+    models: [{ id: "claude", name: "Claude", default: "claude-medium", variants: [
+      { value: "claude-medium", name: "Claude Medium" }, { value: "claude-high", name: "Claude High" }
+    ] }],
+    modes: []
+  });
+  h.post(options("low"));
+  await h.settle(20);
+
+  const thinking = h.document.querySelector("#thinking-dd");
+  const label = () => thinking.querySelector(".dd-label").textContent;
+  thinking.querySelector(".dd-btn").click();
+  [...thinking.querySelectorAll(".dd-item")].find((el) => el.textContent === "High").click();
+  assert.strictEqual(label(), "High", "the pick is optimistic");
+  assert.strictEqual(h.posted.at(-1).requestId, 1, "the pick is tagged");
+
+  h.post({ type: "sessionReady", sessionId: "s-new" });
+  h.post(options("low"));
+  await h.settle(20);
+  assert.strictEqual(label(), "High", "a stale reply cannot undo the pick just because the session arrived");
+
+  h.post({ type: "modelConfigApplied", requestId: 1, model: "claude-medium", thoughtLevel: "high" });
+  await h.settle(20);
+  assert.strictEqual(label(), "High", "the acknowledgement for the pending pick still applies");
+
+  h.post(options("low"));
+  await h.settle(20);
+  assert.strictEqual(label(), "Low", "once acknowledged, authoritative replies apply again");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("catalogue lead names strip the effort suffix whatever level it carries", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({
+    type: "options", currentMode: "accept-edits",
+    currentModel: "fusion-gpt-6-astra-low-sidekick-swe-2-medium",
+    currentThoughtLevel: "low",
+    thoughtLevels: [{ value: "low", name: "Low" }, { value: "medium", name: "Medium" }, { value: "high", name: "High" }],
+    modelChoices: {},
+    models: [{
+      id: "fusion", name: "Fusion", default: "fusion-gpt-6-astra-low-sidekick-swe-2-medium",
+      variants: [
+        { value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "(Claude Opus 5 High Thinking + SWE-2 Medium)" },
+        { value: "fusion-claude-opus-5-low-sidekick-swe-2-medium", name: "(Claude Opus 5 Low Thinking + SWE-2 Medium)" },
+        { value: "fusion-gpt-6-astra-high-sidekick-swe-2-medium", name: "(GPT-6 Astra High Thinking + SWE-2 Medium)" },
+        { value: "fusion-gpt-6-astra-medium-sidekick-swe-2-medium", name: "(GPT-6 Astra Medium Thinking + SWE-2 Medium)" },
+        { value: "fusion-gpt-6-astra-low-sidekick-swe-2-medium", name: "(GPT-6 Astra Low Thinking + SWE-2 Medium)" }
+      ]
+    }],
+    modes: []
+  });
+  await h.settle(20);
+  const picker = h.document.querySelector("#fusion-dd");
+  picker.querySelector(".dd-btn").click();
+  const leadNames = [...picker.querySelectorAll(".fusion-config-option[data-kind=lead]")].map((el) => el.textContent);
+  assert.deepStrictEqual(leadNames, ["Claude Opus 5", "GPT-6 Astra"]);
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a reply about another Fusion lead cannot move the shown effort", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  const variants = [
+    { value: "fusion-claude-opus-5-low-sidekick-swe-2-medium", name: "(Claude Opus 5 Low + SWE-2 Medium)" },
+    { value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "(Claude Opus 5 High + SWE-2 Medium)" },
+    { value: "fusion-gpt-6-astra-low-sidekick-swe-2-medium", name: "(GPT-6 Astra Low + SWE-2 Medium)" },
+    { value: "fusion-gpt-6-astra-high-sidekick-swe-2-medium", name: "(GPT-6 Astra High + SWE-2 Medium)" }
+  ];
+  const allModels = [{ id: "fusion", name: "Fusion", default: "fusion-claude-opus-5-high-sidekick-swe-2-medium", variants }];
+  const levels = [{ value: "low", name: "Low" }, { value: "high", name: "High" }];
+  const options = (currentModel, currentThoughtLevel) => ({
+    type: "options", currentMode: "accept-edits", currentModel, currentThoughtLevel,
+    thoughtLevels: levels, modelChoices: {}, models: allModels, modes: []
+  });
+  h.post(options("fusion-claude-opus-5-high-sidekick-swe-2-medium", "high"));
+  await h.settle(20);
+  const picker = h.document.querySelector("#fusion-dd");
+  const title = () => picker.querySelector(".fusion-config-lead-title").textContent;
+  assert.strictEqual(title(), "Opus 5 · High");
+  h.post(options("fusion-gpt-6-astra-low-sidekick-swe-2-medium", "low"));
+  await h.settle(20);
+  assert.strictEqual(title(), "Opus 5 · High", "a reply about GPT-6 Astra cannot change Opus 5's shown effort");
   assert.strictEqual(h.errors().length, 0);
 });
 

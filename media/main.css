@@ -954,6 +954,11 @@ body {
   color: var(--vscode-list-activeSelectionForeground, inherit);
 }
 
+.fusion-config-loading {
+  padding: 5px 7px;
+  color: var(--vscode-descriptionForeground);
+}
+
 .fusion-config-option {
   display: inline-flex;
   align-items: center;

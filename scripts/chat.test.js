@@ -1312,4 +1312,404 @@ test("a watched list update follows an in-flight session refresh", posixOnly, as
   await h.dispose();
 });
 
+test("a model pick waits for a stored session to finish loading", posixOnly, async () => {
+  const h = createChat({ config: { defaultMode: "", defaultModel: "", defaultThoughtLevel: "" } });
+  let release;
+  try {
+    await h.ready();
+    const baseline = await h.startChat("baseline config");
+    const configOptions = JSON.parse(JSON.stringify(h.controller.runtimes.get(baseline).configOptions));
+    h.store.add("stored", h.cwd);
+
+    let loadedRuntime;
+    const blocked = new Promise((resolve) => { release = resolve; });
+    h.controller.loadWithTakeover = async (rt) => {
+      loadedRuntime = rt;
+      await blocked;
+      return { configOptions };
+    };
+
+    h.send({ type: "loadSession", id: "stored" });
+    assert.ok(await h.until(() => !!loadedRuntime), "the full session load entered");
+    assert.strictEqual(loadedRuntime.replaying, true, "the stored session is still replaying");
+
+    const calls = [];
+    const original = loadedRuntime.client.setConfigOption.bind(loadedRuntime.client);
+    loadedRuntime.client.setConfigOption = async (sessionId, configId, value) => {
+      calls.push([configId, value]);
+      return original(sessionId, configId, value);
+    };
+    h.send({
+      type: "setConfigOption",
+      configId: "thought_level",
+      value: "low",
+      model: "fusion-claude-opus-5-high-sidekick-swe-2-medium",
+      requestId: 51
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.deepStrictEqual(calls, [], "the config RPC waits for the full session load");
+
+    release();
+    assert.ok(await h.until(() => h.postsOf("modelConfigApplied").some((message) => message.requestId === 51)), "the request is acknowledged after loading");
+    const ack = h.postsOf("modelConfigApplied").find((message) => message.requestId === 51);
+    assert.strictEqual(loadedRuntime.configOptions.find((option) => option.id === "thought_level").currentValue, "low");
+    assert.strictEqual(ack.thoughtLevel, "low", "the acknowledgement keeps the user's effort instead of the loaded high effort");
+  } finally {
+    release?.();
+    await h.dispose();
+  }
+});
+
+test("model picks serialize and coalesce to the latest full selection", posixOnly, async () => {
+  const h = createChat({ config: { defaultMode: "", defaultModel: "", defaultThoughtLevel: "" } });
+  const vscode = globalThis.__dvVscode;
+  const writes = [];
+  const realGetConfiguration = vscode.workspace.getConfiguration;
+  vscode.workspace.getConfiguration = () => ({
+    get: (key, fallback) => (globalThis.__dvConfig && key in globalThis.__dvConfig ? globalThis.__dvConfig[key] : fallback),
+    update: async (key, value) => { writes.push([key, value]); }
+  });
+  let release;
+  try {
+    await h.ready();
+    const id = await h.startChat("serialize picks");
+    const rt = h.controller.runtimes.get(id);
+    const original = rt.client.setConfigOption.bind(rt.client);
+    const calls = [];
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const blocked = new Promise((resolve) => { release = resolve; });
+    rt.client.setConfigOption = async (sessionId, configId, value) => {
+      calls.push([configId, value]);
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      try {
+        if (calls.length === 1) await blocked;
+        return await original(sessionId, configId, value);
+      } finally {
+        inFlight -= 1;
+      }
+    };
+
+    h.send({ type: "setConfigOption", configId: "thought_level", value: "low", model: "fusion-claude-opus-5-high-sidekick-swe-2-medium", requestId: 1 });
+    await h.until(() => calls.length === 1);
+    h.send({ type: "setConfigOption", configId: "thought_level", value: "high", model: "fusion-claude-opus-5-high-sidekick-swe-2-medium", requestId: 2 });
+    h.send({ type: "setFusionModel", model: "fusion-gpt-6-astra-high-sidekick-swe-2-high", thoughtLevel: "low", requestId: 3 });
+    h.send({ type: "setConfigOption", configId: "thought_level", value: "high", model: "fusion-gpt-6-astra-high-sidekick-swe-2-high", requestId: 4 });
+
+    const intermediate = JSON.parse(JSON.stringify(rt.configOptions));
+    intermediate.find((option) => option.id === "thought_level").currentValue = "low";
+    rt.client.emit("update", { sessionId: id, update: { sessionUpdate: "config_option_update", configOptions: intermediate } });
+    await h.settle(50);
+    assert.notStrictEqual(h.last("options")?.currentThoughtLevel, "low", "an intermediate notification cannot paint over a pending pick");
+
+    release();
+    assert.ok(await h.until(() => h.postsOf("modelConfigApplied").length === 1), "exactly one acknowledgement arrives");
+
+    assert.strictEqual(maxInFlight, 1, "the agent never saw two config calls at once");
+    assert.deepStrictEqual(calls, [
+      ["thought_level", "low"],
+      ["model", "fusion-gpt-6-astra-high-sidekick-swe-2-high"],
+      ["thought_level", "high"]
+    ], "queued intermediate states are skipped and the final pair and effort land once");
+    const ack = h.postsOf("modelConfigApplied")[0];
+    assert.strictEqual(ack.requestId, 4, "only the latest request is acknowledged");
+    assert.strictEqual(ack.model, "fusion-gpt-6-astra-high-sidekick-swe-2-high");
+    assert.strictEqual(ack.thoughtLevel, "high");
+    assert.strictEqual(h.last("options").currentModel, "fusion-gpt-6-astra-high-sidekick-swe-2-high");
+    assert.strictEqual(h.last("options").currentThoughtLevel, "high");
+    assert.ok(writes.some(([key, value]) => key === "defaultThoughtLevel" && value === "high"), "the applied effort is persisted");
+  } finally {
+    vscode.workspace.getConfiguration = realGetConfiguration;
+    release?.();
+    await h.dispose();
+  }
+});
+
+test("a superseded model change still leaves its confirmed state recorded", posixOnly, async () => {
+  const h = createChat({ config: { defaultMode: "", defaultModel: "", defaultThoughtLevel: "" } });
+  const vscode = globalThis.__dvVscode;
+  const writes = [];
+  const realGetConfiguration = vscode.workspace.getConfiguration;
+  vscode.workspace.getConfiguration = () => ({
+    get: (key, fallback) => (globalThis.__dvConfig && key in globalThis.__dvConfig ? globalThis.__dvConfig[key] : fallback),
+    update: async (key, value) => { writes.push([key, value]); }
+  });
+  let release;
+  const uidA = "fusion-claude-opus-5-high-sidekick-swe-2-medium";
+  const uidB = "fusion-gpt-6-astra-high-sidekick-swe-2-high";
+  try {
+    await h.ready();
+    const id = await h.startChat("record the superseded reply");
+    const rt = h.controller.runtimes.get(id);
+    const original = rt.client.setConfigOption.bind(rt.client);
+    const calls = [];
+    const blocked = new Promise((resolve) => { release = resolve; });
+    rt.client.setConfigOption = async (sessionId, configId, value) => {
+      calls.push([configId, value]);
+      if (calls.length === 1) await blocked;
+      return original(sessionId, configId, value);
+    };
+
+    h.send({ type: "setFusionModel", model: uidB, thoughtLevel: "low", requestId: 21 });
+    assert.ok(await h.until(() => calls.length === 1), "the model change is in flight");
+    h.send({ type: "setConfigOption", configId: "thought_level", value: "low", model: uidA, requestId: 22 });
+    release();
+    assert.ok(await h.until(() => h.postsOf("modelConfigApplied").length === 1), "only the latest request is acknowledged");
+
+    assert.deepStrictEqual(calls, [
+      ["model", uidB],
+      ["model", uidA],
+      ["thought_level", "low"]
+    ], "the queued pick still sends its own model, because B was recorded when its call finished");
+    const ack = h.postsOf("modelConfigApplied")[0];
+    assert.strictEqual(ack.requestId, 22);
+    assert.strictEqual(ack.model, uidA);
+    assert.strictEqual(ack.thoughtLevel, "low");
+    assert.strictEqual(rt.configOptions.find((option) => option.id === "model").currentValue, uidA, "the runtime knows its real model");
+    assert.strictEqual(rt.model, uidA, "the runtime model agrees with the confirmed option");
+  } finally {
+    vscode.workspace.getConfiguration = realGetConfiguration;
+    release?.();
+    await h.dispose();
+  }
+});
+
+test("a failed effort still acknowledges the model that did apply", posixOnly, async () => {
+  const h = createChat({ config: { defaultMode: "", defaultModel: "", defaultThoughtLevel: "" } });
+  const vscode = globalThis.__dvVscode;
+  const writes = [];
+  const realGetConfiguration = vscode.workspace.getConfiguration;
+  vscode.workspace.getConfiguration = () => ({
+    get: (key, fallback) => (globalThis.__dvConfig && key in globalThis.__dvConfig ? globalThis.__dvConfig[key] : fallback),
+    update: async (key, value) => { writes.push([key, value]); }
+  });
+  const uidA = "fusion-claude-opus-5-high-sidekick-swe-2-medium";
+  const uidB = "fusion-gpt-6-astra-high-sidekick-swe-2-high";
+  try {
+    await h.ready();
+    const id = await h.startChat("fail the effort only");
+    const rt = h.controller.runtimes.get(id);
+    const original = rt.client.setConfigOption.bind(rt.client);
+    let failEffort = true;
+    rt.client.setConfigOption = async (sessionId, configId, value) => {
+      if (configId === "thought_level" && failEffort) throw new Error("effort refused");
+      return original(sessionId, configId, value);
+    };
+
+    h.send({ type: "setFusionModel", model: uidB, thoughtLevel: "low", requestId: 31 });
+    assert.ok(await h.until(() => h.postsOf("modelConfigApplied").length === 1), "the failed request is still acknowledged");
+    const ack = h.postsOf("modelConfigApplied")[0];
+    assert.strictEqual(ack.model, uidB, "the model change that did land is reported");
+    assert.strictEqual(ack.thoughtLevel, "high", "the effort the agent actually kept is reported");
+    assert.strictEqual(rt.model, uidB, "the runtime records the applied model");
+    assert.ok(vscode.window.shown.warning.length >= 1, "the failure is surfaced as a warning");
+    assert.ok(!writes.some(([key]) => key === "defaultModel" || key === "defaultThoughtLevel"), "nothing about the failed pick is persisted");
+
+    failEffort = false;
+    h.send({ type: "setConfigOption", configId: "thought_level", value: "low", model: uidA, requestId: 32 });
+    assert.ok(await h.until(() => h.postsOf("modelConfigApplied").length === 2), "a retry after the failure works");
+    const retry = h.postsOf("modelConfigApplied")[1];
+    assert.strictEqual(retry.model, uidA);
+    assert.strictEqual(retry.thoughtLevel, "low");
+  } finally {
+    vscode.workspace.getConfiguration = realGetConfiguration;
+    await h.dispose();
+  }
+});
+
+test("an effort the agent does not offer is neither sent nor persisted", posixOnly, async () => {
+  const h = createChat({ config: { defaultMode: "", defaultModel: "", defaultThoughtLevel: "" } });
+  const vscode = globalThis.__dvVscode;
+  const writes = [];
+  const realGetConfiguration = vscode.workspace.getConfiguration;
+  vscode.workspace.getConfiguration = () => ({
+    get: (key, fallback) => (globalThis.__dvConfig && key in globalThis.__dvConfig ? globalThis.__dvConfig[key] : fallback),
+    update: async (key, value) => { writes.push([key, value]); }
+  });
+  try {
+    await h.ready();
+    await h.startChat("reject unknown effort");
+    h.send({ type: "setConfigOption", configId: "thought_level", value: "xhigh", model: "fusion-claude-opus-5-high-sidekick-swe-2-medium", requestId: 41 });
+    assert.ok(await h.until(() => h.postsOf("modelConfigApplied").length === 1), "the request is still acknowledged");
+    assert.ok(!h.agentSaw("session/set_config_option").some((request) => request.params.configId === "thought_level"), "no call goes out for a value the agent does not list");
+    const ack = h.postsOf("modelConfigApplied")[0];
+    assert.strictEqual(ack.thoughtLevel, "high", "the agent's real effort is acknowledged");
+    assert.ok(writes.some(([key, value]) => key === "defaultThoughtLevel" && value === "high"), "the confirmed effort is persisted");
+    assert.ok(!writes.some(([key, value]) => value === "xhigh"), "the unsupported value is never persisted");
+  } finally {
+    vscode.workspace.getConfiguration = realGetConfiguration;
+    await h.dispose();
+  }
+});
+
+test("a rejected model change restores the confirmed effort and still acknowledges", posixOnly, async () => {
+  const h = createChat({ config: { defaultMode: "", defaultModel: "", defaultThoughtLevel: "" } });
+  const vscode = globalThis.__dvVscode;
+  const writes = [];
+  const realGetConfiguration = vscode.workspace.getConfiguration;
+  vscode.workspace.getConfiguration = () => ({
+    get: (key, fallback) => (globalThis.__dvConfig && key in globalThis.__dvConfig ? globalThis.__dvConfig[key] : fallback),
+    update: async (key, value) => { writes.push([key, value]); }
+  });
+  try {
+    await h.ready();
+    const id = await h.startChat("reject the pick");
+    const rt = h.controller.runtimes.get(id);
+    const original = rt.client.setConfigOption.bind(rt.client);
+    rt.client.setConfigOption = async (sessionId, configId, value) => {
+      if (configId === "thought_level") throw new Error("thought_level refused");
+      return original(sessionId, configId, value);
+    };
+
+    h.send({ type: "setConfigOption", configId: "thought_level", value: "low", model: "fusion-claude-opus-5-high-sidekick-swe-2-medium", requestId: 7 });
+    assert.ok(await h.until(() => h.postsOf("modelConfigApplied").length === 1), "the failed request is still acknowledged");
+    const ack = h.postsOf("modelConfigApplied")[0];
+    assert.strictEqual(ack.requestId, 7);
+    assert.strictEqual(ack.thoughtLevel, "high", "the acknowledgement reports the confirmed effort, not the rejected pick");
+    assert.ok(vscode.window.shown.warning.length >= 1, "the failure is surfaced as a warning");
+    assert.strictEqual(h.last("options").currentThoughtLevel, "high", "the pickers are repainted with confirmed state");
+    assert.ok(!writes.some(([key, value]) => key === "defaultThoughtLevel" && value === "low"), "the rejected effort is not persisted");
+
+    rt.client.setConfigOption = original;
+    h.send({ type: "setConfigOption", configId: "thought_level", value: "low", model: "fusion-claude-opus-5-high-sidekick-swe-2-medium", requestId: 8 });
+    assert.ok(await h.until(() => h.postsOf("modelConfigApplied").length === 2), "a retry after the failure works");
+    assert.strictEqual(h.last("options").currentThoughtLevel, "low");
+  } finally {
+    vscode.workspace.getConfiguration = realGetConfiguration;
+    await h.dispose();
+  }
+});
+
+test("a model change cannot paint the session that replaced the one it was for", posixOnly, async () => {
+  const h = createChat({ config: { defaultMode: "", defaultModel: "", defaultThoughtLevel: "" } });
+  let release;
+  try {
+    await h.ready();
+    const first = await h.startChat("first chat");
+    const rtA = h.controller.runtimes.get(first);
+    const original = rtA.client.setConfigOption.bind(rtA.client);
+    let entered = false;
+    const blocked = new Promise((resolve) => { release = resolve; });
+    rtA.client.setConfigOption = async (sessionId, configId, value) => {
+      entered = true;
+      await blocked;
+      return original(sessionId, configId, value);
+    };
+    h.send({ type: "setConfigOption", configId: "thought_level", value: "low", model: "fusion-claude-opus-5-high-sidekick-swe-2-medium", requestId: 9 });
+    assert.ok(await h.until(() => entered), "the first session's change is in flight");
+
+    const second = await h.startChat("second chat");
+    h.send({ type: "activateSession", id: second });
+    assert.ok(await h.until(() => h.activeId() === second), "the second session is on screen");
+
+    const rtB = h.controller.runtimes.get(second);
+    const bOptions = JSON.parse(JSON.stringify(rtB.configOptions));
+    bOptions.find((option) => option.id === "model").currentValue = "fusion-gpt-6-astra-high-sidekick-swe-2-high";
+    bOptions.find((option) => option.id === "thought_level").currentValue = "low";
+    rtB.client.emit("update", { sessionId: second, update: { sessionUpdate: "config_option_update", configOptions: bOptions } });
+    assert.ok(await h.until(() => h.last("options")?.currentModel === "fusion-gpt-6-astra-high-sidekick-swe-2-high" && h.last("options")?.currentThoughtLevel === "low"), "the active session's own update is not held back by another session's pending change");
+
+    const posts = (type) => h.postsOf(type).length;
+    const beforeRelease = { options: posts("options"), model: posts("model"), ack: posts("modelConfigApplied") };
+    release();
+    await h.controller.modelConfigTail;
+    await h.settle(50);
+    assert.strictEqual(posts("options"), beforeRelease.options, "the released request repaints nothing");
+    assert.strictEqual(posts("model"), beforeRelease.model, "no model message lands either");
+    assert.strictEqual(posts("modelConfigApplied"), beforeRelease.ack, "a request whose session went away is not acknowledged");
+    assert.strictEqual(h.last("options").currentModel, "fusion-gpt-6-astra-high-sidekick-swe-2-high", "the new session's own state stays on screen");
+  } finally {
+    release?.();
+    await h.dispose();
+  }
+});
+
+test("a pick made before any session persists its defaults and applies once one starts", posixOnly, async () => {
+  const vscode = globalThis.__dvVscode;
+  const writes = [];
+  const realGetConfiguration = vscode.workspace.getConfiguration;
+  vscode.workspace.getConfiguration = () => ({
+    get: (key, fallback) => {
+      const written = [...writes].reverse().find(([k]) => k === key);
+      if (written) return written[1];
+      return globalThis.__dvConfig && key in globalThis.__dvConfig ? globalThis.__dvConfig[key] : fallback;
+    },
+    update: async (key, value) => { writes.push([key, value]); }
+  });
+  const h = createChat({ newDelay: 300, config: { defaultMode: "", defaultModel: "", defaultThoughtLevel: "" } });
+  try {
+    await h.ready();
+
+    h.send({ type: "setFusionModel", model: "fusion-gpt-6-astra-high-sidekick-swe-2-high", thoughtLevel: "low", requestId: 11 });
+    assert.ok(await h.until(() => h.postsOf("modelConfigApplied").length === 1), "the pre session pick is acknowledged");
+    const first = h.postsOf("modelConfigApplied")[0];
+    assert.strictEqual(first.requestId, 11);
+    assert.strictEqual(first.model, "fusion-gpt-6-astra-high-sidekick-swe-2-high");
+    assert.strictEqual(first.thoughtLevel, "low");
+    assert.ok(writes.some(([key, value]) => key === "defaultModel" && value === "fusion-gpt-6-astra-high-sidekick-swe-2-high"), "the model default is persisted");
+    assert.ok(writes.some(([key, value]) => key === "defaultThoughtLevel" && value === "low"), "the effort default is persisted");
+    assert.strictEqual(h.agentSaw("session/set_config_option").length, 0, "no agent existed to call");
+
+    h.send({ type: "send", text: "start a chat", newSession: true });
+    await h.until(() => h.agentSaw("session/new").length === 1);
+    h.send({ type: "setConfigOption", configId: "thought_level", value: "low", model: "fusion-claude-opus-5-high-sidekick-swe-2-medium", requestId: 12 });
+    assert.ok(await h.until(() => h.postsOf("modelConfigApplied").length === 2), "the queued pick waits for the starting session");
+    const second = h.postsOf("modelConfigApplied")[1];
+    assert.strictEqual(second.requestId, 12);
+    assert.strictEqual(second.model, "fusion-claude-opus-5-high-sidekick-swe-2-medium");
+    assert.strictEqual(second.thoughtLevel, "low");
+    assert.ok(h.agentSaw("session/set_config_option").some((request) => request.params.configId === "thought_level" && request.params.value === "low"), "the new session's agent gets the effort");
+  } finally {
+    vscode.workspace.getConfiguration = realGetConfiguration;
+    await h.dispose();
+  }
+});
+
+test("catalogue uids are translated to the values the session's model option accepts", posixOnly, async () => {
+  const h = createChat({ config: { defaultMode: "", defaultModel: "", defaultThoughtLevel: "" } });
+  try {
+    await h.ready();
+    const id = await h.startChat("translate the pick");
+    const rt = h.controller.runtimes.get(id);
+    // The real session offers one uid per family, not the per effort uids the
+    // catalogue (and so the picker) is built from. Every reply has to report it:
+    // publishOptions replaces the snapshot each time.
+    const widen = (options) => {
+      options.find((option) => option.id === "model").options.push({
+        group: "gpt-5.6-sol", name: "GPT-5.6 Sol", options: [{ value: "gpt-5-6-sol-medium", name: "GPT-5.6 Sol" }]
+      });
+      options.find((option) => option.id === "thought_level").options.push({ value: "none", name: "None" }, { value: "medium", name: "Medium" });
+      return options;
+    };
+    widen(rt.configOptions);
+    const original = rt.client.setConfigOption.bind(rt.client);
+    rt.client.setConfigOption = async (sessionId, configId, value) => {
+      const res = await original(sessionId, configId, value);
+      if (res?.configOptions) widen(res.configOptions);
+      return res;
+    };
+
+    h.send({ type: "setModel", model: "gpt-5-6-sol-none", requestId: 51 });
+    assert.ok(await h.until(() => h.postsOf("modelConfigApplied").length === 1), "the normal model pick is acknowledged");
+    assert.deepStrictEqual(
+      h.agentSaw("session/set_config_option").map((item) => [item.params.configId, item.params.value]),
+      [["model", "gpt-5-6-sol-medium"], ["thought_level", "none"]],
+      "the effort variant uid becomes the accepted family uid plus a thought_level call"
+    );
+
+    const before = h.agentSaw("session/set_config_option").length;
+    h.send({ type: "setFusionModel", model: "fusion-claude-opus-5-medium-sidekick-swe-2-medium", thoughtLevel: "medium", requestId: 52 });
+    assert.ok(await h.until(() => h.postsOf("modelConfigApplied").length === 2), "the Fusion pick is acknowledged");
+    assert.deepStrictEqual(
+      h.agentSaw("session/set_config_option").slice(before).map((item) => [item.params.configId, item.params.value]),
+      [["model", "fusion-claude-opus-5-high-sidekick-swe-2-medium"], ["thought_level", "medium"]],
+      "a Fusion pair the session does not list maps to its accepted uid, with the lead effort going to thought_level"
+    );
+  } finally {
+    await h.dispose();
+  }
+});
+
 test.after(() => cleanup());

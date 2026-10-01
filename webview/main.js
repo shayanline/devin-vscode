@@ -115,6 +115,12 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   let thinkingShowsEfforts = false;
   let currentThoughtLevel = "";
   let currentModelUid = "";
+  let modelChangeSeq = 0;
+  let pendingModelChange = 0;
+  function postModelChange(message) {
+    pendingModelChange = ++modelChangeSeq;
+    vscode.postMessage({ ...message, requestId: pendingModelChange });
+  }
   const savedState = vscode.getState() || {};
   const pinnedModelIds = new Set(Array.isArray(savedState.pinnedModels) ? savedState.pinnedModels : []);
   // The active model family's display name, stamped onto each turn when it is
@@ -134,11 +140,13 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     el.fusionDD,
     (model) => {
       currentModelUid = model;
-      vscode.postMessage({ type: "setFusionModel", model, thoughtLevel: currentThoughtLevel });
+      updateModelConfig(familyOfUid(model), model);
+      postModelChange({ type: "setFusionModel", model, thoughtLevel: currentThoughtLevel });
     },
-    (value) => {
+    (value, model) => {
+      if (model) currentModelUid = model;
       currentThoughtLevel = value;
-      vscode.postMessage({ type: "setConfigOption", configId: "thought_level", value });
+      postModelChange({ type: "setConfigOption", configId: "thought_level", value, model: currentModelUid });
     }
   );
   const thinkingDropdown = createDropdown(el.thinkingDD, onThinkingSelect, {
@@ -167,8 +175,27 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   }
 
   function familyById(id) { return modelFamilies.find((f) => f.id === id); }
-  function familyOfUid(uid) { return modelFamilies.find((f) => (f.variants || []).some((v) => v.value === uid)); }
-  function effortsFor(fam) { return (fam && thoughtLevelsByFamily[fam.id]) || []; }
+  function familyOfUid(uid) {
+    return modelFamilies.find((f) => (f.variants || []).some((v) => v.value === uid))
+      || (String(uid || "").startsWith("fusion-") ? familyById("fusion") : undefined);
+  }
+  function effortKey(fam, uid) {
+    return isFusion(fam) ? `fusion:${fusionIdentity(uid).lead}` : fam?.id;
+  }
+  const EFFORT_ORDER = ["none", "low", "medium", "high", "xhigh"];
+  const EFFORT_NAMES = { none: "No Thinking", low: "Low", medium: "Medium", high: "High", xhigh: "XHigh" };
+  function effortsFor(fam, uid) {
+    const known = fam ? thoughtLevelsByFamily[effortKey(fam, uid)] : undefined;
+    if (known?.length) return known;
+    if (!isFusion(fam)) return [];
+    const wanted = fusionIdentity(uid || fam.default);
+    const seen = new Set();
+    for (const variant of fam.variants || []) {
+      const identity = fusionIdentity(variant.value);
+      if (identity.lead === wanted.lead && identity.sidekick === wanted.sidekick && identity.effort) seen.add(identity.effort);
+    }
+    return EFFORT_ORDER.filter((value) => seen.has(value)).map((value) => ({ value, name: EFFORT_NAMES[value] }));
+  }
   function variantFor(fam, uid) {
     return (fam?.variants || []).find((v) => v.value === uid)
       || (fam?.variants || []).find((v) => v.value === fam.default)
@@ -362,21 +389,22 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     if (!fam) return;
     currentModelUid = fam.default;
     currentModelLabel = fam.name || "";
-    vscode.postMessage({ type: "setModel", model: fam.default });
+    postModelChange({ type: "setModel", model: fam.default });
     updateModelConfig(fam, fam.default);
   }
   function onThinkingSelect(value) {
     if (thinkingShowsEfforts) {
       currentThoughtLevel = value;
-      vscode.postMessage({ type: "setConfigOption", configId: "thought_level", value });
+      postModelChange({ type: "setConfigOption", configId: "thought_level", value, model: currentModelUid });
       return;
     }
     currentModelUid = value;
-    vscode.postMessage({ type: "setModel", model: value });
+    postModelChange({ type: "setModel", model: value });
   }
   function fusionIdentity(uid) {
-    const [lead = "", sidekick = ""] = String(uid || "").replace(/^fusion-/, "").split("-sidekick-");
-    return { lead: lead.replace(/-(?:none|low|medium|high|xhigh)$/, ""), sidekick };
+    const [leadUid = "", sidekick = ""] = String(uid || "").replace(/^fusion-/, "").split("-sidekick-");
+    const effortMatch = leadUid.match(/-(none|low|medium|high|xhigh)$/);
+    return { lead: leadUid.replace(/-(?:none|low|medium|high|xhigh)$/, ""), sidekick, effort: effortMatch ? effortMatch[1] : "" };
   }
   function fusionChoice(choice) {
     const identity = fusionIdentity(choice.value);
@@ -384,8 +412,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     return {
       ...choice,
       ...identity,
-      leadName: lead.replace(/ (?:No Thinking|Low|Medium|High(?: Thinking)?|XHigh)$/, ""),
-      sidekickName: sidekick
+      leadName: lead.replace(/ (?:No Thinking|Low|Medium|High|XHigh)(?: Thinking)?$/, "") || identity.lead,
+      sidekickName: sidekick || identity.sidekick
     };
   }
   function compactFusionLead(name) {
@@ -412,9 +440,12 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     let lead = "";
     let sidekick = "";
     let effort = "";
+    let lastSignature = "";
+    let menuBuilt = false;
 
     function pair() {
-      return pairs.find((item) => item.lead === lead && item.sidekick === sidekick)
+      return pairs.find((item) => item.lead === lead && item.sidekick === sidekick && item.effort === effort)
+        || pairs.find((item) => item.lead === lead && item.sidekick === sidekick)
         || pairs.find((item) => item.lead === lead)
         || pairs[0];
     }
@@ -439,7 +470,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     function choose(kind, value) {
       if (kind === "effort") {
         effort = value;
-        onEffort(value);
+        onEffort(value, pair()?.value);
       } else {
         if (kind === "lead") lead = value;
         else sidekick = value;
@@ -476,15 +507,29 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       root.appendChild(rows);
       return root;
     }
+    function effortLoading() {
+      const root = document.createElement("div");
+      root.className = "fusion-config-section";
+      root.appendChild(Object.assign(document.createElement("div"), { className: "fusion-config-label", textContent: "Lead effort" }));
+      const status = document.createElement("div");
+      status.className = "fusion-config-loading";
+      status.setAttribute("role", "status");
+      status.setAttribute("aria-busy", "true");
+      status.textContent = "Loading effort options...";
+      root.appendChild(status);
+      return root;
+    }
     function renderMenu() {
       menu.innerHTML = "";
       const leads = [...new Map(pairs.map((item) => [item.lead, { value: item.lead, name: item.leadName }])).values()];
       const sidekicks = [...new Map(pairs.map((item) => [item.sidekick, { value: item.sidekick, name: item.sidekickName }])).values()];
       menu.append(section("Lead model", "lead", leads));
-      // An effort section with no options is just an orphan label, so only
-      // render it once the levels are known.
+      // An effort section with no options is just an orphan label, so without
+      // real choices it reports that the levels are still loading instead.
       if (levels.length) menu.append(section("Lead effort", "effort", levels));
+      else menu.append(effortLoading());
       menu.append(section("Sidekick", "sidekick", sidekicks));
+      menuBuilt = true;
       sync();
     }
     button.addEventListener("click", (event) => {
@@ -499,21 +544,31 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     });
     return {
       set(choices, currentModel, effortOptions, currentEffort) {
+        const signature = JSON.stringify([choices, effortOptions]);
+        const changed = signature !== lastSignature;
+        lastSignature = signature;
         pairs = (choices || []).map(fusionChoice);
         levels = effortOptions || [];
         const current = fusionIdentity(currentModel);
         lead = current.lead || pairs[0]?.lead || "";
         sidekick = current.sidekick || pairs[0]?.sidekick || "";
-        effort = currentEffort || levels[0]?.value || "";
-        // Levels can arrive after the user has already opened the menu, so
-        // rebuild it in place rather than leaving the effort section empty.
-        if (!menu.classList.contains("hidden")) renderMenu(); else sync();
+        effort = (levels.some((item) => item.value === currentEffort) ? currentEffort
+          : levels.some((item) => item.value === current.effort) ? current.effort
+          : levels[0]?.value) || "";
+        if (effort) currentThoughtLevel = effort;
+        // Choices can arrive after the user has already opened the menu, so
+        // rebuild it in place when they really changed.
+        if (!menu.classList.contains("hidden")) {
+          if (changed || !menuBuilt) renderMenu(); else sync();
+        } else {
+          sync();
+        }
         container.classList.toggle("hidden", !pairs.length);
       }
     };
   }
   function updateModelConfig(fam, currentUid) {
-    const levels = effortsFor(fam);
+    const levels = effortsFor(fam, currentUid);
     if (isFusion(fam)) {
       // Fusion's own variants are the whole lead times sidekick cross product,
       // so they are never a thinking list. The picker waits for real pairs.
@@ -537,9 +592,12 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     }
   }
   // The grouped choices only exist once a session has reported its options, so
-  // fall back to the family's own variants, which carry the same pair uids.
+  // they merge over the family's own variants, which carry the same pair uids.
   function fusionPairs(fam) {
-    return modelChoices.fusion?.length ? modelChoices.fusion : (fam?.variants || []);
+    const byValue = new Map();
+    for (const variant of fam?.variants || []) byValue.set(variant.value, variant);
+    for (const choice of modelChoices.fusion || []) byValue.set(choice.value, choice);
+    return [...byValue.values()];
   }
   function isAdaptive(f) { return f.id === "adaptive" || /adaptive/i.test(f.name || ""); }
   function isFusion(f) { return f?.id === "fusion" || /^fusion$/i.test(f?.name || ""); }
@@ -1051,6 +1109,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   function renderElsewhere(m) {
     snapshotCurrent();
     curSessionId = null;
+    pendingModelChange = 0;
     setBody("thread");
     stopThreadLoading();
     elsewhereId = m.id || null;
@@ -1091,6 +1150,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     // returning to it is instant, then show the list.
     snapshotCurrent();
     curSessionId = null;
+    pendingModelChange = 0;
     vscode.postMessage({ type: "leaveToList" });
     setBody("list");
   });
@@ -6715,6 +6775,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // idle and unchanged, otherwise ask the host to wake/reload it.
   function switchToSession(id, title) {
     if (id === curSessionId) { setBody("thread"); return; }
+    pendingModelChange = 0;
     // Held by the other surface: say so rather than restoring a copy of it here.
     // The host answers with the same state, and corrects this if it disagrees.
     if (elsewhereIds.includes(id)) {
@@ -7404,6 +7465,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
           // session is not short-circuited and can restore + wake seamlessly.
           snapshotCurrent();
           curSessionId = null;
+          pendingModelChange = 0;
           setBody("list");
         } else {
           setBody("thread");
@@ -7419,14 +7481,16 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         for (const key of Object.keys(incoming)) modelChoices[key] = incoming[key];
         // Families come from this response, because modelFamilies is still
         // empty on the first one.
-        const famOf = (uid) => (m.models || []).find((f) => (f.variants || []).some((v) => v.value === uid));
+        const famOf = (uid) => (m.models || []).find((f) => (f.variants || []).some((v) => v.value === uid))
+          || (String(uid || "").startsWith("fusion-") ? (m.models || []).find(isFusion) : undefined);
         const responseFamily = famOf(m.currentModel);
         const shownFamily = famOf(currentModelUid) || responseFamily;
         if (responseFamily) {
-          thoughtLevelsByFamily[responseFamily.id] = Array.isArray(m.thoughtLevels) ? m.thoughtLevels : [];
+          const key = effortKey(responseFamily, m.currentModel);
+          if (key) thoughtLevelsByFamily[key] = Array.isArray(m.thoughtLevels) ? m.thoughtLevels : [];
           // Only the family the response is about can report its effort, and an
           // empty string is the host clearing a model that has none.
-          if (responseFamily.id === shownFamily?.id && typeof m.currentThoughtLevel === "string") currentThoughtLevel = m.currentThoughtLevel;
+          if (!pendingModelChange && effortKey(responseFamily, m.currentModel) === effortKey(shownFamily, currentModelUid || m.currentModel) && typeof m.currentThoughtLevel === "string") currentThoughtLevel = m.currentThoughtLevel;
         }
         // The user may have already picked a different model before this async
         // options response arrived. Keep their local selection.
@@ -7470,7 +7534,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       case "sessionReady":
         if (m.title) { currentTitle = m.title; el.chatTitle.textContent = currentTitle; }
         // The thread now shows this session; retire any retained snapshot for it.
-        if (m.sessionId && curSessionId !== m.sessionId) cancelPreviewWaiters();
+        if (m.sessionId && curSessionId !== m.sessionId) { cancelPreviewWaiters(); if (curSessionId) pendingModelChange = 0; }
         if (m.sessionId) { curSessionId = m.sessionId; views.delete(m.sessionId); dirtyViews.delete(m.sessionId); }
         // Remembered so an editor tab restored after a window reload comes back to
         // the chat it was holding instead of an empty tab.
@@ -7482,6 +7546,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         break;
       case "clear":
         clearElsewhere();
+        if (m.reset || m.loading) pendingModelChange = 0;
         // The warning belongs to the agent behind this chat, so it does not carry
         // over to the next one, dismissed or not.
         renderMcpProblems([]);
@@ -7615,7 +7680,13 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       case "busy": setBusy(m.value); refreshTurnChrome(); break;
       case "cancelPrompts": cancelPrompts(); break;
       case "mode": if (m.mode) modeDropdown.setCurrent(m.mode); break;
-      case "model": if (m.model) selectModelUid(m.model); break;
+      case "model": if (m.model && !pendingModelChange) selectModelUid(m.model); break;
+      case "modelConfigApplied":
+        if (m.requestId !== pendingModelChange || !pendingModelChange) break;
+        pendingModelChange = 0;
+        if (typeof m.thoughtLevel === "string") currentThoughtLevel = m.thoughtLevel;
+        if (m.model) selectModelUid(m.model);
+        break;
       case "terminalOutput": updateTerminal(m); break;
       case "usage": renderUsage(m); break;
       // A failed revert reports `error` rather than `reverted`, so abandon any
