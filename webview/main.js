@@ -46,6 +46,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     attach: $("attach"),
     modeDD: $("mode-dd"),
     modelDD: $("model-dd"),
+    fusionDD: $("fusion-dd"),
     thinkingDD: $("thinking-dd"),
     inputBox: $("input-box"),
     composer: $("composer"),
@@ -103,7 +104,23 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // Model picker lists families; a separate thinking picker holds the effort
   // variants of the selected family (Copilot-style).
   let modelFamilies = [];
+  let modelChoices = {};
+  // thought_level is reported for the active model only, so each family's
+  // effort list is filed under that family rather than applied to whichever
+  // model is on screen. A missing key means not known yet, an empty array
+  // means the family really has no efforts.
+  let thoughtLevelsByFamily = {};
+  // Whether the thinking picker is currently listing efforts rather than the
+  // family's own variants, since the two need different messages on select.
+  let thinkingShowsEfforts = false;
+  let currentThoughtLevel = "";
   let currentModelUid = "";
+  let modelChangeSeq = 0;
+  let pendingModelChange = 0;
+  function postModelChange(message) {
+    pendingModelChange = ++modelChangeSeq;
+    vscode.postMessage({ ...message, requestId: pendingModelChange });
+  }
   const savedState = vscode.getState() || {};
   const pinnedModelIds = new Set(Array.isArray(savedState.pinnedModels) ? savedState.pinnedModels : []);
   // The active model family's display name, stamped onto each turn when it is
@@ -119,6 +136,19 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     itemLeave: scheduleModelHoverClose,
     onClose: closeModelHover
   });
+  const fusionPicker = createFusionPicker(
+    el.fusionDD,
+    (model) => {
+      currentModelUid = model;
+      updateModelConfig(familyOfUid(model), model);
+      postModelChange({ type: "setFusionModel", model, thoughtLevel: currentThoughtLevel });
+    },
+    (value, model) => {
+      if (model) currentModelUid = model;
+      currentThoughtLevel = value;
+      postModelChange({ type: "setConfigOption", configId: "thought_level", value, model: currentModelUid });
+    }
+  );
   const thinkingDropdown = createDropdown(el.thinkingDD, onThinkingSelect, {
     staticIcon: "codicon-thinking",
     ariaLabel: "Thinking effort"
@@ -145,7 +175,27 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   }
 
   function familyById(id) { return modelFamilies.find((f) => f.id === id); }
-  function familyOfUid(uid) { return modelFamilies.find((f) => (f.variants || []).some((v) => v.value === uid)); }
+  function familyOfUid(uid) {
+    return modelFamilies.find((f) => (f.variants || []).some((v) => v.value === uid))
+      || (String(uid || "").startsWith("fusion-") ? familyById("fusion") : undefined);
+  }
+  function effortKey(fam, uid) {
+    return isFusion(fam) ? `fusion:${fusionIdentity(uid).lead}` : fam?.id;
+  }
+  const EFFORT_ORDER = ["none", "low", "medium", "high", "xhigh"];
+  const EFFORT_NAMES = { none: "No Thinking", low: "Low", medium: "Medium", high: "High", xhigh: "XHigh" };
+  function effortsFor(fam, uid) {
+    const known = fam ? thoughtLevelsByFamily[effortKey(fam, uid)] : undefined;
+    if (known?.length) return known;
+    if (!isFusion(fam)) return [];
+    const wanted = fusionIdentity(uid || fam.default);
+    const seen = new Set();
+    for (const variant of fam.variants || []) {
+      const identity = fusionIdentity(variant.value);
+      if (identity.lead === wanted.lead && identity.sidekick === wanted.sidekick && identity.effort) seen.add(identity.effort);
+    }
+    return EFFORT_ORDER.filter((value) => seen.has(value)).map((value) => ({ value, name: EFFORT_NAMES[value] }));
+  }
   function variantFor(fam, uid) {
     return (fam?.variants || []).find((v) => v.value === uid)
       || (fam?.variants || []).find((v) => v.value === fam.default)
@@ -167,12 +217,12 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     if (value.includes("med")) return "cost-medium";
     return "cost-low";
   }
-  function costRows(summary) {
+  function costRows(summary, sidekick = false) {
     return String(summary || "").split("·").map((part) => {
-      const match = /^(.+?)\s*\/\s*(?:MTok|1M)\s+(In|Input|Out|Output|Cache Read|Cached input|Cache Write)$/i.exec(part.trim());
-      if (!match) return null;
+      const match = /^(.+?)\s*\/\s*(?:MTok|1M)\s+(Sidekick )?(In|Input|Out|Output|Cache Read|Cached input|Cache Write)$/i.exec(part.trim());
+      if (!match || !!match[2] !== sidekick) return null;
       const labels = { in: "Input", input: "Input", out: "Output", output: "Output", "cache read": "Cache Read", "cached input": "Cache Read", "cache write": "Cache Write" };
-      return { label: labels[match[2].toLowerCase()], value: match[1].trim() };
+      return { label: labels[match[3].toLowerCase()], value: match[1].trim() };
     }).filter(Boolean);
   }
   function formatTokenCount(value) {
@@ -186,15 +236,22 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     if (!item) return null;
     const defaultRows = costRows(item.costSummary);
     const longRows = costRows(item.longContextCostSummary);
-    const rowLabels = [...new Set([...defaultRows, ...longRows].map((row) => row.label))];
+    const sidekickDefaultRows = costRows(item.costSummary, true);
+    const sidekickLongRows = costRows(item.longContextCostSummary, true);
+    const hasSidekickCosts = sidekickDefaultRows.length > 0 || sidekickLongRows.length > 0;
+    const costSections = [
+      { title: hasSidekickCosts ? "Lead cost per 1M tokens" : "Cost per 1M tokens", defaultRows, longRows },
+      ...(hasSidekickCosts ? [{ title: "Sidekick cost per 1M tokens", defaultRows: sidekickDefaultRows, longRows: sidekickLongRows }] : [])
+    ];
+    const hasCosts = costSections.some((section) => section.defaultRows.length || section.longRows.length);
     const promotion = promotionLabel(item);
     const contextRows = [
       ["Max context", formatTokenCount(item.maxContextTokens)],
       ["Max output", formatTokenCount(item.maxOutputTokens)]
     ].filter(([, value]) => value);
-    const hasConfigurable = !!item.thinkingLevels;
-    if (!item.description && !item.costTier && !rowLabels.length && !promotion && !contextRows.length && !hasConfigurable) return null;
-    const compact = !rowLabels.length && !promotion && !contextRows.length && !hasConfigurable;
+    const hasConfigurable = !!item.thinkingLevels || !!item.fusion;
+    if (!item.description && !item.costTier && !hasCosts && !promotion && !contextRows.length && !hasConfigurable) return null;
+    const compact = !hasCosts && !promotion && !contextRows.length && !hasConfigurable;
 
     const card = document.createElement("div");
     card.className = "model-hover" + (compact ? " compact" : "") + (!hasConfigurable ? " no-configurable" : "");
@@ -205,35 +262,37 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     if (item.costTier) header.appendChild(Object.assign(document.createElement("span"), { className: `model-hover-tier ${costTierClass(item.costTier)}`, textContent: costTierLabel(item.costTier) }));
     card.appendChild(header);
 
-    if (rowLabels.length) {
-      card.appendChild(Object.assign(document.createElement("div"), { className: "model-hover-section", textContent: "Cost per 1M tokens" }));
+    costSections.forEach((section) => {
+      const rowLabels = [...new Set([...section.defaultRows, ...section.longRows].map((row) => row.label))];
+      if (!rowLabels.length) return;
+      card.appendChild(Object.assign(document.createElement("div"), { className: "model-hover-section", textContent: section.title }));
       const cost = document.createElement("div");
       cost.className = "model-hover-cost";
       const headings = document.createElement("div");
-      headings.className = "model-hover-cost-heading-row" + (longRows.length ? " has-long-context" : "");
+      headings.className = "model-hover-cost-heading-row" + (section.longRows.length ? " has-long-context" : "");
       headings.appendChild(Object.assign(document.createElement("span"), { className: "model-hover-cost-heading", textContent: "Default" }));
-      if (longRows.length) headings.appendChild(Object.assign(document.createElement("span"), { className: "model-hover-cost-heading", textContent: "Long Context" }));
+      if (section.longRows.length) headings.appendChild(Object.assign(document.createElement("span"), { className: "model-hover-cost-heading", textContent: "Long Context" }));
       cost.appendChild(headings);
       const table = document.createElement("div");
-      table.className = "model-hover-cost-table" + (longRows.length ? " has-long-context" : "");
-      const defaultByLabel = new Map(defaultRows.map((row) => [row.label, row.value]));
-      const longByLabel = new Map(longRows.map((row) => [row.label, row.value]));
+      table.className = "model-hover-cost-table" + (section.longRows.length ? " has-long-context" : "");
+      const defaultByLabel = new Map(section.defaultRows.map((row) => [row.label, row.value]));
+      const longByLabel = new Map(section.longRows.map((row) => [row.label, row.value]));
       rowLabels.forEach((label) => {
         const row = document.createElement("div");
-        row.className = "model-hover-cost-row" + (longRows.length ? " has-long-context" : "");
+        row.className = "model-hover-cost-row" + (section.longRows.length ? " has-long-context" : "");
         row.append(
           Object.assign(document.createElement("span"), { className: "model-hover-cost-line" }),
           Object.assign(document.createElement("span"), { className: "model-hover-cost-label", textContent: label }),
           Object.assign(document.createElement("strong"), { className: "model-hover-cost-value", textContent: defaultByLabel.get(label) || "" })
         );
-        if (longRows.length) {
+        if (section.longRows.length) {
           row.append(Object.assign(document.createElement("strong"), { className: "model-hover-cost-value", textContent: longByLabel.get(label) || "" }));
         }
         table.appendChild(row);
       });
       cost.appendChild(table);
       card.appendChild(cost);
-    }
+    });
 
     if (promotion) {
       const promo = document.createElement("div");
@@ -268,11 +327,11 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       const effort = document.createElement("button");
       effort.type = "button";
       effort.className = "model-hover-configurable-button";
-      effort.textContent = "Thinking Level";
+      effort.textContent = item.fusion ? "Configure Fusion" : "Thinking Level";
       effort.addEventListener("click", (event) => {
         event.stopPropagation();
         modelDropdown.close();
-        el.thinkingDD.querySelector(".dd-btn")?.click();
+        (item.fusion ? el.fusionDD : el.thinkingDD).querySelector(".dd-btn")?.click();
       });
       controls.appendChild(effort);
       configurable.appendChild(controls);
@@ -330,31 +389,225 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     if (!fam) return;
     currentModelUid = fam.default;
     currentModelLabel = fam.name || "";
-    vscode.postMessage({ type: "setModel", model: fam.default });
-    updateThinking(fam, fam.default);
+    postModelChange({ type: "setModel", model: fam.default });
+    updateModelConfig(fam, fam.default);
   }
-  function onThinkingSelect(uid) {
-    currentModelUid = uid;
-    vscode.postMessage({ type: "setModel", model: uid });
+  function onThinkingSelect(value) {
+    if (thinkingShowsEfforts) {
+      currentThoughtLevel = value;
+      postModelChange({ type: "setConfigOption", configId: "thought_level", value, model: currentModelUid });
+      return;
+    }
+    currentModelUid = value;
+    postModelChange({ type: "setModel", model: value });
   }
-  function updateThinking(fam, currentUid) {
-    if (fam && (fam.variants || []).length > 1) {
-      thinkingDropdown.set(fam.variants.map((v) => ({
-        ...v,
-        badges: variantBadges(v)
-      })), currentUid);
+  function fusionIdentity(uid) {
+    const [leadUid = "", sidekick = ""] = String(uid || "").replace(/^fusion-/, "").split("-sidekick-");
+    const effortMatch = leadUid.match(/-(none|low|medium|high|xhigh)$/);
+    return { lead: leadUid.replace(/-(?:none|low|medium|high|xhigh)$/, ""), sidekick, effort: effortMatch ? effortMatch[1] : "" };
+  }
+  function fusionChoice(choice) {
+    const identity = fusionIdentity(choice.value);
+    const [lead = choice.name || choice.value, sidekick = ""] = String(choice.name || choice.value).replace(/^Fusion\s*/i, "").replace(/^\(/, "").replace(/\)$/, "").split(" + ");
+    return {
+      ...choice,
+      ...identity,
+      leadName: lead.replace(/ (?:No Thinking|Low|Medium|High|XHigh)(?: Thinking)?$/, "") || identity.lead,
+      sidekickName: sidekick || identity.sidekick
+    };
+  }
+  function compactFusionLead(name) {
+    return String(name || "").replace(/^Claude /, "");
+  }
+  function compactFusionSidekick(name) {
+    return String(name || "").replace(/ (Low|Medium|High|XHigh)$/, " · $1");
+  }
+  function createFusionPicker(container, onModel, onEffort) {
+    const button = document.createElement("button");
+    button.className = "dd-btn";
+    button.setAttribute("aria-haspopup", "true");
+    button.setAttribute("aria-expanded", "false");
+    button.setAttribute("aria-label", "Configure Fusion");
+    button.innerHTML = '<span class="dd-icon"><i class="codicon codicon-git-compare"></i></span><span class="dd-label fusion-config-selection"><span class="fusion-config-lead-title"></span><span class="fusion-config-separator"> + </span><span class="fusion-config-sidekick-title"></span></span><i class="codicon codicon-chevron-down"></i>';
+    const leadTitle = button.querySelector(".fusion-config-lead-title");
+    const sidekickTitle = button.querySelector(".fusion-config-sidekick-title");
+    const menu = document.createElement("div");
+    menu.className = "dd-menu fusion-config-menu hidden";
+    container.append(button, menu);
+
+    let pairs = [];
+    let levels = [];
+    let lead = "";
+    let sidekick = "";
+    let effort = "";
+    let lastSignature = "";
+    let menuBuilt = false;
+
+    function pair() {
+      return pairs.find((item) => item.lead === lead && item.sidekick === sidekick && item.effort === effort)
+        || pairs.find((item) => item.lead === lead && item.sidekick === sidekick)
+        || pairs.find((item) => item.lead === lead)
+        || pairs[0];
+    }
+    function sync() {
+      const selected = pair();
+      const effortName = levels.find((item) => item.value === effort)?.name || effort;
+      if (selected) {
+        leadTitle.textContent = `${compactFusionLead(selected.leadName)} · ${effortName}`;
+        sidekickTitle.textContent = compactFusionSidekick(selected.sidekickName);
+        button.title = `${selected.leadName} · ${effortName} + ${selected.sidekickName}`;
+      }
+      menu.querySelectorAll(".fusion-config-option").forEach((item) => {
+        const value = item.dataset.value;
+        const selectedValue = item.dataset.kind === "lead" ? lead : item.dataset.kind === "effort" ? effort : sidekick;
+        const isSelected = value === selectedValue;
+        item.classList.toggle("selected", isSelected);
+        item.setAttribute("aria-checked", isSelected ? "true" : "false");
+        const checkEl = item.querySelector(".dd-check");
+        if (checkEl) checkEl.innerHTML = isSelected ? '<i class="codicon codicon-check"></i>' : "";
+      });
+    }
+    function choose(kind, value) {
+      if (kind === "effort") {
+        effort = value;
+        onEffort(value, pair()?.value);
+      } else {
+        if (kind === "lead") lead = value;
+        else sidekick = value;
+        const selected = pair();
+        if (selected) onModel(selected.value);
+      }
+      sync();
+    }
+    function section(title, kind, options) {
+      const root = document.createElement("div");
+      root.className = "fusion-config-section";
+      root.appendChild(Object.assign(document.createElement("div"), { className: "fusion-config-label", textContent: title }));
+      const rows = document.createElement("div");
+      rows.className = "fusion-config-options" + (kind === "effort" ? " effort" : "");
+      rows.setAttribute("role", "radiogroup");
+      rows.setAttribute("aria-label", title);
+      options.forEach((option) => {
+        const item = document.createElement("button");
+        item.type = "button";
+        item.className = "fusion-config-option";
+        item.setAttribute("role", "radio");
+        item.dataset.kind = kind;
+        item.dataset.value = option.value;
+        const check = document.createElement("span");
+        check.className = "dd-check";
+        item.appendChild(check);
+        item.appendChild(Object.assign(document.createElement("span"), { className: "fusion-config-text", textContent: option.name }));
+        item.addEventListener("click", (event) => {
+          event.stopPropagation();
+          choose(kind, option.value);
+        });
+        rows.appendChild(item);
+      });
+      root.appendChild(rows);
+      return root;
+    }
+    function effortLoading() {
+      const root = document.createElement("div");
+      root.className = "fusion-config-section";
+      root.appendChild(Object.assign(document.createElement("div"), { className: "fusion-config-label", textContent: "Lead effort" }));
+      const status = document.createElement("div");
+      status.className = "fusion-config-loading";
+      status.setAttribute("role", "status");
+      status.setAttribute("aria-busy", "true");
+      status.textContent = "Loading effort options...";
+      root.appendChild(status);
+      return root;
+    }
+    function renderMenu() {
+      menu.innerHTML = "";
+      const leads = [...new Map(pairs.map((item) => [item.lead, { value: item.lead, name: item.leadName }])).values()];
+      const sidekicks = [...new Map(pairs.map((item) => [item.sidekick, { value: item.sidekick, name: item.sidekickName }])).values()];
+      menu.append(section("Lead model", "lead", leads));
+      // An effort section with no options is just an orphan label, so without
+      // real choices it reports that the levels are still loading instead.
+      if (levels.length) menu.append(section("Lead effort", "effort", levels));
+      else menu.append(effortLoading());
+      menu.append(section("Sidekick", "sidekick", sidekicks));
+      menuBuilt = true;
+      sync();
+    }
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      document.querySelectorAll(".dd-menu").forEach((item) => { if (item !== menu) item.classList.add("hidden"); });
+      document.querySelectorAll(".dd-btn.open").forEach((item) => { if (item !== button) item.classList.remove("open"); });
+      renderMenu();
+      menu.classList.toggle("hidden");
+      const open = !menu.classList.contains("hidden");
+      button.classList.toggle("open", open);
+      button.setAttribute("aria-expanded", open ? "true" : "false");
+    });
+    return {
+      set(choices, currentModel, effortOptions, currentEffort) {
+        const signature = JSON.stringify([choices, effortOptions]);
+        const changed = signature !== lastSignature;
+        lastSignature = signature;
+        pairs = (choices || []).map(fusionChoice);
+        levels = effortOptions || [];
+        const current = fusionIdentity(currentModel);
+        lead = current.lead || pairs[0]?.lead || "";
+        sidekick = current.sidekick || pairs[0]?.sidekick || "";
+        effort = (levels.some((item) => item.value === currentEffort) ? currentEffort
+          : levels.some((item) => item.value === current.effort) ? current.effort
+          : levels[0]?.value) || "";
+        if (effort) currentThoughtLevel = effort;
+        // Choices can arrive after the user has already opened the menu, so
+        // rebuild it in place when they really changed.
+        if (!menu.classList.contains("hidden")) {
+          if (changed || !menuBuilt) renderMenu(); else sync();
+        } else {
+          sync();
+        }
+        container.classList.toggle("hidden", !pairs.length);
+      }
+    };
+  }
+  function updateModelConfig(fam, currentUid) {
+    const levels = effortsFor(fam, currentUid);
+    if (isFusion(fam)) {
+      // Fusion's own variants are the whole lead times sidekick cross product,
+      // so they are never a thinking list. The picker waits for real pairs.
+      fusionPicker.set(fusionPairs(fam), currentUid, levels, currentThoughtLevel);
+      el.thinkingDD.classList.add("hidden");
+      thinkingShowsEfforts = false;
+      return;
+    }
+    el.fusionDD.classList.add("hidden");
+    if (levels.length) {
+      thinkingDropdown.set(levels, currentThoughtLevel);
       el.thinkingDD.classList.remove("hidden");
+      thinkingShowsEfforts = true;
+    } else if (fam && (fam.variants || []).length > 1) {
+      thinkingDropdown.set(fam.variants.map((v) => ({ ...v, badges: variantBadges(v) })), currentUid);
+      el.thinkingDD.classList.remove("hidden");
+      thinkingShowsEfforts = false;
     } else {
       el.thinkingDD.classList.add("hidden");
+      thinkingShowsEfforts = false;
     }
   }
+  // The grouped choices only exist once a session has reported its options, so
+  // they merge over the family's own variants, which carry the same pair uids.
+  function fusionPairs(fam) {
+    const byValue = new Map();
+    for (const variant of fam?.variants || []) byValue.set(variant.value, variant);
+    for (const choice of modelChoices.fusion || []) byValue.set(choice.value, choice);
+    return [...byValue.values()];
+  }
   function isAdaptive(f) { return f.id === "adaptive" || /adaptive/i.test(f.name || ""); }
+  function isFusion(f) { return f?.id === "fusion" || /^fusion$/i.test(f?.name || ""); }
 
   function applyModelOptions(families, currentModel) {
     const list = Array.isArray(families) ? families.slice() : [];
     const adaptive = list.filter(isAdaptive);
-    const rest = list.filter((f) => !isAdaptive(f)).sort((a, b) => (a.name || "").localeCompare(b.name || ""));
-    modelFamilies = [...adaptive, ...rest];
+    const fusion = list.filter(isFusion);
+    const rest = list.filter((f) => !isAdaptive(f) && !isFusion(f)).sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+    modelFamilies = [...adaptive, ...fusion, ...rest];
     const fam = familyOfUid(currentModel) || modelFamilies[0];
     currentModelUid = currentModel || fam?.default || "";
     currentModelLabel = fam ? fam.name || "" : currentModelLabel;
@@ -365,25 +618,25 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         name: family.name,
         badges: variantBadges(variant),
         pinned: pinnedModelIds.has(family.id),
-        hover: { ...variant, name: family.name, thinkingLevels: (family.variants || []).length > 1 },
+        hover: { ...variant, name: family.name, thinkingLevels: (family.variants || []).length > 1, fusion: isFusion(family) },
         group
       };
     };
     const adaptiveFamily = adaptive[0];
-    const pinned = modelFamilies.filter((f) => !isAdaptive(f) && pinnedModelIds.has(f.id));
-    const models = modelFamilies.filter((f) => !isAdaptive(f) && !pinnedModelIds.has(f.id));
+    const fusionFamily = fusion[0];
+    const pinned = modelFamilies.filter((f) => !isAdaptive(f) && !isFusion(f) && pinnedModelIds.has(f.id));
+    const models = modelFamilies.filter((f) => !isAdaptive(f) && !isFusion(f) && !pinnedModelIds.has(f.id));
     const items = [];
-    if (adaptiveFamily) {
-      items.push(item(adaptiveFamily));
-      if (pinned.length || models.length) items.push({ sep: true });
-    }
+    if (adaptiveFamily) items.push(item(adaptiveFamily));
+    if (fusionFamily) items.push(item(fusionFamily));
+    if ((adaptiveFamily || fusionFamily) && (pinned.length || models.length)) items.push({ sep: true });
     if (pinned.length) {
       items.push(...pinned.map((f) => item(f, "Pinned")));
       if (models.length) items.push({ sep: true });
     }
     items.push(...models.map((f) => item(f, "Models")));
     modelDropdown.set(items, fam ? fam.id : "");
-    updateThinking(fam, currentModelUid);
+    updateModelConfig(fam, currentModelUid);
   }
   function selectModelUid(uid) {
     const fam = familyOfUid(uid);
@@ -391,7 +644,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     currentModelUid = uid;
     currentModelLabel = fam.name || "";
     modelDropdown.setCurrent(fam.id);
-    updateThinking(fam, uid);
+    updateModelConfig(fam, uid);
   }
 
   // --- View state ----------------------------------------------------------
@@ -856,6 +1109,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   function renderElsewhere(m) {
     snapshotCurrent();
     curSessionId = null;
+    pendingModelChange = 0;
     setBody("thread");
     stopThreadLoading();
     elsewhereId = m.id || null;
@@ -896,6 +1150,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     // returning to it is instant, then show the list.
     snapshotCurrent();
     curSessionId = null;
+    pendingModelChange = 0;
     vscode.postMessage({ type: "leaveToList" });
     setBody("list");
   });
@@ -6520,6 +6775,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // idle and unchanged, otherwise ask the host to wake/reload it.
   function switchToSession(id, title) {
     if (id === curSessionId) { setBody("thread"); return; }
+    pendingModelChange = 0;
     // Held by the other surface: say so rather than restoring a copy of it here.
     // The host answers with the same state, and corrects this if it disagrees.
     if (elsewhereIds.includes(id)) {
@@ -7209,16 +7465,38 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
           // session is not short-circuited and can restore + wake seamlessly.
           snapshotCurrent();
           curSessionId = null;
+          pendingModelChange = 0;
           setBody("list");
         } else {
           setBody("thread");
         }
         break;
       case "workspace": break;
-      case "options":
+      case "options": {
         modeDropdown.set((m.modes || []).map((mode) => mode.value === "bypass" ? { ...mode, name: "Bypass" } : mode), m.currentMode);
-        applyModelOptions(m.models, m.currentModel);
+        // Model groups are merged rather than replaced: the server reports the
+        // options of the active model, so a normal model's response can omit the
+        // Fusion group entirely, and losing it would empty the Fusion picker.
+        const incoming = m.modelChoices || {};
+        for (const key of Object.keys(incoming)) modelChoices[key] = incoming[key];
+        // Families come from this response, because modelFamilies is still
+        // empty on the first one.
+        const famOf = (uid) => (m.models || []).find((f) => (f.variants || []).some((v) => v.value === uid))
+          || (String(uid || "").startsWith("fusion-") ? (m.models || []).find(isFusion) : undefined);
+        const responseFamily = famOf(m.currentModel);
+        const shownFamily = famOf(currentModelUid) || responseFamily;
+        if (responseFamily) {
+          const key = effortKey(responseFamily, m.currentModel);
+          if (key) thoughtLevelsByFamily[key] = Array.isArray(m.thoughtLevels) ? m.thoughtLevels : [];
+          // Only the family the response is about can report its effort, and an
+          // empty string is the host clearing a model that has none.
+          if (!pendingModelChange && effortKey(responseFamily, m.currentModel) === effortKey(shownFamily, currentModelUid || m.currentModel) && typeof m.currentThoughtLevel === "string") currentThoughtLevel = m.currentThoughtLevel;
+        }
+        // The user may have already picked a different model before this async
+        // options response arrived. Keep their local selection.
+        applyModelOptions(m.models, currentModelUid || m.currentModel);
         break;
+      }
       case "commands": commands = Array.isArray(m.commands) ? m.commands : []; break;
       case "fileSuggestions":
         if (m.query === fileQueryToken) {
@@ -7256,7 +7534,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       case "sessionReady":
         if (m.title) { currentTitle = m.title; el.chatTitle.textContent = currentTitle; }
         // The thread now shows this session; retire any retained snapshot for it.
-        if (m.sessionId && curSessionId !== m.sessionId) cancelPreviewWaiters();
+        if (m.sessionId && curSessionId !== m.sessionId) { cancelPreviewWaiters(); if (curSessionId) pendingModelChange = 0; }
         if (m.sessionId) { curSessionId = m.sessionId; views.delete(m.sessionId); dirtyViews.delete(m.sessionId); }
         // Remembered so an editor tab restored after a window reload comes back to
         // the chat it was holding instead of an empty tab.
@@ -7268,6 +7546,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         break;
       case "clear":
         clearElsewhere();
+        if (m.reset || m.loading) pendingModelChange = 0;
         // The warning belongs to the agent behind this chat, so it does not carry
         // over to the next one, dismissed or not.
         renderMcpProblems([]);
@@ -7401,7 +7680,13 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       case "busy": setBusy(m.value); refreshTurnChrome(); break;
       case "cancelPrompts": cancelPrompts(); break;
       case "mode": if (m.mode) modeDropdown.setCurrent(m.mode); break;
-      case "model": if (m.model) selectModelUid(m.model); break;
+      case "model": if (m.model && !pendingModelChange) selectModelUid(m.model); break;
+      case "modelConfigApplied":
+        if (m.requestId !== pendingModelChange || !pendingModelChange) break;
+        pendingModelChange = 0;
+        if (typeof m.thoughtLevel === "string") currentThoughtLevel = m.thoughtLevel;
+        if (m.model) selectModelUid(m.model);
+        break;
       case "terminalOutput": updateTerminal(m); break;
       case "usage": renderUsage(m); break;
       // A failed revert reports `error` rather than `reverted`, so abandon any

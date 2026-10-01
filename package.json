@@ -2,7 +2,7 @@
   "name": "devin-vscode",
   "displayName": "Devin for VS Code",
   "description": "A native chat panel for the Devin CLI, powered by the Agent Client Protocol. Streaming replies, per workspace sessions, and trackable diffs.",
-  "version": "0.12.7",
+  "version": "0.13.0",
   "publisher": "shayanline",
   "author": "Shayan Khaksar",
   "license": "AGPL-3.0-or-later",
@@ -347,6 +347,27 @@
           "type": "string",
           "default": "",
           "markdownDescription": "Model for chats started in this extension (e.g. `auto`, `sonnet`, `opus`, `gpt`). The model picker in the chat composer writes this setting, and it takes precedence over the Devin CLI's own default. Leave it empty to follow the CLI's `agent.model` instead, which you can set in **Devin: Open Settings**."
+        },
+        "devin.defaultThoughtLevel": {
+          "type": "string",
+          "enum": [
+            "",
+            "none",
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "enumDescriptions": [
+            "Follow the model or Devin CLI default",
+            "No extended thinking",
+            "Low thinking effort",
+            "Medium thinking effort",
+            "High thinking effort",
+            "Extra high thinking effort"
+          ],
+          "default": "",
+          "markdownDescription": "Thinking effort for chats started in this extension. The thinking picker writes this setting when the Devin CLI exposes a `thought_level` session option."
         },
         "devin.defaultMode": {
           "type": "string",

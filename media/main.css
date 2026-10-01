@@ -893,6 +893,114 @@ body {
   box-sizing: border-box;
 }
 
+#fusion-dd .dd-btn {
+  max-width: min(300px, calc(100vw - 150px));
+}
+
+#fusion-dd .fusion-config-menu {
+  width: min(300px, calc(100vw - 16px));
+  padding: 0;
+}
+
+.fusion-config-separator,
+.fusion-config-sidekick-title {
+  color: var(--vscode-descriptionForeground);
+}
+
+.fusion-config-section {
+  padding: 8px;
+  border-bottom: 1px solid var(--vscode-menu-separatorBackground, var(--vscode-widget-border));
+}
+
+.fusion-config-section:last-child {
+  border-bottom: 0;
+}
+
+.fusion-config-label {
+  padding: 0 3px 5px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.fusion-config-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 3px;
+}
+
+.fusion-config-options.effort {
+  display: flex;
+  flex-wrap: wrap;
+}
+
+.fusion-config-options.effort .fusion-config-option {
+  flex: 1 1 auto;
+  justify-content: center;
+  padding-inline: 6px;
+  text-align: center;
+}
+
+/* The effort row reads as a segmented control, so the selection is the
+   background and the weight. A tick would cost a third of each button. */
+.fusion-config-options.effort .dd-check {
+  display: none;
+}
+
+.fusion-config-options.effort .fusion-config-option.selected {
+  background: var(--vscode-list-activeSelectionBackground, var(--vscode-list-hoverBackground));
+  color: var(--vscode-list-activeSelectionForeground, inherit);
+}
+
+.fusion-config-loading {
+  padding: 5px 7px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.fusion-config-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  position: relative;
+  min-width: 0;
+  padding: 5px 7px;
+  overflow: hidden;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--vscode-menu-foreground, var(--vscode-foreground));
+  font: inherit;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.fusion-config-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fusion-config-option .dd-check {
+  display: inline-flex;
+  width: 14px;
+  flex: 0 0 14px;
+}
+
+.fusion-config-option .dd-check .codicon {
+  font-size: 13px;
+}
+
+.fusion-config-option:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.fusion-config-option.selected {
+  font-weight: 600;
+}
+
 .dd.right .dd-menu {
   left: auto;
   right: 0;
@@ -1294,10 +1402,12 @@ button.model-hover-configurable-button:hover {
   background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
 }
 
+#fusion-dd .dd-icon,
 #thinking-dd .dd-icon {
   display: none;
 }
 
+#input-box.cmp-sm #fusion-dd .dd-icon,
 #input-box.cmp-sm #thinking-dd .dd-icon {
   display: inline-flex;
 }

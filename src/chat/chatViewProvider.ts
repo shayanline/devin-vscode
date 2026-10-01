@@ -65,6 +65,7 @@ interface Runtime {
   lastActivityAt: number; // for idle auto-exit
   mode?: string;
   model?: string;
+  configOptions?: ConfigOption[];
   // Permission/elicitation requests from a background session, re-surfaced to
   // the webview when the session is next opened. Several can be outstanding at
   // once, so this is a queue rather than a single slot.
@@ -282,8 +283,63 @@ const MODE_ICONS: Record<string, string> = {
 // sends a description for each ("Auto-approve actions the model judges safe"),
 // which the picker has nowhere to show yet, so it is left out rather than passed
 // through unused.
+function configChoices(opt?: ConfigOption): { value: string; name?: string; description?: string; _meta?: Record<string, unknown> }[] {
+  return (opt?.options || []).flatMap((choice) => "group" in choice ? choice.options : [choice]);
+}
+
+function groupedModelChoices(options?: ConfigOption[]): Record<string, { value: string; name?: string; description?: string }[]> {
+  const model = options?.find((option) => option.id === "model" || option.category === "model");
+  const groups: Record<string, { value: string; name?: string; description?: string }[]> = {};
+  for (const choice of model?.options || []) {
+    if ("group" in choice) {
+      groups[choice.group] = choice.options;
+    }
+  }
+  return groups;
+}
+
+function thoughtOption(options?: ConfigOption[]): ConfigOption | undefined {
+  return options?.find((option) => option.id === "thought_level" || option.category === "thought_level");
+}
+
+// `devin models list` exposes per-effort uids the session's `model` option does
+// not accept: a session takes one uid per family, with the effort set through
+// `thought_level`, and only the "high" lead-effort Fusion pairs. A picked uid
+// therefore has to be translated to the uid this session advertises, with the
+// stripped effort carried over for `thought_level`.
+const EFFORT_SUFFIX = /-(none|low|medium|high|xhigh)$/;
+function effortOf(uid: string): string | undefined {
+  return EFFORT_SUFFIX.exec(uid)?.[1];
+}
+// Fusion uids carry the lead effort (`fusion-<lead>-<effort>-sidekick-<s>`),
+// which the session does not. Two uids describe the same pair once it is gone.
+function fusionKey(uid: string): string | undefined {
+  if (!uid.startsWith("fusion-")) return undefined;
+  const [lead = "", sidekick = ""] = uid.slice("fusion-".length).split("-sidekick-");
+  return `${lead.replace(EFFORT_SUFFIX, "")}+${sidekick}`;
+}
+function acceptedModelUid(options: ConfigOption[] | undefined, requested: string): { model: string; effort?: string } {
+  const accepted = new Set(
+    configChoices(options?.find((o) => o.id === "model" || o.category === "model")).map((c) => c.value)
+  );
+  if (!accepted.size || accepted.has(requested)) return { model: requested };
+  const fusion = fusionKey(requested);
+  if (fusion) {
+    const lead = requested.slice("fusion-".length).split("-sidekick-")[0];
+    for (const value of accepted) {
+      if (fusionKey(value) === fusion) return { model: value, effort: effortOf(lead) };
+    }
+    return { model: requested };
+  }
+  const base = requested.replace(EFFORT_SUFFIX, "");
+  for (const value of accepted) {
+    if (value.replace(EFFORT_SUFFIX, "") === base) return { model: value, effort: effortOf(requested) };
+  }
+  return { model: requested };
+}
+
 function modeChoices(opt?: ConfigOption): { value: string; name: string; icon: string }[] {
-  return (opt?.options || []).map((c) => ({
+  return configChoices(opt).map((c) => ({
     value: c.value,
     name: c.name || c.value,
     icon: MODE_ICONS[String(c._meta?.["cognition.ai/icon"] || "")] || "codicon-circle-outline"
@@ -330,6 +386,18 @@ export class ChatController implements AcpHost {
   private env?: NodeJS.ProcessEnv;
   private currentMode?: string;
   private currentModel?: string;
+  private currentThoughtLevel?: string;
+  // Bumped every time a model change is queued or starts. After each await the
+  // caller checks whether the generation moved, and bails if a newer call has
+  // taken over, so only the latest model change publishes options.
+  private modelGen = 0;
+  private modelConfigTail: Promise<void> = Promise.resolve();
+  private pendingModelConfig?: {
+    rt: Runtime | undefined;
+    model: string;
+    thoughtLevel?: string;
+    requestId?: number;
+  };
 
   private readonly permissionResolvers = new Map<string, { resolve: (res: RequestPermissionResult) => void; rid: string }>();
   // Shared across surfaces: a request id has to stay unique when a session (and
@@ -1516,7 +1584,17 @@ export class ChatController implements AcpHost {
           await this.setMode(String(msg.mode || DEFAULT_MODE));
           return;
         case "setModel":
-          await this.setModel(String(msg.model || ""));
+          await this.queueModelConfig(String(msg.model || ""), undefined, msg.requestId);
+          return;
+        case "setFusionModel":
+          await this.queueModelConfig(String(msg.model || ""), String(msg.thoughtLevel || ""), msg.requestId);
+          return;
+        case "setConfigOption":
+          if (msg.configId === "thought_level" && typeof msg.value === "string") {
+            await this.queueModelConfig(String(msg.model || this.currentModel || ""), msg.value, msg.requestId);
+            return;
+          }
+          await this.setSessionConfig(String(msg.configId || ""), msg.value);
           return;
         case "permission":
           this.resolvePermission(String(msg.requestId), msg.optionId);
@@ -1922,6 +2000,7 @@ export class ChatController implements AcpHost {
           this.activeId = rt.id;
           this.currentMode = undefined;
           this.currentModel = undefined;
+          this.currentThoughtLevel = undefined;
           this.markVisible(rt.id);
           this.painted = true;
           this.postCapabilities();
@@ -2368,8 +2447,9 @@ export class ChatController implements AcpHost {
     this.postDraft();
     this.currentMode = rt.mode;
     this.currentModel = rt.model;
+    this.currentThoughtLevel = thoughtOption(rt.configOptions)?.currentValue as string | undefined;
     this.postCapabilities();
-    this.postModelOptions(rt.model || "adaptive");
+    this.postModelOptions(rt.model || "adaptive", rt.configOptions);
     if (rt.mode) {
       this.post({ type: "mode", mode: rt.mode });
     }
@@ -2953,12 +3033,16 @@ export class ChatController implements AcpHost {
   // chat's, which matters most on the mode, since it says whether permission is asked
   // for before anything runs. Answers whether the panel is really showing this chat, so
   // a caller can post the rest of what it was going to say.
-  private showOptions(rt: Runtime | undefined, mode?: string, model?: string): boolean {
+  private showOptions(rt: Runtime | undefined, mode?: string, model?: string, thoughtLevel?: string): boolean {
     if (rt && this.activeId !== rt.id) {
       return false;
     }
     this.currentMode = mode || this.currentMode;
     this.currentModel = model || this.currentModel;
+    // When thoughtLevel is undefined the caller did not supply one, so keep the
+    // current value. An explicit empty string means "this model has no thought
+    // level", which must clear the stale value from the previous model.
+    this.currentThoughtLevel = thoughtLevel !== undefined ? thoughtLevel : this.currentThoughtLevel;
     this.statusBar?.set({ connected: this.isReady(), mode: this.currentMode, model: this.currentModel });
     return true;
   }
@@ -2967,12 +3051,24 @@ export class ChatController implements AcpHost {
   // switching back to it later restores the pickers to what that session is actually set
   // to, rather than to the last session's or to a default.
   private publishOptions(rt: Runtime | undefined, options: ConfigOption[] | undefined, currentModeId?: string): void {
-    const byId = new Map((options || []).map((o) => [o.id, o]));
+    const activeOptions = options || rt?.configOptions;
+    const byId = new Map((activeOptions || []).map((o) => [o.id, o]));
     const modeOpt = byId.get("mode");
     const modelOpt = byId.get("model");
+    const thoughtOpt = thoughtOption(activeOptions);
+    const mode = typeof modeOpt?.currentValue === "string" ? modeOpt.currentValue : currentModeId;
+    const model = typeof modelOpt?.currentValue === "string" ? modelOpt.currentValue : undefined;
+    // When the agent reports config options but thought_level is absent (the
+    // model does not support it), pass "" so showOptions clears the stale value
+    // left by a previous model. undefined means "not reported at all" (e.g. no
+    // options yet), so the old value is preserved.
+    const thoughtLevel = typeof thoughtOpt?.currentValue === "string"
+      ? thoughtOpt.currentValue
+      : activeOptions ? "" : undefined;
     if (rt) {
-      rt.mode = modeOpt?.currentValue || currentModeId || rt.mode;
-      rt.model = modelOpt?.currentValue || rt.model;
+      rt.configOptions = activeOptions;
+      rt.mode = mode || rt.mode;
+      rt.model = model || rt.model;
     }
     // The agent reports the modes it actually has, with their names, descriptions
     // and icons. Remember them so the picker offers whatever this CLI supports
@@ -2984,30 +3080,37 @@ export class ChatController implements AcpHost {
     // Which models can read an image. Not every one can (Inkling cannot), and an
     // image block sent to one that cannot poisons the whole session, so this is
     // recorded whenever the agent reports it.
-    for (const choice of modelOpt?.options || []) {
+    for (const choice of configChoices(modelOpt)) {
       const supported = choice._meta?.["cognition.ai/supportsImages"];
       if (typeof supported === "boolean") {
         this.modelImageSupport.set(choice.value, supported);
       }
     }
-    // A background session reports its own mode and model too, and they belong to it
-    // alone: recorded on its runtime above, and not painted over the pickers.
-    if (!this.showOptions(rt, modeOpt?.currentValue || currentModeId, modelOpt?.currentValue)) {
+    if (this.pendingModelConfig && this.pendingModelConfig.rt === rt) {
       return;
     }
-    this.postModelOptions(this.currentModel || "adaptive");
+    // A background session reports its own mode and model too, and they belong to it
+    // alone: recorded on its runtime above, and not painted over the pickers.
+    if (!this.showOptions(rt, mode || currentModeId, model, thoughtLevel)) {
+      return;
+    }
+    this.postModelOptions(this.currentModel || "adaptive", activeOptions);
   }
 
   // Posts the mode + model-family options. Model families come from
   // `devin models list` (cached); if not fetched yet, fetch and re-post.
-  private postModelOptions(currentModel: string): void {
+  private postModelOptions(currentModel: string, options = this.active()?.configOptions): void {
     const families = cachedFamilies();
+    const thought = thoughtOption(options);
     const payload = {
       type: "options",
       modes: this.modes,
       currentMode: this.currentMode || DEFAULT_MODE,
       models: families,
-      currentModel
+      currentModel,
+      modelChoices: groupedModelChoices(options),
+      thoughtLevels: configChoices(thought),
+      currentThoughtLevel: typeof thought?.currentValue === "string" ? thought.currentValue : this.currentThoughtLevel || ""
     };
     if (families.length) {
       this.store.cacheOptions(payload);
@@ -3018,9 +3121,7 @@ export class ChatController implements AcpHost {
         if (f.length) {
           // Listing takes seconds, so re-read the mode: the visible session may
           // have changed by now and this post must not put the old one back.
-          const late = { ...payload, models: f, currentMode: this.currentMode || payload.currentMode };
-          this.post(late);
-          this.store.cacheOptions(late);
+          this.postModelOptions(this.active()?.model || this.currentModel || "adaptive");
         }
       });
     }
@@ -3076,12 +3177,17 @@ export class ChatController implements AcpHost {
     const live = this.active();
     const mode = live?.mode || this.currentMode || this.cfg().get<string>("defaultMode", DEFAULT_MODE);
     const model = live?.model || this.currentModel || this.cfg().get<string>("defaultModel", "");
+    const options = live?.configOptions;
+    const thought = thoughtOption(options);
     const payload = {
       type: "options",
       modes: this.modes,
       currentMode: mode || DEFAULT_MODE,
       models: families,
-      currentModel: model || "adaptive"
+      currentModel: model || "adaptive",
+      modelChoices: groupedModelChoices(options),
+      thoughtLevels: configChoices(thought),
+      currentThoughtLevel: typeof thought?.currentValue === "string" ? thought.currentValue : ""
     };
     this.store.cacheOptions(payload);
     this.post(payload);
@@ -3090,6 +3196,7 @@ export class ChatController implements AcpHost {
   private async applyDefaults(rt: Runtime, res: NewSessionResult): Promise<void> {
     const mode = this.cfg().get<string>("defaultMode", DEFAULT_MODE);
     const model = this.cfg().get<string>("defaultModel", "");
+    const thoughtLevel = this.cfg().get<string>("defaultThoughtLevel", "");
     const currentMode = res.modes?.currentModeId;
     // Record the session's own mode first. The `current_mode_update` that
     // announces it arrives before session/new returns, so the runtime is not in
@@ -3098,17 +3205,29 @@ export class ChatController implements AcpHost {
     rt.mode = currentMode || rt.mode;
     // Show it straight away, if this is the chat being shown at all.
     this.showOptions(rt, rt.mode);
+    const gen = ++this.modelGen;
     try {
       if (mode && mode !== currentMode) {
-        await rt.client.setConfigOption(rt.id, "mode", mode);
+        const result = await rt.client.setConfigOption(rt.id, "mode", mode);
         rt.mode = mode;
+        this.publishOptions(rt, result.configOptions);
       }
+      if (gen !== this.modelGen) return;
       // Only re-apply a remembered model if it's still an available model
-      // (when we know the list); otherwise keep the session's own default.
-      const modelKnown = cachedFamilies().length === 0 || !!familyOf(model);
+      // (when we know the list); otherwise keep the session's own default. The
+      // session accepts a narrower set than the catalog, so translate first.
+      const resolved = acceptedModelUid(rt.configOptions, model);
+      const modelKnown = resolved.model !== model || cachedFamilies().length === 0 || !!familyOf(model);
       if (model && modelKnown) {
-        await rt.client.setConfigOption(rt.id, "model", model);
-        rt.model = model;
+        const result = await rt.client.setConfigOption(rt.id, "model", resolved.model);
+        this.publishOptions(rt, result.configOptions);
+        if (gen !== this.modelGen) return;
+      }
+      const rememberedLevel = thoughtLevel || resolved.effort;
+      if (rememberedLevel && thoughtOption(rt.configOptions)) {
+        const result = await rt.client.setConfigOption(rt.id, "thought_level", rememberedLevel);
+        this.publishOptions(rt, result.configOptions);
+        if (gen !== this.modelGen) return;
       }
       if (!this.showOptions(rt, rt.mode, rt.model)) {
         return;
@@ -3128,7 +3247,8 @@ export class ChatController implements AcpHost {
     if (rt) {
       rt.mode = mode;
       try {
-        await rt.client.setConfigOption(rt.id, "mode", mode);
+        const result = await rt.client.setConfigOption(rt.id, "mode", mode);
+        this.publishOptions(rt, result.configOptions);
       } catch (err) {
         this.log(`[set-mode-failed] ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -3162,22 +3282,163 @@ export class ChatController implements AcpHost {
     }
   }
 
+  private async setSessionConfig(configId: string, value: unknown): Promise<void> {
+    const rt = this.active();
+    const option = rt?.configOptions?.find((item) => item.id === configId);
+    if (!rt || !option || (typeof value !== "string" && typeof value !== "boolean")) {
+      return;
+    }
+    if (option.type === "select" && (typeof value !== "string" || !configChoices(option).some((choice) => choice.value === value))) {
+      return;
+    }
+    // Record the thought level immediately so a concurrent setFusionModel sees
+    // the user's latest choice before its own ACP call returns.
+    if (configId === "thought_level" && typeof value === "string") {
+      this.currentThoughtLevel = value;
+    }
+    try {
+      const result = await rt.client.setConfigOption(rt.id, configId, value);
+      this.publishOptions(rt, result.configOptions);
+      if (configId === "thought_level" && typeof value === "string") {
+        await this.cfg().update("defaultThoughtLevel", value, vscode.ConfigurationTarget.Workspace);
+      }
+    } catch (err) {
+      this.log(`[set-config-failed] ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  private queueModelConfig(model: string, thoughtLevel?: string, requestId?: number): Promise<void> {
+    const request = { rt: this.active(), model, thoughtLevel, requestId };
+    this.pendingModelConfig = request;
+    ++this.modelGen;
+    const barriers: (Promise<Runtime> | Promise<void> | undefined)[] = [
+      this.startingNew,
+      request.rt?.waking,
+      this.activeId ? this.loading.get(this.activeId) : undefined
+    ];
+    const task = this.modelConfigTail.then(async () => {
+      let started: Runtime | undefined;
+      for (const barrier of barriers) {
+        if (!barrier) continue;
+        const result = await barrier.then((rt) => rt, () => undefined);
+        if (result) started = result as Runtime;
+      }
+      if (this.pendingModelConfig !== request) return;
+      const rt = request.rt || (started && this.active() === started ? started : undefined);
+      request.rt = rt;
+      if (this.active() !== rt) {
+        this.pendingModelConfig = undefined;
+        return;
+      }
+      const previousModel = this.currentModel;
+      const previousThought = this.currentThoughtLevel;
+      // The session's own option is the authority on the `model` values it
+      // takes, which is narrower than the `devin models list` catalog the
+      // picker was built from. Translate before asking.
+      const resolved = acceptedModelUid(rt?.configOptions, model);
+      const level = thoughtLevel ?? resolved.effort;
+      let failure: unknown;
+      try {
+        if (level === undefined) await this.setModel(resolved.model);
+        else await this.setFusionModel(resolved.model, level);
+      } catch (err) {
+        failure = err;
+      }
+      if (this.pendingModelConfig !== request) return;
+      this.pendingModelConfig = undefined;
+      if (this.active() !== rt) return;
+      const options = rt?.configOptions;
+      const modelOpt = options?.find((option) => option.id === "model" || option.category === "model");
+      const modeOpt = options?.find((option) => option.id === "mode" || option.category === "mode");
+      const confirmedMode = typeof modeOpt?.currentValue === "string" ? modeOpt.currentValue : rt?.mode;
+      const confirmedModel = typeof modelOpt?.currentValue === "string" ? modelOpt.currentValue : (failure ? previousModel : this.currentModel) || resolved.model;
+      const confirmedThought = typeof thoughtOption(options)?.currentValue === "string"
+        ? thoughtOption(options)?.currentValue as string
+        : options ? "" : (failure ? previousThought : this.currentThoughtLevel);
+      if (rt && options) {
+        rt.mode = typeof modeOpt?.currentValue === "string" ? modeOpt.currentValue : rt.mode;
+        rt.model = typeof modelOpt?.currentValue === "string" ? modelOpt.currentValue : rt.model;
+      }
+      if (failure) {
+        const message = failure instanceof Error ? failure.message : String(failure);
+        this.log(`[model-config-failed] model=${model} thoughtLevel=${thoughtLevel ?? ""} ${message}`);
+        void vscode.window.showWarningMessage(`Could not update model configuration: ${message}`);
+      }
+      this.showOptions(rt, confirmedMode, confirmedModel, confirmedThought);
+      this.postModelOptions(this.currentModel || "adaptive", options);
+      this.post({ type: "modelConfigApplied", requestId, model: confirmedModel, thoughtLevel: confirmedThought });
+    });
+    this.modelConfigTail = task;
+    return task;
+  }
+
+  private async setFusionModel(model: string, thoughtLevel: string): Promise<void> {
+    const gen = ++this.modelGen;
+    this.currentModel = model;
+    this.currentThoughtLevel = thoughtLevel;
+    const rt = this.active();
+    if (rt) {
+      try {
+        // Apply model first, but do not publish options yet. The model change
+        // may reset thought_level on the server, so the second call restores it.
+        const confirmed = rt.configOptions?.find((option) => option.id === "model" || option.category === "model");
+        let result = confirmed?.currentValue === model
+          ? { configOptions: rt.configOptions }
+          : await rt.client.setConfigOption(rt.id, "model", model);
+        this.publishOptions(rt, result.configOptions);
+        if (gen !== this.modelGen) return;
+        // If the user changed the effort level while the model call was in
+        // flight, use their latest choice rather than the stale captured value.
+        const latestThought = this.pendingModelConfig?.thoughtLevel ?? thoughtLevel;
+        if (latestThought && configChoices(thoughtOption(result.configOptions)).some((choice) => choice.value === latestThought)) {
+          result = await rt.client.setConfigOption(rt.id, "thought_level", latestThought);
+        }
+        // Publish once with the final state after both values are applied.
+        this.publishOptions(rt, result.configOptions);
+        if (gen !== this.modelGen) return;
+      } catch (err) {
+        this.log(`[set-fusion-failed] ${err instanceof Error ? err.message : String(err)}`);
+        throw err;
+      }
+    }
+    if (gen !== this.modelGen) return;
+    const appliedOptions = rt?.configOptions;
+    const appliedModelOpt = appliedOptions?.find((option) => option.id === "model" || option.category === "model");
+    const appliedThoughtOpt = thoughtOption(appliedOptions);
+    const appliedModel = rt ? (typeof appliedModelOpt?.currentValue === "string" ? appliedModelOpt.currentValue : model) : model;
+    const appliedThought = rt ? (typeof appliedThoughtOpt?.currentValue === "string" ? appliedThoughtOpt.currentValue : "") : thoughtLevel;
+    try {
+      await this.cfg().update("defaultModel", appliedModel, vscode.ConfigurationTarget.Workspace);
+    } catch {}
+    try {
+      await this.cfg().update("defaultThoughtLevel", appliedThought, vscode.ConfigurationTarget.Workspace);
+    } catch {}
+    if (gen !== this.modelGen || (rt && this.active() !== rt)) return;
+    this.statusBar?.set({ connected: this.isReady(), mode: this.currentMode, model: this.currentModel });
+    this.post({ type: "model", model: appliedModel });
+  }
+
   private async setModel(model: string): Promise<void> {
+    const gen = ++this.modelGen;
     this.currentModel = model;
     const rt = this.active();
     if (rt) {
-      rt.model = model;
       try {
-        await rt.client.setConfigOption(rt.id, "model", model);
+        const result = await rt.client.setConfigOption(rt.id, "model", model);
+        this.publishOptions(rt, result.configOptions);
+        if (gen !== this.modelGen) return;
       } catch (err) {
         this.log(`[set-model-failed] ${err instanceof Error ? err.message : String(err)}`);
+        throw err;
       }
     }
+    if (gen !== this.modelGen) return;
     try {
       await this.cfg().update("defaultModel", model, vscode.ConfigurationTarget.Workspace);
     } catch (err) {
       this.log(`[set-model-persist-failed] ${err instanceof Error ? err.message : String(err)}`);
     }
+    if (gen !== this.modelGen || (rt && this.active() !== rt)) return;
     this.statusBar?.set({ connected: this.isReady(), mode: this.currentMode, model: this.currentModel });
     this.post({ type: "model", model });
   }
@@ -5287,13 +5548,13 @@ function imageOf(content: any): { mimeType?: string; data: string } | null {
 // these so the webview can render web search / fetch / MCP tools distinctly.
 function toolMeta(u: any): { inferenceToolName?: string; toolName?: string; eventType?: string } | undefined {
   const m = u && u._meta;
-  if (!m || typeof m !== "object") {
-    return undefined;
-  }
   const out: { inferenceToolName?: string; toolName?: string; eventType?: string } = {};
-  if (typeof m["cognition.ai/inferenceToolName"] === "string") out.inferenceToolName = m["cognition.ai/inferenceToolName"];
-  if (typeof m["cognition.ai/toolName"] === "string") out.toolName = m["cognition.ai/toolName"];
-  if (typeof m["cognition.ai/eventType"] === "string") out.eventType = m["cognition.ai/eventType"];
+  if (typeof u?.name === "string") out.inferenceToolName = u.name;
+  if (m && typeof m === "object") {
+    if (typeof m["cognition.ai/inferenceToolName"] === "string") out.inferenceToolName = m["cognition.ai/inferenceToolName"];
+    if (typeof m["cognition.ai/toolName"] === "string") out.toolName = m["cognition.ai/toolName"];
+    if (typeof m["cognition.ai/eventType"] === "string") out.eventType = m["cognition.ai/eventType"];
+  }
   return Object.keys(out).length ? out : undefined;
 }
 

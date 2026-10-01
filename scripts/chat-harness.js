@@ -84,6 +84,41 @@ const num = (k) => Number(process.env[k] || 0);
 let seq = 0;
 const idBase = "s" + process.pid;
 const send = (o) => process.stdout.write(JSON.stringify(o) + "\\n");
+let currentModel = "fusion-claude-opus-5-high-sidekick-swe-2-medium";
+let currentThoughtLevel = "high";
+const configOptions = () => [
+  {
+    id: "mode",
+    name: "Session Mode",
+    category: "mode",
+    type: "select",
+    currentValue: process.env.DV_MODE || "default",
+    options: [{ value: "default", name: "Default" }, { value: "plan", name: "Plan" }]
+  },
+  {
+    id: "model",
+    name: "Model",
+    category: "model",
+    type: "select",
+    currentValue: currentModel,
+    options: [{
+      group: "fusion",
+      name: "Fusion",
+      options: [
+        { value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "Fusion (Claude Opus 5 High + SWE-2 Medium)" },
+        { value: "fusion-gpt-6-astra-high-sidekick-swe-2-high", name: "Fusion (GPT-6 Astra High Thinking + SWE-2 High)" }
+      ]
+    }]
+  },
+  {
+    id: "thought_level",
+    name: "Thinking Level",
+    category: "thought_level",
+    type: "select",
+    currentValue: currentThoughtLevel,
+    options: [{ value: "low", name: "Low" }, { value: "high", name: "High" }]
+  }
+];
 let buf = "";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", async (chunk) => {
@@ -121,9 +156,14 @@ process.stdin.on("data", async (chunk) => {
         // paints one chat's settings into another's.
         send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: newId, update: { sessionUpdate: "current_mode_update", currentModeId: process.env.DV_MODE || "default" } } });
         await delay(num("DV_NEW_DELAY"));
-        reply({ sessionId: newId, modes: { currentModeId: process.env.DV_MODE || "default", availableModes: [{ id: "default", name: "Default" }, { id: "plan", name: "Plan" }] } });
+        reply({ sessionId: newId, modes: { currentModeId: process.env.DV_MODE || "default", availableModes: [{ id: "default", name: "Default" }, { id: "plan", name: "Plan" }] }, configOptions: configOptions() });
         break;
       }
+      case "session/set_config_option":
+        if (msg.params.configId === "model") currentModel = msg.params.value;
+        if (msg.params.configId === "thought_level") currentThoughtLevel = msg.params.value;
+        reply({ configOptions: configOptions() });
+        break;
       case "session/load":
         await delay(num("DV_LOAD_DELAY"));
         reply({});

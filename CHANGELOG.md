@@ -8,6 +8,19 @@ the commit messages carry the detail.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
+## [0.13.0] - 2026-10-01
+
+### Highlights
+- Configure Fusion lead models, effort, and sidekicks in one picker.
+- Keep each model family's effort choices separate and accurate.
+- Switch models and effort quickly without stale selections or flicker.
+- Configure Fusion while a session is still loading.
+- Show the agent's reason when a model configuration update fails.
+
+### Under the hood
+- Translate catalogue model variants to ACP accepted model values.
+- Keep design previews out of Marketplace packages.
+
 ## [0.12.7] - 2026-09-03
 
 ### Highlights
