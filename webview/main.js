@@ -106,6 +106,10 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   let modelFamilies = [];
   let modelChoices = {};
   let thoughtLevels = [];
+  // The Fusion picker needs the effort list even while a normal model is
+  // active and reporting none, so the last non empty list is kept here while
+  // thoughtLevels stays live for the normal model thinking dropdown.
+  let knownThoughtLevels = [];
   let currentThoughtLevel = "";
   let currentModelUid = "";
   const savedState = vscode.getState() || {};
@@ -472,11 +476,11 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       menu.innerHTML = "";
       const leads = [...new Map(pairs.map((item) => [item.lead, { value: item.lead, name: item.leadName }])).values()];
       const sidekicks = [...new Map(pairs.map((item) => [item.sidekick, { value: item.sidekick, name: item.sidekickName }])).values()];
-      menu.append(
-        section("Lead model", "lead", leads),
-        section("Lead effort", "effort", levels),
-        section("Sidekick", "sidekick", sidekicks)
-      );
+      menu.append(section("Lead model", "lead", leads));
+      // An effort section with no options is just an orphan label, so only
+      // render it once the levels are known.
+      if (levels.length) menu.append(section("Lead effort", "effort", levels));
+      menu.append(section("Sidekick", "sidekick", sidekicks));
       sync();
     }
     button.addEventListener("click", (event) => {
@@ -497,7 +501,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         lead = current.lead || pairs[0]?.lead || "";
         sidekick = current.sidekick || pairs[0]?.sidekick || "";
         effort = currentEffort || levels[0]?.value || "";
-        sync();
+        // Levels can arrive after the user has already opened the menu, so
+        // rebuild it in place rather than leaving the effort section empty.
+        if (!menu.classList.contains("hidden")) renderMenu(); else sync();
         container.classList.toggle("hidden", !pairs.length);
       }
     };
@@ -505,7 +511,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   function updateModelConfig(fam, currentUid) {
     const pairs = isFusion(fam) ? modelChoices.fusion || [] : [];
     if (pairs.length) {
-      fusionPicker.set(pairs, currentUid, thoughtLevels, currentThoughtLevel);
+      fusionPicker.set(pairs, currentUid, knownThoughtLevels, currentThoughtLevel);
       el.fusionDD.classList.remove("hidden");
       el.thinkingDD.classList.add("hidden");
     } else {
@@ -7395,15 +7401,15 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       case "workspace": break;
       case "options": {
         modeDropdown.set((m.modes || []).map((mode) => mode.value === "bypass" ? { ...mode, name: "Bypass" } : mode), m.currentMode);
-        // Merge rather than replace: the server reports config options for the
-        // currently active model, so switching to (say) GPT may drop the Fusion
-        // group and the thought_level list. Losing those would leave the Fusion
-        // picker empty when the user switches back. Keep existing groups and
-        // thought levels unless the new response supplies them.
+        // Model groups are merged rather than replaced: the server reports the
+        // options of the active model, so a normal model's response can omit the
+        // Fusion group entirely, and losing it would empty the Fusion picker.
         const incoming = m.modelChoices || {};
         for (const key of Object.keys(incoming)) modelChoices[key] = incoming[key];
-        const newLevels = Array.isArray(m.thoughtLevels) ? m.thoughtLevels : [];
-        if (newLevels.length) thoughtLevels = newLevels;
+        // thoughtLevels stays live, since the normal model thinking dropdown is
+        // shown only when the active model really has a thought level.
+        thoughtLevels = Array.isArray(m.thoughtLevels) ? m.thoughtLevels : [];
+        if (thoughtLevels.length) knownThoughtLevels = thoughtLevels;
         currentThoughtLevel = m.currentThoughtLevel || currentThoughtLevel;
         // The user may have already picked a different model before this async
         // options response arrived. Keep their local selection.

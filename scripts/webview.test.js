@@ -5561,6 +5561,99 @@ test("switching from a normal model to Fusion keeps the effort levels", async ()
   assert.strictEqual(h.errors().length, 0);
 });
 
+test("Fusion effort levels that arrive late fill the open configuration menu", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  const allModels = [
+    { id: "fusion", name: "Fusion", default: "fusion-claude-opus-5-high-sidekick-swe-2-medium", variants: [{ value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "Fusion" }] },
+    { id: "gpt", name: "GPT-5", default: "gpt-5-xhigh", variants: [{ value: "gpt-5-xhigh", name: "GPT-5 XHigh" }] }
+  ];
+  const fusionChoices = [
+    { value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "Fusion (Claude Opus 5 High + SWE-2 Medium)" },
+    { value: "fusion-claude-opus-5-high-sidekick-swe-2-high", name: "Fusion (Claude Opus 5 High + SWE-2 High)" }
+  ];
+  const levels = [{ value: "low", name: "Low" }, { value: "high", name: "High" }];
+
+  // A normal model is active and reports no thought level, but the Fusion
+  // group is already known so the picker can populate.
+  h.post({
+    type: "options", currentMode: "accept-edits",
+    currentModel: "gpt-5-xhigh", currentThoughtLevel: "",
+    thoughtLevels: [], modelChoices: { fusion: fusionChoices }, models: allModels, modes: []
+  });
+  await h.settle(20);
+
+  const modelDD = h.document.querySelector("#model-dd");
+  modelDD.querySelector(".dd-btn").click();
+  [...modelDD.querySelectorAll(".dd-item")].find((el) => el.textContent.includes("GPT-5")).click();
+  modelDD.querySelector(".dd-btn").click();
+  [...modelDD.querySelectorAll(".dd-item")].find((el) => el.textContent.includes("Fusion")).click();
+
+  const picker = h.document.querySelector("#fusion-dd");
+  assert.ok(!picker.classList.contains("hidden"), "Fusion picker is visible");
+  picker.querySelector(".dd-btn").click();
+  const labels = () => [...picker.querySelectorAll(".fusion-config-label")].map((el) => el.textContent);
+  assert.deepStrictEqual(labels(), ["Lead model", "Sidekick"], "no Lead effort section while the levels are unknown");
+
+  // The options response for the Fusion model lands while the menu is still
+  // open, so the effort section has to appear without closing and reopening.
+  h.post({
+    type: "options", currentMode: "accept-edits",
+    currentModel: "fusion-claude-opus-5-high-sidekick-swe-2-medium",
+    currentThoughtLevel: "low", thoughtLevels: levels,
+    modelChoices: { fusion: fusionChoices }, models: allModels, modes: []
+  });
+  await h.settle(20);
+
+  assert.ok(!picker.querySelector(".dd-menu").classList.contains("hidden"), "the menu is still open");
+  const effortSection = [...picker.querySelectorAll(".fusion-config-label")].find((el) => el.textContent === "Lead effort");
+  assert.ok(effortSection, "Lead effort section appears once the levels arrive");
+  assert.strictEqual(effortSection.parentElement.querySelectorAll(".fusion-config-option").length, 2, "both effort levels are rendered");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a normal model with no thought level keeps the ACP thinking picker hidden", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  const allModels = [
+    { id: "fusion", name: "Fusion", default: "fusion-claude-opus-5-high-sidekick-swe-2-medium", variants: [{ value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "Fusion" }] },
+    { id: "gpt", name: "GPT-5", default: "gpt-5-xhigh", variants: [{ value: "gpt-5-xhigh", name: "GPT-5 XHigh" }] }
+  ];
+  const fusionChoices = [
+    { value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "Fusion (Claude Opus 5 High + SWE-2 Medium)" },
+    { value: "fusion-claude-opus-5-high-sidekick-swe-2-high", name: "Fusion (Claude Opus 5 High + SWE-2 High)" }
+  ];
+  const levels = [{ value: "low", name: "Low" }, { value: "high", name: "High" }];
+
+  // Fusion is active, so its effort levels become the known list.
+  h.post({
+    type: "options", currentMode: "accept-edits",
+    currentModel: "fusion-claude-opus-5-high-sidekick-swe-2-medium",
+    currentThoughtLevel: "low", thoughtLevels: levels,
+    modelChoices: { fusion: fusionChoices }, models: allModels, modes: []
+  });
+  await h.settle(20);
+
+  // The user picks a normal model whose options report no thought level. The
+  // remembered Fusion levels must not leak into the thinking picker, and the
+  // GPT family has a single variant so there is nothing else to show.
+  const modelDD = h.document.querySelector("#model-dd");
+  modelDD.querySelector(".dd-btn").click();
+  [...modelDD.querySelectorAll(".dd-item")].find((el) => el.textContent.includes("GPT-5")).click();
+  h.post({
+    type: "options", currentMode: "accept-edits",
+    currentModel: "gpt-5-xhigh", currentThoughtLevel: "",
+    thoughtLevels: [], modelChoices: {}, models: allModels, modes: []
+  });
+  await h.settle(20);
+
+  assert.ok(h.document.querySelector("#thinking-dd").classList.contains("hidden"), "the thinking picker stays hidden");
+  assert.ok(h.document.querySelector("#fusion-dd").classList.contains("hidden"), "the Fusion picker is hidden");
+  assert.strictEqual(h.errors().length, 0);
+});
+
 test("thinking picker keeps a thought icon in compact mode", async () => {
   const h = createHarness();
   h.post({ type: "ready" });
