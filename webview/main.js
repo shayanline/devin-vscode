@@ -1,4 +1,9 @@
 import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
+import { EFFORT_NAMES, EFFORT_ORDER, fusionIdentity, fusionModelKey, modelIdentity } from "../src/cli/modelId";
+import { singleModelPricing, fusionRolePricing, estimatedOriginalPrice, pickerPromotionEndDate } from "./modelPickerPricing";
+import { contextPercent, normalizeContextUsage, fusionUsageRoles } from "./contextUsage";
+import { acuText } from "../src/acp/usage";
+import { createWorkingMark } from "./workingMark.js";
 
 (function () {
   const vscode = acquireVsCodeApi();
@@ -46,8 +51,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     attach: $("attach"),
     modeDD: $("mode-dd"),
     modelDD: $("model-dd"),
-    fusionDD: $("fusion-dd"),
     thinkingDD: $("thinking-dd"),
+    modelPickerGroup: $("model-picker-group"),
     inputBox: $("input-box"),
     composer: $("composer"),
     permissionTray: $("permission-tray"),
@@ -61,6 +66,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
 
   let body = "list"; // "list" | "thread"
   let busy = false; // whether a turn is in flight; gates edit/restore chrome
+  // The Fusion role the host last saw producing work this turn, if any:
+  // { model, role: "lead" | "sub" }. Ephemeral chrome, never persisted.
+  let modelActivity = null;
   // The thread is a flat sequence of blocks rendered in stream order. `block`
   // is the currently open block; a new block starts on a role change, a
   // messageId change, or after a tool/plan/error interrupts the flow.
@@ -100,9 +108,16 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   let currentTitle = "Chat";
   let lastUserText = "";
 
-  const modeDropdown = createDropdown(el.modeDD, (v) => vscode.postMessage({ type: "setMode", mode: v }));
-  // Model picker lists families; a separate thinking picker holds the effort
-  // variants of the selected family (Copilot-style).
+  // The chat input's mode control shows its icon and word only, so it asks the
+  // shared dropdown to skip the trailing chevron.
+  const modeDropdown = createDropdown(el.modeDD, (v) => {
+    vscode.postMessage({ type: "setMode", mode: v });
+    // The row already wrote the new label, so the fit sees the picked word.
+    fitComposer();
+  }, { hideChevron: true });
+  // The model picker owns one composer pill with a Model and an Effort
+  // segment, plus a four page popup (models, model details, Fusion roles,
+  // role details) floating above it.
   let modelFamilies = [];
   let modelChoices = {};
   // thought_level is reported for the active model only, so each family's
@@ -110,58 +125,62 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // model is on screen. A missing key means not known yet, an empty array
   // means the family really has no efforts.
   let thoughtLevelsByFamily = {};
-  // Whether the thinking picker is currently listing efforts rather than the
-  // family's own variants, since the two need different messages on select.
-  let thinkingShowsEfforts = false;
+  let speedsByModel = {};
+  let reportedThoughtLevels = {};
+  let pendingPrefIntent = null;
   let currentThoughtLevel = "";
+  let currentSpeed = "";
   let currentModelUid = "";
   let modelChangeSeq = 0;
   let pendingModelChange = 0;
-  function postModelChange(message) {
+  // Identity of the catalogue the capability caches were learned from, so a
+  // changed `devin models list` output invalidates them on the next options
+  // reply rather than serving stale support.
+  let catalogKey = "";
+  function postModelChange(message, intent) {
     pendingModelChange = ++modelChangeSeq;
-    vscode.postMessage({ ...message, requestId: pendingModelChange });
+    pendingPrefIntent = intent ? { scope: intent.scope } : null;
+    vscode.postMessage({ speed: currentSpeed, ...message, requestId: pendingModelChange });
   }
   const savedState = vscode.getState() || {};
   const pinnedModelIds = new Set(Array.isArray(savedState.pinnedModels) ? savedState.pinnedModels : []);
+  const savedCaps = normalizeCapabilities(savedState.modelCapabilities);
+  catalogKey = savedCaps.catalogKey;
+  thoughtLevelsByFamily = savedCaps.thoughtLevelsByFamily;
+  speedsByModel = savedCaps.speedsByModel;
   // The active model family's display name, stamped onto each turn when it is
   // sent so the response footer can show "{model} · {time}" (VS Code's footer
   // detail). ACP does not report a per-turn model, so this is the model
   // selected at send time.
   let currentModelLabel = "";
-  let modelHoverFloater = null;
-  const modelDropdown = createDropdown(el.modelDD, onModelSelect, {
-    buttonIcon: modelButtonIcon,
-    itemAction: toggleModelPin,
-    itemHover: showModelHover,
-    itemLeave: scheduleModelHoverClose,
-    onClose: closeModelHover
-  });
-  const fusionPicker = createFusionPicker(
-    el.fusionDD,
-    (model) => {
-      currentModelUid = model;
-      updateModelConfig(familyOfUid(model), model);
-      postModelChange({ type: "setFusionModel", model, thoughtLevel: currentThoughtLevel });
-    },
-    (value, model) => {
-      if (model) currentModelUid = model;
-      currentThoughtLevel = value;
-      postModelChange({ type: "setConfigOption", configId: "thought_level", value, model: currentModelUid });
+
+  // The Cognition symbol lives in one body template for the masked model
+  // icons. The working row animates a different asset, the bundled Devin logo.
+  let cognitionSvg = null;
+  function cognitionMarkSvg() {
+    if (cognitionSvg === null) {
+      const tpl = document.getElementById("cognition-mark");
+      const svg = tpl && tpl.content ? tpl.content.querySelector("svg") : null;
+      cognitionSvg = svg ? svg.outerHTML : "";
     }
-  );
-  const thinkingDropdown = createDropdown(el.thinkingDD, onThinkingSelect, {
-    staticIcon: "codicon-thinking",
-    ariaLabel: "Thinking effort"
-  });
+    return cognitionSvg;
+  }
+  function cognitionMarkUrl() {
+    return "data:image/svg+xml," + encodeURIComponent(cognitionMarkSvg());
+  }
 
   // Icon shown on the model button: sparkle for Adaptive, the brand codicon for
-  // Claude / OpenAI, and a generic chip otherwise. Grok has no codicon, so it
-  // still uses the bundled SVG mask (via brandIconOf).
+  // Claude / OpenAI, the Cognition symbol for the SWE families, and a generic
+  // chip otherwise. Grok has no codicon, so it still uses the bundled SVG mask
+  // (via brandIconOf).
   function brandIconOf(fam) {
     let icons = {};
     try { icons = JSON.parse(document.body.dataset.modelIcons || "{}"); } catch { icons = {}; }
     const s = ((fam.name || "") + " " + (fam.id || "")).toLowerCase();
     if (/grok/.test(s) && icons.grok) return { key: "grok", url: icons.grok };
+    if (/^swe(?:-|$)/i.test(fam.id || "") && cognitionMarkSvg()) {
+      return { key: "cognition", url: cognitionMarkUrl() };
+    }
     return null;
   }
   function modelButtonIcon(familyId) {
@@ -175,37 +194,158 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   }
 
   function familyById(id) { return modelFamilies.find((f) => f.id === id); }
-  function familyOfUid(uid) {
-    return modelFamilies.find((f) => (f.variants || []).some((v) => v.value === uid))
-      || (String(uid || "").startsWith("fusion-") ? familyById("fusion") : undefined);
+  function familyOfUid(uid, families = modelFamilies) {
+    return families.find((f) => (f.variants || []).some((v) => v.value === uid))
+      || (String(uid || "").startsWith("fusion-") ? families.find(isFusion) : undefined)
+      || familyForModelId(modelIdentity(uid || "").id, families);
   }
   function effortKey(fam, uid) {
     return isFusion(fam) ? `fusion:${fusionIdentity(uid).lead}` : fam?.id;
   }
-  const EFFORT_ORDER = ["none", "low", "medium", "high", "xhigh"];
-  const EFFORT_NAMES = { none: "No Thinking", low: "Low", medium: "Medium", high: "High", xhigh: "XHigh" };
-  function effortsFor(fam, uid) {
-    const known = fam ? thoughtLevelsByFamily[effortKey(fam, uid)] : undefined;
-    if (known?.length) return known;
-    if (!isFusion(fam)) return [];
-    const wanted = fusionIdentity(uid || fam.default);
+  function speedKey(fam, uid) {
+    if (!isFusion(fam)) return fam?.id;
+    const identity = fusionIdentity(uid);
+    return `fusion:${identity.lead}:${identity.sidekick}`;
+  }
+  // Fast support resolves from the exact scope's reported choices first, then
+  // from catalogue Fast variants. known=false means neither has spoken yet,
+  // which is the "checking" state rather than "unavailable".
+  function speedInfoFor(fam, uid) {
+    const key = fam ? speedKey(fam, uid) : "";
+    const cached = key ? speedsByModel[key] : undefined;
+    if (cached) {
+      const choices = Array.isArray(cached.choices) ? cached.choices : [];
+      return { choices, known: true, fast: choices.some((c) => c.value === "fast") };
+    }
+    const choices = catalogSpeedChoices(fam, uid);
+    return { choices, known: choices.length > 0, fast: choices.length > 0 };
+  }
+  function catalogSpeedChoices(fam, uid) {
+    const variants = isFusion(fam) ? fusionPairs(fam).filter((v) => {
+      const candidate = fusionIdentity(v.value), current = fusionIdentity(uid);
+      return candidate.lead === current.lead && candidate.sidekick === current.sidekick;
+    }) : fam?.variants || [];
+    const fast = variants.some((v) => (isFusion(fam) ? fusionIdentity(v.value) : modelIdentity(v.value)).speed === "fast");
+    return fast ? [{ value: "standard", name: "Standard" }, { value: "fast", name: "Fast" }] : [];
+  }
+  function reconcileCurrentSpeed(fam, uid) {
+    const choices = speedInfoFor(fam, uid).choices;
+    if (!choices.some((choice) => choice.value === currentSpeed)) {
+      const speed = isFusion(fam) ? fusionIdentity(uid).speed : modelIdentity(uid || "").speed;
+      currentSpeed = choices.some((choice) => choice.value === speed) ? speed : "standard";
+    }
+  }
+  // Fusion effort options are scoped to the Lead, matching effortKey, so a
+  // cached ACP list and the catalogue fallback always describe the same scope.
+  function catalogFusionEfforts(fam, lead) {
     const seen = new Set();
-    for (const variant of fam.variants || []) {
+    for (const variant of fusionPairs(fam)) {
       const identity = fusionIdentity(variant.value);
-      if (identity.lead === wanted.lead && identity.sidekick === wanted.sidekick && identity.effort) seen.add(identity.effort);
+      if (identity.lead === lead && identity.effort) seen.add(identity.effort);
     }
     return EFFORT_ORDER.filter((value) => seen.has(value)).map((value) => ({ value, name: EFFORT_NAMES[value] }));
+  }
+  function fusionEffortsForLead(lead) {
+    const fam = modelFamilies.find(isFusion);
+    const known = fam ? thoughtLevelsByFamily[`fusion:${lead}`] : undefined;
+    if (known !== undefined) return { options: known, authoritative: true };
+    return { options: fam ? catalogFusionEfforts(fam, lead) : [], authoritative: false };
+  }
+  // The authoritative flag separates "the agent reported no efforts" from "no
+  // report yet", which the Fusion picker renders as Not configurable versus
+  // Loading. A known empty list must never fall through to catalogue efforts.
+  function effortsFor(fam, uid) {
+    const known = fam ? thoughtLevelsByFamily[effortKey(fam, uid)] : undefined;
+    if (known !== undefined) return { options: known, authoritative: true };
+    if (!isFusion(fam)) return { options: [], authoritative: false };
+    return fusionEffortsForLead(fusionIdentity(uid || fam.default || "").lead);
+  }
+  function supportedEffortValues(fam, uid) {
+    const info = effortsFor(fam, uid);
+    if (info.authoritative || info.options.length) return info.options.map((o) => o.value);
+    if (isFusion(fam)) return [];
+    const matching = (fam?.variants || []).filter((v) => modelIdentity(v.value).speed === currentSpeed);
+    const variants = matching.length ? matching : (fam?.variants || []);
+    const efforts = [];
+    for (const v of variants) {
+      const effort = modelIdentity(v.value).effort;
+      if (effort && !efforts.includes(effort)) efforts.push(effort);
+    }
+    return efforts;
+  }
+  // currentThoughtLevel must name an effort the shown model supports before any
+  // label or message uses it, or pickers display and post stale values.
+  function reconcileCurrentEffort(fam, uid) {
+    const supported = supportedEffortValues(fam, uid);
+    if (supported.includes(currentThoughtLevel)) return;
+    const uidEffort = isFusion(fam) ? fusionIdentity(uid || "").effort : modelIdentity(uid || "").effort;
+    currentThoughtLevel = uidEffort && supported.includes(uidEffort) ? uidEffort : supported[0] || "";
+  }
+  // The key is canonical: family and variant order carries no meaning, so a
+  // reordered catalogue must not invalidate learned capability choices.
+  function catalogKeyFor(models) {
+    return (models || [])
+      .map((fam) => `${fam.id || ""}=${(fam.variants || []).map((v) => v.value).sort().join("+")}`)
+      .sort()
+      .join("|");
+  }
+  function normalizeCapabilities(raw) {
+    const caps = { catalogKey: "", thoughtLevelsByFamily: {}, speedsByModel: {} };
+    if (!raw || typeof raw !== "object") return caps;
+    if (typeof raw.catalogKey === "string") caps.catalogKey = raw.catalogKey;
+    for (const [key, list] of Object.entries(raw.thoughtLevelsByFamily || {})) {
+      if (Array.isArray(list)) caps.thoughtLevelsByFamily[key] = list.filter((o) => o && typeof o.value === "string");
+    }
+    for (const [key, entry] of Object.entries(raw.speedsByModel || {})) {
+      const choices = Array.isArray(entry?.choices) ? entry.choices.filter((o) => o && typeof o.value === "string") : null;
+      if (choices) caps.speedsByModel[key] = { choices };
+    }
+    return caps;
+  }
+  // Only capability choices persist, never the selected Fast or effort values,
+  // and other saved fields such as sessionId and pinnedModels ride along.
+  function persistCapabilities() {
+    const speeds = {};
+    for (const [key, entry] of Object.entries(speedsByModel)) {
+      speeds[key] = { choices: Array.isArray(entry?.choices) ? entry.choices : [] };
+    }
+    vscode.setState({
+      ...(vscode.getState() || {}),
+      modelCapabilities: { catalogKey, thoughtLevelsByFamily, speedsByModel: speeds }
+    });
   }
   function variantFor(fam, uid) {
     return (fam?.variants || []).find((v) => v.value === uid)
       || (fam?.variants || []).find((v) => v.value === fam.default)
       || fam?.variants?.[0];
   }
+  // Badges follow the displayed effort and speed, which the representative
+  // uid can lag. An exact Fast variant keeps its own tags.
+  function badgeVariantFor(fam, effort, speed) {
+    const variants = fam?.variants || [];
+    const matches = (v, wantedSpeed) => {
+      const identity = modelIdentity(v.value);
+      return (!identity.effort || identity.effort === effort) && identity.speed === wantedSpeed;
+    };
+    return variants.find((v) => matches(v, speed))
+      || variants.find((v) => matches(v, "standard"))
+      || variants.find((v) => v.value === fam?.default);
+  }
   function promotionLabel(v) {
     return typeof v?.promotion === "string" && v.promotion.trim() ? v.promotion.trim() : "";
   }
+  // A discount is a promotion: any offer text survives on the single
+  // Promotion tag's tooltip instead of becoming a second tag.
+  function promotionTitle(text) {
+    return /^(promo|promotion|discount)$/i.test(text) ? "Promotion" : `Promotion: ${text}`;
+  }
   function variantBadges(v) {
-    return [v?.isNew ? "NEW" : "", v?.isBeta ? "BETA" : "", promotionLabel(v)].filter(Boolean);
+    const promotion = promotionLabel(v);
+    return [
+      v?.isNew ? { kind: "new", label: "New", title: "New" } : null,
+      promotion ? { kind: "promotion", label: "Promotion", title: promotionTitle(promotion) } : null,
+      v?.isBeta ? { kind: "beta", label: "Beta", title: "Beta" } : null
+    ].filter(Boolean);
   }
   function costTierLabel(tier) {
     return String(tier || "").replace(/^med\b/i, "Medium").trim();
@@ -217,387 +357,27 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     if (value.includes("med")) return "cost-medium";
     return "cost-low";
   }
-  function costRows(summary, sidekick = false) {
-    return String(summary || "").split("·").map((part) => {
-      const match = /^(.+?)\s*\/\s*(?:MTok|1M)\s+(Sidekick )?(In|Input|Out|Output|Cache Read|Cached input|Cache Write)$/i.exec(part.trim());
-      if (!match || !!match[2] !== sidekick) return null;
-      const labels = { in: "Input", input: "Input", out: "Output", output: "Output", "cache read": "Cache Read", "cached input": "Cache Read", "cache write": "Cache Write" };
-      return { label: labels[match[3].toLowerCase()], value: match[1].trim() };
-    }).filter(Boolean);
-  }
-  function formatTokenCount(value) {
-    const n = Number(value);
-    if (!Number.isFinite(n) || n <= 0) return "";
-    if (n >= 900000) return `${Math.round(n / 1000000)}M tokens`;
-    if (n >= 1000) return `${Math.round(n / 1000)}K tokens`;
-    return `${n} tokens`;
-  }
-  function modelHoverContent(item) {
-    if (!item) return null;
-    const defaultRows = costRows(item.costSummary);
-    const longRows = costRows(item.longContextCostSummary);
-    const sidekickDefaultRows = costRows(item.costSummary, true);
-    const sidekickLongRows = costRows(item.longContextCostSummary, true);
-    const hasSidekickCosts = sidekickDefaultRows.length > 0 || sidekickLongRows.length > 0;
-    const costSections = [
-      { title: hasSidekickCosts ? "Lead cost per 1M tokens" : "Cost per 1M tokens", defaultRows, longRows },
-      ...(hasSidekickCosts ? [{ title: "Sidekick cost per 1M tokens", defaultRows: sidekickDefaultRows, longRows: sidekickLongRows }] : [])
-    ];
-    const hasCosts = costSections.some((section) => section.defaultRows.length || section.longRows.length);
-    const promotion = promotionLabel(item);
-    const contextRows = [
-      ["Max context", formatTokenCount(item.maxContextTokens)],
-      ["Max output", formatTokenCount(item.maxOutputTokens)]
-    ].filter(([, value]) => value);
-    const hasConfigurable = !!item.thinkingLevels || !!item.fusion;
-    if (!item.description && !item.costTier && !hasCosts && !promotion && !contextRows.length && !hasConfigurable) return null;
-    const compact = !hasCosts && !promotion && !contextRows.length && !hasConfigurable;
-
-    const card = document.createElement("div");
-    card.className = "model-hover" + (compact ? " compact" : "") + (!hasConfigurable ? " no-configurable" : "");
-    const header = document.createElement("div");
-    header.className = "model-hover-header" + (item.description ? "" : " no-description");
-    header.appendChild(Object.assign(document.createElement("strong"), { className: "model-hover-name", textContent: item.name || "Model" }));
-    if (item.description) header.appendChild(Object.assign(document.createElement("span"), { className: "model-hover-description", textContent: item.description }));
-    if (item.costTier) header.appendChild(Object.assign(document.createElement("span"), { className: `model-hover-tier ${costTierClass(item.costTier)}`, textContent: costTierLabel(item.costTier) }));
-    card.appendChild(header);
-
-    costSections.forEach((section) => {
-      const rowLabels = [...new Set([...section.defaultRows, ...section.longRows].map((row) => row.label))];
-      if (!rowLabels.length) return;
-      card.appendChild(Object.assign(document.createElement("div"), { className: "model-hover-section", textContent: section.title }));
-      const cost = document.createElement("div");
-      cost.className = "model-hover-cost";
-      const headings = document.createElement("div");
-      headings.className = "model-hover-cost-heading-row" + (section.longRows.length ? " has-long-context" : "");
-      headings.appendChild(Object.assign(document.createElement("span"), { className: "model-hover-cost-heading", textContent: "Default" }));
-      if (section.longRows.length) headings.appendChild(Object.assign(document.createElement("span"), { className: "model-hover-cost-heading", textContent: "Long Context" }));
-      cost.appendChild(headings);
-      const table = document.createElement("div");
-      table.className = "model-hover-cost-table" + (section.longRows.length ? " has-long-context" : "");
-      const defaultByLabel = new Map(section.defaultRows.map((row) => [row.label, row.value]));
-      const longByLabel = new Map(section.longRows.map((row) => [row.label, row.value]));
-      rowLabels.forEach((label) => {
-        const row = document.createElement("div");
-        row.className = "model-hover-cost-row" + (section.longRows.length ? " has-long-context" : "");
-        row.append(
-          Object.assign(document.createElement("span"), { className: "model-hover-cost-line" }),
-          Object.assign(document.createElement("span"), { className: "model-hover-cost-label", textContent: label }),
-          Object.assign(document.createElement("strong"), { className: "model-hover-cost-value", textContent: defaultByLabel.get(label) || "" })
-        );
-        if (section.longRows.length) {
-          row.append(Object.assign(document.createElement("strong"), { className: "model-hover-cost-value", textContent: longByLabel.get(label) || "" }));
-        }
-        table.appendChild(row);
-      });
-      cost.appendChild(table);
-      card.appendChild(cost);
-    });
-
-    if (promotion) {
-      const promo = document.createElement("div");
-      promo.className = "model-hover-promotion";
-      promo.appendChild(Object.assign(document.createElement("span"), { textContent: "Promotion" }));
-      promo.appendChild(Object.assign(document.createElement("strong"), { textContent: promotion }));
-      card.appendChild(promo);
-    }
-
-    if (contextRows.length) {
-      const limits = document.createElement("div");
-      limits.className = "model-hover-limits";
-      contextRows.forEach(([label, value]) => {
-        const row = document.createElement("div");
-        row.className = "model-hover-cost-row";
-        row.append(
-          Object.assign(document.createElement("span"), { className: "model-hover-cost-line" }),
-          Object.assign(document.createElement("span"), { className: "model-hover-cost-label", textContent: label }),
-          Object.assign(document.createElement("strong"), { className: "model-hover-cost-value", textContent: value })
-        );
-        limits.appendChild(row);
-      });
-      card.appendChild(limits);
-    }
-
-    if (hasConfigurable) {
-      const configurable = document.createElement("div");
-      configurable.className = "model-hover-configurable";
-      configurable.appendChild(Object.assign(document.createElement("span"), { className: "model-hover-configurable-label", textContent: "Configurable" }));
-      const controls = document.createElement("div");
-      controls.className = "model-hover-configurable-controls";
-      const effort = document.createElement("button");
-      effort.type = "button";
-      effort.className = "model-hover-configurable-button";
-      effort.textContent = item.fusion ? "Configure Fusion" : "Thinking Level";
-      effort.addEventListener("click", (event) => {
-        event.stopPropagation();
-        modelDropdown.close();
-        (item.fusion ? el.fusionDD : el.thinkingDD).querySelector(".dd-btn")?.click();
-      });
-      controls.appendChild(effort);
-      configurable.appendChild(controls);
-      card.appendChild(configurable);
-    }
-    return card;
-  }
-  let modelHoverShowTimer = null;
-  let modelHoverCloseTimer = null;
-  function cancelModelHoverShow() {
-    if (modelHoverShowTimer) clearTimeout(modelHoverShowTimer);
-    modelHoverShowTimer = null;
-  }
-  function cancelModelHoverClose() {
-    if (modelHoverCloseTimer) clearTimeout(modelHoverCloseTimer);
-    modelHoverCloseTimer = null;
-  }
-  function closeModelHover() {
-    cancelModelHoverShow();
-    cancelModelHoverClose();
-    if (modelHoverFloater) modelHoverFloater.close();
-    modelHoverFloater = null;
-  }
-  function scheduleModelHoverClose() {
-    cancelModelHoverShow();
-    cancelModelHoverClose();
-    modelHoverCloseTimer = setTimeout(closeModelHover, 300);
-  }
-  function showModelHover(anchor, item) {
-    cancelModelHoverClose();
-    closeModelHover();
-    modelHoverShowTimer = setTimeout(() => {
-      modelHoverShowTimer = null;
-      const card = modelHoverContent(item.hover);
-      if (!card) return;
-      card.addEventListener("mouseenter", cancelModelHoverClose);
-      card.addEventListener("mouseleave", scheduleModelHoverClose);
-      modelHoverFloater = makeFloater(anchor, card, "outside-right", () => { modelHoverFloater = null; });
-    }, 500);
-  }
   function savePinnedModels() {
     vscode.setState({ ...(vscode.getState() || {}), pinnedModels: [...pinnedModelIds] });
   }
-  function toggleModelPin(item) {
-    if (!item?.value) return;
-    if (pinnedModelIds.has(item.value)) pinnedModelIds.delete(item.value);
-    else pinnedModelIds.add(item.value);
-    savePinnedModels();
-    applyModelOptions(modelFamilies, currentModelUid);
-    modelDropdown.close();
-  }
-
-  function onModelSelect(familyId) {
-    const fam = familyById(familyId);
-    if (!fam) return;
-    currentModelUid = fam.default;
-    currentModelLabel = fam.name || "";
-    postModelChange({ type: "setModel", model: fam.default });
-    updateModelConfig(fam, fam.default);
-  }
-  function onThinkingSelect(value) {
-    if (thinkingShowsEfforts) {
-      currentThoughtLevel = value;
-      postModelChange({ type: "setConfigOption", configId: "thought_level", value, model: currentModelUid });
-      return;
-    }
-    currentModelUid = value;
-    postModelChange({ type: "setModel", model: value });
-  }
-  function fusionIdentity(uid) {
-    const [leadUid = "", sidekick = ""] = String(uid || "").replace(/^fusion-/, "").split("-sidekick-");
-    const effortMatch = leadUid.match(/-(none|low|medium|high|xhigh)$/);
-    return { lead: leadUid.replace(/-(?:none|low|medium|high|xhigh)$/, ""), sidekick, effort: effortMatch ? effortMatch[1] : "" };
-  }
-  function fusionChoice(choice) {
-    const identity = fusionIdentity(choice.value);
-    const [lead = choice.name || choice.value, sidekick = ""] = String(choice.name || choice.value).replace(/^Fusion\s*/i, "").replace(/^\(/, "").replace(/\)$/, "").split(" + ");
-    return {
-      ...choice,
-      ...identity,
-      leadName: lead.replace(/ (?:No Thinking|Low|Medium|High|XHigh)(?: Thinking)?$/, "") || identity.lead,
-      sidekickName: sidekick || identity.sidekick
-    };
-  }
-  function compactFusionLead(name) {
-    return String(name || "").replace(/^Claude /, "");
-  }
-  function compactFusionSidekick(name) {
-    return String(name || "").replace(/ (Low|Medium|High|XHigh)$/, " · $1");
-  }
-  function createFusionPicker(container, onModel, onEffort) {
-    const button = document.createElement("button");
-    button.className = "dd-btn";
-    button.setAttribute("aria-haspopup", "true");
-    button.setAttribute("aria-expanded", "false");
-    button.setAttribute("aria-label", "Configure Fusion");
-    button.innerHTML = '<span class="dd-icon"><i class="codicon codicon-git-compare"></i></span><span class="dd-label fusion-config-selection"><span class="fusion-config-lead-title"></span><span class="fusion-config-separator"> + </span><span class="fusion-config-sidekick-title"></span></span><i class="codicon codicon-chevron-down"></i>';
-    const leadTitle = button.querySelector(".fusion-config-lead-title");
-    const sidekickTitle = button.querySelector(".fusion-config-sidekick-title");
-    const menu = document.createElement("div");
-    menu.className = "dd-menu fusion-config-menu hidden";
-    container.append(button, menu);
-
-    let pairs = [];
-    let levels = [];
-    let lead = "";
-    let sidekick = "";
-    let effort = "";
-    let lastSignature = "";
-    let menuBuilt = false;
-
-    function pair() {
-      return pairs.find((item) => item.lead === lead && item.sidekick === sidekick && item.effort === effort)
-        || pairs.find((item) => item.lead === lead && item.sidekick === sidekick)
-        || pairs.find((item) => item.lead === lead)
-        || pairs[0];
-    }
-    function sync() {
-      const selected = pair();
-      const effortName = levels.find((item) => item.value === effort)?.name || effort;
-      if (selected) {
-        leadTitle.textContent = `${compactFusionLead(selected.leadName)} · ${effortName}`;
-        sidekickTitle.textContent = compactFusionSidekick(selected.sidekickName);
-        button.title = `${selected.leadName} · ${effortName} + ${selected.sidekickName}`;
-      }
-      menu.querySelectorAll(".fusion-config-option").forEach((item) => {
-        const value = item.dataset.value;
-        const selectedValue = item.dataset.kind === "lead" ? lead : item.dataset.kind === "effort" ? effort : sidekick;
-        const isSelected = value === selectedValue;
-        item.classList.toggle("selected", isSelected);
-        item.setAttribute("aria-checked", isSelected ? "true" : "false");
-        const checkEl = item.querySelector(".dd-check");
-        if (checkEl) checkEl.innerHTML = isSelected ? '<i class="codicon codicon-check"></i>' : "";
-      });
-    }
-    function choose(kind, value) {
-      if (kind === "effort") {
-        effort = value;
-        onEffort(value, pair()?.value);
-      } else {
-        if (kind === "lead") lead = value;
-        else sidekick = value;
-        const selected = pair();
-        if (selected) onModel(selected.value);
-      }
-      sync();
-    }
-    function section(title, kind, options) {
-      const root = document.createElement("div");
-      root.className = "fusion-config-section";
-      root.appendChild(Object.assign(document.createElement("div"), { className: "fusion-config-label", textContent: title }));
-      const rows = document.createElement("div");
-      rows.className = "fusion-config-options" + (kind === "effort" ? " effort" : "");
-      rows.setAttribute("role", "radiogroup");
-      rows.setAttribute("aria-label", title);
-      options.forEach((option) => {
-        const item = document.createElement("button");
-        item.type = "button";
-        item.className = "fusion-config-option";
-        item.setAttribute("role", "radio");
-        item.dataset.kind = kind;
-        item.dataset.value = option.value;
-        const check = document.createElement("span");
-        check.className = "dd-check";
-        item.appendChild(check);
-        item.appendChild(Object.assign(document.createElement("span"), { className: "fusion-config-text", textContent: option.name }));
-        item.addEventListener("click", (event) => {
-          event.stopPropagation();
-          choose(kind, option.value);
-        });
-        rows.appendChild(item);
-      });
-      root.appendChild(rows);
-      return root;
-    }
-    function effortLoading() {
-      const root = document.createElement("div");
-      root.className = "fusion-config-section";
-      root.appendChild(Object.assign(document.createElement("div"), { className: "fusion-config-label", textContent: "Lead effort" }));
-      const status = document.createElement("div");
-      status.className = "fusion-config-loading";
-      status.setAttribute("role", "status");
-      status.setAttribute("aria-busy", "true");
-      status.textContent = "Loading effort options...";
-      root.appendChild(status);
-      return root;
-    }
-    function renderMenu() {
-      menu.innerHTML = "";
-      const leads = [...new Map(pairs.map((item) => [item.lead, { value: item.lead, name: item.leadName }])).values()];
-      const sidekicks = [...new Map(pairs.map((item) => [item.sidekick, { value: item.sidekick, name: item.sidekickName }])).values()];
-      menu.append(section("Lead model", "lead", leads));
-      // An effort section with no options is just an orphan label, so without
-      // real choices it reports that the levels are still loading instead.
-      if (levels.length) menu.append(section("Lead effort", "effort", levels));
-      else menu.append(effortLoading());
-      menu.append(section("Sidekick", "sidekick", sidekicks));
-      menuBuilt = true;
-      sync();
-    }
-    button.addEventListener("click", (event) => {
-      event.stopPropagation();
-      document.querySelectorAll(".dd-menu").forEach((item) => { if (item !== menu) item.classList.add("hidden"); });
-      document.querySelectorAll(".dd-btn.open").forEach((item) => { if (item !== button) item.classList.remove("open"); });
-      renderMenu();
-      menu.classList.toggle("hidden");
-      const open = !menu.classList.contains("hidden");
-      button.classList.toggle("open", open);
-      button.setAttribute("aria-expanded", open ? "true" : "false");
-    });
-    return {
-      set(choices, currentModel, effortOptions, currentEffort) {
-        const signature = JSON.stringify([choices, effortOptions]);
-        const changed = signature !== lastSignature;
-        lastSignature = signature;
-        pairs = (choices || []).map(fusionChoice);
-        levels = effortOptions || [];
-        const current = fusionIdentity(currentModel);
-        lead = current.lead || pairs[0]?.lead || "";
-        sidekick = current.sidekick || pairs[0]?.sidekick || "";
-        effort = (levels.some((item) => item.value === currentEffort) ? currentEffort
-          : levels.some((item) => item.value === current.effort) ? current.effort
-          : levels[0]?.value) || "";
-        if (effort) currentThoughtLevel = effort;
-        // Choices can arrive after the user has already opened the menu, so
-        // rebuild it in place when they really changed.
-        if (!menu.classList.contains("hidden")) {
-          if (changed || !menuBuilt) renderMenu(); else sync();
-        } else {
-          sync();
-        }
-        container.classList.toggle("hidden", !pairs.length);
-      }
-    };
-  }
   function updateModelConfig(fam, currentUid) {
-    const levels = effortsFor(fam, currentUid);
-    if (isFusion(fam)) {
-      // Fusion's own variants are the whole lead times sidekick cross product,
-      // so they are never a thinking list. The picker waits for real pairs.
-      fusionPicker.set(fusionPairs(fam), currentUid, levels, currentThoughtLevel);
-      el.thinkingDD.classList.add("hidden");
-      thinkingShowsEfforts = false;
-      return;
-    }
-    el.fusionDD.classList.add("hidden");
-    if (levels.length) {
-      thinkingDropdown.set(levels, currentThoughtLevel);
-      el.thinkingDD.classList.remove("hidden");
-      thinkingShowsEfforts = true;
-    } else if (fam && (fam.variants || []).length > 1) {
-      thinkingDropdown.set(fam.variants.map((v) => ({ ...v, badges: variantBadges(v) })), currentUid);
-      el.thinkingDD.classList.remove("hidden");
-      thinkingShowsEfforts = false;
-    } else {
-      el.thinkingDD.classList.add("hidden");
-      thinkingShowsEfforts = false;
-    }
+    reconcileCurrentSpeed(fam, currentUid);
+    reconcileCurrentEffort(fam, currentUid);
+    renderPicker();
   }
   // The grouped choices only exist once a session has reported its options, so
   // they merge over the family's own variants, which carry the same pair uids.
   function fusionPairs(fam) {
     const byValue = new Map();
     for (const variant of fam?.variants || []) byValue.set(variant.value, variant);
-    for (const choice of modelChoices.fusion || []) byValue.set(choice.value, choice);
-    return [...byValue.values()];
+    for (const choice of modelChoices.fusion || []) byValue.set(choice.value, { ...byValue.get(choice.value), ...choice });
+    // The ACP session reports the pairs it accepts. A Fast Sub pair exists
+    // only when the report advertises one with the same Lead and complete Sub
+    // uid; a catalogue-only Fast Sub is never offered because the session
+    // rejects it. Standard Sub pairs and Lead speeds are unaffected.
+    const accepted = new Set((modelChoices.fusion || []).map((c) => fusionModelKey(c.value)));
+    return [...byValue.values()].filter((v) =>
+      fusionIdentity(v.value).subSpeed !== "fast" || accepted.has(fusionModelKey(v.value)));
   }
   function isAdaptive(f) { return f.id === "adaptive" || /adaptive/i.test(f.name || ""); }
   function isFusion(f) { return f?.id === "fusion" || /^fusion$/i.test(f?.name || ""); }
@@ -606,46 +386,1796 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     const list = Array.isArray(families) ? families.slice() : [];
     const adaptive = list.filter(isAdaptive);
     const fusion = list.filter(isFusion);
-    const rest = list.filter((f) => !isAdaptive(f) && !isFusion(f)).sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+    const rest = list.filter((f) => !isAdaptive(f) && !isFusion(f)).sort((a, b) => cmpModelEntries({ id: a.id, name: a.name }, { id: b.id, name: b.name }));
     modelFamilies = [...adaptive, ...fusion, ...rest];
     const fam = familyOfUid(currentModel) || modelFamilies[0];
     currentModelUid = currentModel || fam?.default || "";
-    currentModelLabel = fam ? fam.name || "" : currentModelLabel;
-    const item = (family, group) => {
-      const variant = variantFor(family, currentModelUid);
-      return {
-        value: family.id,
-        name: family.name,
-        badges: variantBadges(variant),
-        pinned: pinnedModelIds.has(family.id),
-        hover: { ...variant, name: family.name, thinkingLevels: (family.variants || []).length > 1, fusion: isFusion(family) },
-        group
-      };
-    };
-    const adaptiveFamily = adaptive[0];
-    const fusionFamily = fusion[0];
-    const pinned = modelFamilies.filter((f) => !isAdaptive(f) && !isFusion(f) && pinnedModelIds.has(f.id));
-    const models = modelFamilies.filter((f) => !isAdaptive(f) && !isFusion(f) && !pinnedModelIds.has(f.id));
-    const items = [];
-    if (adaptiveFamily) items.push(item(adaptiveFamily));
-    if (fusionFamily) items.push(item(fusionFamily));
-    if ((adaptiveFamily || fusionFamily) && (pinned.length || models.length)) items.push({ sep: true });
-    if (pinned.length) {
-      items.push(...pinned.map((f) => item(f, "Pinned")));
-      if (models.length) items.push({ sep: true });
-    }
-    items.push(...models.map((f) => item(f, "Models")));
-    modelDropdown.set(items, fam ? fam.id : "");
+    currentModelLabel = isFusion(fam) ? "Fusion" : fam ? fam.name || "" : currentModelLabel;
     updateModelConfig(fam, currentModelUid);
   }
-  function selectModelUid(uid) {
+  function selectModelUid(uid, ackIntent) {
     const fam = familyOfUid(uid);
     if (!fam) return;
+    const previousFamily = familyOfUid(currentModelUid);
+    // A different model cannot inherit the old one's live role marker.
+    if (uid !== currentModelUid) clearModelActivity();
     currentModelUid = uid;
-    currentModelLabel = fam.name || "";
-    modelDropdown.setCurrent(fam.id);
+    currentModelLabel = isFusion(fam) ? "Fusion" : fam.name || "";
     updateModelConfig(fam, uid);
+    // Session reported state is authoritative: it also becomes the saved
+    // preference for this model after reconciliation, without posting
+    // anything. An acknowledged change updates only the scope its intent
+    // recorded. A null intent saves nothing.
+    if (ackIntent === undefined) rememberActiveSettings("all");
+    else if (ackIntent) applyPrefIntent(ackIntent);
+    if (pickerState.open && previousFamily && previousFamily.id !== fam.id) closePicker({ restoreFocus: false });
   }
+
+  // The scope an acknowledged post intended to change: exactly that entry is
+  // rewritten with the confirmed values, so a rejected change reverts its own
+  // preference and nothing else.
+  function applyPrefIntent(intent) {
+    if (intent.scope === "single" || intent.scope === "lead" || intent.scope === "sub") {
+      rememberActiveSettings(intent.scope);
+      return;
+    }
+    const fam = familyOfUid(currentModelUid);
+    if (!isFusion(fam)) return;
+    const id = fusionIdentity(currentModelUid);
+    modelPreferences.fusion = { lead: id.lead, subModel: id.subModel };
+    persistModelPreferences();
+  }
+
+  // --- Model picker -------------------------------------------------------
+
+  // Per model effort and Fast settings persisted under their own versioned
+  // state key: Single by family id, Fusion Lead and Sub by parsed model id,
+  // plus the last Fusion pairing. Capability choices still live separately in
+  // modelCapabilities. Candidate resolution validates these saved scalars
+  // against the live catalog and reported options, so a stale entry can only
+  // fall back to a catalog default, never post an invalid value.
+  const PREFS_VERSION = 1;
+  function normalizeModelPreferences(raw) {
+    const prefs = { version: PREFS_VERSION, single: {}, lead: {}, sub: {}, fusion: null };
+    if (!raw || typeof raw !== "object" || raw.version !== PREFS_VERSION) return prefs;
+    for (const scope of ["single", "lead", "sub"]) {
+      for (const [id, entry] of Object.entries(raw[scope] || {})) {
+        const effort = typeof entry?.effort === "string" ? entry.effort : "";
+        const speed = entry?.speed === "fast" || entry?.speed === "standard" ? entry.speed : "";
+        if (id && (effort || speed)) prefs[scope][id] = { effort, speed };
+      }
+    }
+    const fusion = raw.fusion;
+    if (fusion && typeof fusion.lead === "string" && typeof fusion.subModel === "string") {
+      prefs.fusion = { lead: fusion.lead, subModel: fusion.subModel };
+    }
+    return prefs;
+  }
+  let modelPreferences = normalizeModelPreferences(savedState.modelPreferences);
+  function persistModelPreferences() {
+    vscode.setState({ ...(vscode.getState() || {}), modelPreferences });
+  }
+  // Records the live selection as the saved settings of every model currently
+  // active. Explicit edits, selections, session notifications and accepted
+  // confirmations call this. Candidates and renderers never write here, and a
+  // compatibility fallback for one model never touches another model's entry.
+  // scope is "single", "lead", "sub" or "all": an explicit edit writes only
+  // the scope it touched, while a session report records everything active.
+  function rememberActiveSettings(scope) {
+    const fam = familyOfUid(currentModelUid);
+    if (!fam) return;
+    if (isFusion(fam)) {
+      const id = fusionIdentity(currentModelUid);
+      modelPreferences.fusion = { lead: id.lead, subModel: id.subModel };
+      if (scope === "lead" || scope === "all") modelPreferences.lead[id.lead] = { effort: currentThoughtLevel, speed: currentSpeed };
+      if (scope === "sub" || scope === "all") modelPreferences.sub[id.subModel] = { effort: id.subEffort, speed: id.subSpeed };
+    } else if (scope === "single" || scope === "all") {
+      modelPreferences.single[fam.id] = { effort: currentThoughtLevel, speed: currentSpeed };
+    }
+    persistModelPreferences();
+  }
+
+  // Records the outgoing model's settings only when none were saved yet, so a
+  // reported choice survives leaving the model without an explicit edit.
+  function seedActivePreferences() {
+    const fam = familyOfUid(currentModelUid);
+    if (!fam) return;
+    if (isFusion(fam)) {
+      const id = fusionIdentity(currentModelUid);
+      if (!modelPreferences.fusion) modelPreferences.fusion = { lead: id.lead, subModel: id.subModel };
+      if (!modelPreferences.lead[id.lead]) modelPreferences.lead[id.lead] = { effort: currentThoughtLevel, speed: currentSpeed };
+      if (!modelPreferences.sub[id.subModel]) modelPreferences.sub[id.subModel] = { effort: id.subEffort, speed: id.subSpeed };
+    } else if (!modelPreferences.single[fam.id]) {
+      modelPreferences.single[fam.id] = { effort: currentThoughtLevel, speed: currentSpeed };
+    }
+    persistModelPreferences();
+  }
+
+  function familyForModelId(id, families = modelFamilies) {
+    return families.find((f) => !isFusion(f) && (f.variants || []).some((v) => modelIdentity(v.value).id === id));
+  }
+  function modelNameFor(id, fallback) { return familyForModelId(id)?.name || fallback || id; }
+  function shortModelName(id) { return String(modelNameFor(id)).replace(/^Claude /, ""); }
+  function effortLabel(e) { return EFFORT_NAMES[e] || e; }
+  // Providers sort alphabetically and versions newest first, preserving
+  // catalog order for equal versions.
+  function modelProviderOf(name, id) {
+    const text = `${name || ""} ${id || ""}`.toLowerCase();
+    return /claude|anthropic/.test(text) ? "claude"
+      : /gpt|openai/.test(text) ? "gpt"
+      : /grok/.test(text) ? "grok"
+      : /swe|sidekick/.test(text) ? "swe"
+      : String(name || id || "zz").toLowerCase().split(/\s+/)[0] || "zz";
+  }
+  function modelVersionOf(name) {
+    const match = String(name || "").match(/\d+(?:\.\d+)*/);
+    return match ? match[0].split(".").map(Number) : [0];
+  }
+  function cmpModelEntries(a, b) {
+    const pa = modelProviderOf(a.name, a.id), pb = modelProviderOf(b.name, b.id);
+    if (pa !== pb) return pa < pb ? -1 : 1;
+    const va = modelVersionOf(a.name), vb = modelVersionOf(b.name);
+    for (let i = 0; i < Math.max(va.length, vb.length); i++) {
+      const d = (vb[i] || 0) - (va[i] || 0);
+      if (d) return d;
+    }
+    return 0;
+  }
+  // The short label used on rails, rows and composer text. Medium is never
+  // abbreviated, and "none" reads "None" rather than "No Thinking".
+  function effortShort(e) { return e === "none" ? "None" : effortLabel(e); }
+  function roleFullName(id, effort, speed) {
+    return `${modelNameFor(id)}${effort ? ` ${effortLabel(effort)}` : ""}${speed === "fast" ? " Fast" : ""}`;
+  }
+  function roleDefaultSettings(id) {
+    const d = modelIdentity(familyForModelId(id)?.default || "");
+    return { effort: d.effort || "", speed: d.speed || "standard" };
+  }
+  // Effort options for a single family at a given speed: the reported list
+  // when one was learned, otherwise the catalog variants matching that speed
+  // (or every variant when none carry it, the same fallback
+  // supportedEffortValues uses). A known empty list is honoured, it means
+  // "not configurable" and is never replaced by catalog entries.
+  function singleEffortOptions(fam, speed) {
+    const known = fam ? thoughtLevelsByFamily[fam.id] : undefined;
+    if (known !== undefined) return known.map((o) => o.value);
+    const matching = (fam?.variants || []).filter((v) => !speed || modelIdentity(v.value).speed === speed);
+    const variants = matching.length ? matching : (fam?.variants || []);
+    const seen = new Set();
+    for (const v of variants) {
+      const effort = modelIdentity(v.value).effort;
+      if (effort) seen.add(effort);
+    }
+    return EFFORT_ORDER.filter((e) => seen.has(e));
+  }
+  function singleEffortsAuthoritative(fam) {
+    return fam ? thoughtLevelsByFamily[fam.id] !== undefined : false;
+  }
+  function fusionFam() { return modelFamilies.find(isFusion); }
+  // Each catalog or grouped Fusion variant becomes a parsed pair record.
+  function allFusionPairs() {
+    return fusionPairs(fusionFam()).map((v) => ({ ...v, ...fusionIdentity(v.value) }));
+  }
+  function pairRowsFor(lead, sub) {
+    return allFusionPairs().filter((p) => p.lead === lead && p.subModel === sub);
+  }
+  function leadEffortOptionsFor(lead) {
+    return (fusionEffortsForLead(lead).options || []).map((o) => o.value);
+  }
+  function subEffortOptionsFor(lead, sub) {
+    const seen = new Set(pairRowsFor(lead, sub).map((p) => p.subEffort).filter(Boolean));
+    return EFFORT_ORDER.filter((e) => seen.has(e));
+  }
+  function speedValuesFor(fam, uid) {
+    return speedInfoFor(fam, uid).choices.map((o) => o.value);
+  }
+
+  // --- Candidate resolution -------------------------------------------------
+  // A candidate is the selection a model would resolve to if picked now: the
+  // live selection when the model is already active, otherwise its own saved
+  // settings or catalog default. Resolvers mutate only the candidate copy, so
+  // rendering a row never changes the active selection or a saved preference.
+
+  function resolveSingleCandidate(c) {
+    const fam = familyById(c.model);
+    if (!fam) return c;
+    const d = modelIdentity(fam.default || "");
+    const speeds = speedValuesFor(fam, fam.default);
+    if (!speeds.includes(c.speed)) {
+      c.speed = speeds.includes(d.speed) ? d.speed : speeds.includes("standard") ? "standard" : speeds[0] || "standard";
+    }
+    const efforts = singleEffortOptions(fam, c.speed);
+    if (!efforts.length) {
+      // No configurable thinking effort never implies no Fast: a learned Fast
+      // choice stays, and the posted uid remains a genuine catalog variant.
+      c.effort = "";
+      if (!speeds.includes(c.speed)) c.speed = speeds.includes("standard") ? "standard" : speeds[0] || "standard";
+      const rep = (fam.variants || []).find((v) => modelIdentity(v.value).speed === c.speed)
+        || (fam.variants || []).find((v) => v.value === fam.default)
+        || fam.variants?.[0];
+      c.uid = rep ? rep.value : fam.default || "";
+      return c;
+    }
+    if (!efforts.includes(c.effort)) c.effort = efforts.includes(d.effort) ? d.effort : efforts[0];
+    // The representative uid is always a real catalog variant: an effort the
+    // agent reports but the catalog does not encode keeps the closest uid and
+    // is sent as the separate thought level.
+    const exact = (fam.variants || []).find((v) => {
+      const id = modelIdentity(v.value);
+      return id.effort === c.effort && id.speed === c.speed;
+    }) || (fam.variants || []).find((v) => modelIdentity(v.value).effort === c.effort);
+    c.uid = exact ? exact.value : fam.default || fam.variants?.[0]?.value || "";
+    return c;
+  }
+
+  function resolveFusionSelection(s) {
+    const pairs = allFusionPairs();
+    if (!pairs.length) return s;
+    const fam = fusionFam();
+    const d = fusionIdentity(fam?.default || pairs[0].value);
+    const leads = [...new Set(pairs.map((p) => p.lead))];
+    if (!leads.includes(s.lead)) s.lead = leads.includes(d.lead) ? d.lead : leads[0];
+    if (!pairRowsFor(s.lead, s.sub).length) {
+      const subs = [...new Set(pairs.filter((p) => p.lead === s.lead).map((p) => p.subModel))];
+      s.sub = subs.includes(s.sub) ? s.sub : subs.includes(d.subModel) ? d.subModel : subs[0] || "";
+    }
+    const all = pairRowsFor(s.lead, s.sub);
+    const leadOpts = leadEffortOptionsFor(s.lead);
+    const subOpts = subEffortOptionsFor(s.lead, s.sub);
+    if (!leadOpts.includes(s.leadEffort)) s.leadEffort = leadOpts.includes(d.effort) ? d.effort : leadOpts[0] || "";
+    if (!subOpts.includes(s.subEffort)) s.subEffort = subOpts.includes(d.subEffort) ? d.subEffort : subOpts[0] || "";
+    let rows = all.filter((p) =>
+      (!s.leadEffort || p.effort === s.leadEffort) && (!s.subEffort || p.subEffort === s.subEffort));
+    // A reported effort can have no encoded pair for this combo: the posted
+    // uid stays a genuine pair for the two models and the effort goes along
+    // as the separate thought level.
+    if (!rows.length) rows = all;
+    if (!rows.length) rows = pairs.filter((p) => p.lead === s.lead);
+    if (!rows.length) rows = pairs;
+    const subSpeeds = [...new Set(rows.map((p) => p.subSpeed))];
+    if (!subSpeeds.includes(s.subSpeed)) {
+      s.subSpeed = subSpeeds.includes("standard") ? "standard" : subSpeeds[0] || "standard";
+    }
+    const pool = rows.filter((p) => p.subSpeed === s.subSpeed);
+    const rep = (pool.length ? pool : rows).find((p) => p.speed === "standard") || pool[0] || rows[0];
+    if (rep) s.uid = rep.value;
+    // Lead speed is set independently of the pair uid, so it reconciles
+    // against the speed options reported for the resolved pair's scope.
+    const leadSpeeds = speedValuesFor(fam, s.uid);
+    if (!leadSpeeds.includes(s.leadSpeed)) {
+      s.leadSpeed = leadSpeeds.includes("standard") ? "standard" : leadSpeeds[0] || "standard";
+    }
+    return s;
+  }
+
+  function isFusionActive() { return isFusion(familyOfUid(currentModelUid)); }
+
+  // The live Fusion selection, or the pairing the Fusion card would restore:
+  // the saved lead plus sub ids, each role's own saved settings or its model
+  // default, resolved against the supplied pairs.
+  function fusionSelectionState() {
+    if (isFusionActive()) {
+      const id = fusionIdentity(currentModelUid);
+      return { lead: id.lead, leadEffort: currentThoughtLevel, leadSpeed: currentSpeed, sub: id.subModel, subEffort: id.subEffort, subSpeed: id.subSpeed, uid: currentModelUid };
+    }
+    const saved = modelPreferences.fusion || {};
+    const s = { lead: saved.lead || "", sub: saved.subModel || "", leadEffort: "", leadSpeed: "standard", subEffort: "", subSpeed: "standard", uid: "" };
+    for (const role of ["lead", "sub"]) {
+      const id = role === "lead" ? s.lead : s.sub;
+      const pref = (id && modelPreferences[role][id]) || roleDefaultSettings(id);
+      if (role === "lead") { s.leadEffort = pref.effort; s.leadSpeed = pref.speed; }
+      else { s.subEffort = pref.effort; s.subSpeed = pref.speed; }
+    }
+    return resolveFusionSelection(s);
+  }
+
+  function singleCandidate(famId) {
+    const fam = familyById(famId);
+    if (!fam) return null;
+    const active = familyOfUid(currentModelUid);
+    if (active && active.id === famId && !isFusion(active)) {
+      return { model: famId, effort: currentThoughtLevel, speed: currentSpeed, uid: currentModelUid };
+    }
+    const saved = modelPreferences.single[famId] || {};
+    return resolveSingleCandidate({ model: famId, effort: saved.effort || "", speed: saved.speed || "", uid: "" });
+  }
+
+  function fusionCandidate(role, modelId) {
+    const s = { ...fusionSelectionState() };
+    if ((role === "lead" ? s.lead : s.sub) === modelId) return s;
+    const saved = modelPreferences[role][modelId] || {};
+    const d = roleDefaultSettings(modelId);
+    const effort = saved.effort || d.effort;
+    const speed = saved.speed || d.speed;
+    if (role === "lead") { s.lead = modelId; s.leadEffort = effort; s.leadSpeed = speed; }
+    else { s.sub = modelId; s.subEffort = effort; s.subSpeed = speed; }
+    // The passive partner resolves from its remembered desired settings, so a
+    // temporary compatibility fallback is never persisted into its preference.
+    const other = role === "lead" ? "sub" : "lead";
+    const otherSaved = modelPreferences[other][other === "lead" ? s.lead : s.sub];
+    if (other === "lead" && otherSaved) { s.leadEffort = otherSaved.effort || s.leadEffort; s.leadSpeed = otherSaved.speed || s.leadSpeed; }
+    else if (otherSaved) { s.subEffort = otherSaved.effort || s.subEffort; s.subSpeed = otherSaved.speed || s.subSpeed; }
+    return resolveFusionSelection(s);
+  }
+
+  // --- Selection edits ------------------------------------------------------
+  // Every explicit edit resolves first so the post always carries values the
+  // target model actually supports, then records the active settings.
+
+  function applySingleCandidate(c) {
+    const fam = familyById(c.model);
+    if (!fam || !c) return;
+    seedActivePreferences();
+    currentModelUid = c.uid;
+    currentThoughtLevel = c.effort;
+    currentSpeed = c.speed;
+    currentModelLabel = fam.name || "";
+    updateModelConfig(fam, c.uid);
+    rememberActiveSettings("single");
+    postModelChange({ type: "setModel", model: c.uid, thoughtLevel: currentThoughtLevel }, { scope: "single" });
+  }
+
+  // scope is the role the user explicitly touched. "seed" is the Fusion card
+  // restoring its pairing, which records only entries that were never saved.
+  function applyFusionSelection(s, scope) {
+    seedActivePreferences();
+    currentModelUid = s.uid;
+    currentThoughtLevel = s.leadEffort;
+    currentSpeed = s.leadSpeed;
+    currentModelLabel = "Fusion";
+    updateModelConfig(fusionFam(), s.uid);
+    if (scope === "seed") {
+      const id = fusionIdentity(s.uid);
+      modelPreferences.fusion = { lead: id.lead, subModel: id.subModel };
+      if (!modelPreferences.lead[id.lead]) modelPreferences.lead[id.lead] = { effort: s.leadEffort, speed: s.leadSpeed };
+      if (!modelPreferences.sub[id.subModel]) modelPreferences.sub[id.subModel] = { effort: id.subEffort, speed: id.subSpeed };
+      persistModelPreferences();
+    } else {
+      rememberActiveSettings(scope || "all");
+    }
+    postModelChange({ type: "setFusionModel", model: s.uid, thoughtLevel: currentThoughtLevel }, { scope: scope === "seed" ? "fusion" : scope });
+  }
+
+  function fastPossibleSingle(fam, effort) {
+    const info = speedInfoFor(fam, fam?.default || "");
+    if (!info.known || !info.fast) return false;
+    // Reported speed choices apply to the model as a whole. A purely
+    // catalog-derived answer only holds when a Fast variant exists at the
+    // shown effort.
+    if (speedsByModel[fam?.id]) return true;
+    return (fam?.variants || []).some((v) => {
+      const id = modelIdentity(v.value);
+      return id.speed === "fast" && (!effort || !id.effort || id.effort === effort);
+    });
+  }
+  function fastPossibleRole(role, s) {
+    if (role === "lead") {
+      const info = speedInfoFor(fusionFam(), s.uid || currentModelUid);
+      return info.known && info.fast;
+    }
+    return pairRowsFor(s.lead, s.sub).some((p) =>
+      (!s.leadEffort || p.effort === s.leadEffort) &&
+      (!s.subEffort || p.subEffort === s.subEffort) &&
+      p.subSpeed === "fast");
+  }
+
+  function pickerPickEffort(value) {
+    if (isFusionActive()) {
+      if (pickerState.role === "sub") {
+        const s = fusionSelectionState();
+        if (s.subEffort === value) return;
+        s.subEffort = value;
+        applyFusionSelection(resolveFusionSelection(s), "sub");
+        return;
+      }
+      if (currentThoughtLevel === value) return;
+      currentThoughtLevel = value;
+      rememberActiveSettings("lead");
+      postModelChange({ type: "setConfigOption", configId: "thought_level", value, model: currentModelUid }, { scope: "lead" });
+      renderPicker();
+      return;
+    }
+    if (currentThoughtLevel === value) return;
+    currentThoughtLevel = value;
+    rememberActiveSettings("single");
+    postModelChange({ type: "setConfigOption", configId: "thought_level", value, model: currentModelUid }, { scope: "single" });
+    renderPicker();
+  }
+
+  function pickerToggleFast() {
+    if (isFusionActive()) {
+      const s = fusionSelectionState();
+      if (pickerState.role === "sub") {
+        if (!fastPossibleRole("sub", s)) return;
+        s.subSpeed = s.subSpeed === "fast" ? "standard" : "fast";
+        applyFusionSelection(resolveFusionSelection(s), "sub");
+        return;
+      }
+      const info = speedInfoFor(fusionFam(), currentModelUid);
+      if (!(info.known && info.fast)) return;
+      currentSpeed = currentSpeed === "fast" ? "standard" : "fast";
+      rememberActiveSettings("lead");
+      postModelChange({
+        type: "setConfigOption", configId: "speed", value: currentSpeed,
+        model: currentModelUid, thoughtLevel: currentThoughtLevel
+      }, { scope: "lead" });
+      renderPicker();
+      return;
+    }
+    const fam = familyOfUid(currentModelUid);
+    const info = speedInfoFor(fam, currentModelUid);
+    if (!(info.known && info.fast)) return;
+    currentSpeed = currentSpeed === "fast" ? "standard" : "fast";
+    rememberActiveSettings("single");
+    postModelChange({
+      type: "setConfigOption", configId: "speed", value: currentSpeed,
+      model: currentModelUid, thoughtLevel: currentThoughtLevel
+    }, { scope: "single" });
+    renderPicker();
+  }
+
+  // --- Picker DOM -----------------------------------------------------------
+
+  const pickerState = {
+    open: false,
+    page: "models",               // "models" | "details" | "fusion" | "role"
+    role: "lead",
+    trigger: "model",
+    search: { models: "", lead: "", sub: "" },
+    listAnchor: null,
+    fusionAnchor: null,
+    renderedPage: null,
+    pricingOpen: false
+  };
+  const pickerEl = {};
+
+  function pickerNode(tag, className, text) {
+    const n = document.createElement(tag);
+    if (className) n.className = className;
+    if (text !== undefined) n.textContent = text;
+    return n;
+  }
+  function pickerIcon(name) {
+    const i = pickerNode("i", "codicon " + name);
+    i.setAttribute("aria-hidden", "true");
+    return i;
+  }
+  // Inline filled bolt marking an enabled Fast speed beside effort text. The
+  // bundled codicon set only has the outline zap, so a filled bolt is drawn
+  // as an inline SVG using the outer silhouette of the codicon zap glyph.
+  const PICKER_ZAP_D =
+    "M4.91,1.71Q5.01,1.39 5.28,1.2Q5.55,1.01 5.87,1.01L10.29,1.01" +
+    "Q10.83,1.01 11.12,1.44Q11.41,1.87 11.2,2.35L10.24,5.01L12.27,5.01" +
+    "Q12.75,5.01 12.93,5.44Q13.12,5.87 12.85,6.24L6.24,14.51" +
+    "Q5.81,15.04 5.23,15.01Q4.64,14.99 4.27,14.51Q3.89,14.03 4.05,13.39" +
+    "L5.33,9.01L3.73,9.01Q3.36,9.01 3.15,8.69Q2.93,8.37 3.04,8.05Z";
+  function zapFillEl() {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("class", "zap-fill");
+    svg.setAttribute("viewBox", "0 0 16 16");
+    svg.setAttribute("aria-hidden", "true");
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", PICKER_ZAP_D);
+    path.setAttribute("fill", "currentColor");
+    svg.appendChild(path);
+    return svg;
+  }
+  function brandIconEl(fam) {
+    const ic = modelButtonIcon(fam?.id || "");
+    if (ic.startsWith("img:")) {
+      const rest = ic.slice(4);
+      const sp = rest.indexOf(" ");
+      const span = pickerNode("span", `dd-brand dd-brand--${rest.slice(0, sp)} dd-item-icon`);
+      const url = rest.slice(sp + 1).replace(/"/g, "%22");
+      span.style.webkitMaskImage = `url('${url}')`;
+      span.style.maskImage = `url('${url}')`;
+      return span;
+    }
+    const i = pickerIcon(ic);
+    i.classList.add("dd-item-icon");
+    return i;
+  }
+  function roleIconEl(id) {
+    const fam = familyForModelId(id);
+    return fam ? brandIconEl(fam) : pickerIcon("codicon-chip");
+  }
+  // Catalog metadata is untrusted text, so the label is assigned, never
+  // parsed as markup.
+  function modelStatusBadgeEl({ kind, label, title }) {
+    const tag = pickerNode("span", `dd-item-badge dd-model-tag dd-model-tag-${kind}`);
+    tag.textContent = label;
+    tag.title = title;
+    return tag;
+  }
+  // Fast availability keeps an outline bolt and its own neutral badge style.
+  function fastBadgeEl() {
+    const badge = pickerNode("span", "dd-item-badge dd-fast-badge");
+    badge.title = "Supports Fast thinking";
+    badge.append(pickerIcon("codicon-zap"), pickerNode("span", "", "Fast"));
+    return badge;
+  }
+
+  function buildPickerDom() {
+    if (pickerEl.popup) return;
+    const group = el.modelPickerGroup;
+    if (!group) return;
+    const modelBtn = pickerNode("button", "dd-btn");
+    modelBtn.id = "modelBtn";
+    modelBtn.type = "button";
+    modelBtn.setAttribute("aria-haspopup", "dialog");
+    modelBtn.setAttribute("aria-expanded", "false");
+    const modelIcon = pickerNode("span", "dd-icon");
+    const modelLabel = pickerNode("span", "dd-label");
+    modelBtn.append(modelIcon, modelLabel);
+    el.modelDD.appendChild(modelBtn);
+    const effortBtn = pickerNode("button", "dd-btn");
+    effortBtn.id = "effortBtn";
+    effortBtn.type = "button";
+    effortBtn.setAttribute("aria-haspopup", "dialog");
+    effortBtn.setAttribute("aria-expanded", "false");
+    const effortLabelEl = pickerNode("span", "dd-label");
+    effortLabelEl.id = "effortBtnLabel";
+    effortBtn.appendChild(effortLabelEl);
+    el.thinkingDD.appendChild(effortBtn);
+    const popup = pickerNode("section", "setup-tray hidden");
+    popup.id = "model-picker-popup";
+    popup.setAttribute("role", "dialog");
+    popup.setAttribute("aria-modal", "false");
+    popup.setAttribute("aria-label", "Model setup");
+    const head = pickerNode("div", "tray-head");
+    head.id = "trayHead";
+    const rolebar = pickerNode("div", "tray-rolebar");
+    rolebar.hidden = true;
+    const body = pickerNode("div", "tray-body");
+    popup.append(head, rolebar, body);
+    document.body.appendChild(popup);
+    Object.assign(pickerEl, {
+      group, modelBtn, modelIcon, modelLabel, effortBtn, effortLabel: effortLabelEl,
+      popup, head, rolebar, body
+    });
+    modelBtn.addEventListener("click", (e) => { e.stopPropagation(); onPickerModelBtn(); });
+    effortBtn.addEventListener("click", (e) => { e.stopPropagation(); onPickerEffortBtn(); });
+    popup.addEventListener("click", onPickerClick);
+    popup.addEventListener("input", onPickerInput);
+    popup.addEventListener("keydown", onPickerKey);
+    popup.addEventListener("change", onPickerChange);
+    window.addEventListener("resize", positionPickerPopup);
+  }
+
+  // --- Composer -----------------------------------------------------------
+
+  function effortButtonInfo() {
+    if (isFusionActive()) {
+      const s = fusionSelectionState();
+      // Each role is one inline text run so the label's text reads exactly as
+      // before. The name gets its own span so live activity can light it up.
+      const roleGroup = (role, uid, effort, speed) => {
+        const group = document.createElement("span");
+        group.className = "fusion-role-group";
+        const text = document.createElement("span");
+        text.className = "fusion-role-text";
+        const name = document.createElement("span");
+        name.className = "fusion-model-name";
+        name.dataset.role = role;
+        name.textContent = shortModelName(uid);
+        text.appendChild(name);
+        if (effort) text.appendChild(document.createTextNode(` ${effortShort(effort)}`));
+        group.appendChild(text);
+        if (speed === "fast") group.appendChild(zapFillEl());
+        return group;
+      };
+      const parts = [
+        roleGroup("lead", s.lead, s.leadEffort, s.leadSpeed),
+        " + ",
+        roleGroup("sub", s.sub, s.subEffort, s.subSpeed)
+      ];
+      const leadFull = roleFullName(s.lead, s.leadEffort, s.leadSpeed);
+      const subFull = roleFullName(s.sub, s.subEffort, s.subSpeed);
+      return {
+        parts,
+        title: `Fusion · Lead: ${leadFull} · Sub model: ${subFull}. Opens Fusion settings.`,
+        aria: `Fusion. Lead: ${leadFull}. Sub model: ${subFull}. Opens Fusion settings.`
+      };
+    }
+    const fam = familyOfUid(currentModelUid);
+    const fast = currentSpeed === "fast";
+    const parts = [currentThoughtLevel ? effortShort(currentThoughtLevel) : "Auto"];
+    if (fast) parts.push(zapFillEl());
+    const effortText = currentThoughtLevel ? effortLabel(currentThoughtLevel) : "";
+    return {
+      parts,
+      title: `${fam?.name || ""} ${effortText}${fast ? " Fast" : ""}. Opens model details.`,
+      aria: `Model details: ${effortText}${fast ? ", Fast" : ""}`
+    };
+  }
+
+  function updateComposer() {
+    const group = el.modelPickerGroup;
+    if (!group || !pickerEl.modelBtn) return;
+    // Optimistic picks assign the uid directly, so a marker reported under a
+    // different model is dropped here too, not only on selectModelUid.
+    if (modelActivity && modelActivity.model !== currentModelUid) modelActivity = null;
+    group.classList.toggle("hidden", !modelFamilies.length);
+    group.classList.toggle("tray-open", pickerState.open);
+    const fusionOn = isFusionActive();
+    group.classList.toggle("mode-fusion", fusionOn);
+    // A managed single model (Adaptive) has no effort choice, so the Effort
+    // half and its divider disappear and Model takes full corner radius.
+    const fam = familyOfUid(currentModelUid);
+    group.classList.toggle("no-effort", !fusionOn && (!fam || isAdaptive(fam) || (!singleEffortOptions(fam, currentSpeed).length && !fastPossibleSingle(fam, currentThoughtLevel))));
+    group.dataset.page = pickerState.page;
+    if (fusionOn) {
+      const s = fusionSelectionState();
+      pickerEl.modelLabel.textContent = "Fusion";
+      pickerEl.modelBtn.title = `Fusion: ${modelNameFor(s.lead)} + ${modelNameFor(s.sub)}`;
+      pickerEl.modelBtn.setAttribute("aria-label", `Model: Fusion ${modelNameFor(s.lead)} + ${modelNameFor(s.sub)}. Activate to edit.`);
+      pickerEl.modelIcon.innerHTML = "";
+      pickerEl.modelIcon.appendChild(pickerIcon("codicon-symbol-interface"));
+    } else {
+      pickerEl.modelLabel.textContent = fam?.name || "";
+      pickerEl.modelBtn.title = fam?.name || "";
+      pickerEl.modelBtn.setAttribute("aria-label", `Model: ${fam?.name || ""}. Activate to edit.`);
+      pickerEl.modelIcon.innerHTML = "";
+      const icon = fam ? brandIconEl(fam) : pickerIcon("codicon-sparkle");
+      icon.classList.remove("dd-item-icon");
+      pickerEl.modelIcon.appendChild(icon);
+    }
+    const info = effortButtonInfo();
+    pickerEl.effortLabel.textContent = "";
+    for (const part of info.parts) {
+      pickerEl.effortLabel.appendChild(typeof part === "string" ? document.createTextNode(part) : part);
+    }
+    pickerEl.effortBtn.title = info.title;
+    pickerEl.effortBtn.setAttribute("aria-label", info.aria);
+    const open = pickerState.open ? "true" : "false";
+    pickerEl.modelBtn.setAttribute("aria-expanded", open);
+    pickerEl.effortBtn.setAttribute("aria-expanded", open);
+    paintUsage();
+    paintFusionActivity();
+  }
+
+  // Light up the Fusion model name matching the role the host last reported
+  // producing work, and announce it on the button. When the label is clipped
+  // narrow, scroll just that label far enough to show the active name. Neutral
+  // and Lead keep the resting scroll position.
+  function paintFusionActivity() {
+    const label = pickerEl.effortLabel;
+    if (!label) return;
+    const role = busy && modelActivity && modelActivity.model === currentModelUid ? modelActivity.role : null;
+    for (const name of label.querySelectorAll(".fusion-model-name")) {
+      const on = !!role && name.dataset.role === role;
+      name.classList.toggle("is-active", on);
+      // The whole role group takes the active colour, so the effort text and a
+      // Fast bolt light with the model name while the other role stays normal.
+      name.closest(".fusion-role-group")?.classList.toggle("is-active", on);
+    }
+    label.classList.toggle("has-activity", !!role);
+    if (role) {
+      pickerEl.effortBtn.setAttribute("aria-description", role === "lead" ? "The Lead model is active." : "The Sub model is active.");
+    } else {
+      pickerEl.effortBtn.removeAttribute("aria-description");
+    }
+    // The fit pass runs after the classes and aria land, and it owns the
+    // scroll sync once the final layout is known.
+    fitComposer();
+  }
+
+  // Scroll just enough to keep the active Sub name visible while the label
+  // is clipped. Lead and neutral states keep the resting scroll position.
+  function scrollFusionActivity() {
+    const label = pickerEl.effortLabel;
+    if (!label) return;
+    const role = busy && modelActivity && modelActivity.model === currentModelUid ? modelActivity.role : null;
+    const active = role === "sub" && label.querySelector(".fusion-model-name.is-active");
+    if (active && label.scrollWidth > label.clientWidth) {
+      // Content offset of the name's left edge inside the label. The browser
+      // clamps it to the scrollable range. Only the label scrolls, never the
+      // page or the composer.
+      label.scrollLeft += active.getBoundingClientRect().left - label.getBoundingClientRect().left;
+    } else {
+      label.scrollLeft = 0;
+    }
+  }
+
+  function clearModelActivity() {
+    if (!modelActivity) return;
+    modelActivity = null;
+    paintFusionActivity();
+  }
+
+  // --- Pricing and limits ---------------------------------------------------
+
+  function pickerPriceCell(value, promotion) {
+    const cell = document.createElement("td");
+    const estimate = estimatedOriginalPrice(value, promotion);
+    if (!estimate) {
+      cell.textContent = value;
+      return cell;
+    }
+    const pair = pickerNode("span", "catalog-price-pair");
+    pair.append(
+      pickerNode("span", "sr-only", "Estimated original price "),
+      pickerNode("del", "catalog-price-original", estimate),
+      pickerNode("span", "sr-only", " Current price "),
+      " ",
+      pickerNode("span", "catalog-price-value", value)
+    );
+    cell.appendChild(pair);
+    return cell;
+  }
+
+  function pickerPriceTable(section, promotion) {
+    const table = pickerNode("table", "catalog-prices");
+    const longContext = section.longRows.length > 0;
+    if (longContext) {
+      const head = document.createElement("thead");
+      const row = document.createElement("tr");
+      for (const label of ["Token type", "Default", "Long context"]) {
+        const cell = pickerNode("th", "", label);
+        cell.scope = "col";
+        row.appendChild(cell);
+      }
+      head.appendChild(row);
+      table.appendChild(head);
+    }
+    const body = document.createElement("tbody");
+    const defaults = new Map(section.rows.map((row) => [row.label, row.value]));
+    const extended = new Map(section.longRows.map((row) => [row.label, row.value]));
+    const order = ["Input", "Output", "Cache Read", "Cache Write"];
+    const rank = (label) => (order.includes(label) ? order.indexOf(label) : order.length);
+    const labels = [...new Set([...defaults.keys(), ...extended.keys()])].sort((a, b) => rank(a) - rank(b));
+    for (const label of labels) {
+      const row = document.createElement("tr");
+      const heading = pickerNode("th", "", label);
+      heading.scope = "row";
+      row.appendChild(heading);
+      row.appendChild(pickerPriceCell(defaults.has(label) ? defaults.get(label) : "Not provided", promotion));
+      if (longContext) {
+        row.appendChild(pickerPriceCell(extended.has(label) ? extended.get(label) : "Not provided", promotion));
+      }
+      body.appendChild(row);
+    }
+    table.appendChild(body);
+    return table;
+  }
+
+  // One catalog-details block used by the details and role pages: a fixed
+  // Token Limits box followed by a collapsible pricing box whose state is
+  // remembered for the picker's lifetime.
+  function renderPickerDetails(item) {
+    const root = pickerNode("section", "catalog-details");
+    if (item.contextRows.length) {
+      const box = pickerNode("div", "catalog-box");
+      const head = pickerNode("div", "catalog-box-head");
+      const titles = pickerNode("span", "catalog-box-titles");
+      titles.appendChild(pickerNode("strong", "catalog-box-label", "Token Limits"));
+      head.appendChild(titles);
+      box.appendChild(head);
+      const limits = pickerNode("dl", "catalog-limits");
+      for (const [label, value] of item.contextRows) {
+        const row = pickerNode("div", "catalog-limit");
+        row.append(pickerNode("dt", "", label), pickerNode("dd", "", value));
+        limits.appendChild(row);
+      }
+      box.appendChild(limits);
+      root.appendChild(box);
+    }
+    const pricing = pickerNode("details", "catalog-pricing catalog-box");
+    pricing.open = pickerState.pricingOpen;
+    const head = pickerNode("summary", "catalog-pricing-head catalog-box-head");
+    const titles = pickerNode("span", "catalog-box-titles");
+    titles.appendChild(pickerNode("strong", "catalog-box-label", "Pricing details"));
+    head.appendChild(titles);
+    const pricingBadges = pickerNode("span", "catalog-pricing-badges");
+    for (const d of variantBadges({ promotion: item.promotion })) {
+      pricingBadges.appendChild(modelStatusBadgeEl(d));
+    }
+    if (item.costTier) {
+      const tier = pickerNode("span", `catalog-tier ${costTierClass(item.costTier)}`, costTierLabel(item.costTier));
+      if (item.tierTitle && item.tierTitle !== item.costTier) tier.title = item.tierTitle;
+      pricingBadges.appendChild(tier);
+    }
+    if (pricingBadges.childNodes.length) head.appendChild(pricingBadges);
+    const chevron = pickerIcon("codicon-chevron-right");
+    chevron.classList.add("catalog-chevron");
+    head.appendChild(chevron);
+    pricing.appendChild(head);
+    const body = pickerNode("div", "catalog-pricing-body");
+    if (item.sections.some((section) => section.rows.length || section.longRows.length)) {
+      body.appendChild(pickerNode("p", "catalog-unit", "USD per 1M tokens"));
+    }
+    for (const section of item.sections) {
+      if (section.rows.length || section.longRows.length) {
+        body.appendChild(pickerPriceTable(section, item.promotion));
+      } else {
+        body.appendChild(pickerNode("p", "catalog-empty", "The catalog does not provide pricing for this selection."));
+      }
+    }
+    const promotion = typeof item.promotion === "string" ? item.promotion.trim() : "";
+    const endDate = promotion ? pickerPromotionEndDate(item.promotionEndDate) : "";
+    if (endDate) {
+      const note = pickerNode("p", "catalog-promo-note");
+      note.append("Promotion ends on ");
+      const time = pickerNode("time", "", endDate);
+      time.dateTime = item.promotionEndDate;
+      note.append(time, " (UTC).");
+      body.appendChild(note);
+    }
+    pricing.appendChild(body);
+    pricing.addEventListener("toggle", () => { pickerState.pricingOpen = pricing.open; });
+    root.appendChild(pricing);
+    return root;
+  }
+
+  function singleDetailsItem(fam) {
+    const p = singleModelPricing(fam, currentThoughtLevel, currentSpeed);
+    return {
+      promotion: p.promotion || "",
+      promotionEndDate: p.promotionEndDate || "",
+      costTier: p.costTier || "",
+      tierTitle: p.tierTitle || "",
+      contextRows: p.contextRows || [],
+      sections: [{ rows: p.defaultRows || [], longRows: p.longRows || [] }]
+    };
+  }
+  function roleDetailsItem(s, role) {
+    const sel = {
+      lead: s.lead, effort: s.leadEffort, speed: s.leadSpeed,
+      subModel: s.sub, subEffort: s.subEffort, subSpeed: s.subSpeed
+    };
+    const p = fusionRolePricing(modelFamilies, fusionPairs(fusionFam()), sel, role);
+    return {
+      promotion: p.promotion || "",
+      promotionEndDate: p.promotionEndDate || "",
+      costTier: p.costTier || "",
+      tierTitle: p.tierTitle || "",
+      contextRows: p.contextRows || [],
+      sections: [{ rows: p.defaultRows || [], longRows: p.longRows || [] }]
+    };
+  }
+
+  // --- Picker lists ---------------------------------------------------------
+
+  function matchesFamQuery(fam, q) {
+    if (!q) return true;
+    return (fam.name || "").toLowerCase().includes(q) || (fam.id || "").toLowerCase().includes(q);
+  }
+  function emptyPickerList(body) {
+    const empty = pickerNode("div", "dd-empty");
+    empty.append(pickerNode("span", "", "No matches"));
+    const clear = pickerNode("button", "btn secondary", "Clear search");
+    clear.type = "button";
+    clear.id = "listClear";
+    empty.appendChild(clear);
+    body.appendChild(empty);
+  }
+  function pickerRowAccessibleName(kind, entry, hasBadge) {
+    if (kind === "fusion") {
+      const s = fusionSelectionState();
+      const leadFull = roleFullName(s.lead, s.leadEffort, s.leadSpeed);
+      const subFull = roleFullName(s.sub, s.subEffort, s.subSpeed);
+      return `Fusion. Lead: ${leadFull}. Sub model: ${subFull}.`;
+    }
+    return entry.name + (hasBadge ? ", Fast available" : "");
+  }
+  function pickerRow({ kind, entry, badge, badges, action, card, subtitle, subtitleTitle }) {
+    const wrap = pickerNode("div", card ? "dd-item dd-item-card" : "dd-item");
+    wrap.dataset.id = kind === "fusion" ? "fusion" : entry.id;
+    const main = pickerNode("button", "dd-item-main");
+    main.type = "button";
+    main.id = "row-" + wrap.dataset.id;
+    main.dataset.kind = kind;
+    main.dataset.id = wrap.dataset.id;
+    const selected = kind === "fusion"
+      ? isFusionActive()
+      : kind === "model" && !isFusionActive() && familyOfUid(currentModelUid)?.id === entry.fam.id;
+    const check = pickerNode("span", "dd-check");
+    if (selected) {
+      check.appendChild(pickerIcon("codicon-check"));
+      wrap.classList.add("selected");
+    }
+    main.setAttribute("aria-pressed", selected ? "true" : "false");
+    main.title = kind === "fusion" ? "Fusion" : entry.name;
+    main.setAttribute("aria-label", pickerRowAccessibleName(kind, entry, !!badge));
+    main.appendChild(check);
+    main.appendChild(kind === "fusion" ? pickerIcon("codicon-symbol-interface") : brandIconEl(entry.fam || familyForModelId(entry.id)));
+    const content = pickerNode("span", "dd-item-content");
+    // Cards keep the name and its metadata badges on one title row, with the
+    // subtitle underneath.
+    const nameTarget = card ? pickerNode("span", "dd-card-title") : content;
+    nameTarget.appendChild(pickerNode("span", "dd-item-name", kind === "fusion" ? "Fusion" : entry.name));
+    if (badges?.length) {
+      nameTarget.classList.add("dd-tagged-content");
+      // The row's accessible name skips the tags, so they join its
+      // description instead.
+      main.setAttribute("aria-description", badges.map((d) => d.title).join(", "));
+    }
+    for (const d of badges || []) {
+      nameTarget.appendChild(modelStatusBadgeEl(d));
+    }
+    if (badge) nameTarget.appendChild(fastBadgeEl());
+    if (card) {
+      content.appendChild(nameTarget);
+      content.classList.add("dd-card-texts");
+      const sub = pickerNode("span", "dd-card-sub");
+      for (const part of Array.isArray(subtitle) ? subtitle : [subtitle]) {
+        sub.appendChild(typeof part === "string" ? document.createTextNode(part) : part);
+      }
+      sub.title = subtitleTitle || "";
+      content.appendChild(sub);
+    }
+    main.appendChild(content);
+    wrap.appendChild(main);
+    if (action) wrap.appendChild(action);
+    return wrap;
+  }
+  function pickerRowAction({ kind, id, label, fullLabel }) {
+    const act = pickerNode("button", "dd-item-action dd-item-effort");
+    act.type = "button";
+    act.id = "act-" + id;
+    act.dataset.kind = kind;
+    act.dataset.id = id;
+    const lab = pickerNode("span", "dd-effort-label");
+    for (const part of Array.isArray(label) ? label : [label]) {
+      lab.appendChild(typeof part === "string" ? document.createTextNode(part) : part);
+    }
+    act.append(lab, pickerIcon("codicon-chevron-right"));
+    act.title = fullLabel;
+    act.setAttribute("aria-label", fullLabel);
+    return act;
+  }
+
+  function renderModelsBody() {
+    const body = pickerEl.body;
+    body.appendChild(pickerSearchEl("models", "Search models"));
+    const q = pickerState.search.models.trim().toLowerCase();
+    const entries = [];
+    const adaptiveFam = modelFamilies.find(isAdaptive);
+    if (adaptiveFam && matchesFamQuery(adaptiveFam, q)) entries.push({ kind: "model", entry: { id: adaptiveFam.id, name: adaptiveFam.name, fam: adaptiveFam, card: "adaptive" } });
+    if (fusionFam() && (!q || "fusion".includes(q) || matchesFamQuery(fusionFam(), q))) entries.push({ kind: "fusion" });
+    const rest = modelFamilies.filter((f) => !isAdaptive(f) && !isFusion(f) && matchesFamQuery(f, q));
+    const pinned = rest.filter((f) => pinnedModelIds.has(f.id));
+    const models = rest.filter((f) => !pinnedModelIds.has(f.id));
+    const groups = [
+      { items: pinned, caption: "Pinned" },
+      { items: models, caption: "Models" }
+    ].filter((g) => g.items.length);
+    const total = entries.length + groups.reduce((n, g) => n + g.items.length, 0);
+    if (!modelFamilies.length) {
+      body.appendChild(pickerNode("div", "dd-empty", "Loading models..."));
+      return;
+    }
+    if (total === 0) { emptyPickerList(body); return; }
+    const list = pickerNode("div", "dd-rows page-rows");
+    list.id = "modelList";
+    list.setAttribute("role", "group");
+    list.setAttribute("aria-label", "Models");
+    const fs = fusionSelectionState();
+    for (const e of entries) {
+      if (e.kind === "fusion") {
+        const flat = [
+          ...fusionRoleSummary(fs.lead, fs.leadEffort, fs.leadSpeed),
+          " + ",
+          ...fusionRoleSummary(fs.sub, fs.subEffort, fs.subSpeed)
+        ];
+        const action = pickerRowAction({ kind: "fusion", id: "fusion", label: [], fullLabel: "Fusion settings" });
+        list.appendChild(pickerRow({
+          kind: "fusion", card: true, action,
+          badges: variantBadges(variantFor(fusionFam(), fs.uid)),
+          subtitle: flat,
+          subtitleTitle: `${roleFullName(fs.lead, fs.leadEffort, fs.leadSpeed)} + ${roleFullName(fs.sub, fs.subEffort, fs.subSpeed)}`
+        }));
+      } else {
+        const fam = e.entry.fam;
+        const desc = variantFor(fam, fam.default)?.description || "";
+        list.appendChild(pickerRow({
+          kind: "model", entry: e.entry, card: true,
+          badges: variantBadges(variantFor(fam, fam.default)),
+          subtitle: desc, subtitleTitle: desc
+        }));
+      }
+    }
+    for (const [gi, group] of groups.entries()) {
+      if (gi) list.appendChild(pickerNode("div", "dd-sep"));
+      list.appendChild(pickerNode("div", "dd-group", group.caption));
+      for (const fam of group.items) {
+        const c = singleCandidate(fam.id);
+        const label = singleEffortOptions(fam, c && c.speed).length
+          ? [c && c.effort ? effortShort(c.effort) : "Auto"]
+          : [];
+        if (c && c.speed === "fast") label.push(zapFillEl());
+        const fast = fastAvailableSingle(fam);
+        const action = (label.length || fast) ? pickerRowAction({
+          kind: "model", id: fam.id, label,
+          fullLabel: `${fam.name} details${c && c.effort ? `: ${effortLabel(c.effort)}` : ""}${c && c.speed === "fast" ? ", Fast" : ""}`
+        }) : null;
+        list.appendChild(pickerRow({
+          kind: "model", entry: { id: fam.id, name: fam.name, fam },
+          badge: fast, badges: variantBadges(badgeVariantFor(fam, c?.effort, c?.speed)), action
+        }));
+      }
+    }
+    body.appendChild(list);
+    applyPickerTabindex(list, pickerState.listAnchor, () => isFusionActive() ? "fusion" : familyOfUid(currentModelUid)?.id);
+  }
+  function fusionRoleSummary(id, effort, speed) {
+    const parts = [effort ? `${shortModelName(id)} ${effortShort(effort)}` : shortModelName(id)];
+    if (speed === "fast") parts.push(zapFillEl());
+    return parts;
+  }
+  function fastAvailableSingle(fam) {
+    const info = speedInfoFor(fam, fam?.default || "");
+    return info.known && info.fast;
+  }
+  function fastAvailableRole(role, id, s) {
+    if (role === "lead") {
+      const info = speedInfoFor(fusionFam(), fusionCandidate("lead", id).uid);
+      return info.known && info.fast;
+    }
+    return pairRowsFor(s.lead, id).some((p) => p.subSpeed === "fast");
+  }
+
+  // Sub choices are constrained to the active Lead.
+  function fusionRoleModels(role, s, q) {
+    // Every supplied Lead stays visible even when the current Sub cannot pair
+    // with it: picking one silently resolves a valid pair.
+    const ids = role === "lead"
+      ? [...new Set(allFusionPairs().map((p) => p.lead))]
+      : [...new Set(allFusionPairs().filter((p) => p.lead === s.lead).map((p) => p.subModel))];
+    return ids
+      .map((id) => ({ id, fam: familyForModelId(id), name: modelNameFor(id) }))
+      .filter((m) => !q || m.name.toLowerCase().includes(q) || m.id.toLowerCase().includes(q))
+      .sort(cmpModelEntries);
+  }
+  function fusionRoleRow(m, role, s) {
+    const wrap = pickerNode("div", "dd-item");
+    wrap.dataset.id = m.id;
+    const main = pickerNode("button", "dd-item-main");
+    main.type = "button";
+    main.id = "row-" + m.id;
+    main.dataset.kind = "role";
+    main.dataset.id = m.id;
+    const selected = (role === "lead" ? s.lead : s.sub) === m.id;
+    const check = pickerNode("span", "dd-check");
+    if (selected) {
+      check.appendChild(pickerIcon("codicon-check"));
+      wrap.classList.add("selected");
+    }
+    main.setAttribute("aria-pressed", selected ? "true" : "false");
+    main.title = m.name;
+    const badge = fastAvailableRole(role, m.id, s);
+    main.setAttribute("aria-label", m.name + (badge ? ", Fast available" : ""));
+    main.appendChild(check);
+    main.appendChild(m.fam ? brandIconEl(m.fam) : pickerIcon("codicon-chip dd-item-icon"));
+    const content = pickerNode("span", "dd-item-content");
+    content.appendChild(pickerNode("span", "dd-item-name", m.name));
+    // The trailing action and the badges show the effort and Fast this row
+    // would give the active role, from the same candidate the click applies.
+    const c = fusionCandidate(role, m.id);
+    const effort = role === "lead" ? c.leadEffort : c.subEffort;
+    const speed = role === "lead" ? c.leadSpeed : c.subSpeed;
+    const tags = variantBadges(badgeVariantFor(m.fam, effort, speed));
+    if (tags.length) {
+      content.classList.add("dd-tagged-content");
+      main.setAttribute("aria-description", tags.map((d) => d.title).join(", "));
+    }
+    for (const d of tags) {
+      content.appendChild(modelStatusBadgeEl(d));
+    }
+    if (badge) content.appendChild(fastBadgeEl());
+    main.appendChild(content);
+    wrap.appendChild(main);
+    if (effort || badge) {
+      const label = effort ? [effortShort(effort)] : [];
+      if (speed === "fast") label.push(zapFillEl());
+      const roleName = role === "lead" ? "lead" : "sub model";
+      wrap.appendChild(pickerRowAction({
+        kind: "role", id: m.id, label,
+        fullLabel: `${m.name} ${roleName} effort: ${effortLabel(effort)}${speed === "fast" ? ", Fast" : ""}`
+      }));
+    }
+    return wrap;
+  }
+
+  function renderFusionBody() {
+    const body = pickerEl.body;
+    const s = fusionSelectionState();
+    const role = pickerState.role;
+    body.appendChild(pickerSearchEl(role, role === "lead" ? "Search lead models" : "Search sub models"));
+    const items = fusionRoleModels(role, s, pickerState.search[role].trim().toLowerCase());
+    const roleName = role === "lead" ? "Lead" : "Sub model";
+    const pinned = items.filter((m) => m.fam && pinnedModelIds.has(m.fam.id));
+    const rest = items.filter((m) => !(m.fam && pinnedModelIds.has(m.fam.id)));
+    const groups = [
+      { items: pinned, caption: "Pinned" },
+      { items: rest, caption: "Models" }
+    ].filter((g) => g.items.length);
+    if (!groups.length) {
+      const empty = pickerNode("div", "dd-empty fusion-empty");
+      empty.append(pickerNode("span", "", "No matches"));
+      const clear = pickerNode("button", "btn secondary", "Clear search");
+      clear.type = "button";
+      clear.id = "listClear";
+      empty.appendChild(clear);
+      body.appendChild(empty);
+      return;
+    }
+    const list = pickerNode("div", "dd-rows fusion-rows");
+    list.setAttribute("role", "group");
+    list.setAttribute("aria-label", `${roleName} models`);
+    for (const [gi, group] of groups.entries()) {
+      if (gi) list.appendChild(pickerNode("div", "dd-sep"));
+      list.appendChild(pickerNode("div", "dd-group", group.caption));
+      for (const m of group.items) list.appendChild(fusionRoleRow(m, role, s));
+    }
+    body.appendChild(list);
+    applyPickerTabindex(list, pickerState.fusionAnchor, () => (role === "lead" ? s.lead : s.sub));
+  }
+
+  // --- Picker effort controls ------------------------------------------------
+
+  function buildEffortControls({ options, current, fastPossible, fastOn, fastLabel, emptyNote }) {
+    const wrap = pickerNode("div", "controls");
+    const title = pickerNode("span", "controls-title", "Effort Level");
+    title.id = "effortLabel";
+    wrap.appendChild(title);
+    const rail = pickerNode("div", "effort-rail");
+    rail.setAttribute("role", "radiogroup");
+    rail.setAttribute("aria-labelledby", "effortLabel");
+    const checked = options.includes(current) ? current : options[0];
+    for (const e of options) {
+      const seg = pickerNode("button", "effort-seg");
+      seg.type = "button";
+      seg.id = "seg-" + e;
+      seg.setAttribute("role", "radio");
+      seg.dataset.effort = e;
+      seg.textContent = effortShort(e);
+      seg.title = effortLabel(e);
+      seg.setAttribute("aria-label", effortLabel(e));
+      const on = e === checked;
+      seg.setAttribute("aria-checked", on ? "true" : "false");
+      seg.tabIndex = on ? 0 : -1;
+      rail.appendChild(seg);
+    }
+    const row = pickerNode("div", "controls-row");
+    if (options.length) row.appendChild(rail);
+    else if (emptyNote) row.appendChild(pickerNode("span", "controls-empty", emptyNote));
+    if (fastPossible) {
+      const btn = pickerNode("button", "tool-ctl fast-thinking");
+      btn.type = "button";
+      btn.id = "fast-thinking";
+      btn.setAttribute("aria-pressed", fastOn ? "true" : "false");
+      btn.title = `Fast thinking for ${fastLabel}: uses more inference credits.`;
+      btn.setAttribute("aria-label", `Fast for ${fastLabel}`);
+      btn.append(fastOn ? zapFillEl() : pickerIcon("codicon-zap"), pickerNode("span", "", "Fast"));
+      row.appendChild(btn);
+    }
+    if (row.childNodes.length) wrap.appendChild(row);
+    return wrap;
+  }
+
+  function renderDetailsBody() {
+    const body = pickerEl.body;
+    const scroll = pickerNode("div", "page-scroll");
+    const fam = familyOfUid(currentModelUid);
+    if (!fam || isFusion(fam)) { renderModelsBody(); return; }
+    const options = singleEffortOptions(fam, currentSpeed);
+    scroll.appendChild(buildEffortControls({
+      options,
+      current: currentThoughtLevel,
+      fastPossible: fastPossibleSingle(fam, currentThoughtLevel),
+      fastOn: currentSpeed === "fast",
+      fastLabel: fam.name || "",
+      emptyNote: singleEffortsAuthoritative(fam) ? "Not configurable" : "Loading..."
+    }));
+    scroll.appendChild(renderPickerDetails(singleDetailsItem(fam)));
+    body.appendChild(scroll);
+  }
+
+  function renderRoleBody() {
+    const body = pickerEl.body;
+    const scroll = pickerNode("div", "page-scroll");
+    const s = fusionSelectionState();
+    const role = pickerState.role;
+    const roleId = role === "lead" ? s.lead : s.sub;
+    const options = role === "lead" ? leadEffortOptionsFor(s.lead) : subEffortOptionsFor(s.lead, s.sub);
+    const current = role === "lead" ? s.leadEffort : s.subEffort;
+    const speed = role === "lead" ? s.leadSpeed : s.subSpeed;
+    scroll.appendChild(buildEffortControls({
+      options,
+      current,
+      fastPossible: fastPossibleRole(role, s),
+      fastOn: speed === "fast",
+      fastLabel: shortModelName(roleId),
+      emptyNote: role === "lead"
+        ? (fusionEffortsForLead(s.lead).authoritative ? "Not configurable" : "Loading...")
+        : "Loading..."
+    }));
+    scroll.appendChild(renderPickerDetails(roleDetailsItem(s, role)));
+    body.appendChild(scroll);
+  }
+
+  // --- Picker chrome ----------------------------------------------------------
+
+  function pickerSearchEl(scope, placeholder) {
+    const input = pickerNode("input", "dd-filter");
+    input.id = "pageSearch";
+    input.type = "text";
+    input.autocomplete = "off";
+    input.spellcheck = false;
+    input.placeholder = placeholder;
+    input.setAttribute("aria-label", placeholder);
+    input.value = pickerState.search[scope];
+    input.addEventListener("keydown", (ev) => {
+      if (ev.key !== "ArrowDown") return;
+      const list = pickerEl.body.querySelector(".dd-rows");
+      const row = list && (list.querySelector(".dd-item.selected") || list.querySelector(".dd-item"));
+      if (!row) return;
+      ev.preventDefault();
+      for (const r of list.querySelectorAll(".dd-item")) setPickerRowTabbable(r, r === row);
+      if (list.classList.contains("fusion-rows")) pickerState.fusionAnchor = row.dataset.id;
+      else pickerState.listAnchor = row.dataset.id;
+      row.querySelector(".dd-item-main").focus({ preventScroll: true });
+      revealPickerRow(list, row);
+    });
+    const wrap = pickerNode("div", "dd-filter-wrap");
+    wrap.append(pickerIcon("codicon-search"), input);
+    return wrap;
+  }
+  function pickerBackButton(title) {
+    const btn = pickerNode("button", "icon-btn small");
+    btn.type = "button";
+    btn.id = "pageBack";
+    btn.title = title || "Back to models";
+    btn.setAttribute("aria-label", btn.title);
+    btn.appendChild(pickerIcon("codicon-arrow-left"));
+    return btn;
+  }
+  function pickerPinButton(pinId, name) {
+    const pin = pickerNode("button", "icon-btn small");
+    pin.type = "button";
+    pin.id = "pagePin";
+    pin.dataset.pin = pinId;
+    const on = pinnedModelIds.has(pinId);
+    pin.innerHTML = `<i class="codicon ${on ? "codicon-pinned" : "codicon-pin"}" aria-hidden="true"></i>`;
+    const verb = on ? "Unpin" : "Pin";
+    pin.title = verb;
+    pin.setAttribute("aria-label", `${verb} ${name}`);
+    return pin;
+  }
+
+  function renderPickerHead() {
+    const head = pickerEl.head;
+    head.textContent = "";
+    head.hidden = pickerState.page === "models";
+    pickerEl.popup.setAttribute("aria-label", pickerState.page === "models" ? "Models" : "Model setup");
+    if (pickerState.page === "models") return;
+    if (pickerState.page === "details") {
+      const fam = familyOfUid(currentModelUid);
+      const left = pickerNode("span", "tray-head-left");
+      left.appendChild(pickerBackButton());
+      if (fam) left.appendChild(brandIconEl(fam));
+      const col = pickerNode("span", "tray-title-col");
+      col.appendChild(pickerNode("span", "tray-title-text", fam?.name || ""));
+      left.appendChild(col);
+      head.appendChild(left);
+      if (fam) head.appendChild(pickerPinButton(fam.id, fam.name || ""));
+      return;
+    }
+    if (pickerState.page === "fusion") {
+      const left = pickerNode("span", "tray-head-left");
+      left.appendChild(pickerBackButton());
+      const icon = pickerIcon("codicon-symbol-interface");
+      icon.classList.add("dd-item-icon");
+      left.appendChild(icon);
+      const col = pickerNode("span", "tray-title-col");
+      col.appendChild(pickerNode("span", "tray-title-text", "Fusion"));
+      col.appendChild(pickerNode("span", "tray-sub", "Choose a Lead and sub model"));
+      left.appendChild(col);
+      head.appendChild(left);
+      return;
+    }
+    const s = fusionSelectionState();
+    const role = pickerState.role;
+    const roleId = role === "lead" ? s.lead : s.sub;
+    const left = pickerNode("span", "tray-head-left");
+    left.appendChild(pickerBackButton("Back to Fusion"));
+    left.appendChild(roleIconEl(roleId));
+    const col = pickerNode("span", "tray-title-col");
+    col.appendChild(pickerNode("span", "tray-title-text", modelNameFor(roleId)));
+    col.appendChild(pickerNode("span", "tray-sub", role === "lead" ? "Fusion - Lead model" : "Fusion - Sub model"));
+    left.appendChild(col);
+    head.appendChild(left);
+    const pinId = familyForModelId(roleId)?.id;
+    if (pinId) head.appendChild(pickerPinButton(pinId, modelNameFor(roleId)));
+  }
+
+  function renderPickerRolebar() {
+    const bar = pickerEl.rolebar;
+    bar.textContent = "";
+    if (pickerState.page !== "fusion") { bar.hidden = true; return; }
+    bar.hidden = false;
+    const s = fusionSelectionState();
+    const wrap = pickerNode("div", "role-switch");
+    wrap.setAttribute("role", "radiogroup");
+    wrap.setAttribute("aria-label", "Fusion role");
+    for (const role of ["lead", "sub"]) {
+      const label = pickerNode("label", "role-opt");
+      const input = pickerNode("input", "role-radio");
+      input.type = "radio";
+      input.name = "fusionRole";
+      input.value = role;
+      input.id = "roleRadio-" + role;
+      input.checked = pickerState.role === role;
+      const roleId = role === "lead" ? s.lead : s.sub;
+      const effort = role === "lead" ? s.leadEffort : s.subEffort;
+      const speed = role === "lead" ? s.leadSpeed : s.subSpeed;
+      const roleName = role === "lead" ? "Lead" : "Sub model";
+      input.setAttribute("aria-label", `${roleName}: ${modelNameFor(roleId)}${effort ? `, ${effortLabel(effort)}` : ""}${speed === "fast" ? ", Fast" : ""}`);
+      const face = pickerNode("span", "role-opt-face");
+      face.appendChild(pickerIcon(role === "lead" ? "codicon-lightbulb" : "codicon-code"));
+      const texts = pickerNode("span", "role-opt-texts");
+      texts.appendChild(pickerNode("span", "role-opt-name", roleName));
+      const modelLine = pickerNode("span", "role-opt-model");
+      modelLine.appendChild(pickerNode("span", "role-opt-model-text", `${modelNameFor(roleId)}${effort ? ` · ${effortShort(effort)}` : ""}`));
+      if (speed === "fast") modelLine.appendChild(zapFillEl());
+      texts.appendChild(modelLine);
+      face.appendChild(texts);
+      label.append(input, face);
+      wrap.appendChild(label);
+    }
+    bar.appendChild(wrap);
+  }
+
+  function renderPickerBody() {
+    const body = pickerEl.body;
+    const samePage = pickerState.renderedPage === pickerState.page;
+    const bodyScroll = samePage ? body.scrollTop : 0;
+    const prevOuter = samePage ? body.querySelector(".page-scroll") : null;
+    const prevInner = samePage ? body.querySelector(".dd-rows") : null;
+    const outerScroll = prevOuter ? prevOuter.scrollTop : 0;
+    const innerScroll = prevInner ? prevInner.scrollTop : 0;
+    body.textContent = "";
+    if (pickerState.page === "details") renderDetailsBody();
+    else if (pickerState.page === "fusion") renderFusionBody();
+    else if (pickerState.page === "role") renderRoleBody();
+    else renderModelsBody();
+    pickerState.renderedPage = pickerState.page;
+    if (samePage) {
+      body.scrollTop = bodyScroll;
+      const nextOuter = body.querySelector(".page-scroll");
+      const nextInner = body.querySelector(".dd-rows");
+      if (nextOuter) nextOuter.scrollTop = outerScroll;
+      if (nextInner) nextInner.scrollTop = innerScroll;
+    }
+  }
+
+  function renderPickerTray() {
+    renderPickerHead();
+    renderPickerRolebar();
+    renderPickerBody();
+  }
+
+  // Only the anchor row's buttons are tab stops, so Tab reaches the actions
+  // of the active row without tabbing through the whole catalog.
+  function setPickerRowTabbable(item, on) {
+    for (const b of item.querySelectorAll("button")) b.tabIndex = on ? 0 : -1;
+  }
+  function applyPickerTabindex(list, anchorId, selectedIdFn) {
+    const items = [...list.querySelectorAll(".dd-item")];
+    const ids = new Set(items.map((it) => it.dataset.id));
+    const selected = selectedIdFn();
+    const anchor = anchorId && ids.has(anchorId) ? anchorId
+      : ids.has(selected) ? selected
+      : items.length ? items[0].dataset.id
+      : null;
+    for (const it of items) setPickerRowTabbable(it, it.dataset.id === anchor);
+  }
+  function revealPickerRow(list, row) {
+    if (!list || !row) return;
+    const r = row.getBoundingClientRect();
+    const lr = list.getBoundingClientRect();
+    if (r.top < lr.top) list.scrollTop -= lr.top - r.top;
+    else if (r.bottom > lr.bottom) list.scrollTop += r.bottom - lr.bottom;
+  }
+  function revealSelectedFusionRow() {
+    const list = pickerEl.body.querySelector(".fusion-rows");
+    const s = fusionSelectionState();
+    const id = pickerState.role === "lead" ? s.lead : s.sub;
+    const row = list && [...list.querySelectorAll(".dd-item")].find((it) => it.dataset.id === id);
+    revealPickerRow(list, row);
+  }
+
+  function capturePickerFocus() {
+    const a = document.activeElement;
+    if (!a || !pickerEl.popup || !pickerEl.popup.contains(a)) return null;
+    if (a.id === "pageSearch" && a.type === "text") {
+      return { id: a.id, start: a.selectionStart, end: a.selectionEnd, dir: a.selectionDirection };
+    }
+    return a.id || null;
+  }
+  function restorePickerFocus(focus) {
+    const key = typeof focus === "string" ? focus : focus && focus.id;
+    if (!key) return;
+    const target = document.getElementById(key);
+    if (target && pickerEl.popup.contains(target)) {
+      target.focus({ preventScroll: true });
+      if (typeof focus === "object" && typeof focus.start === "number" && target.type === "text") {
+        target.setSelectionRange(focus.start, focus.end, focus.dir);
+      }
+    }
+  }
+  function pickerFocusDefault() {
+    const focusable = (elm) => elm && elm.focus({ preventScroll: true });
+    if (pickerState.page === "models") {
+      const input = pickerEl.body.querySelector("#pageSearch");
+      if (input) { input.focus({ preventScroll: true }); return; }
+      focusable(pickerEl.body.querySelector(".dd-item-main"));
+    } else if (pickerState.page === "details" || pickerState.page === "role") {
+      focusable(
+        pickerEl.body.querySelector(".effort-seg[aria-checked='true']")
+        || pickerEl.body.querySelector(".effort-seg")
+        || pickerEl.head.querySelector("#pageBack")
+      );
+    } else {
+      focusable(document.getElementById("roleRadio-" + pickerState.role) || pickerEl.head.querySelector("#pageBack"));
+    }
+  }
+
+  function renderPicker() {
+    buildPickerDom();
+    if (!pickerEl.popup) return;
+    const focusKey = pickerState.open ? capturePickerFocus() : null;
+    updateComposer();
+    if (pickerState.open) {
+      renderPickerTray();
+      restorePickerFocus(focusKey);
+      positionPickerPopup();
+    }
+  }
+
+  // --- Picker open, close, pages, placement -----------------------------------
+
+  function pickerTargetPage() {
+    if (isFusionActive()) return "fusion";
+    const fam = familyOfUid(currentModelUid);
+    return fam && !isAdaptive(fam) && (singleEffortOptions(fam, currentSpeed).length || fastPossibleSingle(fam, currentThoughtLevel)) ? "details" : "models";
+  }
+  function pickerFlowPages() {
+    return isFusionActive() ? ["fusion", "role"] : ["details"];
+  }
+
+  function openPicker(trigger, page) {
+    buildPickerDom();
+    if (!pickerEl.popup) return;
+    closeUsagePopup();
+    document.querySelectorAll(".dd-menu").forEach((m) => m.classList.add("hidden"));
+    document.querySelectorAll(".dd-btn.open").forEach((b) => {
+      b.classList.remove("open");
+      b.setAttribute("aria-expanded", "false");
+    });
+    const wasOpen = pickerState.open;
+    pickerState.open = true;
+    pickerState.trigger = trigger || "model";
+    pickerState.page = page || (trigger === "effort" ? pickerTargetPage() : "models");
+    if (!wasOpen) {
+      pickerState.search = { models: "", lead: "", sub: "" };
+      pickerState.listAnchor = null;
+      pickerState.fusionAnchor = null;
+    }
+    pickerState.renderedPage = null;
+    pickerEl.popup.classList.remove("hidden");
+    renderPicker();
+    if (!pickerState.open) return;
+    if (pickerState.page === "fusion") revealSelectedFusionRow();
+    pickerFocusDefault();
+    document.addEventListener("mousedown", onPickerDocPointer, true);
+    document.addEventListener("focusin", onPickerDocFocus, true);
+  }
+
+  function closePicker(opts) {
+    if (!pickerState.open) return;
+    const restoreFocus = !opts || opts.restoreFocus !== false;
+    pickerState.open = false;
+    pickerEl.popup.classList.add("hidden");
+    // Only the close state is repainted here. A full updateComposer would
+    // call fitComposer again, and fitComposer is what calls this on a hidden
+    // anchor.
+    el.modelPickerGroup.classList.remove("tray-open");
+    pickerEl.modelBtn.setAttribute("aria-expanded", "false");
+    pickerEl.effortBtn.setAttribute("aria-expanded", "false");
+    document.removeEventListener("mousedown", onPickerDocPointer, true);
+    document.removeEventListener("focusin", onPickerDocFocus, true);
+    if (restoreFocus) {
+      (pickerState.trigger === "effort" ? pickerEl.effortBtn : pickerEl.modelBtn).focus();
+    }
+  }
+
+  // Outside interaction closes without stealing focus back to the trigger.
+  function isPickerTarget(t) {
+    return !!(pickerEl.popup && pickerEl.popup.contains(t))
+      || !!(el.modelPickerGroup && el.modelPickerGroup.contains(t));
+  }
+  function onPickerDocPointer(ev) {
+    if (!isPickerTarget(ev.target)) closePicker({ restoreFocus: false });
+  }
+  function onPickerDocFocus(ev) {
+    if (!isPickerTarget(ev.target)) closePicker({ restoreFocus: false });
+  }
+
+  function setPickerPage(page) {
+    if (pickerState.page === page) return;
+    pickerState.page = page;
+    pickerState.renderedPage = null;
+    renderPicker();
+    if (page === "fusion") revealSelectedFusionRow();
+    pickerFocusDefault();
+  }
+
+  function onPickerModelBtn() {
+    if (!pickerState.open) openPicker("model", "models");
+    else if (pickerState.page === "models") closePicker();
+    else {
+      pickerState.trigger = "model";
+      setPickerPage("models");
+    }
+  }
+  // The Effort half belongs to one flow per mode: single details, or the
+  // Fusion page and its role pages. Inside that flow it closes the popup.
+  function onPickerEffortBtn() {
+    const target = pickerTargetPage();
+    if (!pickerState.open) openPicker("effort", target);
+    else if (pickerFlowPages().includes(pickerState.page)) closePicker();
+    else {
+      pickerState.trigger = "effort";
+      setPickerPage(target);
+    }
+  }
+
+  // Selecting a model applies its resolved candidate, which carries the
+  // saved settings or the catalog default for that model.
+  function pickerSelectSingle(famId) {
+    const c = singleCandidate(famId);
+    if (c) applySingleCandidate(c);
+  }
+  function pickerSelectRoleModel(id) {
+    const c = fusionCandidate(pickerState.role, id);
+    // A click on the already active role model is a no op: reposting the same
+    // pair would only mark an unrelated report as a stale reply.
+    if (isFusionActive() && c.uid === currentModelUid) return;
+    applyFusionSelection(c, pickerState.role);
+  }
+  function openPickerDetails(famId) {
+    // The action also selects its row's model, but a model that is already
+    // active needs no second setModel post.
+    const active = familyOfUid(currentModelUid);
+    if (!active || isFusion(active) || active.id !== famId) pickerSelectSingle(famId);
+    if (!pickerState.open) openPicker("model");
+    pickerState.page = "details";
+    pickerState.renderedPage = null;
+    renderPicker();
+    pickerFocusDefault();
+  }
+  function openFusionPage() {
+    if (!isFusionActive()) applyFusionSelection(fusionSelectionState(), "seed");
+    pickerState.page = "fusion";
+    pickerState.renderedPage = null;
+    renderPicker();
+    revealSelectedFusionRow();
+    pickerFocusDefault();
+  }
+  function openRolePage(id) {
+    const c = fusionCandidate(pickerState.role, id);
+    if (!isFusionActive() || c.uid !== currentModelUid) applyFusionSelection(c, pickerState.role);
+    setPickerPage("role");
+  }
+
+  function pickerRowPrimary(kind, id) {
+    if (kind === "fusion") { openFusionPage(); return; }
+    if (kind === "role") { pickerSelectRoleModel(id); return; }
+    pickerSelectSingle(id);
+    closePicker();
+  }
+  function pickerRowActionGo(kind, id) {
+    if (kind === "fusion") openFusionPage();
+    else if (kind === "model") openPickerDetails(id);
+    else if (kind === "role") openRolePage(id);
+  }
+
+  function toggleModelPin(pinId) {
+    if (!pinId) return;
+    if (pinnedModelIds.has(pinId)) pinnedModelIds.delete(pinId);
+    else pinnedModelIds.add(pinId);
+    savePinnedModels();
+    // The row can move between the Pinned and Models groups, so keep it as
+    // the roving anchor; the render pass restores focus.
+    if (pickerState.page === "fusion" || pickerState.page === "role") pickerState.fusionAnchor = pinId;
+    else pickerState.listAnchor = pinId;
+    renderPicker();
+    const item = document.activeElement && document.activeElement.closest(".dd-item");
+    revealPickerRow(item && item.closest(".dd-rows"), item);
+  }
+
+  function pickerSearchScope() {
+    if (pickerState.page === "fusion") return pickerState.role;
+    if (pickerState.page === "models") return "models";
+    return null;
+  }
+  function clearPickerSearch() {
+    const scope = pickerSearchScope();
+    if (!scope) return;
+    pickerState.search[scope] = "";
+    const input = pickerEl.body.querySelector("#pageSearch");
+    if (input) input.value = "";
+    renderPickerBody();
+    const next = pickerEl.body.querySelector("#pageSearch");
+    if (next) next.focus({ preventScroll: true });
+  }
+
+  // Back routes by page: the role page returns to the Fusion list focused on
+  // that role's selected row action, details returns to the catalog focused
+  // on the model's action, and Fusion returns to the catalog.
+  function pickerGoBack() {
+    if (pickerState.page === "role") {
+      const s = fusionSelectionState();
+      const id = pickerState.role === "lead" ? s.lead : s.sub;
+      pickerState.fusionAnchor = id;
+      setPickerPage("fusion");
+      const act = document.getElementById("act-" + id);
+      const list = pickerEl.body.querySelector(".fusion-rows");
+      const row = act && act.closest(".dd-item");
+      revealPickerRow(list, row);
+      if (act) act.focus({ preventScroll: true });
+      return;
+    }
+    if (pickerState.page === "details") {
+      const id = familyOfUid(currentModelUid)?.id;
+      pickerState.listAnchor = id;
+      setPickerPage("models");
+      const act = id && document.getElementById("act-" + id);
+      if (act) act.focus({ preventScroll: true });
+      return;
+    }
+    setPickerPage("models");
+  }
+
+  // The popup anchors to the shared composer group: it prefers opening
+  // above, flips below when that fits better, keeps a stable height capped
+  // to the available space, and clamps to the viewport inset.
+  function positionPickerPopup() {
+    if (!pickerState.open || !pickerEl.popup) return;
+    const anchor = el.modelPickerGroup.getBoundingClientRect();
+    // A fully zero rect means the anchor cannot be measured (unit DOMs), so
+    // the popup keeps its stylesheet position instead of closing.
+    if (!anchor.width && !anchor.height && !anchor.top && !anchor.left && !anchor.bottom) return;
+    const popup = pickerEl.popup;
+    const inset = 8;
+    const gap = 4;
+    // The popup never leaves the chat surface, or the viewport when the chat
+    // bounds cannot be measured (the unit DOM returns a zero rect).
+    let bx0 = inset, by0 = inset;
+    let bx1 = window.innerWidth - inset;
+    let by1 = window.innerHeight - inset;
+    const chat = el.chatMain && el.chatMain.getBoundingClientRect();
+    if (chat && (chat.width || chat.height)) {
+      bx0 = Math.max(bx0, chat.left + inset);
+      by0 = Math.max(by0, chat.top + inset);
+      bx1 = Math.min(bx1, chat.right - inset);
+      by1 = Math.min(by1, chat.bottom - inset);
+    }
+    if (bx1 <= bx0 || by1 <= by0 || anchor.bottom <= by0 || anchor.top >= by1) {
+      closePicker({ restoreFocus: false });
+      return;
+    }
+    const width = Math.min(400, Math.max(0, bx1 - bx0));
+    popup.style.width = width + "px";
+    popup.classList.toggle("popup-tight", width < 360 && popup.querySelectorAll(".effort-seg").length >= 5);
+    const preferred = 400;
+    const above = anchor.top - gap - by0;
+    const below = by1 - anchor.bottom - gap;
+    const placeAbove = preferred <= above || above >= below;
+    const maxH = Math.max(0, placeAbove ? above : below);
+    const h = Math.max(0, Math.min(preferred, maxH, by1 - by0));
+    popup.style.height = h + "px";
+    popup.style.maxHeight = h + "px";
+    let top = placeAbove ? anchor.top - gap - h : anchor.bottom + gap;
+    top = Math.max(by0, Math.min(top, by1 - h));
+    const left = Math.max(bx0, Math.min(anchor.left, bx1 - width));
+    popup.style.left = left + "px";
+    popup.style.top = top + "px";
+  }
+
+  // --- Picker events ----------------------------------------------------------
+
+  function onPickerKey(ev) {
+    const item = ev.target.closest(".dd-item");
+    const main = item && item.querySelector(".dd-item-main");
+    if (main && ["ArrowDown", "ArrowUp", "Home", "End"].includes(ev.key)) {
+      const list = main.closest(".dd-rows");
+      const rows = [...list.querySelectorAll(".dd-item")];
+      const i = rows.indexOf(item);
+      let next = null;
+      if (ev.key === "ArrowDown") next = rows[Math.min(i + 1, rows.length - 1)];
+      else if (ev.key === "ArrowUp") next = rows[Math.max(i - 1, 0)];
+      else if (ev.key === "Home") next = rows[0];
+      else if (ev.key === "End") next = rows[rows.length - 1];
+      if (!next) return;
+      ev.preventDefault();
+      for (const r of rows) setPickerRowTabbable(r, r === next);
+      if (list.classList.contains("fusion-rows")) pickerState.fusionAnchor = next.dataset.id;
+      else pickerState.listAnchor = next.dataset.id;
+      next.querySelector(".dd-item-main").focus({ preventScroll: true });
+      revealPickerRow(list, next);
+      return;
+    }
+    const seg = ev.target.closest(".effort-seg");
+    if (seg && ["ArrowRight", "ArrowDown", "ArrowLeft", "ArrowUp", "Home", "End"].includes(ev.key)) {
+      const segs = [...seg.closest(".effort-rail").querySelectorAll(".effort-seg")];
+      const i = segs.indexOf(seg);
+      let next = null;
+      if (ev.key === "ArrowRight" || ev.key === "ArrowDown") next = segs[Math.min(i + 1, segs.length - 1)];
+      else if (ev.key === "ArrowLeft" || ev.key === "ArrowUp") next = segs[Math.max(i - 1, 0)];
+      else if (ev.key === "Home") next = segs[0];
+      else if (ev.key === "End") next = segs[segs.length - 1];
+      if (!next) return;
+      ev.preventDefault();
+      next.focus();
+      next.click();
+    }
+  }
+
+  function onPickerDocKey(ev) {
+    if (ev.key !== "Escape" || !pickerState.open) return;
+    ev.preventDefault();
+    const scope = pickerSearchScope();
+    if (scope && pickerState.search[scope]) {
+      // Escape clears a non empty query before it closes the popup.
+      clearPickerSearch();
+      return;
+    }
+    closePicker();
+  }
+
+  function onPickerInput(ev) {
+    if (ev.target.id !== "pageSearch") return;
+    const scope = pickerSearchScope();
+    if (!scope) return;
+    pickerState.search[scope] = ev.target.value;
+    const selection = { start: ev.target.selectionStart, end: ev.target.selectionEnd, dir: ev.target.selectionDirection };
+    renderPickerBody();
+    const input = pickerEl.body.querySelector("#pageSearch");
+    if (input) {
+      input.focus({ preventScroll: true });
+      input.setSelectionRange(selection.start, selection.end, selection.dir);
+    }
+  }
+
+  function onPickerClick(ev) {
+    const t = ev.target;
+    if (t.closest("#pageBack")) { pickerGoBack(); return; }
+    const pin = t.closest("#pagePin");
+    if (pin) { toggleModelPin(pin.dataset.pin); return; }
+    const seg = t.closest(".effort-seg");
+    if (seg) { pickerPickEffort(seg.dataset.effort); return; }
+    if (t.closest("#fast-thinking")) { pickerToggleFast(); return; }
+    if (t.closest("#listClear")) { clearPickerSearch(); return; }
+    const act = t.closest(".dd-item-effort");
+    if (act) { pickerRowActionGo(act.dataset.kind, act.dataset.id); return; }
+    const main = t.closest(".dd-item-main");
+    if (main) pickerRowPrimary(main.dataset.kind, main.dataset.id);
+  }
+
+  function onPickerChange(ev) {
+    if (ev.target.name === "fusionRole" && pickerState.role !== ev.target.value) {
+      pickerState.role = ev.target.value;
+      pickerState.fusionAnchor = null;
+      pickerState.renderedPage = null;
+      renderPicker();
+      revealSelectedFusionRow();
+    }
+  }
+
+  document.addEventListener("keydown", onPickerDocKey);
 
   // --- View state ----------------------------------------------------------
 
@@ -684,7 +2214,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     // it, and the panel is told it is a list more than once: on open, and again
     // once the CLI health check finishes. Doing it every time wiped the draft that
     // had just been restored, and anything typed while that check was running.
-    if (list && was !== "list") { closeTitleMenu(); detachComposerFromSession(); closeSessionsPanel(); stopThreadLoading(); }
+    if (list && was !== "list") { closeTitleMenu(); detachComposerFromSession(); closeSessionsPanel(); stopThreadLoading(); clearModelActivity(); }
     renderHeader();
     updateComposerDock();
     updateTerminateBtn();
@@ -847,7 +2377,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // it would overflow the bottom.
   function makeFloater(anchor, content, align, onClose) {
     const boxEl = document.createElement("div");
-    boxEl.className = "dv-floater" + (content.classList.contains("model-hover") ? " model-hover-floater" : "");
+    boxEl.className = "dv-floater";
     boxEl.appendChild(content);
     document.body.appendChild(boxEl);
     const r = anchor.getBoundingClientRect();
@@ -1109,7 +2639,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   function renderElsewhere(m) {
     snapshotCurrent();
     curSessionId = null;
-    pendingModelChange = 0;
+    pendingModelChange = 0; pendingPrefIntent = null;
     setBody("thread");
     stopThreadLoading();
     elsewhereId = m.id || null;
@@ -1150,7 +2680,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     // returning to it is instant, then show the list.
     snapshotCurrent();
     curSessionId = null;
-    pendingModelChange = 0;
+    pendingModelChange = 0; pendingPrefIntent = null;
     vscode.postMessage({ type: "leaveToList" });
     setBody("list");
   });
@@ -1484,6 +3014,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     const icon = el.send.querySelector("i");
     if (icon) icon.className = "codicon " + (action ? action.icon : "codicon-newline");
     if (!split && sendFloater) sendFloater.close();
+    fitComposer();
   }
 
   // The image types the agent can decode. One it cannot (svg, heic, avif) has to
@@ -1695,17 +3226,109 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     }
   }
 
-  // Responsive composer: progressively drop labels, then whole controls, as the
-  // panel narrows, so the toolbar never overlaps. Worst case keeps just Send.
+  // Fit the toolbar's actual content instead of fixed breakpoints: shrinkable
+  // wrappers can otherwise become narrower than the buttons inside them. The
+  // fit classes collapse text first and whole controls last, and the Send and
+  // Stop side is never touched. Measurement borrows a synchronous class on
+  // the left cluster only, so nothing it reads is ever painted. The right
+  // cluster keeps its live styles: its border box plus each percentage's
+  // hidden scrollWidth reserves the expanded width arithmetically, which
+  // keeps the hide decision independent of a real hover without restarting
+  // any transition.
+  const FIT_STAGES = [
+    "cmp-mode-icon", // mode word goes first: Bypass, Smart and friends
+    "cmp-no-effort", // then the effort segment and its divider
+    "cmp-model-icon", // then the model name text, keeping its icon
+    "cmp-no-mode", // emergency stages below drop whole left controls
+    "cmp-no-attach",
+    "cmp-no-models",
+    "cmp-no-left",
+    "cmp-no-usage" // usage is the last control to leave
+  ];
+  // An anchor counts as hidden when it or any ancestor up through the
+  // composer computes display:none. A zero rect cannot answer this in a
+  // layoutless DOM, where every rect is zero anyway. The .hidden class is
+  // checked directly as well: it carries display:none !important, so the
+  // computed style agrees in a browser, and DOMs with a partial cascade
+  // still see the marker.
+  function composerHidden(node) {
+    for (let n = node; n; n = n.parentElement) {
+      if (n.classList && n.classList.contains("hidden")) return true;
+      if (getComputedStyle(n).display === "none") return true;
+      if (n === el.inputBox) break;
+    }
+    return false;
+  }
+  // A popup whose anchor just collapsed would float orphaned and reopen on
+  // the next widen, so the fit closes it instead. Focus that sat inside the
+  // hidden control or the closed popup moves to the composer input, and
+  // focus anywhere still visible is left alone.
+  function closeHiddenAnchors(wasActive) {
+    const modeMenu = el.modeDD && el.modeDD.querySelector(".dd-menu");
+    if (modeMenu && !modeMenu.classList.contains("hidden") && composerHidden(el.modeDD)) {
+      modeDropdown.close();
+    }
+    if (pickerState.open) {
+      const trigger = pickerState.trigger === "effort" ? pickerEl.effortBtn : pickerEl.modelBtn;
+      if (trigger && composerHidden(trigger)) closePicker({ restoreFocus: false });
+    }
+    if (wasActive && wasActive !== document.body && composerHidden(wasActive)) {
+      el.input.focus({ preventScroll: true });
+    }
+  }
+  function fitComposer() {
+    // Focus ownership is read before the collapse classes mutate the DOM: an
+    // element that loses display:none blurs to BODY and the real owner would
+    // be unrecoverable.
+    const wasActive = document.activeElement;
+    const toolbar = el.inputBox && el.inputBox.querySelector("#toolbar");
+    const left = toolbar && toolbar.querySelector(".toolbar-left");
+    const right = toolbar && toolbar.querySelector(".toolbar-right");
+    if (toolbar && toolbar.clientWidth && left && right) {
+      for (const s of FIT_STAGES) el.inputBox.classList.remove(s);
+      const gap = parseFloat(getComputedStyle(toolbar).columnGap) || 0;
+      const fits = () => {
+        left.classList.add("cmp-measure");
+        const leftW = left.getBoundingClientRect().width;
+        left.classList.remove("cmp-measure");
+        // The right cluster is never mutated for measurement. Its live border
+        // box already holds the collapsed percentage widths, and each
+        // percentage's hidden content width comes from scrollWidth, so the
+        // reserved total matches what a hover will need without touching a
+        // live transition. Hidden usage contributes zero.
+        let rightW = right.getBoundingClientRect().width;
+        for (const pct of right.querySelectorAll(".usage-pct")) {
+          rightW += Math.max(0, pct.scrollWidth - pct.getBoundingClientRect().width);
+        }
+        return Math.ceil(leftW + rightW + gap) <= toolbar.clientWidth;
+      };
+      for (const stage of FIT_STAGES) {
+        if (fits()) break;
+        el.inputBox.classList.add(stage);
+      }
+    }
+    closeHiddenAnchors(wasActive);
+    if (pickerState.open) positionPickerPopup();
+    scrollFusionActivity();
+  }
+
+  // Responsive composer: fitComposer fits the natural left cluster and the
+  // reserved right width against the toolbar width and applies the ordered
+  // collapse classes until they fit. The right cluster is observed too, so
+  // a wider entry (the expanded usage percentages or the queue split)
+  // triggers the same refit. Read the box itself, since entries now belong
+  // to more than one element. Activity classes are already authoritative on
+  // the label, so the observer only refits, and scrollFusionActivity inside
+  // the fit keeps the active Sub name in view after the final layout.
   if (window.ResizeObserver) {
-    const ro = new ResizeObserver((entries) => {
-      const w = entries[0].contentRect.width;
-      el.inputBox.classList.toggle("cmp-sm", w < 380); // labels -> icons only
-      el.inputBox.classList.toggle("cmp-xs", w < 280); // hide mode/model/context
-      el.inputBox.classList.toggle("cmp-xxs", w < 190); // only Send remains
+    const ro = new ResizeObserver(() => {
+      const w = el.inputBox.clientWidth;
       updateWorkingDuration(w);
+      fitComposer();
     });
     ro.observe(el.inputBox);
+    const toolbarRight = el.inputBox.querySelector(".toolbar-right");
+    if (toolbarRight) ro.observe(toolbarRight);
   }
 
   function isFileReference(href) {
@@ -1901,7 +3524,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     chev.className = "codicon codicon-chevron-down";
     btn.appendChild(btnIcon);
     btn.appendChild(label);
-    btn.appendChild(chev);
+    if (!opts.hideChevron) btn.appendChild(chev);
 
     function iconFor(v) {
       if (opts.buttonIcon) return opts.buttonIcon(v) || "";
@@ -3379,7 +5002,12 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // subagent its own working row, and a question is waiting on the user, which
   // is worth saying rather than calling it work.
   function workingLabel() {
-    if (!busy || body !== "thread" || !currentTurn) return null;
+    if (body !== "thread" || !currentTurn || loadingSession) return null;
+    // A session coming back from idle is working even though no turn is busy
+    // yet: say that honestly rather than nothing, or a working word for a turn
+    // that has not started.
+    if (curSessionId && sessionStatuses[curSessionId] === "starting") return "Waking session";
+    if (!busy) return null;
     const pending = el.permissionTray.children.length + el.elicitationTray.children.length;
     if (pending) return pending === 1 ? "1 confirmation pending" : pending + " confirmations pending";
     if (currentTurn.resp.querySelector(".tool.in_progress, .tool.pending, .subagent-active")) return null;
@@ -3408,23 +5036,37 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     }
   }
 
+  // The working row's mark is the animated cog silhouette built by
+  // webview/workingMark.js. One controller per row, all sharing the module's
+  // epoch, so a rebuilt row drops into the phase the last one was in.
+  let workingMark = null;
+
   function showWorking(label) {
+    // Waiting on the user is not work, so the mark stays out of the row while
+    // a permission or a question is asking for confirmation.
+    const awaiting = el.permissionTray.children.length + el.elicitationTray.children.length > 0;
     // Already saying it, and still at the end of the turn: leave the row alone so
     // its sweep runs on rather than restarting.
     if (workingEl && workingEl.parentElement === respTarget() && workingEl.nextSibling === null) {
-      const span = workingEl.firstChild;
-      if (label && span.textContent !== label) span.textContent = label;
+      const span = workingEl.querySelector(".working-label");
+      if (label && span && span.textContent !== label) span.textContent = label;
+      if (workingMark) workingMark.setVisible(!awaiting);
       return;
     }
     hideWorking();
     ensureTurn();
     const w = document.createElement("div");
     w.className = "working";
+    workingMark = createWorkingMark();
+    w.appendChild(workingMark.element);
     const span = document.createElement("span");
-    span.className = "dv-shimmer";
+    span.className = "working-label dv-shimmer";
     span.textContent = label || pickWorkingWord();
     w.appendChild(span);
     respTarget().appendChild(w);
+    // The clock only starts once the row is in the document: the mark's first
+    // frame needs a connected element before it can animate.
+    workingMark.setVisible(!awaiting);
     syncShimmer(span);
     workingEl = w;
     scrollToBottom();
@@ -3439,6 +5081,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   }
 
   function hideWorking() {
+    // The controller goes even when the row is already gone: its clock and
+    // listeners must not outlive the mark they belong to.
+    if (workingMark) { workingMark.dispose(); workingMark = null; }
     if (workingEl) { workingEl.remove(); workingEl = null; }
     // A retained transcript can bring back a "Working…" line this module no
     // longer tracks, so sweep any stray one: two must never show at once.
@@ -6717,6 +8362,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     wsCounts.clear();
     renderWorkingSet([]);
     lastUsage = null;
+    usageLoading = false;
+    usageError = "";
     el.usage.classList.add("hidden");
     el.usage.innerHTML = "";
     closeUsagePopup();
@@ -6775,7 +8422,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // idle and unchanged, otherwise ask the host to wake/reload it.
   function switchToSession(id, title) {
     if (id === curSessionId) { setBody("thread"); return; }
-    pendingModelChange = 0;
+    pendingModelChange = 0; pendingPrefIntent = null; reportedThoughtLevels = {};
     // Held by the other surface: say so rather than restoring a copy of it here.
     // The host answers with the same state, and corrects this if it disagrees.
     if (elsewhereIds.includes(id)) {
@@ -7037,6 +8684,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   function setBusy(value) {
     const wasBusy = busy;
     busy = value;
+    // A turn boundary drops the role marker. The host re-derives it live.
+    if (value !== wasBusy) clearModelActivity();
     updateComposerButtons();
     // Copilot-style animated indicator on the input (gated by progressBorder).
     el.inputBox.classList.toggle("busy", value && caps.progressBorder);
@@ -7059,10 +8708,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // sends capabilities. Timestamps (verbose) are gated in buildTurnChrome.
   function applyCapPrefs() {
     el.inputBox.classList.toggle("busy", busy && caps.progressBorder);
-    if (!caps.contextUsage) {
-      el.usage.classList.add("hidden");
-      closeUsagePopup();
-    }
+    paintUsage();
     // Drive the streaming entrance animation from the setting.
     el.thread.dataset.anim = caps.streamAnim || "rise";
     applyPanelSide();
@@ -7291,6 +8937,10 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   }
 
   let lastUsage = null;
+  // Quiet status for the open details popup: a read is in flight, or the last
+  // one failed and the figures on screen are the previous snapshot.
+  let usageLoading = false;
+  let usageError = "";
 
   function fmtCost(cost) {
     if (!cost || typeof cost.amount !== "number") return "";
@@ -7299,9 +8949,13 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
 
   function ringSvg(pct) {
     const r = 7, c = 2 * Math.PI * r;
+    const track = `<circle cx="9" cy="9" r="7" fill="none" stroke="var(--vscode-disabledForeground, var(--vscode-panel-border))" stroke-width="2.5" opacity="0.5"/>`;
+    // Unknown usage has no arc, so it stays distinct from a reported zero.
+    if (pct === null) {
+      return `<svg width="16" height="16" viewBox="0 0 18 18" aria-hidden="true">${track}</svg>`;
+    }
     const off = c * (1 - Math.min(100, Math.max(0, pct)) / 100);
-    // Arc colour matches VS Code's context-usage widget: normal icon colour,
-    // amber past 75%, red past 90%; track is the dimmed disabled foreground.
+    // The arc follows VS Code's context usage colours and severity thresholds.
     const arc = pct >= 90
       ? "var(--vscode-editorError-foreground, #f14c4c)"
       : pct >= 75
@@ -7309,19 +8963,79 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         : "var(--vscode-icon-foreground, var(--vscode-foreground))";
     return (
       `<svg width="16" height="16" viewBox="0 0 18 18" aria-hidden="true">` +
-      `<circle cx="9" cy="9" r="7" fill="none" stroke="var(--vscode-disabledForeground, var(--vscode-panel-border))" stroke-width="2.5" opacity="0.5"/>` +
+      track +
       `<circle cx="9" cy="9" r="7" fill="none" stroke="${arc}" stroke-width="2.5" stroke-linecap="round"` +
       ` stroke-dasharray="${c.toFixed(2)}" stroke-dashoffset="${off.toFixed(2)}" transform="rotate(-90 9 9)"/></svg>`
     );
   }
 
   function renderUsage(m) {
-    if (!caps.contextUsage) { el.usage.classList.add("hidden"); lastUsage = null; return; }
-    if (!m.used || !m.size) { el.usage.classList.add("hidden"); lastUsage = null; closeUsagePopup(); return; }
-    lastUsage = m;
-    const pct = Math.round((m.used / m.size) * 100);
-    el.usage.innerHTML = ringSvg(pct) + `<span class="usage-pct">${pct}%</span>`;
-    el.usage.title = "Context used, click for details";
+    const previous = lastUsage;
+    lastUsage = caps.contextUsage ? normalizeContextUsage(m, lastUsage, currentModelUid) : null;
+    // A refresh read carries no spend of its own, so it must not erase the
+    // cost the turn's usage update reported.
+    if (lastUsage && lastUsage.cost === undefined && previous?.cost !== undefined) {
+      lastUsage = { ...lastUsage, cost: previous.cost };
+    }
+    paintUsage();
+  }
+
+  function paintUsage() {
+    if (!caps.contextUsage || !lastUsage) {
+      el.usage.classList.add("hidden");
+      el.usage.innerHTML = "";
+      closeUsagePopup();
+      return;
+    }
+    const roles = fusionUsageRoles(lastUsage, currentModelUid);
+    if (roles === null) {
+      const pct = contextPercent(lastUsage.used, lastUsage.size);
+      if (pct === null) {
+        // A billing only record has no window to draw: the ring stays an empty
+        // track rather than pretending a percentage.
+        el.usage.innerHTML = ringSvg(null);
+        el.usage.title = "Context not reported, click for details";
+        el.usage.setAttribute("aria-label", "Context not reported. Opens details");
+      } else {
+        el.usage.innerHTML = ringSvg(pct) + `<span class="usage-pct">${pct}%</span>`;
+        el.usage.title = "Context used, click for details";
+        el.usage.setAttribute("aria-label", `Context used: ${pct}%`);
+      }
+    } else {
+      el.usage.innerHTML = "";
+      const summary = [];
+      for (const role of roles) {
+        const roleName = role.role === "lead" ? "Lead" : "Sub model";
+        const model = contextModelName(role.context?.modelId || role.uid);
+        const pct = role.context
+          ? contextPercent(role.context.totalTokens, role.context.maxTokens)
+          : null;
+        // Each role keeps its meter and its percentage together, so the hover
+        // reveal works the same way it does for a single model.
+        const group = document.createElement("span");
+        group.className = "usage-role-group";
+        const span = document.createElement("span");
+        span.className = "usage-role";
+        span.dataset.role = role.role;
+        span.setAttribute("aria-label", pct === null ? `${roleName} · ${model} context usage not reported` : `${roleName} · ${model} context used: ${pct}%`);
+        span.innerHTML = ringSvg(pct);
+        const letter = document.createElement("span");
+        letter.className = "usage-role-letter";
+        letter.textContent = role.letter;
+        span.appendChild(letter);
+        group.appendChild(span);
+        if (pct !== null) {
+          const label = document.createElement("span");
+          label.className = "usage-pct";
+          label.textContent = `${pct}%`;
+          group.appendChild(label);
+        }
+        el.usage.appendChild(group);
+        summary.push(pct === null ? `${roleName} · ${model} not reported` : `${roleName} · ${model} ${pct}%`);
+      }
+      el.usage.title = `Context used: ${summary.join(", ")}. Click for details`;
+      el.usage.setAttribute("aria-label", `Context used: ${summary.join(", ")}. Opens details`);
+    }
     el.usage.classList.remove("hidden");
     refreshUsagePopup();
   }
@@ -7333,30 +9047,106 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
 
   function refreshUsagePopup() {
     const pop = document.getElementById("usage-popup");
-    if (pop && lastUsage) pop.innerHTML = usagePopupHtml(lastUsage);
+    if (pop && lastUsage) pop.replaceChildren(usagePopupContent(lastUsage));
   }
 
-  function usagePopupHtml(m) {
-    const pct = Math.round((m.used / m.size) * 100);
+  function contextModelName(uid) {
+    const identity = modelIdentity(uid || "");
+    const family = modelFamilies.find((f) => !isFusion(f) && (f.variants || []).some((v) => modelIdentity(v.value).id === identity.id));
+    return family?.name || uid || "Context window";
+  }
+
+  function usagePopupContent(m) {
+    const root = document.createElement("div");
+    function row(parent, label, value, muted = false) {
+      const item = document.createElement("div");
+      item.className = "usage-row" + (muted ? " muted" : "");
+      item.append(Object.assign(document.createElement("span"), { textContent: label }), Object.assign(document.createElement("span"), { textContent: value }));
+      parent.appendChild(item);
+    }
+    function windowUsage(label, used, size, sections) {
+      const group = document.createElement("div");
+      group.className = "usage-model";
+      const pct = contextPercent(used, size);
+      if (pct === null) {
+        row(group, label, "Not reported", true);
+        root.appendChild(group);
+        return group;
+      }
+      row(group, label, `${pct}%`);
+      const bar = document.createElement("div");
+      bar.className = "usage-bar";
+      bar.appendChild(Object.assign(document.createElement("div"), { style: `width:${Math.min(100, pct)}%` }));
+      group.appendChild(bar);
+      row(group, "Tokens", `${fmtTokens(used)} / ${fmtTokens(size)}`, true);
+      const labels = { systemPrompt: "System prompt", tools: "Tools", messages: "Messages" };
+      for (const section of sections || []) {
+        if (Number.isFinite(section.tokens)) row(group, labels[section.kind] || section.kind, fmtTokens(section.tokens), true);
+      }
+      root.appendChild(group);
+      return group;
+    }
+    const roles = fusionUsageRoles(m, currentModelUid);
+    if (roles !== null) {
+      for (const role of roles) {
+        const roleName = role.role === "lead" ? "Lead" : "Sub model";
+        let group;
+        if (role.context) {
+          group = windowUsage(`${roleName} · ${contextModelName(role.context.modelId)}`, role.context.totalTokens, role.context.maxTokens, role.context.sections);
+        } else {
+          group = document.createElement("div");
+          group.className = "usage-model";
+          row(group, `${roleName} · ${contextModelName(role.uid)}`, "Not reported", true);
+          root.appendChild(group);
+        }
+        group.dataset.role = role.role;
+      }
+    } else if (m.contexts?.length) {
+      for (const context of m.contexts) windowUsage(contextModelName(context.modelId), context.totalTokens, context.maxTokens, context.sections);
+    } else {
+      windowUsage("Context window", m.used, m.size);
+    }
+    // Billing figures sit in their own section so they cannot be read as
+    // part of a model's token window.
+    const session = document.createElement("div");
+    session.className = "usage-session";
     const cost = fmtCost(m.cost);
-    return (
-      `<div class="usage-row"><span>Context window</span><span>${pct}%</span></div>` +
-      `<div class="usage-bar"><div style="width:${Math.min(100, pct)}%"></div></div>` +
-      `<div class="usage-row muted"><span>Tokens</span><span>${fmtTokens(m.used)} / ${fmtTokens(m.size)}</span></div>` +
-      (cost ? `<div class="usage-row muted"><span>Cost this turn</span><span>${cost}</span></div>` : "")
-    );
+    if (cost) row(session, "Cost this turn", cost, true);
+    // Session ACUs are reported for the whole session, not per model, so the
+    // row stays meaningful even when no context window arrived at all.
+    row(session, "Session usage", Number.isFinite(m.sessionAcus) ? `${acuText(m.sessionAcus)} ACU` : "Not reported", true);
+    root.appendChild(session);
+    if (usageLoading || usageError) {
+      const note = document.createElement("div");
+      note.className = "usage-note muted";
+      note.setAttribute("aria-live", "polite");
+      note.textContent = usageLoading ? "Refreshing usage…" : "Couldn't refresh usage. Showing the last reported figures.";
+      root.appendChild(note);
+    }
+    return root;
   }
 
   el.usage.addEventListener("click", (e) => {
     e.stopPropagation();
+    closePicker();
     if (document.getElementById("usage-popup")) { closeUsagePopup(); return; }
     if (!lastUsage) return;
     const pop = document.createElement("div");
     pop.id = "usage-popup";
     pop.className = "usage-popup";
-    pop.innerHTML = usagePopupHtml(lastUsage);
+    pop.appendChild(usagePopupContent(lastUsage));
     pop.addEventListener("click", (ev) => ev.stopPropagation());
     el.usage.parentElement.appendChild(pop);
+    // Opening the details asks for fresh figures; the popup live-updates when
+    // the reply (or its failure) arrives.
+    vscode.postMessage({ type: "refreshUsage" });
+  });
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape" || !document.getElementById("usage-popup")) return;
+    e.preventDefault();
+    closeUsagePopup();
+    el.usage.focus({ preventScroll: true });
   });
 
   // Live terminal output streamed from the extension host.
@@ -7465,7 +9255,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
           // session is not short-circuited and can restore + wake seamlessly.
           snapshotCurrent();
           curSessionId = null;
-          pendingModelChange = 0;
+          pendingModelChange = 0; pendingPrefIntent = null;
           setBody("list");
         } else {
           setBody("thread");
@@ -7479,22 +9269,58 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         // Fusion group entirely, and losing it would empty the Fusion picker.
         const incoming = m.modelChoices || {};
         for (const key of Object.keys(incoming)) modelChoices[key] = incoming[key];
+        // An empty bootstrap carries no catalogue, so the last painted families
+        // stay authoritative for lookups and painting. Only a nonempty list can
+        // invalidate cached capabilities or repaint the pickers.
+        const models = Array.isArray(m.models) && m.models.length ? m.models : modelFamilies;
         // Families come from this response, because modelFamilies is still
         // empty on the first one.
-        const famOf = (uid) => (m.models || []).find((f) => (f.variants || []).some((v) => v.value === uid))
-          || (String(uid || "").startsWith("fusion-") ? (m.models || []).find(isFusion) : undefined);
+        const famOf = (uid) => familyOfUid(uid, models);
         const responseFamily = famOf(m.currentModel);
         const shownFamily = famOf(currentModelUid) || responseFamily;
+        // Capability choices persist per catalogue identity: a genuinely
+        // different nonempty catalogue invalidates them, while an empty
+        // bootstrap response must not.
+        let capsDirty = false;
+        if (models.length) {
+          const nextKey = catalogKeyFor(models);
+          if (nextKey !== catalogKey) {
+            if (catalogKey) {
+              thoughtLevelsByFamily = {};
+              speedsByModel = {};
+              reportedThoughtLevels = {};
+            }
+            catalogKey = nextKey;
+            capsDirty = true;
+          }
+        }
         if (responseFamily) {
           const key = effortKey(responseFamily, m.currentModel);
-          if (key) thoughtLevelsByFamily[key] = Array.isArray(m.thoughtLevels) ? m.thoughtLevels : [];
+          const levels = Array.isArray(m.thoughtLevels) ? m.thoughtLevels : [];
+          if (key && (m.sessionConfig === true || levels.length)) {
+            if (JSON.stringify(thoughtLevelsByFamily[key]) !== JSON.stringify(levels)) capsDirty = true;
+            thoughtLevelsByFamily[key] = levels;
+          }
           // Only the family the response is about can report its effort, and an
           // empty string is the host clearing a model that has none.
+          // The reported value is volatile per scope: every response records it
+          // for the model notification that follows, while the visible effort
+          // still only moves for the shown family with no pending pick.
+          if (key && typeof m.currentThoughtLevel === "string") reportedThoughtLevels[key] = m.currentThoughtLevel;
           if (!pendingModelChange && effortKey(responseFamily, m.currentModel) === effortKey(shownFamily, currentModelUid || m.currentModel) && typeof m.currentThoughtLevel === "string") currentThoughtLevel = m.currentThoughtLevel;
+          const speedId = speedKey(responseFamily, m.currentModel);
+          const speedOptions = Array.isArray(m.speedOptions) ? m.speedOptions : [];
+          if (speedId && (m.sessionConfig === true || speedOptions.length)) {
+            const prev = speedsByModel[speedId];
+            if (!prev || JSON.stringify(prev.choices) !== JSON.stringify(speedOptions)) capsDirty = true;
+            speedsByModel[speedId] = { choices: speedOptions, value: m.currentSpeed };
+          }
+          if (!pendingModelChange && speedId === speedKey(shownFamily, currentModelUid || m.currentModel) && typeof m.currentSpeed === "string") currentSpeed = m.currentSpeed;
         }
+        if (capsDirty) persistCapabilities();
         // The user may have already picked a different model before this async
         // options response arrived. Keep their local selection.
-        applyModelOptions(m.models, currentModelUid || m.currentModel);
+        applyModelOptions(models, currentModelUid || m.currentModel);
         break;
       }
       case "commands": commands = Array.isArray(m.commands) ? m.commands : []; break;
@@ -7534,7 +9360,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       case "sessionReady":
         if (m.title) { currentTitle = m.title; el.chatTitle.textContent = currentTitle; }
         // The thread now shows this session; retire any retained snapshot for it.
-        if (m.sessionId && curSessionId !== m.sessionId) { cancelPreviewWaiters(); if (curSessionId) pendingModelChange = 0; }
+        if (m.sessionId && curSessionId !== m.sessionId) { cancelPreviewWaiters(); if (curSessionId) { pendingModelChange = 0; pendingPrefIntent = null; reportedThoughtLevels = {}; } clearModelActivity(); }
         if (m.sessionId) { curSessionId = m.sessionId; views.delete(m.sessionId); dirtyViews.delete(m.sessionId); }
         // Remembered so an editor tab restored after a window reload comes back to
         // the chat it was holding instead of an empty tab.
@@ -7546,12 +9372,12 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         break;
       case "clear":
         clearElsewhere();
-        if (m.reset || m.loading) pendingModelChange = 0;
+        if (m.reset || m.loading) { pendingModelChange = 0; pendingPrefIntent = null; reportedThoughtLevels = {}; }
         // The warning belongs to the agent behind this chat, so it does not carry
         // over to the next one, dismissed or not.
         renderMcpProblems([]);
         mcpDismissed.clear();
-        workingEl = null;
+        hideWorking();
         // Any prior load is over: drop the replay freeze before this clear
         // rebuilds the thread (a new clear{loading} re-arms it just below).
         stopThreadLoading();
@@ -7599,7 +9425,10 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         el.usage.classList.add("hidden");
         el.usage.innerHTML = "";
         lastUsage = null;
+        usageLoading = false;
+        usageError = "";
         closeUsagePopup();
+        clearModelActivity();
         // `pendingSend` means a user message is about to render (new chat from
         // the list), so do not flash the welcome screen in the gap.
         if (m.loading) showThreadLoading(m.waking);
@@ -7678,17 +9507,46 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       // Every turn's edit/restore chrome depends on the busy state
       // (canEditTurn/canRestoreTurn gate on !busy), so rebuild them all.
       case "busy": setBusy(m.value); refreshTurnChrome(); break;
+      // Which Fusion role is producing work right now. It applies only to the
+      // session on screen, running the model it was reported under, mid turn:
+      // a stale message for another session or model is ignored rather than
+      // allowed to clear a real highlight.
+      case "modelActivity":
+        if (m.sessionId === curSessionId && m.model === currentModelUid && busy) {
+          modelActivity = m.role === "lead" || m.role === "sub" ? { model: m.model, role: m.role } : null;
+          paintFusionActivity();
+        }
+        break;
       case "cancelPrompts": cancelPrompts(); break;
-      case "mode": if (m.mode) modeDropdown.setCurrent(m.mode); break;
-      case "model": if (m.model && !pendingModelChange) selectModelUid(m.model); break;
+      case "mode": if (m.mode) { modeDropdown.setCurrent(m.mode); fitComposer(); } break;
+      case "model":
+        if (m.model && !pendingModelChange) {
+          const reported = speedsByModel[speedKey(familyOfUid(m.model), m.model)]?.value;
+          if (typeof reported === "string") currentSpeed = reported;
+          const reportedEffort = reportedThoughtLevels[effortKey(familyOfUid(m.model), m.model)];
+          if (typeof reportedEffort === "string") currentThoughtLevel = reportedEffort;
+          selectModelUid(m.model);
+        }
+        break;
       case "modelConfigApplied":
         if (m.requestId !== pendingModelChange || !pendingModelChange) break;
-        pendingModelChange = 0;
+        const intent = pendingPrefIntent;
+        pendingModelChange = 0; pendingPrefIntent = null;
         if (typeof m.thoughtLevel === "string") currentThoughtLevel = m.thoughtLevel;
-        if (m.model) selectModelUid(m.model);
+        if (typeof m.speed === "string") currentSpeed = m.speed;
+        if (m.model) {
+          const ackedKey = effortKey(familyOfUid(m.model), m.model);
+          if (ackedKey && typeof m.thoughtLevel === "string") reportedThoughtLevels[ackedKey] = m.thoughtLevel;
+          selectModelUid(m.model, intent);
+        } else if (intent) applyPrefIntent(intent);
         break;
       case "terminalOutput": updateTerminal(m); break;
       case "usage": renderUsage(m); break;
+      case "usageState":
+        usageLoading = m.loading === true;
+        usageError = usageLoading ? "" : String(m.error || "");
+        refreshUsagePopup();
+        break;
       // A failed revert reports `error` rather than `reverted`, so abandon any
       // pending revert here to avoid a stale head trimming the wrong turn later.
       case "error": hideBoot(); pendingRevert = null; renderError(m.text); break;

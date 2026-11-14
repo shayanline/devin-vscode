@@ -1,0 +1,71 @@
+{
+  "currentModel": "fusion-claude-opus-5-5-high-sidekick-gpt-5-6-sol-high",
+  "currentThoughtLevel": "high",
+  "currentSpeed": "standard",
+  "sessionConfig": true,
+  "thoughtLevels": [{ "value": "high", "name": "High" }],
+  "speedOptions": [
+    { "value": "standard", "name": "Standard" },
+    { "value": "fast", "name": "Fast" }
+  ],
+  "modelChoices": {
+    "fusion": [
+      {
+        "value": "fusion-claude-opus-5-5-high-sidekick-gpt-5-6-sol-high",
+        "name": "Fusion (Claude Opus 5.5 High + GPT-5.6 Sol High)"
+      },
+      {
+        "value": "fusion-claude-opus-5-5-high-fast-sidekick-gpt-5-6-sol-high-priority",
+        "name": "Fusion (Claude Opus 5.5 High Fast + GPT-5.6 Sol High Fast)"
+      }
+    ]
+  },
+  "models": [
+    {
+      "id": "fusion",
+      "name": "Fusion",
+      "default": "fusion-claude-opus-5-5-high-sidekick-gpt-5-6-sol-high",
+      "variants": [
+        {
+          "value": "fusion-claude-opus-5-5-high-sidekick-gpt-5-6-sol-high",
+          "name": "Fusion (Claude Opus 5.5 High + GPT-5.6 Sol High)",
+          "costSummary": "$4/MTok In \u00b7 $20/MTok Out \u00b7 $0.2/MTok Cache Read \u00b7 $4/MTok Sidekick In \u00b7 $20/MTok Sidekick Out \u00b7 $0.4/MTok Sidekick Cache Read"
+        },
+        {
+          "value": "fusion-claude-opus-5-5-high-fast-sidekick-gpt-5-6-sol-high-priority",
+          "name": "Fusion (Claude Opus 5.5 High Fast + GPT-5.6 Sol High Fast)",
+          "costSummary": "$8/MTok In \u00b7 $40/MTok Out \u00b7 $0.4/MTok Cache Read \u00b7 $8/MTok Sidekick In \u00b7 $40/MTok Sidekick Out \u00b7 $0.8/MTok Sidekick Cache Read"
+        }
+      ]
+    },
+    {
+      "id": "claude-opus-5-5",
+      "name": "Claude Opus 5.5",
+      "default": "claude-opus-5-5-high",
+      "variants": [
+        {
+          "value": "claude-opus-5-5-high",
+          "name": "Claude Opus 5.5 High",
+          "costTier": "High cost",
+          "maxContextTokens": 1000000,
+          "maxOutputTokens": 128000
+        }
+      ]
+    },
+    {
+      "id": "gpt-5-6-sol",
+      "name": "GPT-5.6 Sol",
+      "default": "gpt-5-6-sol-high",
+      "variants": [
+        {
+          "value": "gpt-5-6-sol-high",
+          "name": "GPT-5.6 Sol High",
+          "costTier": "High cost",
+          "maxContextTokens": 1000000,
+          "maxOutputTokens": 128000,
+          "costSummary": "$4/MTok In \u00b7 $0.4/MTok Cache Read \u00b7 $20/MTok Out"
+        }
+      ]
+    }
+  ]
+}

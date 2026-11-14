@@ -1401,7 +1401,7 @@ test("model picks serialize and coalesce to the latest full selection", posixOnl
     const intermediate = JSON.parse(JSON.stringify(rt.configOptions));
     intermediate.find((option) => option.id === "thought_level").currentValue = "low";
     rt.client.emit("update", { sessionId: id, update: { sessionUpdate: "config_option_update", configOptions: intermediate } });
-    await h.settle(50);
+    await h.controller.publishInitialOptions();
     assert.notStrictEqual(h.last("options")?.currentThoughtLevel, "low", "an intermediate notification cannot paint over a pending pick");
 
     release();
@@ -1627,6 +1627,7 @@ test("a model change cannot paint the session that replaced the one it was for",
 });
 
 test("a pick made before any session persists its defaults and applies once one starts", posixOnly, async () => {
+  const h = createChat({ config: { defaultMode: "", defaultModel: "", defaultThoughtLevel: "" } });
   const vscode = globalThis.__dvVscode;
   const writes = [];
   const realGetConfiguration = vscode.workspace.getConfiguration;
@@ -1638,7 +1639,7 @@ test("a pick made before any session persists its defaults and applies once one 
     },
     update: async (key, value) => { writes.push([key, value]); }
   });
-  const h = createChat({ newDelay: 300, config: { defaultMode: "", defaultModel: "", defaultThoughtLevel: "" } });
+  let release;
   try {
     await h.ready();
 
@@ -1652,9 +1653,23 @@ test("a pick made before any session persists its defaults and applies once one 
     assert.ok(writes.some(([key, value]) => key === "defaultThoughtLevel" && value === "low"), "the effort default is persisted");
     assert.strictEqual(h.agentSaw("session/set_config_option").length, 0, "no agent existed to call");
 
+    let creating = false;
+    const blocked = new Promise((resolve) => { release = resolve; });
+    const spawn = h.controller.spawnRuntime.bind(h.controller);
+    h.controller.spawnRuntime = (...args) => {
+      const rt = spawn(...args);
+      const newSession = rt.client.newSession.bind(rt.client);
+      rt.client.newSession = async (...params) => {
+        creating = true;
+        await blocked;
+        return newSession(...params);
+      };
+      return rt;
+    };
     h.send({ type: "send", text: "start a chat", newSession: true });
-    await h.until(() => h.agentSaw("session/new").length === 1);
+    assert.ok(await h.until(() => creating), "session creation is held open for the pick");
     h.send({ type: "setConfigOption", configId: "thought_level", value: "low", model: "fusion-claude-opus-5-high-sidekick-swe-2-medium", requestId: 12 });
+    release();
     assert.ok(await h.until(() => h.postsOf("modelConfigApplied").length === 2), "the queued pick waits for the starting session");
     const second = h.postsOf("modelConfigApplied")[1];
     assert.strictEqual(second.requestId, 12);
@@ -1662,6 +1677,7 @@ test("a pick made before any session persists its defaults and applies once one 
     assert.strictEqual(second.thoughtLevel, "low");
     assert.ok(h.agentSaw("session/set_config_option").some((request) => request.params.configId === "thought_level" && request.params.value === "low"), "the new session's agent gets the effort");
   } finally {
+    release?.();
     vscode.workspace.getConfiguration = realGetConfiguration;
     await h.dispose();
   }

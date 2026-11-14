@@ -2,12 +2,14 @@ import { spawn, execFile, ChildProcessWithoutNullStreams } from "child_process";
 import { EventEmitter } from "events";
 import { cliCommand } from "../cli/locate";
 import { JsonRpcConnection } from "./connection";
+import { contextReportFromUpdate, mergeContextReports, sessionAcuUsage } from "./usage";
 import {
   AcpSessionRow,
   AgentStopped,
   CliOutput,
   ConfigOption,
   ContentBlock,
+  ContextUsage,
   CreateTerminalParams,
   DocumentParams,
   headOf,
@@ -29,6 +31,19 @@ import {
   TerminalRef,
   WriteTextFileParams
 } from "./types";
+
+export interface UsageReport {
+  contexts?: ContextUsage[];
+  sessionAcus?: number | null;
+  error?: string;
+}
+
+interface UsageRead {
+  sessionId: string;
+  command: "context" | "session-stats";
+  contexts: ContextUsage[];
+  stats?: unknown;
+}
 
 export interface AcpClientOptions {
   cliPath: string;
@@ -79,6 +94,11 @@ export class AcpClient extends EventEmitter {
   private host?: AcpHost;
   private exited = false;
   private mcpChangeSeen = false;
+  private readonly sessionCommands = new Map<string, Set<string>>();
+  private usagePending?: Promise<UsageReport>;
+  private usageCapture?: UsageRead;
+  private promptCalls = 0;
+  private cancelVersion = 0;
   initializeResult?: InitializeResult;
 
   constructor(private readonly options: AcpClientOptions) {
@@ -173,7 +193,31 @@ export class AcpClient extends EventEmitter {
 
   private handleNotification(method: string, params: unknown): void {
     if (method === "session/update") {
-      this.emit("update", params as SessionUpdateNotification);
+      const notification = params as SessionUpdateNotification;
+      const update = notification.update as any;
+      if (update.sessionUpdate === "available_commands_update") {
+        this.sessionCommands.set(notification.sessionId, new Set(
+          (update.availableCommands || []).map((command: { name: string }) => command.name)
+        ));
+      }
+      const reading = this.usageCapture;
+      if (reading?.sessionId === notification.sessionId) {
+        const meta = update._meta || {};
+        if (reading.command === "context" && meta["cognition.ai/contextUsage"] !== undefined) {
+          const report = contextReportFromUpdate(update);
+          if (Array.isArray(report)) reading.contexts = report;
+          else if (report) reading.contexts = mergeContextReports(reading.contexts, [report]);
+          return;
+        }
+        if (reading.command === "session-stats" && meta["cognition.ai/sessionStats"] !== undefined) {
+          reading.stats = meta["cognition.ai/sessionStats"];
+          return;
+        }
+        if (this.usagePending && reading.command === "session-stats" && meta["cognition.ai/instant"] === true) {
+          return;
+        }
+      }
+      this.emit("update", notification);
       return;
     }
     // Devin's own notifications. `output` carries the CLI's log stream, which is
@@ -308,11 +352,70 @@ export class AcpClient extends EventEmitter {
     }, OPEN_TIMEOUT_MS);
   }
 
-  prompt(sessionId: string, blocks: ContentBlock[]): Promise<PromptResult> {
-    return this.rpc<PromptResult>("session/prompt", { sessionId, prompt: blocks });
+  async prompt(sessionId: string, blocks: ContentBlock[]): Promise<PromptResult> {
+    const version = this.cancelVersion;
+    this.promptCalls++;
+    try {
+      await this.usagePending;
+      if (version !== this.cancelVersion) return { stopReason: "cancelled" };
+      // A manual report command keeps its normal transcript output.
+      if (blocks.some((block) => block.type === "text"
+        && /^\/(?:context|session-stats)(?:\s|$)/.test(String((block as { text?: string }).text || "")))) {
+        this.usageCapture = undefined;
+      }
+      return await this.rpc<PromptResult>("session/prompt", { sessionId, prompt: blocks });
+    } finally {
+      this.promptCalls--;
+    }
+  }
+
+  readUsage(sessionId: string): Promise<UsageReport> {
+    if (this.usagePending) {
+      return this.usageCapture?.sessionId === sessionId ? this.usagePending : Promise.resolve({});
+    }
+    if (this.promptCalls) return Promise.resolve({});
+    const commands = this.sessionCommands.get(sessionId);
+    if (!commands?.has("context") && !commands?.has("session-stats")) return Promise.resolve({});
+    const reading: UsageRead = { sessionId, command: "context", contexts: [] };
+    this.usageCapture = reading;
+    // These instant commands do not echo a correlation ID, so keep them
+    // between prompts and consume only their structured report messages.
+    const work = async (): Promise<UsageReport> => {
+      const report: UsageReport = {};
+      try {
+        if (commands.has("context")) {
+          const result = await this.rpc<PromptResult>("session/prompt", {
+            sessionId, prompt: [{ type: "text", text: "/context" }]
+          }, QUERY_TIMEOUT_MS);
+          if (result.stopReason === "cancelled") return report;
+          report.contexts = reading.contexts;
+        }
+        if (commands.has("session-stats")) {
+          reading.command = "session-stats";
+          const result = await this.rpc<PromptResult>("session/prompt", {
+            sessionId, prompt: [{ type: "text", text: "/session-stats" }]
+          }, QUERY_TIMEOUT_MS);
+          if (result.stopReason !== "cancelled" && reading.stats !== undefined) {
+            report.sessionAcus = sessionAcuUsage(reading.stats) ?? null;
+          }
+        }
+        if (this.usageCapture === reading) this.usageCapture = undefined;
+      } catch {
+        // Keep the capture for late report replies, which must not become chat text.
+        report.error = "Could not refresh usage.";
+      }
+      return report;
+    };
+    const pending = work();
+    this.usagePending = pending;
+    void pending.finally(() => {
+      if (this.usagePending === pending) this.usagePending = undefined;
+    });
+    return pending;
   }
 
   cancel(sessionId: string): void {
+    this.cancelVersion++;
     this.conn?.notify("session/cancel", { sessionId });
   }
 

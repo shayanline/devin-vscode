@@ -120,6 +120,22 @@ const window = {
   showErrorMessage: (m) => { window.shown.error.push(String(m)); return Promise.resolve(undefined); },
   showWarningMessage: (m) => { window.shown.warning.push(String(m)); return Promise.resolve(undefined); },
   showInformationMessage: (m) => { window.shown.info.push(String(m)); return Promise.resolve(undefined); },
+  // The status bar items created so a test can read their text and tooltip.
+  statusBarItems: [],
+  createStatusBarItem(alignment, priority) {
+    const item = {
+      alignment, priority,
+      text: "",
+      tooltip: undefined,
+      command: undefined,
+      shown: 0,
+      show() { item.shown++; },
+      hide() {},
+      dispose() { item.disposed = true; }
+    };
+    window.statusBarItems.push(item);
+    return item;
+  },
   // Test-side helpers, not part of the real API.
   __fire: { shellIntegrationChanged, shellExecutionEnded, terminalClosed }
 };
@@ -129,6 +145,24 @@ class ThemeIcon {
     this.id = id;
   }
 }
+
+// Enough of the real thing for the tooltip builder: string accumulation and the
+// trust flags the extension sets.
+class MarkdownString {
+  constructor(value, supportThemeIcons) {
+    this.value = value || "";
+    this.supportThemeIcons = !!supportThemeIcons;
+    this.isTrusted = false;
+  }
+  appendMarkdown(text) {
+    this.value += String(text);
+  }
+}
+
+const StatusBarAlignment = { Left: 1, Right: 2 };
+
+// Same numbering as VS Code, which the quick pick compares separators against.
+const QuickPickItemKind = { Separator: -1, Default: 0 };
 
 // Same numbering as VS Code, which the diagnostics mapper compares against.
 const DiagnosticSeverity = { Error: 0, Warning: 1, Information: 2, Hint: 3 };
@@ -228,6 +262,7 @@ const SymbolKind = {
 
 module.exports = {
   EventEmitter, Uri, Disposable, commands, workspace, scm, window, ThemeIcon,
+  MarkdownString, StatusBarAlignment, QuickPickItemKind,
   DiagnosticSeverity, languages, env, ConfigurationTarget, Position, Range, SymbolKind
 };
 

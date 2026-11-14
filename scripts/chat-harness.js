@@ -86,6 +86,7 @@ const idBase = "s" + process.pid;
 const send = (o) => process.stdout.write(JSON.stringify(o) + "\\n");
 let currentModel = "fusion-claude-opus-5-high-sidekick-swe-2-medium";
 let currentThoughtLevel = "high";
+let currentSpeed = "standard";
 const configOptions = () => [
   {
     id: "mode",
@@ -101,7 +102,7 @@ const configOptions = () => [
     category: "model",
     type: "select",
     currentValue: currentModel,
-    options: [{
+    options: process.env.DV_MODEL_OPTIONS ? JSON.parse(process.env.DV_MODEL_OPTIONS) : [{
       group: "fusion",
       name: "Fusion",
       options: [
@@ -116,7 +117,15 @@ const configOptions = () => [
     category: "thought_level",
     type: "select",
     currentValue: currentThoughtLevel,
-    options: [{ value: "low", name: "Low" }, { value: "high", name: "High" }]
+    options: process.env.DV_THOUGHT_LEVELS ? JSON.parse(process.env.DV_THOUGHT_LEVELS) : [{ value: "low", name: "Low" }, { value: "high", name: "High" }]
+  },
+  {
+    id: "speed",
+    name: "Speed",
+    category: "model_config",
+    type: "select",
+    currentValue: currentSpeed,
+    options: [{ value: "standard", name: "Standard" }, { value: "fast", name: "Fast" }]
   }
 ];
 let buf = "";
@@ -155,25 +164,63 @@ process.stdin.on("data", async (chunk) => {
         // id. Anything that answers such an update with "whatever is on screen"
         // paints one chat's settings into another's.
         send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: newId, update: { sessionUpdate: "current_mode_update", currentModeId: process.env.DV_MODE || "default" } } });
+        if (process.env.DV_USAGE) {
+          // Advertise only the two instant read commands the host may use. The
+          // announcement has to precede the reply so the first refresh finds them,
+          // unless the test holds it back to model commands announced late.
+          const advertise = () => send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: newId, update: { sessionUpdate: "available_commands_update", availableCommands: [{ name: "context" }, { name: "session-stats" }] } } });
+          const late = num("DV_USAGE_LATE");
+          if (late) setTimeout(advertise, late); else advertise();
+        }
         await delay(num("DV_NEW_DELAY"));
         reply({ sessionId: newId, modes: { currentModeId: process.env.DV_MODE || "default", availableModes: [{ id: "default", name: "Default" }, { id: "plan", name: "Plan" }] }, configOptions: configOptions() });
         break;
       }
       case "session/set_config_option":
-        if (msg.params.configId === "model") currentModel = msg.params.value;
+        if (msg.params.configId === "model") {
+          currentModel = msg.params.value;
+          currentThoughtLevel = "high";
+          currentSpeed = "standard";
+        }
         if (msg.params.configId === "thought_level") currentThoughtLevel = msg.params.value;
+        if (msg.params.configId === "speed") currentSpeed = msg.params.value;
         reply({ configOptions: configOptions() });
         break;
       case "session/load":
         await delay(num("DV_LOAD_DELAY"));
+        // The real CLI replays a loaded session's history as session/update
+        // traffic before answering. Tests configure that replay through
+        // DV_LOAD_UPDATES; absent or empty, the load replays nothing.
+        try {
+          for (const update of JSON.parse(process.env.DV_LOAD_UPDATES || "[]")) {
+            send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: msg.params.sessionId, update } });
+          }
+        } catch {}
         reply({});
         break;
-      case "session/prompt":
+      case "session/prompt": {
+        const ptext = (msg.params.prompt || []).map((block) => block.text || "").join(" ");
+        const usageChunks = (name) => {
+          try { return JSON.parse(process.env[name] || "[]"); } catch { return []; }
+        };
+        const emit = (update) => send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: msg.params.sessionId, update } });
+        if (process.env.DV_USAGE && ptext.startsWith("/context")) {
+          const answer = () => { usageChunks("DV_CONTEXT_CHUNKS").forEach(emit); reply({ stopReason: "end_turn" }); };
+          const hold = num("DV_CONTEXT_DELAY");
+          if (hold) setTimeout(answer, hold); else answer();
+          break;
+        }
+        if (process.env.DV_USAGE && ptext.startsWith("/session-stats")) {
+          usageChunks("DV_STATS_CHUNKS").forEach(emit);
+          reply({ stopReason: "end_turn" });
+          break;
+        }
         // Long by default: a turn is running until the test says otherwise, which is
         // what makes "busy" states reachable.
         await delay(num("DV_PROMPT_DELAY") || 60000);
         reply({ stopReason: "end_turn" });
         break;
+      }
       case "_cognition.ai/revert/listSteps": await delay(num("DV_STEPS_DELAY")); reply({ steps: [] }); break;
       case "session/list": reply({ sessions: [] }); break;
       default: reply({});
@@ -243,7 +290,21 @@ function createChat(opts = {}) {
     DV_LOAD_DELAY: String(opts.loadDelay || 0),
     DV_PROMPT_DELAY: String(opts.promptDelay || 0),
     DV_STEPS_DELAY: String(opts.stepsDelay || 0),
-    DV_DOCUMENT_LIFECYCLE: opts.documentLifecycle ? "1" : ""
+    DV_DOCUMENT_LIFECYCLE: opts.documentLifecycle ? "1" : "",
+    // The instant usage reads the host may send: advertised only when the test
+    // supplies reports for them to answer with.
+    DV_USAGE: opts.usage ? "1" : "",
+    DV_USAGE_LATE: String(opts.usageLate || 0),
+    DV_CONTEXT_DELAY: String(opts.usageContextDelay || 0),
+    DV_CONTEXT_CHUNKS: opts.usage?.contextChunks ? JSON.stringify(opts.usage.contextChunks) : "",
+    DV_STATS_CHUNKS: opts.usage?.statsChunks ? JSON.stringify(opts.usage.statsChunks) : "",
+    // Session config choices a test needs the agent to advertise, serialized
+    // because the agent is a separate process. Absent values keep the defaults.
+    DV_MODEL_OPTIONS: opts.modelOptions ? JSON.stringify(opts.modelOptions) : "",
+    DV_THOUGHT_LEVELS: opts.thoughtLevels ? JSON.stringify(opts.thoughtLevels) : "",
+    // Exact ACP update objects the agent emits during session/load, standing in
+    // for the history the real CLI replays. Absent means no replay at all.
+    DV_LOAD_UPDATES: opts.loadUpdates ? JSON.stringify(opts.loadUpdates) : ""
   };
   globalThis.__dvConfig = Object.assign(
     {

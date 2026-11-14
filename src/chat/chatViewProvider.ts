@@ -41,7 +41,9 @@ import { paintedReplay, recordPainted } from "./transcriptLog";
 import { StatusBar } from "../ui/statusBar";
 import { checkHealth, CliHealth, loginShellEnv } from "../cli/locate";
 import { cachedFamilies, familyOf, listModelFamilies, ModelFamily } from "../cli/models";
+import { fusionIdentity, fusionModelKey, modelIdentity } from "../cli/modelId";
 import { lockOwner, removeLock } from "../cli/sessionLocks";
+import { contextReportFromUpdate } from "../acp/usage";
 
 // One live session: its own `devin acp` process and terminal manager, plus the
 // per-session state that used to be flat on the provider. Several of these can
@@ -119,6 +121,21 @@ interface Runtime {
   steps: RevertStep[];
   stepsKnown: boolean;
   openDocuments: Map<string, { uri: string; languageId: string; isDirty: boolean }>;
+  // A usage read in flight for this session, so overlapping triggers coalesce
+  // into one /context + /session-stats pair.
+  usagePending?: Promise<void>;
+  // The surface that currently owns this session's usage reporting. A read can
+  // outlive a surface transfer, so the reply goes to whoever holds the runtime
+  // when it lands rather than the controller that asked for it.
+  usageOwner?: ChatController;
+  // When the last usage read was scheduled; non-forced triggers inside the
+  // window are skipped so every signal does not become its own read.
+  usageRefreshedAt: number;
+  // Which Fusion role produced the latest meaningful update this turn, and the
+  // model the turn was started under. Snapshotted at turn start so a mid turn
+  // model change cannot misattribute the old request's frames. Cleared when
+  // the turn ends.
+  modelActivity?: { model: string; role: "lead" | "sub" | null };
 }
 
 // Cap on a backgrounded session's replay buffer (oldest dropped past this).
@@ -302,38 +319,28 @@ function thoughtOption(options?: ConfigOption[]): ConfigOption | undefined {
   return options?.find((option) => option.id === "thought_level" || option.category === "thought_level");
 }
 
-// `devin models list` exposes per-effort uids the session's `model` option does
-// not accept: a session takes one uid per family, with the effort set through
-// `thought_level`, and only the "high" lead-effort Fusion pairs. A picked uid
-// therefore has to be translated to the uid this session advertises, with the
-// stripped effort carried over for `thought_level`.
-const EFFORT_SUFFIX = /-(none|low|medium|high|xhigh)$/;
-function effortOf(uid: string): string | undefined {
-  return EFFORT_SUFFIX.exec(uid)?.[1];
+function speedOption(options?: ConfigOption[]): ConfigOption | undefined {
+  return options?.find((option) => option.id === "speed");
 }
-// Fusion uids carry the lead effort (`fusion-<lead>-<effort>-sidekick-<s>`),
-// which the session does not. Two uids describe the same pair once it is gone.
-function fusionKey(uid: string): string | undefined {
-  if (!uid.startsWith("fusion-")) return undefined;
-  const [lead = "", sidekick = ""] = uid.slice("fusion-".length).split("-sidekick-");
-  return `${lead.replace(EFFORT_SUFFIX, "")}+${sidekick}`;
-}
-function acceptedModelUid(options: ConfigOption[] | undefined, requested: string): { model: string; effort?: string } {
+
+// The catalogue includes effort and speed variants, while ACP accepts a base
+// model uid with separate thought_level and speed options.
+function acceptedModelUid(options: ConfigOption[] | undefined, requested: string): { model: string; effort?: string; speed?: string } {
   const accepted = new Set(
     configChoices(options?.find((o) => o.id === "model" || o.category === "model")).map((c) => c.value)
   );
   if (!accepted.size || accepted.has(requested)) return { model: requested };
-  const fusion = fusionKey(requested);
+  const fusion = fusionModelKey(requested);
   if (fusion) {
-    const lead = requested.slice("fusion-".length).split("-sidekick-")[0];
+    const lead = fusionIdentity(requested);
     for (const value of accepted) {
-      if (fusionKey(value) === fusion) return { model: value, effort: effortOf(lead) };
+      if (fusionModelKey(value) === fusion) return { model: value, effort: lead.effort, speed: lead.speed };
     }
     return { model: requested };
   }
-  const base = requested.replace(EFFORT_SUFFIX, "");
+  const identity = modelIdentity(requested);
   for (const value of accepted) {
-    if (value.replace(EFFORT_SUFFIX, "") === base) return { model: value, effort: effortOf(requested) };
+    if (modelIdentity(value).id === identity.id) return { model: value, effort: identity.effort, speed: identity.speed };
   }
   return { model: requested };
 }
@@ -387,6 +394,7 @@ export class ChatController implements AcpHost {
   private currentMode?: string;
   private currentModel?: string;
   private currentThoughtLevel?: string;
+  private currentSpeed?: string;
   // Bumped every time a model change is queued or starts. After each await the
   // caller checks whether the generation moved, and bails if a newer call has
   // taken over, so only the latest model change publishes options.
@@ -396,6 +404,7 @@ export class ChatController implements AcpHost {
     rt: Runtime | undefined;
     model: string;
     thoughtLevel?: string;
+    speed?: string;
     requestId?: number;
   };
 
@@ -998,6 +1007,9 @@ export class ChatController implements AcpHost {
     }
     const rt = transfer.rt;
     this.runtimes.set(rt.id, rt);
+    // A usage read that was already in flight reports to this surface now that
+    // the runtime lives here.
+    rt.usageOwner = this;
     rt.client.setHost(this);
     rt.client.on("log", (line: string) => this.log(line));
     rt.client.on("update", (n: SessionUpdateNotification) => this.onUpdate(n, rt));
@@ -1156,7 +1168,8 @@ export class ChatController implements AcpHost {
       openDocuments: new Map(),
       pendingTerminals: [],
       subagentSpawns: [],
-      subagentIds: new Map()
+      subagentIds: new Map(),
+      usageRefreshedAt: 0
     };
     ref = rt;
     this.spawnedRuntimes.add(rt);
@@ -1574,6 +1587,11 @@ export class ChatController implements AcpHost {
         case "stateFlushed":
           this.onStateFlushed();
           return;
+        case "refreshUsage":
+          // The usage popup asks for fresh figures. Only the visible session is
+          // read, and the read is skipped while a real turn owns the channel.
+          this.refreshUsage(this.active(), true);
+          return;
         case "terminateSession":
           await this.terminateSession(String(msg.id || ""), msg.title, !!msg.returnToList);
           return;
@@ -1584,14 +1602,16 @@ export class ChatController implements AcpHost {
           await this.setMode(String(msg.mode || DEFAULT_MODE));
           return;
         case "setModel":
-          await this.queueModelConfig(String(msg.model || ""), undefined, msg.requestId);
+          await this.queueModelConfig(String(msg.model || ""), msg.thoughtLevel, msg.requestId, msg.speed);
           return;
         case "setFusionModel":
-          await this.queueModelConfig(String(msg.model || ""), String(msg.thoughtLevel || ""), msg.requestId);
+          await this.queueModelConfig(String(msg.model || ""), String(msg.thoughtLevel || ""), msg.requestId, msg.speed);
           return;
         case "setConfigOption":
-          if (msg.configId === "thought_level" && typeof msg.value === "string") {
-            await this.queueModelConfig(String(msg.model || this.currentModel || ""), msg.value, msg.requestId);
+          if ((msg.configId === "thought_level" || msg.configId === "speed") && typeof msg.value === "string") {
+            const thought = msg.configId === "thought_level" ? msg.value : msg.thoughtLevel;
+            const speed = msg.configId === "speed" ? msg.value : msg.speed;
+            await this.queueModelConfig(String(msg.model || this.currentModel || ""), thought, msg.requestId, speed);
             return;
           }
           await this.setSessionConfig(String(msg.configId || ""), msg.value);
@@ -1898,7 +1918,9 @@ export class ChatController implements AcpHost {
     this.log(
       `[health] path=${this.health.path} found=${this.health.found} loggedIn=${this.health.loggedIn} version=${this.health.version || ""} ${this.health.error || ""}`
     );
-    this.statusBar?.setInfo({ version: this.health.version, account: this.health.account });
+    // The same environment the agents run with: the account usage read needs
+    // the CLI credentials wherever the CLI would find them.
+    this.statusBar?.setInfo({ version: this.health.version, account: this.health.account, env: this.clientEnv() });
     this.statusBar?.set({ connected: this.isReady(), mode: this.currentMode, model: this.currentModel });
     this.log(`[perf] health-check ${Date.now() - startedAt}ms`);
   }
@@ -2027,6 +2049,7 @@ export class ChatController implements AcpHost {
         }
         this.ensureIdleTimer();
         this.broadcastStatuses();
+        this.refreshUsage(rt);
         void this.refreshSessionsIfVisible();
         return rt;
       } catch (err) {
@@ -2268,7 +2291,14 @@ export class ChatController implements AcpHost {
       // A load/wake for this session is already running; make it the active one
       // and share its result rather than spawning a second acp.
       this.activeId = id;
-      return inflight;
+      await inflight;
+      // The shared operation just finished. If the panel is still on this
+      // session, rebuild its transcript from the local log: the webview that
+      // asked is showing a loader the silent wake never painted a replay for.
+      if (this.activeId === id && this.runtimes.has(id)) {
+        await this.activateSession(id, true);
+      }
+      return;
     }
     const p = this.doLoadSession(id);
     this.loading.set(id, p);
@@ -2283,9 +2313,10 @@ export class ChatController implements AcpHost {
     const already = this.runtimes.get(id);
     // Never reload a session whose turn is in flight: issuing a loadSession over
     // its live channel aborts the running prompt ("channel closed"). Re-attach
-    // to the running runtime instead (it keeps streaming).
+    // to the running runtime instead (it keeps streaming), rebuilding the
+    // transcript the requesting webview has no copy of.
     if (already && already.busy) {
-      await this.activateSession(id);
+      await this.activateSession(id, true);
       return;
     }
     const startedAt = Date.now();
@@ -2421,6 +2452,9 @@ export class ChatController implements AcpHost {
           // next prompt re-expands the conversation and orphans it.
           void this.postTurnHead(false);
         }
+        if (opened) {
+          this.refreshUsage(opened);
+        }
         void this.refreshSessionsIfVisible();
       }
       this.log(`[perf] session-load ${already ? "live" : "cold"} ${Date.now() - startedAt}ms`);
@@ -2431,23 +2465,37 @@ export class ChatController implements AcpHost {
   // has kept its rendered transcript and restores it locally, so we only need to
   // re-point the active session and refresh the composer chrome. Falls back to a
   // full wake/load if the runtime is not alive. Item: switch without reload.
-  private async activateSession(id: string): Promise<void> {
+  private async activateSession(id: string, replay = false): Promise<void> {
     const rt = this.runtimes.get(id);
     if (!rt) {
       await this.loadSession(id);
       return;
     }
     this.activeId = id;
+    if (replay) {
+      // The caller has no usable transcript (a full load was asked for over a
+      // busy or still-waking session), so rebuild from the recorded log: this
+      // clears the loader, replays what was painted and empties the buffer of
+      // anything the log already covers.
+      this.replayLog(rt);
+    }
     this.markVisible(id);
     this.sendOpenDocuments(rt);
     this.postWorkingSet();
     // The composer belongs to this chat now, so it shows this chat's own unsent
     // text and staged files, not the ones from wherever we just were.
     await this.loadStaged(id);
+    // The awaits above can outlive this activation: the user can open another
+    // chat, or this runtime can be replaced, while staged files load. Nothing
+    // below may paint into a session that is no longer the one on screen.
+    if (this.activeId !== id || this.runtimes.get(id) !== rt) {
+      return;
+    }
     this.postDraft();
     this.currentMode = rt.mode;
     this.currentModel = rt.model;
     this.currentThoughtLevel = thoughtOption(rt.configOptions)?.currentValue as string | undefined;
+    this.currentSpeed = speedOption(rt.configOptions)?.currentValue as string | undefined;
     this.postCapabilities();
     this.postModelOptions(rt.model || "adaptive", rt.configOptions);
     if (rt.mode) {
@@ -2465,6 +2513,14 @@ export class ChatController implements AcpHost {
     // so without this its header, terminate and move controls have no session.
     this.painted = true;
     this.post({ type: "sessionReady", sessionId: id, title: this.store.titles()[id] });
+    // Restore the role marker a backgrounded turn has reached. It is ephemeral
+    // chrome, so it posts directly rather than riding the transcript buffers.
+    this.post({
+      type: "modelActivity",
+      sessionId: id,
+      model: rt.model,
+      role: rt.modelActivity && rt.modelActivity.model === rt.model ? rt.modelActivity.role : null
+    });
     // Replay anything the turn streamed while this session was in the background
     // (including a turn still running), so the restored transcript catches up
     // instead of showing the stale state from when the user left.
@@ -2482,6 +2538,7 @@ export class ChatController implements AcpHost {
     }
     // Restore the composer's queued-message rows for this session.
     this.postQueued(rt);
+    this.refreshUsage(rt);
     void this.refreshSessionsIfVisible();
   }
 
@@ -2628,6 +2685,9 @@ export class ChatController implements AcpHost {
       done();
       if (updateHead) {
         void this.postTurnHead(false);
+      }
+      if (!wakeFailed) {
+        this.refreshUsage(rt);
       }
       this.log(`[perf] session-wake ${Date.now() - startedAt}ms`);
     }
@@ -3033,7 +3093,7 @@ export class ChatController implements AcpHost {
   // chat's, which matters most on the mode, since it says whether permission is asked
   // for before anything runs. Answers whether the panel is really showing this chat, so
   // a caller can post the rest of what it was going to say.
-  private showOptions(rt: Runtime | undefined, mode?: string, model?: string, thoughtLevel?: string): boolean {
+  private showOptions(rt: Runtime | undefined, mode?: string, model?: string, thoughtLevel?: string, speed?: string): boolean {
     if (rt && this.activeId !== rt.id) {
       return false;
     }
@@ -3043,6 +3103,7 @@ export class ChatController implements AcpHost {
     // current value. An explicit empty string means "this model has no thought
     // level", which must clear the stale value from the previous model.
     this.currentThoughtLevel = thoughtLevel !== undefined ? thoughtLevel : this.currentThoughtLevel;
+    this.currentSpeed = speed !== undefined ? speed : this.currentSpeed;
     this.statusBar?.set({ connected: this.isReady(), mode: this.currentMode, model: this.currentModel });
     return true;
   }
@@ -3056,6 +3117,7 @@ export class ChatController implements AcpHost {
     const modeOpt = byId.get("mode");
     const modelOpt = byId.get("model");
     const thoughtOpt = thoughtOption(activeOptions);
+    const speedOpt = speedOption(activeOptions);
     const mode = typeof modeOpt?.currentValue === "string" ? modeOpt.currentValue : currentModeId;
     const model = typeof modelOpt?.currentValue === "string" ? modelOpt.currentValue : undefined;
     // When the agent reports config options but thought_level is absent (the
@@ -3065,6 +3127,7 @@ export class ChatController implements AcpHost {
     const thoughtLevel = typeof thoughtOpt?.currentValue === "string"
       ? thoughtOpt.currentValue
       : activeOptions ? "" : undefined;
+    const speed = typeof speedOpt?.currentValue === "string" ? speedOpt.currentValue : activeOptions ? "" : undefined;
     if (rt) {
       rt.configOptions = activeOptions;
       rt.mode = mode || rt.mode;
@@ -3091,7 +3154,7 @@ export class ChatController implements AcpHost {
     }
     // A background session reports its own mode and model too, and they belong to it
     // alone: recorded on its runtime above, and not painted over the pickers.
-    if (!this.showOptions(rt, mode || currentModeId, model, thoughtLevel)) {
+    if (!this.showOptions(rt, mode || currentModeId, model, thoughtLevel, speed)) {
       return;
     }
     this.postModelOptions(this.currentModel || "adaptive", activeOptions);
@@ -3100,8 +3163,10 @@ export class ChatController implements AcpHost {
   // Posts the mode + model-family options. Model families come from
   // `devin models list` (cached); if not fetched yet, fetch and re-post.
   private postModelOptions(currentModel: string, options = this.active()?.configOptions): void {
+    if (this.pendingModelConfig && this.pendingModelConfig.rt === this.active()) return;
     const families = cachedFamilies();
     const thought = thoughtOption(options);
+    const speed = speedOption(options);
     const payload = {
       type: "options",
       modes: this.modes,
@@ -3109,8 +3174,11 @@ export class ChatController implements AcpHost {
       models: families,
       currentModel,
       modelChoices: groupedModelChoices(options),
+      sessionConfig: options !== undefined,
       thoughtLevels: configChoices(thought),
-      currentThoughtLevel: typeof thought?.currentValue === "string" ? thought.currentValue : this.currentThoughtLevel || ""
+      currentThoughtLevel: typeof thought?.currentValue === "string" ? thought.currentValue : this.currentThoughtLevel || "",
+      speedOptions: configChoices(speed),
+      currentSpeed: typeof speed?.currentValue === "string" ? speed.currentValue : this.currentSpeed || ""
     };
     if (families.length) {
       this.store.cacheOptions(payload);
@@ -3175,10 +3243,12 @@ export class ChatController implements AcpHost {
     // them would show (say) Bypass on a session the agent is still asking
     // permission for.
     const live = this.active();
+    if (this.pendingModelConfig && this.pendingModelConfig.rt === live) return;
     const mode = live?.mode || this.currentMode || this.cfg().get<string>("defaultMode", DEFAULT_MODE);
     const model = live?.model || this.currentModel || this.cfg().get<string>("defaultModel", "");
     const options = live?.configOptions;
     const thought = thoughtOption(options);
+    const speed = speedOption(options);
     const payload = {
       type: "options",
       modes: this.modes,
@@ -3186,8 +3256,11 @@ export class ChatController implements AcpHost {
       models: families,
       currentModel: model || "adaptive",
       modelChoices: groupedModelChoices(options),
+      sessionConfig: options !== undefined,
       thoughtLevels: configChoices(thought),
-      currentThoughtLevel: typeof thought?.currentValue === "string" ? thought.currentValue : ""
+      currentThoughtLevel: typeof thought?.currentValue === "string" ? thought.currentValue : "",
+      speedOptions: configChoices(speed),
+      currentSpeed: typeof speed?.currentValue === "string" ? speed.currentValue : this.currentSpeed || this.cfg().get<string>("defaultSpeed", "")
     };
     this.store.cacheOptions(payload);
     this.post(payload);
@@ -3197,6 +3270,7 @@ export class ChatController implements AcpHost {
     const mode = this.cfg().get<string>("defaultMode", DEFAULT_MODE);
     const model = this.cfg().get<string>("defaultModel", "");
     const thoughtLevel = this.cfg().get<string>("defaultThoughtLevel", "");
+    const speed = this.cfg().get<string>("defaultSpeed", "");
     const currentMode = res.modes?.currentModeId;
     // Record the session's own mode first. The `current_mode_update` that
     // announces it arrives before session/new returns, so the runtime is not in
@@ -3224,8 +3298,14 @@ export class ChatController implements AcpHost {
         if (gen !== this.modelGen) return;
       }
       const rememberedLevel = thoughtLevel || resolved.effort;
-      if (rememberedLevel && thoughtOption(rt.configOptions)) {
+      if (rememberedLevel && configChoices(thoughtOption(rt.configOptions)).some((choice) => choice.value === rememberedLevel)) {
         const result = await rt.client.setConfigOption(rt.id, "thought_level", rememberedLevel);
+        this.publishOptions(rt, result.configOptions);
+        if (gen !== this.modelGen) return;
+      }
+      const rememberedSpeed = speed || resolved.speed;
+      if (rememberedSpeed && configChoices(speedOption(rt.configOptions)).some((choice) => choice.value === rememberedSpeed)) {
+        const result = await rt.client.setConfigOption(rt.id, "speed", rememberedSpeed);
         this.publishOptions(rt, result.configOptions);
         if (gen !== this.modelGen) return;
       }
@@ -3291,24 +3371,16 @@ export class ChatController implements AcpHost {
     if (option.type === "select" && (typeof value !== "string" || !configChoices(option).some((choice) => choice.value === value))) {
       return;
     }
-    // Record the thought level immediately so a concurrent setFusionModel sees
-    // the user's latest choice before its own ACP call returns.
-    if (configId === "thought_level" && typeof value === "string") {
-      this.currentThoughtLevel = value;
-    }
     try {
       const result = await rt.client.setConfigOption(rt.id, configId, value);
       this.publishOptions(rt, result.configOptions);
-      if (configId === "thought_level" && typeof value === "string") {
-        await this.cfg().update("defaultThoughtLevel", value, vscode.ConfigurationTarget.Workspace);
-      }
     } catch (err) {
       this.log(`[set-config-failed] ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
-  private queueModelConfig(model: string, thoughtLevel?: string, requestId?: number): Promise<void> {
-    const request = { rt: this.active(), model, thoughtLevel, requestId };
+  private queueModelConfig(model: string, thoughtLevel?: string, requestId?: number, speed?: string): Promise<void> {
+    const request = { rt: this.active(), model, thoughtLevel, requestId, speed };
     this.pendingModelConfig = request;
     ++this.modelGen;
     const barriers: (Promise<Runtime> | Promise<void> | undefined)[] = [
@@ -3332,15 +3404,16 @@ export class ChatController implements AcpHost {
       }
       const previousModel = this.currentModel;
       const previousThought = this.currentThoughtLevel;
+      const previousSpeed = this.currentSpeed;
       // The session's own option is the authority on the `model` values it
       // takes, which is narrower than the `devin models list` catalog the
       // picker was built from. Translate before asking.
       const resolved = acceptedModelUid(rt?.configOptions, model);
       const level = thoughtLevel ?? resolved.effort;
+      const requestedSpeed = speed ?? resolved.speed;
       let failure: unknown;
       try {
-        if (level === undefined) await this.setModel(resolved.model);
-        else await this.setFusionModel(resolved.model, level);
+        await this.setModelConfig(resolved.model, level, requestedSpeed);
       } catch (err) {
         failure = err;
       }
@@ -3355,6 +3428,9 @@ export class ChatController implements AcpHost {
       const confirmedThought = typeof thoughtOption(options)?.currentValue === "string"
         ? thoughtOption(options)?.currentValue as string
         : options ? "" : (failure ? previousThought : this.currentThoughtLevel);
+      const confirmedSpeed = typeof speedOption(options)?.currentValue === "string"
+        ? speedOption(options)?.currentValue as string
+        : options ? "" : (failure ? previousSpeed : this.currentSpeed);
       if (rt && options) {
         rt.mode = typeof modeOpt?.currentValue === "string" ? modeOpt.currentValue : rt.mode;
         rt.model = typeof modelOpt?.currentValue === "string" ? modelOpt.currentValue : rt.model;
@@ -3364,24 +3440,32 @@ export class ChatController implements AcpHost {
         this.log(`[model-config-failed] model=${model} thoughtLevel=${thoughtLevel ?? ""} ${message}`);
         void vscode.window.showWarningMessage(`Could not update model configuration: ${message}`);
       }
-      this.showOptions(rt, confirmedMode, confirmedModel, confirmedThought);
+      this.showOptions(rt, confirmedMode, confirmedModel, confirmedThought, confirmedSpeed);
       this.postModelOptions(this.currentModel || "adaptive", options);
-      this.post({ type: "modelConfigApplied", requestId, model: confirmedModel, thoughtLevel: confirmedThought });
+      this.post({ type: "modelConfigApplied", requestId, model: confirmedModel, thoughtLevel: confirmedThought, speed: confirmedSpeed });
     });
     this.modelConfigTail = task;
     return task;
   }
 
-  private async setFusionModel(model: string, thoughtLevel: string): Promise<void> {
+  private async setModelConfig(model: string, thoughtLevel?: string, speed?: string): Promise<void> {
     const gen = ++this.modelGen;
     this.currentModel = model;
-    this.currentThoughtLevel = thoughtLevel;
+    if (thoughtLevel !== undefined) this.currentThoughtLevel = thoughtLevel;
+    if (speed !== undefined) this.currentSpeed = speed;
     const rt = this.active();
     if (rt) {
       try {
-        // Apply model first, but do not publish options yet. The model change
-        // may reset thought_level on the server, so the second call restores it.
         const confirmed = rt.configOptions?.find((option) => option.id === "model" || option.category === "model");
+        // A Fast Sub variant the session does not advertise is rejected by the
+        // agent: refuse it locally before any RPC so the queue never emits an
+        // invalid model value or persists the unsupported pair.
+        const accepted = configChoices(confirmed).map((c) => c.value);
+        if (accepted.length && fusionModelKey(model) && !accepted.includes(model)) {
+          throw new Error("This Fusion sub model configuration is not supported by the current ACP session.");
+        }
+        // Changing the model resets effort and speed, so restore both before
+        // acknowledging the queued selection.
         let result = confirmed?.currentValue === model
           ? { configOptions: rt.configOptions }
           : await rt.client.setConfigOption(rt.id, "model", model);
@@ -3392,12 +3476,18 @@ export class ChatController implements AcpHost {
         const latestThought = this.pendingModelConfig?.thoughtLevel ?? thoughtLevel;
         if (latestThought && configChoices(thoughtOption(result.configOptions)).some((choice) => choice.value === latestThought)) {
           result = await rt.client.setConfigOption(rt.id, "thought_level", latestThought);
+          this.publishOptions(rt, result.configOptions);
+          if (gen !== this.modelGen) return;
         }
-        // Publish once with the final state after both values are applied.
+        const latestSpeed = this.pendingModelConfig?.speed ?? speed;
+        const speedOpt = speedOption(result.configOptions);
+        if (latestSpeed && speedOpt?.currentValue !== latestSpeed && configChoices(speedOpt).some((choice) => choice.value === latestSpeed)) {
+          result = await rt.client.setConfigOption(rt.id, "speed", latestSpeed);
+        }
         this.publishOptions(rt, result.configOptions);
         if (gen !== this.modelGen) return;
       } catch (err) {
-        this.log(`[set-fusion-failed] ${err instanceof Error ? err.message : String(err)}`);
+        this.log(`[set-model-config-failed] ${err instanceof Error ? err.message : String(err)}`);
         throw err;
       }
     }
@@ -3405,42 +3495,22 @@ export class ChatController implements AcpHost {
     const appliedOptions = rt?.configOptions;
     const appliedModelOpt = appliedOptions?.find((option) => option.id === "model" || option.category === "model");
     const appliedThoughtOpt = thoughtOption(appliedOptions);
+    const appliedSpeedOpt = speedOption(appliedOptions);
     const appliedModel = rt ? (typeof appliedModelOpt?.currentValue === "string" ? appliedModelOpt.currentValue : model) : model;
     const appliedThought = rt ? (typeof appliedThoughtOpt?.currentValue === "string" ? appliedThoughtOpt.currentValue : "") : thoughtLevel;
+    const appliedSpeed = rt ? (typeof appliedSpeedOpt?.currentValue === "string" ? appliedSpeedOpt.currentValue : "") : speed;
     try {
       await this.cfg().update("defaultModel", appliedModel, vscode.ConfigurationTarget.Workspace);
     } catch {}
     try {
-      await this.cfg().update("defaultThoughtLevel", appliedThought, vscode.ConfigurationTarget.Workspace);
+      if (appliedThought !== undefined) await this.cfg().update("defaultThoughtLevel", appliedThought, vscode.ConfigurationTarget.Workspace);
+    } catch {}
+    try {
+      if (appliedSpeed !== undefined) await this.cfg().update("defaultSpeed", appliedSpeed, vscode.ConfigurationTarget.Workspace);
     } catch {}
     if (gen !== this.modelGen || (rt && this.active() !== rt)) return;
     this.statusBar?.set({ connected: this.isReady(), mode: this.currentMode, model: this.currentModel });
     this.post({ type: "model", model: appliedModel });
-  }
-
-  private async setModel(model: string): Promise<void> {
-    const gen = ++this.modelGen;
-    this.currentModel = model;
-    const rt = this.active();
-    if (rt) {
-      try {
-        const result = await rt.client.setConfigOption(rt.id, "model", model);
-        this.publishOptions(rt, result.configOptions);
-        if (gen !== this.modelGen) return;
-      } catch (err) {
-        this.log(`[set-model-failed] ${err instanceof Error ? err.message : String(err)}`);
-        throw err;
-      }
-    }
-    if (gen !== this.modelGen) return;
-    try {
-      await this.cfg().update("defaultModel", model, vscode.ConfigurationTarget.Workspace);
-    } catch (err) {
-      this.log(`[set-model-persist-failed] ${err instanceof Error ? err.message : String(err)}`);
-    }
-    if (gen !== this.modelGen || (rt && this.active() !== rt)) return;
-    this.statusBar?.set({ connected: this.isReady(), mode: this.currentMode, model: this.currentModel });
-    this.post({ type: "model", model });
   }
 
   // --- Context attachments -------------------------------------------------
@@ -4135,13 +4205,15 @@ export class ChatController implements AcpHost {
     // What was attached goes with the message, so the request keeps saying what it
     // was asked about instead of the context vanishing the moment it is sent.
     const attachments = this.shownAttachments(staged);
-    this.record(sent, { type: "userMessage", text, attachments });
-    // For a fresh chat the message was already rendered above; only echo it here
-    // for a send within an existing (visible) session, and only while that session
-    // is still the one on screen: a wake that finishes after the user has opened
-    // another chat would otherwise paint this message into their transcript.
-    if (!startNew && this.activeId === sent.id) {
-      this.post({ type: "userMessage", text, attachments });
+    const userMessage = { type: "userMessage", text, attachments };
+    if (startNew) {
+      // A fresh chat's echo was already posted. The log still needs it once.
+      this.record(sent, userMessage);
+    } else {
+      // emit records once, then posts while this session is on screen or buffers
+      // it for the transcript it misses: a wake that finishes after the user
+      // has left for the list or another chat used to drop the echo entirely.
+      this.emit(sent, userMessage);
     }
     const blocks: ContentBlock[] = [...this.buildImplicitBlocks(), ...staged.map((a) => a.block), { type: "text", text }];
     await this.runPrompt(sent, blocks);
@@ -4755,33 +4827,74 @@ export class ChatController implements AcpHost {
     this.post({ type: "busy", value: false });
   }
 
-  // Click-through popup for the status bar (the hover card can't be triggered
-  // by click; VS Code has no API for that), mirroring the same info.
+  // The menu uses cached usage until the user selects Refresh account usage.
   async showInfo(): Promise<void> {
-    type Item = vscode.QuickPickItem & { action?: "cloud" | "login" };
-    const a = this.health?.account || {};
-    const items: Item[] = [{ label: "$(link-external) Open Devin Cloud", detail: "https://app.devin.ai", action: "cloud" }];
-    if (this.isReady()) {
-      if (a.name || a.email) {
-        items.push({ label: `$(account) ${a.name || a.email}`, description: a.name && a.email ? a.email : undefined });
-      }
-      const org = a.plan || a.tier;
+    type Item = vscode.QuickPickItem & {
+      action?: "chat" | "cloud" | "details" | "login" | "refreshUsage";
+    };
+    const a = this.health?.account;
+    const org = a?.plan || a?.tier;
+    const identity = this.isReady() && (a?.name || a?.email) ? a : undefined;
+    const items: Item[] = [{ label: "Account", kind: vscode.QuickPickItemKind.Separator }];
+    if (this.statusBar) {
+      items.push(this.statusBar.getUsageItem(identity));
+    }
+    if (identity) {
+      const name = identity.name?.trim();
+      const email = identity.email?.trim();
+      const distinct = !!name && !!email && name.toLowerCase() !== email.toLowerCase();
+      items.push({
+        label: `$(account) ${identity.name || identity.email}`,
+        description: distinct ? email : undefined,
+        detail: org
+      });
+    } else if (this.isReady()) {
       if (org) {
         items.push({ label: `$(organization) ${org}` });
       }
     } else {
       items.push({ label: "$(error) Not signed in", description: "Sign in", action: "login" });
     }
-    const mm = [this.currentModel, this.currentMode].filter(Boolean).join("  /  ");
-    if (mm) {
-      items.push({ label: `$(sparkle) ${mm}` });
+    const actions: Item[] = [
+      { label: "$(comment-discussion) Open chat", action: "chat" },
+      { label: "$(link-external) Open Devin Cloud", action: "cloud" }
+    ];
+    if (this.statusBar) {
+      actions.push({ label: "$(refresh) Refresh account usage", action: "refreshUsage" });
     }
-    items.push({ label: `$(versions) CLI ${this.health?.version || "unknown"}` });
-    const picked = await vscode.window.showQuickPick(items, { title: "Devin" });
+    actions.push({ label: "$(info) Connection details", action: "details" });
+    items.push({ label: "Actions", kind: vscode.QuickPickItemKind.Separator }, ...actions);
+    const picked = await vscode.window.showQuickPick(items, {
+      title: "Devin",
+      placeHolder: "Account usage and shortcuts",
+      matchOnDescription: true,
+      matchOnDetail: true
+    });
     if (picked?.action === "cloud") {
       await vscode.env.openExternal(vscode.Uri.parse("https://app.devin.ai"));
     } else if (picked?.action === "login") {
       await this.authenticate();
+    } else if (picked?.action === "refreshUsage") {
+      await this.statusBar?.refreshUsage();
+      await this.showInfo();
+    } else if (picked?.action === "chat") {
+      await vscode.commands.executeCommand("devin.focusChat");
+    } else if (picked?.action === "details") {
+      await this.showConnectionDetails();
+    }
+  }
+
+  private async showConnectionDetails(): Promise<void> {
+    type Item = vscode.QuickPickItem & { action?: "back" };
+    const items: Item[] = [
+      { label: "$(arrow-left) Back to Devin", action: "back" },
+      { label: "Model", description: this.currentModel || "Not reported" },
+      { label: "Mode", description: this.currentMode || "Not reported" },
+      { label: "Devin CLI", description: this.health?.version || "Unknown" }
+    ];
+    const picked = await vscode.window.showQuickPick(items, { title: "Devin connection details" });
+    if (picked?.action === "back") {
+      await this.showInfo();
     }
   }
 
@@ -4812,8 +4925,15 @@ export class ChatController implements AcpHost {
   // Set a runtime's busy state, mirroring it to the webview only when it is the
   // visible session, and refreshing the status dots.
   private setRuntimeBusy(rt: Runtime, value: boolean): void {
+    const wasBusy = rt.busy;
     rt.busy = value;
+    if (!wasBusy && value) {
+      // Only a Fusion session has roles to mark, and only the model the turn
+      // started under is attributable to its frames.
+      rt.modelActivity = rt.model?.startsWith("fusion-") ? { model: rt.model, role: null } : undefined;
+    }
     if (!value) {
+      rt.modelActivity = undefined;
       rt.lastActivityAt = Date.now();
       // A finished turn is when the CLI names a new chat, so this is what puts
       // that name in the header and the lists without anyone asking for it.
@@ -4827,6 +4947,13 @@ export class ChatController implements AcpHost {
       this.post({ type: "sessionActivity", id: rt.id });
     }
     this.broadcastStatuses();
+    if (wasBusy && !value) {
+      // A finished turn changed both the context window and the ACU spend, and
+      // the prompt channel is free again to ask for them. The forced read skips
+      // the throttle so a fast turn inside the startup window still counts.
+      this.refreshUsage(rt, true);
+      void this.statusBar?.refreshUsage();
+    }
   }
 
   private setBusy(value: boolean): void {
@@ -4865,6 +4992,69 @@ export class ChatController implements AcpHost {
     });
   }
 
+  // Ask the agent for the session's context windows and ACU spend. The read
+  // rides the same prompt channel as a turn, so it only runs while the session
+  // is idle: a busy turn wins, and the finish/open triggers retry. The reply is
+  // routed through `emit`, so a background session's figures wait in its own
+  // buffer rather than painting into the chat on screen.
+  private refreshUsage(rt: Runtime | undefined, force = false): void {
+    if (rt?.id && this.runtimes.get(rt.id) === rt) {
+      // The report lands on whichever surface owns the session when it
+      // resolves, so a transfer mid read does not drop it.
+      rt.usageOwner = this;
+    }
+    if (!rt || !rt.id || !rt.initialized || rt.busy || rt.replaying || rt.silentReplay || rt.client.hasExited()) {
+      return;
+    }
+    if (!this.cfg().get<boolean>("contextUsage.enabled", true)) {
+      return;
+    }
+    if (rt.usagePending) {
+      return;
+    }
+    const now = Date.now();
+    if (!force && now - rt.usageRefreshedAt < 5000) {
+      return;
+    }
+    rt.usageRefreshedAt = now;
+    const sessionId = rt.id;
+    const model = rt.model;
+    this.emit(rt, { type: "usageState", loading: true });
+    const pending = rt.client.readUsage(sessionId).then((report) => {
+      const owner = rt.usageOwner;
+      if (!owner || owner.closed || owner.runtimes.get(sessionId) !== rt) {
+        return;
+      }
+      const usage: Record<string, unknown> = { type: "usage" };
+      // The context windows belong to the model they were read under; if the
+      // session moved to another model mid read they are stale. Session ACUs
+      // are not model scoped, so they still apply.
+      if (report.contexts && rt.model === model) {
+        usage.contexts = report.contexts;
+        usage.contextModel = model;
+      }
+      if ("sessionAcus" in report) {
+        usage.sessionAcus = report.sessionAcus;
+      }
+      // An agent that cannot answer returns an empty report: there is nothing
+      // to paint, so only the loading state is settled.
+      if (report.contexts || "sessionAcus" in report) {
+        owner.emit(rt, usage);
+      }
+      owner.emit(rt, { type: "usageState", loading: false, error: report.error });
+    }).catch(() => {
+      const owner = rt.usageOwner;
+      if (owner && !owner.closed && owner.runtimes.get(sessionId) === rt) {
+        owner.emit(rt, { type: "usageState", loading: false, error: "Could not refresh usage." });
+      }
+    }).finally(() => {
+      if (rt.usagePending === pending) {
+        rt.usagePending = undefined;
+      }
+    });
+    rt.usagePending = pending;
+  }
+
   // --- Incoming session/update notifications -------------------------------
 
   // Send a transcript message to the webview if its session is the visible one,
@@ -4900,9 +5090,44 @@ export class ChatController implements AcpHost {
     }
   }
 
+  // Track which Fusion role produced the latest meaningful update of a running
+  // turn, so the composer can mark the model actually working. The role is
+  // ephemeral chrome, not transcript: it posts only for the visible session and
+  // is never recorded or buffered. A background runtime still keeps its own
+  // state, which activateSession restores when the session comes back.
+  private updateModelActivity(rt: Runtime | undefined, u: any): void {
+    if (!rt || this.runtimes.get(rt.id) !== rt || !rt.busy || rt.replaying || rt.silentReplay) {
+      return;
+    }
+    const activity = rt.modelActivity;
+    // A mid turn model change leaves the snapshot stale: the old request's
+    // frames cannot be attributed to its replacement, so the label stays quiet.
+    if (!activity || activity.model !== rt.model) {
+      return;
+    }
+    const role = activityRole(u);
+    if (!role || role === activity.role) {
+      return;
+    }
+    activity.role = role;
+    if (this.activeId === rt.id) {
+      this.post({ type: "modelActivity", sessionId: rt.id, model: activity.model, role });
+    }
+  }
+
   private onUpdate(n: SessionUpdateNotification, owner?: Runtime): void {
     const u = n.update as any;
     const rt = this.runtimeBySessionId(n.sessionId, owner);
+    this.updateModelActivity(rt, u);
+    // Context windows ride `_meta` on parent and delegated updates alike: the
+    // real Sub report is tagged parentAgentId "sidekick" and would be filtered
+    // out by the subagent dispatch below, so it is lifted here first. A raw
+    // array is a whole snapshot, while a single object merges into the stored
+    // picture (which is how the Sub's own report joins the Lead's).
+    const contextReport = contextReportFromUpdate(u);
+    if (contextReport !== undefined && (u.sessionUpdate !== "usage_update" || subagentParent(u))) {
+      this.emit(rt, { type: "usage", contexts: contextReport });
+    }
     // Delegated work arrives on the same stream as the parent's, tagged in
     // `_meta`. Lift the lifecycle out first, then hand the rest to the switch
     // with the owning subagent attached so the webview can nest it.
@@ -4986,10 +5211,17 @@ export class ChatController implements AcpHost {
         this.recordDiffs(u, rt);
         return;
       case "usage_update":
-        this.emit(rt, { type: "usage", used: u.used, size: u.size, cost: u.cost });
+        if (!parentId) this.emit(rt, {
+          type: "usage", used: u.used, size: u.size, cost: u.cost,
+          contexts: contextReport
+        });
         return;
       case "available_commands_update":
         this.emit(rt, { type: "commands", commands: u.availableCommands });
+        // Commands can arrive after the session already looked unqueryable:
+        // the first usage read ran before the reads were advertised. The gates
+        // inside keep this a no-op while a turn or another read is in flight.
+        this.refreshUsage(rt, true);
         return;
       case "current_mode_update":
         if (rt) rt.mode = u.currentModeId || rt.mode;
@@ -5582,6 +5814,48 @@ function metaTimestamp(u: any): string | undefined {
 function subagentParent(u: any): string | undefined {
   const id = u?._meta?.["cognition.ai/subagent_context"]?.parentAgentId;
   return typeof id === "string" && id ? id : undefined;
+}
+
+// Which Fusion role a session update most recently showed doing meaningful
+// work, if any. Nonempty thought or message text, a tool call, and a tool
+// update moving to in progress all count. They mark the latest role observed
+// producing work rather than proving a model is generating. Report replies,
+// lifecycle noise and terminal tool completions never move the marker, and
+// neither does a spawned subagent's work: it is its own agent, not a role.
+function activityRole(u: any): "lead" | "sub" | undefined {
+  const meta = u?._meta;
+  let meaningful = false;
+  switch (u?.sessionUpdate) {
+    case "agent_thought_chunk":
+    case "agent_message_chunk":
+      // Context/ACU report replies ride this stream as chunks and say nothing
+      // about which model is working.
+      if (meta?.["cognition.ai/instant"] === true
+        || meta?.["cognition.ai/contextUsage"] !== undefined
+        || meta?.["cognition.ai/sessionStats"] !== undefined) {
+        return undefined;
+      }
+      meaningful = !!textOf(u.content).trim();
+      break;
+    case "tool_call":
+      meaningful = true;
+      break;
+    case "tool_call_update":
+      meaningful = u.status === "in_progress";
+      break;
+    default:
+      break;
+  }
+  if (!meaningful) {
+    return undefined;
+  }
+  const parent = subagentParent(u);
+  // Frames another worker produced carry its own parent id, so they are not a
+  // Fusion role even when they also carry the sidekick flag.
+  if (parent && parent !== "sidekick") {
+    return undefined;
+  }
+  return parent === "sidekick" || meta?.["cognition.ai/sidekick"] === true ? "sub" : "lead";
 }
 
 // Claim the spawn a starting subagent belongs to. Both sides carry the same

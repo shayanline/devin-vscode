@@ -17,6 +17,8 @@ async function main() {
     logLevel: "info"
   });
 
+  // The working mark imports the shipped Devin logo as text, so its bundle
+  // carries the asset bytes rather than copied markup.
   const webviewCtx = await esbuild.context({
     entryPoints: ["webview/main.js"],
     bundle: true,
@@ -26,6 +28,7 @@ async function main() {
     platform: "browser",
     target: "es2020",
     outfile: "dist/webview.js",
+    loader: { ".svg": "text" },
     logLevel: "info"
   });
 

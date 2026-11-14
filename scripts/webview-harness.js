@@ -17,11 +17,14 @@ const { JSDOM, VirtualConsole } = require("jsdom");
 const ROOT = path.resolve(__dirname, "..");
 
 // `surface` mounts the page as the extension does: "view" is the side panel,
-// "editor" is a chat tab, which is one chat with no session list.
-function createHarness({ surface = "view" } = {}) {
-  const bundlePath = path.join(ROOT, "dist", "webview.js");
+// "editor" is a chat tab, which is one chat with no session list. `bundle`
+// overrides the webview bundle path, for focused runs against an older build.
+// `beforeLoad` runs against the window after the VSCode mocks are installed
+// and before the bundle evaluates, for deterministic clocks and media stubs.
+function createHarness({ surface = "view", state: initialState, bundle: bundlePath, beforeLoad } = {}) {
+  bundlePath = bundlePath || path.join(ROOT, "dist", "webview.js");
   if (!fs.existsSync(bundlePath)) {
-    throw new Error("dist/webview.js not found. Run `npm run compile` first.");
+    throw new Error(`${bundlePath} not found. Run npm run compile first.`);
   }
   const body = fs.readFileSync(path.join(ROOT, "media", "webview-body.html"), "utf8");
   const bundle = fs.readFileSync(bundlePath, "utf8");
@@ -38,8 +41,9 @@ function createHarness({ surface = "view" } = {}) {
   const { window } = dom;
 
   const posted = [];
-  // What the page has recorded for a reload (the chat a tab is holding).
-  let state;
+  // What the page has recorded for a reload (the chat a tab is holding). An
+  // initial value stands in for state saved by an earlier webview instance.
+  let state = initialState;
   window.acquireVsCodeApi = () => ({
     // The real postMessage structured-clones to the host, which also strips the
     // jsdom realm's prototypes. JSON round-trip mirrors that so assertions with
@@ -48,6 +52,8 @@ function createHarness({ surface = "view" } = {}) {
     getState: () => state,
     setState: (s) => { state = s; }
   });
+
+  if (beforeLoad) beforeLoad(window);
 
   // The bundle is an IIFE; running it via the window's own Function constructor
   // gives it the jsdom realm as its global (so `document`, `window` and

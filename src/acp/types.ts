@@ -76,7 +76,7 @@ export type SessionUpdate =
   | { sessionUpdate: "plan"; entries: PlanEntry[] }
   | { sessionUpdate: "tool_call"; toolCallId: string; name?: string; title?: string; kind?: string; status?: ToolCallStatus; content?: ToolCallContent[]; rawInput?: unknown; locations?: { path: string; line?: number }[]; _meta?: UpdateMeta }
   | { sessionUpdate: "tool_call_update"; toolCallId: string; name?: string; title?: string; kind?: string; status?: ToolCallStatus; content?: ToolCallContent[]; rawInput?: unknown; locations?: { path: string; line?: number }[]; _meta?: UpdateMeta }
-  | { sessionUpdate: "usage_update"; used: number; size: number; cost?: { amount: number; currency: string } }
+  | { sessionUpdate: "usage_update"; used: number; size: number; cost?: { amount: number; currency: string }; _meta?: UpdateMeta }
   | { sessionUpdate: "available_commands_update"; availableCommands: AvailableCommand[] }
   | { sessionUpdate: "current_mode_update"; currentModeId: string }
   | { sessionUpdate: string; [k: string]: unknown };
@@ -89,6 +89,7 @@ export type ToolCallStatus = "pending" | "in_progress" | "completed" | "failed" 
 // without which only the subagent's opening tool_call leaks through, never its
 // updates, leaving those rows stuck at pending).
 export interface UpdateMeta {
+  "cognition.ai/contextUsage"?: ContextUsage | ContextUsage[];
   "cognition.ai/inferenceToolName"?: string;
   "cognition.ai/toolName"?: string;
   "cognition.ai/eventType"?: string;
@@ -98,7 +99,19 @@ export interface UpdateMeta {
   // On every update the subagent itself produces (tool calls, message and
   // thought chunks), naming the subagent that produced it.
   "cognition.ai/subagent_context"?: { parentAgentId?: string };
+  // On updates the Fusion Sub model produces, with no parent id: it is the
+  // role tag rather than a spawned subagent's bookkeeping.
+  "cognition.ai/sidekick"?: boolean;
   [k: string]: unknown;
+}
+
+export interface ContextUsage {
+  modelId: string;
+  totalTokens: number;
+  maxTokens: number;
+  sections?: { kind: string; tokens: number }[];
+  // Added by the client when the report is scoped to a Fusion role.
+  role?: "lead" | "sub";
 }
 
 export interface SubagentStarted {
