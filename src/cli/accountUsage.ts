@@ -90,12 +90,13 @@ export async function fetchAccountStatus(
         "Connect-Protocol-Version": "1"
       },
       body: JSON.stringify({
+        // Match the CLI metadata because the server uses it to choose the model catalogue.
         metadata: {
           apiKey: auth.key,
-          ideName: "devin",
-          ideVersion: "0.0.0",
-          extensionName: "devin-vscode",
-          extensionVersion: "0.0.0",
+          ideName: "chisel",
+          ideVersion: "0.0.0-dev",
+          extensionName: "chisel",
+          extensionVersion: "0.0.0-dev",
           locale: "en"
         }
       })

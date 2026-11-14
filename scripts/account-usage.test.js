@@ -75,10 +75,10 @@ test("the usage read uses the CLI credential and exact GetUserStatus request wit
   assert.deepEqual(JSON.parse(init.body), {
     metadata: {
       apiKey: "test-key",
-      ideName: "devin",
-      ideVersion: "0.0.0",
-      extensionName: "devin-vscode",
-      extensionVersion: "0.0.0",
+      ideName: "chisel",
+      ideVersion: "0.0.0-dev",
+      extensionName: "chisel",
+      extensionVersion: "0.0.0-dev",
       locale: "en"
     }
   });
@@ -199,10 +199,10 @@ test("the raw status reader returns the unprojected response through the same au
   assert.equal(init.headers["Connect-Protocol-Version"], "1");
   assert.deepEqual(JSON.parse(init.body).metadata, {
     apiKey: "test-key",
-    ideName: "devin",
-    ideVersion: "0.0.0",
-    extensionName: "devin-vscode",
-    extensionVersion: "0.0.0",
+    ideName: "chisel",
+    ideVersion: "0.0.0-dev",
+    extensionName: "chisel",
+    extensionVersion: "0.0.0-dev",
     locale: "en"
   });
   assert.ok(init.signal instanceof AbortSignal);

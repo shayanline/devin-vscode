@@ -247,4 +247,46 @@ test("cached and concurrent listings share one status read", { skip: process.pla
   assert.equal(reads, 1, "a cache hit does not read status again");
 });
 
+test("default model listing reads promotion signals with the native CLI client metadata", async () => {
+  const { listModelFamilies: list } = loadModels("models-status-native");
+  const cli = fakeCli(JSON.stringify(sweCatalog));
+  const env = {
+    ...process.env,
+    HOME: TMP,
+    XDG_DATA_HOME: TMP,
+    APPDATA: TMP,
+    WINDSURF_API_KEY: "dummy-status-key",
+    WINDSURF_API_SERVER_URL: "https://models.invalid"
+  };
+  const calls = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url, init });
+    const metadata = JSON.parse(init.body).metadata;
+    const native = metadata.ideName === "chisel"
+      && metadata.ideVersion === "0.0.0-dev"
+      && metadata.extensionName === "chisel"
+      && metadata.extensionVersion === "0.0.0-dev";
+    return {
+      ok: true,
+      json: async () => (native ? sweStatus : { userStatus: { cascadeModelConfigData: {} } })
+    };
+  };
+  let families;
+  try {
+    families = await list(cli, env);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  assert.equal(calls.length, 1, "one GetUserStatus read per listing");
+  assert.equal(calls[0].url, "https://models.invalid/exa.seat_management_pb.SeatManagementService/GetUserStatus");
+  assert.equal(calls[0].init.method, "POST");
+  for (const uid of ["swe-2-high", "swe-2-medium", "swe-2-max"]) {
+    assert.equal(variantOf(families, "swe-2", uid).promotion, "83% off", uid);
+  }
+  for (const uid of ["swe-2-flash-medium", "swe-2-flash-high", "swe-2-flash-max"]) {
+    assert.equal(variantOf(families, "swe-2-flash", uid).promotion, "25% off", uid);
+  }
+});
+
 test.after(() => fs.rmSync(TMP, { recursive: true, force: true }));
