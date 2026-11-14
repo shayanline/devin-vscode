@@ -1,4 +1,5 @@
 import { execFile } from "child_process";
+import { fetchAccountStatus } from "./accountUsage";
 import { cliCommand } from "./locate";
 
 export interface ModelVariant {
@@ -54,7 +55,13 @@ const familyByValue = new Map<string, ModelFamily>();
 // Lists the account's models as families (with effort variants) via
 // `devin models list --format json`. Needs no ACP session, and the uids match
 // what the ACP `model` config option accepts. Cached in-memory for a few minutes.
-export function listModelFamilies(cliPath: string, env?: NodeJS.ProcessEnv): Promise<ModelFamily[]> {
+// A successful listing gains the badge signals only GetUserStatus reports,
+// matched by exact model uid. The status reader is injectable for tests.
+export function listModelFamilies(
+  cliPath: string,
+  env?: NodeJS.ProcessEnv,
+  statusReader: (env?: NodeJS.ProcessEnv) => Promise<unknown> = fetchAccountStatus
+): Promise<ModelFamily[]> {
   if (cache && Date.now() - cache.at < 300000) {
     return Promise.resolve(cache.families);
   }
@@ -64,8 +71,9 @@ export function listModelFamilies(cliPath: string, env?: NodeJS.ProcessEnv): Pro
   const pending = (async () => {
     const families = await run(cliPath, env);
     if (families.length) {
-      setCache(families);
-      return families;
+      const enriched = await applyStatusSignals(families, () => statusReader(env));
+      setCache(enriched);
+      return enriched;
     }
     // The CLI call failed or returned nothing: keep serving the last successful
     // families (even if now stale) so the dropdowns don't empty out on a
@@ -177,4 +185,66 @@ function run(cliPath: string, env?: NodeJS.ProcessEnv): Promise<ModelFamily[]> {
       }
     );
   });
+}
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown> : undefined;
+}
+
+function text(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+interface StatusBadges {
+  isNew: boolean;
+  isBeta: boolean;
+  promotion?: string;
+}
+
+// A reported row is authoritative for its exact uid: omitted protobuf
+// booleans mean false, and an active promoStatus keeps its nonblank label or
+// falls back to PROMO. Unreported rows leave the CLI variant untouched.
+function statusBadgeRows(status: unknown): Map<string, StatusBadges> | undefined {
+  const root = record(status);
+  const user = record(root?.userStatus) || record(root?.user_status) || root;
+  const cascade = record(user?.cascadeModelConfigData) || record(user?.cascade_model_config_data);
+  const configs = cascade?.clientModelConfigs || cascade?.client_model_configs;
+  if (!Array.isArray(configs)) return undefined;
+  const rows = new Map<string, StatusBadges>();
+  for (const entry of configs) {
+    const row = record(entry);
+    const uid = text(row?.modelUid ?? row?.model_uid);
+    if (!row || !uid) continue;
+    const promo = record(row.promoStatus) || record(row.promo_status);
+    const active = (promo?.isActive ?? promo?.is_active) === true;
+    rows.set(uid, {
+      isNew: (row.isNew ?? row.is_new) === true,
+      isBeta: (row.isBeta ?? row.is_beta) === true,
+      promotion: active ? text(promo?.label) || "PROMO" : undefined
+    });
+  }
+  return rows;
+}
+
+// A missing, malformed or rejected status read must never cost the CLI
+// listing, so every failure path resolves to the families unchanged.
+async function applyStatusSignals(families: ModelFamily[], read: () => Promise<unknown>): Promise<ModelFamily[]> {
+  let rows: Map<string, StatusBadges> | undefined;
+  try {
+    rows = statusBadgeRows(await read());
+  } catch {
+    return families;
+  }
+  if (!rows) return families;
+  for (const fam of families) {
+    for (const variant of fam.variants) {
+      const badges = rows.get(variant.value);
+      if (!badges) continue;
+      variant.isNew = badges.isNew;
+      variant.isBeta = badges.isBeta;
+      variant.promotion = badges.promotion;
+    }
+  }
+  return families;
 }

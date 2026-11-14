@@ -8,6 +8,46 @@ the commit messages carry the detail.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
+## [0.14.0] - 2026-11-14
+
+### Highlights
+- Configure models and Fusion roles in a unified searchable picker.
+- Pin models and browse providers with the newest versions first.
+- Set effort, including Max, and Fast thinking where the CLI supports them.
+- Keep Max effort selected when starting or continuing a conversation.
+- Remember effort and Fast preferences for each model and Fusion role.
+- Restore compatible Fusion pairs without losing the other role's settings.
+- Keep Lead Fast available while hiding unsupported Fusion Sub Fast pairs.
+- Keep model selections stable during loading and rapid configuration changes.
+- Restore confirmed model settings when the agent rejects a change.
+- Show each model's token limits, cost tier and reported token prices.
+- Keep Fusion Lead and Sub pricing separate, including reported Fast rates.
+- Show reported long context and cached token prices in pricing details.
+- Display New, Promotion and Beta badges with the reported offer tooltips.
+- Match badges to the displayed model effort and speed.
+- Show context usage separately for Fusion Lead and Sub models.
+- Inspect context token breakdowns and reported session ACU usage.
+- Refresh usage without adding automatic report output to the conversation.
+- Keep usage figures scoped to the correct session, model and account.
+- Show account cycle usage, limits and remaining ACUs in status menus.
+- Refresh account cycle usage reliably for the signed in CLI account.
+- Keep the status bar icon only, with usage in the hover and click menus.
+- Group account actions and connection details in clearer status menus.
+- Collapse composer labels in order as the panel narrows.
+- Keep Send, Stop and queue controls usable in narrow panels.
+- Keep usage hover stable and close menus when their controls disappear.
+- Highlight reported Fusion activity across model, effort and Fast labels.
+- Use aligned Cognition icons for SWE models throughout the picker.
+- Refine chat text colours while preserving light and high contrast themes.
+- Draw and erase the coloured Devin cogs beside working status labels.
+- Respect reduced motion with a static working mark.
+
+### Under the hood
+- Read account usage and model badges with the CLI account credential.
+- Isolate usage reads across prompts, cancellation and session handovers.
+- Share model identity rules across the extension and webview.
+- Expand protocol, model control, usage and rendering regression coverage.
+
 ## [0.13.0] - 2026-10-01
 
 ### Highlights

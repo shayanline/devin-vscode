@@ -347,6 +347,25 @@ body {
   flex: 1 1 0;
   min-width: 0;
   min-height: 0;
+  /* Neutral text ramp sampled from Copilot's dark input area: replies read at
+     near full foreground, composer labels at a muted step, the placeholder a
+     step below that. Scoped to the chat surface so semantic colours keep
+     their own tokens. */
+  --dv-chat-text: color-mix(in srgb, var(--vscode-foreground) 88%, var(--vscode-editor-background, var(--vscode-sideBar-background)));
+  --dv-chat-muted: color-mix(in srgb, var(--vscode-foreground) 58%, var(--vscode-editor-background, var(--vscode-sideBar-background)));
+  --dv-chat-placeholder: color-mix(in srgb, var(--vscode-foreground) 44%, var(--vscode-editor-background, var(--vscode-sideBar-background)));
+  --dv-dim: var(--dv-chat-muted);
+  color: var(--dv-chat-text);
+}
+
+/* Light and contrast themes keep the native input tones rather than mixing a
+   dark screenshot's greys over a light surface. */
+body.vscode-light #chat-main,
+body.vscode-high-contrast #chat-main,
+body.vscode-high-contrast-light #chat-main {
+  --dv-chat-text: var(--vscode-input-foreground, var(--vscode-foreground));
+  --dv-chat-muted: var(--vscode-descriptionForeground, var(--vscode-foreground));
+  --dv-chat-placeholder: var(--vscode-input-placeholderForeground, var(--vscode-descriptionForeground, var(--vscode-foreground)));
 }
 
 /* Drag-and-drop context overlay (VS Code's .chat-dnd-overlay): a full cover with
@@ -626,6 +645,16 @@ body {
   color: var(--vscode-descriptionForeground, #9d9d9d);
 }
 
+/* The Devin logo left of the working word: each cog grows from its centre
+   on the shared 2.667 second clock webview/workingMark.js runs, then clears
+   in the same order, so the mark is empty at both ends of each cycle. */
+.working-mark {
+  display: block;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+}
+
 .working .codicon {
   font-size: 14px;
 }
@@ -852,11 +881,20 @@ body {
 }
 
 /* Claude/OpenAI glyphs fill their whole 24x24 viewBox, so they read larger than
-   Grok (which has built-in padding); shrink them to visually match. */
+   Grok (which has padding inside its viewBox). Shrink them to visually match. */
 .dd-brand--claude,
 .dd-brand--openai {
   width: 10px;
   height: 10px;
+}
+
+/* The Cognition symbol takes the same 14px slot the neighbouring row
+   codicons occupy. mask-size: contain centres its native aspect inside the
+   box, and flex keeps it from shrinking in the row. */
+.dd-brand--cognition {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
 }
 
 .dd-item-icon {
@@ -880,125 +918,6 @@ body {
   background: var(--vscode-menu-background, var(--vscode-editorWidget-background));
   color: var(--vscode-menu-foreground, var(--vscode-foreground));
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.36);
-}
-
-#model-dd .dd-menu {
-  width: min(200px, calc(100vw - 16px));
-  min-width: 0;
-  max-width: calc(100vw - 16px);
-  box-sizing: border-box;
-}
-
-#model-dd .dd-filter {
-  box-sizing: border-box;
-}
-
-#fusion-dd .dd-btn {
-  max-width: min(300px, calc(100vw - 150px));
-}
-
-#fusion-dd .fusion-config-menu {
-  width: min(300px, calc(100vw - 16px));
-  padding: 0;
-}
-
-.fusion-config-separator,
-.fusion-config-sidekick-title {
-  color: var(--vscode-descriptionForeground);
-}
-
-.fusion-config-section {
-  padding: 8px;
-  border-bottom: 1px solid var(--vscode-menu-separatorBackground, var(--vscode-widget-border));
-}
-
-.fusion-config-section:last-child {
-  border-bottom: 0;
-}
-
-.fusion-config-label {
-  padding: 0 3px 5px;
-  color: var(--vscode-descriptionForeground);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-
-.fusion-config-options {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 3px;
-}
-
-.fusion-config-options.effort {
-  display: flex;
-  flex-wrap: wrap;
-}
-
-.fusion-config-options.effort .fusion-config-option {
-  flex: 1 1 auto;
-  justify-content: center;
-  padding-inline: 6px;
-  text-align: center;
-}
-
-/* The effort row reads as a segmented control, so the selection is the
-   background and the weight. A tick would cost a third of each button. */
-.fusion-config-options.effort .dd-check {
-  display: none;
-}
-
-.fusion-config-options.effort .fusion-config-option.selected {
-  background: var(--vscode-list-activeSelectionBackground, var(--vscode-list-hoverBackground));
-  color: var(--vscode-list-activeSelectionForeground, inherit);
-}
-
-.fusion-config-loading {
-  padding: 5px 7px;
-  color: var(--vscode-descriptionForeground);
-}
-
-.fusion-config-option {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  position: relative;
-  min-width: 0;
-  padding: 5px 7px;
-  overflow: hidden;
-  border: 1px solid transparent;
-  border-radius: 3px;
-  background: transparent;
-  color: var(--vscode-menu-foreground, var(--vscode-foreground));
-  font: inherit;
-  text-align: left;
-  white-space: nowrap;
-}
-
-.fusion-config-text {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.fusion-config-option .dd-check {
-  display: inline-flex;
-  width: 14px;
-  flex: 0 0 14px;
-}
-
-.fusion-config-option .dd-check .codicon {
-  font-size: 13px;
-}
-
-.fusion-config-option:hover {
-  background: var(--vscode-list-hoverBackground);
-}
-
-.fusion-config-option.selected {
-  font-weight: 600;
 }
 
 .dd.right .dd-menu {
@@ -1132,284 +1051,6 @@ body {
 
 .dd-item-action:hover {
   background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
-}
-
-.dv-floater.model-hover-floater {
-  width: min(300px, calc(100vw - 8px));
-  min-width: 0;
-  max-width: min(300px, calc(100vw - 8px));
-  max-height: calc(100vh - 8px);
-  overflow: auto;
-  box-sizing: border-box;
-  padding: 0;
-}
-
-.model-hover {
-  width: 100%;
-  box-sizing: border-box;
-  padding: 10px 12px;
-}
-
-.model-hover.compact {
-  padding: 8px 10px;
-}
-
-.model-hover.no-configurable:not(.compact) {
-  padding-bottom: 13px;
-}
-
-.model-hover-header {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 10px;
-}
-
-.model-hover-header.no-description {
-  grid-template-columns: minmax(0, 1fr) auto;
-}
-
-.model-hover.compact .model-hover-header {
-  grid-template-columns: max-content minmax(0, 1fr);
-  gap: 8px;
-  margin-bottom: 0;
-}
-
-.model-hover-name {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  font-size: 1.05em;
-  font-weight: 600;
-}
-
-.model-hover-description {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
-  font-size: 0.9em;
-  white-space: nowrap;
-}
-
-.model-hover-tier {
-  flex: 0 0 auto;
-  padding: 3px 8px;
-  border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
-  border-radius: 12px;
-  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
-  font-size: 0.85em;
-  line-height: 1.2;
-  white-space: nowrap;
-}
-
-.model-hover-tier.cost-low {
-  color: var(--vscode-charts-green, var(--vscode-foreground));
-  border-color: var(--vscode-charts-green, var(--vscode-widget-border));
-}
-
-.model-hover-tier.cost-high,
-.model-hover-tier.cost-very-high {
-  color: var(--vscode-editorWarning-foreground, var(--vscode-foreground));
-  border-color: var(--vscode-editorWarning-foreground, var(--vscode-widget-border));
-}
-
-.model-hover-section {
-  margin: 0 0 5px;
-  color: var(--vscode-foreground);
-  font-size: 0.9em;
-  font-weight: 600;
-}
-
-.model-hover-cost-heading-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) max-content;
-  column-gap: 0;
-  margin-bottom: 3px;
-}
-
-.model-hover-cost-heading-row.has-long-context {
-  grid-template-columns: minmax(0, 1fr) max-content minmax(0, 1fr) max-content;
-}
-
-.model-hover-cost-heading-row .model-hover-cost-heading:first-child {
-  grid-column: 2;
-}
-
-.model-hover-cost-heading-row.has-long-context .model-hover-cost-heading:last-child {
-  grid-column: 4;
-}
-
-.model-hover-cost-table {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) max-content;
-  column-gap: 0;
-  row-gap: 6px;
-  align-items: center;
-}
-
-.model-hover-cost-table.has-long-context {
-  grid-template-columns: minmax(0, 1fr) max-content minmax(0, 1fr) max-content;
-}
-
-.model-hover-cost-heading {
-  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
-  font-size: 0.82em;
-  text-align: right;
-  white-space: nowrap;
-}
-
-.model-hover-cost-row {
-  display: grid;
-  grid-column: 1 / -1;
-  grid-template-columns: subgrid;
-  align-items: center;
-}
-
-.model-hover-cost-row > * {
-  grid-row: 1;
-}
-
-.model-hover-cost-label,
-.model-hover-cost-value {
-  position: relative;
-  z-index: 1;
-  background: var(--vscode-menu-background, var(--vscode-editorWidget-background));
-}
-
-.model-hover-cost-label {
-  grid-column: 1;
-  justify-self: start;
-  padding-right: 6px;
-  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
-  font-size: 0.9em;
-  white-space: nowrap;
-}
-
-.model-hover-cost-line {
-  grid-column: 1 / -1;
-  position: relative;
-  z-index: 0;
-  min-width: 12px;
-  align-self: center;
-  margin: 0;
-  border-bottom-width: 1px;
-  border-bottom-style: dotted;
-  border-bottom-color: var(--vscode-descriptionForeground);
-  opacity: 0.75;
-}
-
-.model-hover-cost-value {
-  grid-column: 2;
-  justify-self: end;
-  min-width: 3ch;
-  padding: 0 6px;
-  font-size: 0.92em;
-  font-variant-numeric: tabular-nums;
-  text-align: right;
-  white-space: nowrap;
-}
-
-.model-hover-cost-row.has-long-context .model-hover-cost-value:last-child {
-  grid-column: 4;
-}
-
-.model-hover-promotion {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  margin-top: 10px;
-  padding-top: 8px;
-  border-top: 1px solid var(--vscode-panel-border);
-  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
-  font-size: 0.9em;
-}
-
-.model-hover-promotion strong {
-  color: var(--vscode-charts-green, var(--vscode-foreground));
-}
-
-.model-hover-limits {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) max-content;
-  column-gap: 0;
-  row-gap: 4px;
-  margin-top: 10px;
-  padding-top: 8px;
-  border-top: 1px solid var(--vscode-panel-border);
-  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
-  font-size: 0.9em;
-}
-
-.model-hover-limits strong {
-  color: var(--vscode-foreground);
-  font-variant-numeric: tabular-nums;
-  text-align: right;
-}
-
-.model-hover-configurable {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-top: 10px;
-  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
-  font-size: 0.9em;
-}
-
-.model-hover-cost + .model-hover-configurable,
-.model-hover-promotion + .model-hover-configurable,
-.model-hover-limits + .model-hover-configurable {
-  padding-top: 8px;
-  border-top: 1px solid var(--vscode-panel-border);
-}
-
-.model-hover-configurable-label {
-  flex: 0 0 auto;
-}
-
-.model-hover-configurable-controls {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  flex-wrap: wrap;
-  gap: 4px;
-  min-width: 0;
-  margin-left: auto;
-}
-
-.model-hover-configurable-button {
-  display: inline-flex;
-  align-items: center;
-  min-height: 26px;
-  box-sizing: border-box;
-  padding: 2px 8px;
-  border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
-  border-radius: 4px;
-  color: var(--vscode-foreground);
-  background: transparent;
-  font: inherit;
-  font-size: 0.9em;
-  line-height: 1.2;
-  white-space: nowrap;
-}
-
-button.model-hover-configurable-button {
-  cursor: pointer;
-}
-
-button.model-hover-configurable-button:hover {
-  background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
-}
-
-#fusion-dd .dd-icon,
-#thinking-dd .dd-icon {
-  display: none;
-}
-
-#input-box.cmp-sm #fusion-dd .dd-icon,
-#input-box.cmp-sm #thinking-dd .dd-icon {
-  display: inline-flex;
 }
 
 .dd-item.selected {
@@ -1574,13 +1215,18 @@ button.model-hover-configurable-button:hover {
   outline: none;
   resize: none;
   background: transparent;
-  color: var(--vscode-input-foreground);
+  color: var(--dv-chat-text);
   font-family: inherit;
   font-size: inherit;
   min-height: 48px;
   max-height: 240px;
   padding: 2px 4px;
   line-height: 1.4;
+}
+
+#input::placeholder {
+  color: var(--dv-chat-placeholder);
+  opacity: 1;
 }
 
 #toolbar {
@@ -1632,17 +1278,21 @@ button.model-hover-configurable-button:hover {
   font-size: 14px;
 }
 
-/* Responsive composer tiers (classes toggled by a ResizeObserver) */
-#input-box.cmp-sm .dd-label { display: none; }
-#input-box.cmp-sm .dd-btn { max-width: none; }
-#input-box.cmp-sm .usage-pct { display: none; }
+/* Neutral composer controls take the muted chat tone, and the icons sit at
+   the same strength as the text beside them rather than dimming again. */
+#toolbar .dd-btn,
+#toolbar .tool-ctl,
+#toolbar .usage-ring {
+  color: var(--dv-chat-muted);
+}
+#toolbar .dd-btn .codicon,
+#toolbar .dd-icon,
+#toolbar .dd-brand {
+  opacity: 1;
+}
 
-#input-box.cmp-xs #model-dd,
-#input-box.cmp-xs #usage { display: none !important; }
-
-#input-box.cmp-xxs #mode-dd,
-#input-box.cmp-xxs #attach,
-#input-box.cmp-xxs #thinking-dd { display: none !important; }
+/* The mode half never shrinks; the model pill is the one allowed to give. */
+#toolbar #mode-dd { flex: 0 0 auto; }
 
 /* Context-window usage ring (click for a details popover) */
 .usage-ring {
@@ -1669,6 +1319,40 @@ button.model-hover-configurable-button:hover {
   outline-offset: -1px;
 }
 
+.usage-role-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex: 0 0 auto;
+}
+
+.usage-role {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+}
+
+/* The ring never shrinks below its drawn 16x16 circle, whichever wrapper the
+   flex layout puts it in. */
+.usage-ring > svg,
+.usage-role > svg {
+  flex: 0 0 auto;
+}
+
+.usage-role-letter {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-family: var(--vscode-font-family);
+  font-size: 7px;
+  font-weight: 600;
+  line-height: 1;
+  pointer-events: none;
+}
+
 /* The % label is hidden at rest and expands on hover/focus, matching VS Code's
    context-usage widget (max-width/opacity transition). */
 .usage-pct {
@@ -1691,7 +1375,9 @@ button.model-hover-configurable-button:hover {
   right: 0;
   bottom: calc(100% + 8px);
   z-index: 60;
-  width: 220px;
+  width: min(280px, calc(100vw - 40px));
+  max-height: min(450px, calc(100vh - 100px));
+  overflow-y: auto;
   padding: 10px 12px;
   border: 1px solid var(--vscode-menu-border, var(--vscode-panel-border));
   border-radius: 6px;
@@ -1700,11 +1386,27 @@ button.model-hover-configurable-button:hover {
   font-size: 0.9em;
 }
 
+.usage-model + .usage-model,
+.usage-model + .usage-session {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--vscode-menu-separatorBackground, var(--vscode-panel-border));
+}
+
 .usage-row {
   display: flex;
   justify-content: space-between;
   gap: 12px;
   padding: 2px 0;
+}
+
+.usage-row > span:first-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.usage-row > span:last-child {
+  flex-shrink: 0;
 }
 
 .usage-row.muted {
@@ -1723,6 +1425,15 @@ button.model-hover-configurable-button:hover {
 .usage-bar > div {
   height: 100%;
   background: var(--vscode-progressBar-background);
+}
+
+.usage-note {
+  margin-top: 6px;
+  font-size: 0.85em;
+}
+
+.usage-note.muted {
+  opacity: 0.7;
 }
 
 /* Autocomplete */
@@ -5899,3 +5610,1000 @@ body.dv-resizing #sessions-resizer {
 .completed-work[open] .completed-work-summary {
   margin-bottom: 8px;
 }
+
+/* ---------- model picker (composer group and setup tray) ---------- */
+
+/* The model and effort segments act as one pill: a hairline divider at
+   rest, a shared wash on hover or while the picker popup is open. At rest
+   there are no backgrounds. Group hover, focus within, or an open popup
+   lifts both halves to a faint wash with the divider hidden, the hovered
+   or focused half steps up brighter, and while the popup is open with
+   nothing hovered the half for the current page stays bright. */
+#model-picker-group{
+  display: flex;
+  align-items: center;
+  gap: 0;
+  flex: 0 1 auto;
+  min-width: 0;
+  /* Copilot palette sampled over the input box surface: resting labels are
+     a dim gray and brighten to near full strength on hover, focus, or
+     while the popup is open. */
+  --cmp-text: var(--dv-chat-muted, color-mix(in srgb, var(--vscode-foreground) 52%, var(--vscode-input-background)));
+  --cmp-text-bright: var(--dv-chat-text, color-mix(in srgb, var(--vscode-foreground) 87%, var(--vscode-input-background)));
+  --cmp-faint: color-mix(in srgb, var(--vscode-foreground) 8%, var(--vscode-input-background));
+  --cmp-bright: color-mix(in srgb, var(--vscode-foreground) 23%, var(--vscode-input-background));
+  border-radius: 4px;
+  background: transparent;
+}
+
+#model-picker-group .dd-btn {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: none;
+  background: transparent;
+  border-radius: 4px;
+  color: var(--cmp-text);
+}
+
+#model-picker-group #modelBtn{
+  flex: 0 1 auto;
+  border-radius: 4px 0 0 4px;
+}
+
+#model-picker-group #modelBtn .dd-label,
+#model-picker-group #effortBtn .dd-label{
+  min-width: 0;
+}
+
+#model-picker-group #effortBtn{
+  flex: 0 0 auto;
+  border-radius: 0 4px 4px 0;
+}
+
+/* The wrappers may give, and the buttons respect the bounds they are given
+   so the labels ellipsize instead of pushing neighbours out. */
+#model-picker-group .dd {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+#model-picker-group .dd-btn {
+  max-width: 100%;
+}
+
+/* In Fusion mode the Model half never shrinks and only the Effort label
+   may ellipsize when space runs out. */
+#model-picker-group.mode-fusion #modelBtn { flex: 0 0 auto; }
+#model-picker-group.mode-fusion #effortBtn { flex: 0 1 auto; }
+
+/* A managed model (Adaptive) has no Effort half: the pill becomes a single
+   rounded button again. */
+#model-picker-group.no-effort #effortBtn,
+#model-picker-group.no-effort .picker-div { display: none; }
+#model-picker-group.no-effort #modelBtn { border-radius: 4px; }
+
+/* The rest divider is a hairline barely lifted off the input surface; it
+   vanishes while the pill is hot. */
+#model-picker-group .picker-div {
+  flex: 0 0 auto;
+  width: 2px;
+  height: 12px;
+  margin: 0;
+  background: color-mix(in srgb, var(--vscode-foreground) 4%, var(--vscode-sideBar-background));
+}
+
+#model-picker-group:is(:hover, :focus-within),
+#model-picker-group.tray-open {
+  background: var(--cmp-faint);
+}
+
+#model-picker-group:is(:hover, :focus-within) .dd-btn,
+#model-picker-group.tray-open .dd-btn {
+  color: var(--cmp-text-bright);
+}
+
+#model-picker-group .dd-btn:is(:hover, :focus-visible) {
+  background: var(--cmp-bright);
+}
+
+/* With the popup open and no half hovered or focused, the half matching
+   the current page keeps the brighter wash. */
+#model-picker-group.tray-open[data-page="models"]:not(:has(.dd-btn:hover)):not(:has(.dd-btn:focus-visible)) #modelBtn,
+#model-picker-group.tray-open[data-page="details"]:not(:has(.dd-btn:hover)):not(:has(.dd-btn:focus-visible)) #effortBtn,
+#model-picker-group.tray-open[data-page="fusion"]:not(:has(.dd-btn:hover)):not(:has(.dd-btn:focus-visible)) #effortBtn,
+#model-picker-group.tray-open[data-page="role"]:not(:has(.dd-btn:hover)):not(:has(.dd-btn:focus-visible)) #effortBtn {
+  background: var(--cmp-bright);
+}
+
+#model-picker-group:is(:hover, :focus-within) .picker-div,
+#model-picker-group.tray-open .picker-div {
+  background: transparent;
+}
+
+/* Filled Fast bolts take the adjacent text colour at the codicon size. The
+   bundled codicon set only has the outline zap, so a filled bolt is drawn
+   as an inline SVG with the codicon glyph's outer silhouette. */
+#model-picker-popup .zap-fill, #model-picker-group .zap-fill{
+  width: 1em;
+  height: 1em;
+  fill: currentColor;
+  vertical-align: -0.15em;
+}
+
+#model-picker-group #effortBtnLabel .zap-fill,
+#model-picker-popup .dd-effort-label .zap-fill,
+#model-picker-popup .role-opt-model .zap-fill,
+#model-picker-popup .dd-item-badge .zap-fill,
+#model-picker-popup .dd-card-sub .zap-fill{
+  font-size: 10px;
+}
+
+#model-picker-group #effortBtnLabel .zap-fill,
+#model-picker-popup .dd-effort-label .zap-fill,
+#model-picker-popup .dd-card-sub .zap-fill{
+  margin-left: 3px;
+}
+
+/* Each Fusion role keeps its name and effort in one inline text run so the
+   label reads exactly as before. The optional Fast bolt sits beside it in the
+   role's own inline group. */
+#model-picker-group .fusion-role-group{
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+/* Inside a role group the shared bolt margin would double the group's own
+   3px gap. */
+#model-picker-group #effortBtnLabel .fusion-role-group .zap-fill{
+  margin-left: 0;
+}
+
+/* The model the session is working with gets the real foreground and weight.
+   The whole role group shares it, so the effort text and a Fast bolt light
+   with the name while the other role keeps the composer's resting colour. */
+#model-picker-group .fusion-role-group.is-active,
+#model-picker-group .fusion-model-name.is-active{
+  color: var(--vscode-foreground);
+  font-weight: 600;
+}
+
+/* The Fusion label must stay a clipped box even where the compact tier turns
+   labels back into inline text, so a hidden Sub name can be scrolled into
+   view. While a role is lit the clip is plain, or an ellipsis would paint
+   over the name being scrolled to. */
+#model-picker-group.mode-fusion #effortBtnLabel{
+  display: block;
+}
+
+#model-picker-group.mode-fusion #effortBtnLabel.has-activity{
+  text-overflow: clip;
+}
+
+/* ---------- model setup tray ---------- */
+
+/* The popup is a real dialog anchored to the shared composer group by
+   positionPickerPopup: fixed to the viewport, native menu surface, capped
+   at 400px wide and 400px tall, and clamped to the viewport inset. The
+   palette mixes keep light and contrast themes adapting. */
+#model-picker-popup{
+  --picker-surface: var(--vscode-menu-background, var(--vscode-editorWidget-background, var(--vscode-editor-background)));
+  --dd-strong: color-mix(in srgb, var(--vscode-foreground) 88%, var(--picker-surface));
+  --dd-dim: color-mix(in srgb, var(--vscode-foreground) 57%, var(--picker-surface));
+  --dd-faint: color-mix(in srgb, var(--vscode-foreground) 49%, var(--picker-surface));
+  --dd-sel: color-mix(in srgb, var(--vscode-foreground) 7.5%, var(--picker-surface));
+  --dd-strip: color-mix(in srgb, var(--vscode-foreground) 8.5%, var(--picker-surface));
+  --dd-tag-new: #00de6b;
+  --dd-tag-promotion: #02beff;
+  --dd-tag-beta: #d8d79b;
+  position: fixed;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  max-width: 400px;
+  padding: 8px 8px 4px;
+  border: 1px solid var(--vscode-menu-border, var(--vscode-panel-border));
+  border-radius: 6px;
+  background: var(--vscode-menu-background, var(--vscode-editorWidget-background));
+  color: var(--vscode-menu-foreground, var(--vscode-foreground));
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.36);
+}
+
+#model-picker-popup .tray-head{
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  min-height: 30px;
+  padding: 2px 4px 6px;
+}
+
+#model-picker-popup .tray-head[hidden]{ display: none; }
+
+#model-picker-popup .tray-head-left{
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+#model-picker-popup .tray-head .icon-btn,
+#model-picker-popup .tray-head .role-opt-face > .codicon{
+  color: var(--dd-dim);
+}
+
+#model-picker-popup .tray-head .dd-item-icon,
+#model-picker-popup .tray-head .tray-head-left > .codicon{
+  color: var(--dd-strong);
+}
+
+#model-picker-popup .tray-title-text{
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 1.05em;
+  font-weight: 600;
+  color: var(--dd-strong);
+}
+
+/* Icon, title, and an optional secondary line form the page heading. The
+   secondary line starts at the title text, not under the Back button. */
+#model-picker-popup .tray-title-col{
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+#model-picker-popup .tray-sub{
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.8em;
+  font-weight: 400;
+  color: var(--dd-dim);
+}
+
+/* Full width grouped radio control for the two Fusion roles. Native
+   inputs keep arrow key navigation, and the checked segment gets a gray
+   fill with a focus ring on the label. The top padding matches the gap
+   between the header and the Effort Level heading on the effort pages. */
+#model-picker-popup .tray-rolebar{
+  flex: 0 0 auto;
+  padding: 12px 0 8px;
+}
+
+#model-picker-popup .tray-rolebar[hidden]{ display: none; }
+
+#model-picker-popup .role-switch{
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+  border-radius: 6px;
+  background: transparent;
+}
+
+#model-picker-popup .role-opt{
+  position: relative;
+  flex: 1 1 0;
+  min-width: 0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+#model-picker-popup .role-radio{
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+#model-picker-popup .role-opt-face{
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 5px 8px;
+  border-radius: 4px;
+}
+
+#model-picker-popup .role-opt-face > .codicon{
+  flex: 0 0 auto;
+  font-size: 13px;
+  color: var(--dd-dim);
+}
+
+#model-picker-popup .role-opt-texts{
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+#model-picker-popup .role-opt-name{
+  font-size: 0.85em;
+  font-weight: 600;
+  color: var(--dd-strong);
+}
+
+/* The secondary line is "name · effort" text that ellipsizes, followed by
+   a non shrinking bolt when that role's speed is fast. */
+#model-picker-popup .role-opt-model{
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  font-size: 0.8em;
+  color: var(--dd-dim);
+}
+
+#model-picker-popup .role-opt-model-text{
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#model-picker-popup .role-opt:hover .role-opt-face{
+  background: var(--dd-strip);
+}
+
+#model-picker-popup .role-opt:has(.role-radio:checked) .role-opt-face{
+  background: var(--dd-sel);
+}
+
+#model-picker-popup .role-opt:has(.role-radio:focus-visible){
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+/* The body is the only scrolling region. Page headers and the Fusion role
+   group stay fixed while lists, controls, and pricing scroll. */
+#model-picker-popup .tray-body{
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+#model-picker-popup .page-scroll{
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+#model-picker-popup .page-rows{
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* The Fusion page body is only the active role's list, which fills the
+   popup height left by the fixed header and role group and scrolls inside
+   its own .dd-rows box. */
+#model-picker-popup .fusion-rows{
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+#model-picker-popup .fusion-empty{
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+/* The models page fills the popup height with its scrollable list, so the
+   empty state takes the same space. */
+#model-picker-popup .tray-body > .dd-empty{
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+/* Rows are a primary button plus sibling action buttons, so no interactive
+   element nests inside another. */
+#model-picker-popup .dd-rows{
+  container-type: inline-size;
+}
+
+/* Group captions align with the rows' inner band and leave 6px above the
+   first highlighted row. */
+#model-picker-popup .dd-rows > .dd-group{
+  padding: 8px 4px 6px;
+  font-size: 10px;
+  line-height: 14px;
+  opacity: 1;
+  color: var(--vscode-descriptionForeground);
+}
+
+/* The search input carries a decorative magnifier at its left edge, so
+   the wrapper holds the 4px gap the bare input used to carry. */
+#model-picker-popup .dd-filter-wrap{
+  position: relative;
+  flex: 0 0 auto;
+  width: 100%;
+  min-width: 0;
+  margin-bottom: 4px;
+}
+
+#model-picker-popup .dd-filter-wrap .dd-filter{
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 0;
+  padding-left: 26px;
+}
+
+#model-picker-popup .dd-filter-wrap .codicon-search{
+  position: absolute;
+  left: 7px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 12px;
+  color: var(--vscode-input-placeholderForeground, var(--vscode-descriptionForeground));
+  pointer-events: none;
+}
+
+#model-picker-popup .dd-item{
+  gap: 2px;
+  padding: 0 4px;
+}
+
+#model-picker-popup .dd-item-main{
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 0;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+#model-picker-popup .dd-item-main:focus-visible{
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+/* The check column stays narrow in both lists. */
+#model-picker-popup .dd-check{
+  width: 12px;
+  flex: 0 0 12px;
+}
+
+#model-picker-popup .dd-check .codicon{
+  font-size: 12px;
+}
+
+/* Adaptive and Fusion render as featured cards on the catalog page: a
+   rounded box fill, a title over a dim subtitle, and a 4px gap between
+   cards and the caption below. */
+#model-picker-popup .dd-item-card{
+  margin-bottom: 4px;
+  border-radius: 6px;
+  background: var(--dd-strip);
+}
+
+#model-picker-popup .dd-item-card:hover,
+#model-picker-popup .dd-item-card:focus-within{
+  background: color-mix(in srgb, var(--dd-strip) 88%, var(--vscode-foreground));
+}
+
+#model-picker-popup .dd-item-card .dd-item-main,
+#model-picker-popup .dd-item-card:hover .dd-item-main{
+  padding-top: 7px;
+  padding-bottom: 7px;
+  background: none;
+}
+
+#model-picker-popup .dd-card-texts{
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0;
+}
+
+#model-picker-popup .dd-card-sub{
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.82em;
+  color: var(--vscode-descriptionForeground);
+}
+
+/* The trailing effort action appears on selected, hovered and focused rows. */
+#model-picker-popup .dd-item-effort{
+  width: auto;
+  gap: 4px;
+  padding: 0 4px;
+  font: inherit;
+  font-size: 0.82em;
+  color: var(--vscode-descriptionForeground);
+  white-space: nowrap;
+  opacity: 0;
+}
+
+#model-picker-popup .dd-item-effort .codicon-chevron-right{
+  font-size: 10px;
+}
+
+/* Narrow rows give up the effort label first, leaving only the chevron. */
+@container (max-width: 250px){
+  #model-picker-popup .dd-effort-label{ display: none; }
+}
+
+/* ---------- role scoped controls ---------- */
+
+#model-picker-popup .controls{
+  margin-top: 12px;
+}
+
+/* Fast sits beside the rail as its own bordered toggle at the rail's
+   height, separated by an 8px gap rather than a divider. */
+#model-picker-popup .controls-row{
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  margin-top: 9px;
+}
+
+#model-picker-popup .controls-row .effort-rail{
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+#model-picker-popup .controls-row .fast-thinking{
+  width: auto;
+  height: auto;
+  gap: 4px;
+  padding: 3px 8px;
+  font: inherit;
+  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dd-dim);
+}
+
+#model-picker-popup .controls-row .fast-thinking:hover{
+  color: var(--dd-strong);
+  background: var(--dd-strip);
+}
+
+#model-picker-popup .controls-row .fast-thinking[aria-pressed="true"]{
+  color: var(--vscode-foreground);
+  font-weight: 600;
+  background: color-mix(in srgb, var(--vscode-foreground) 22%, var(--picker-surface));
+  border-color: color-mix(in srgb, var(--vscode-foreground) 45%, var(--picker-surface));
+}
+
+#model-picker-popup .controls-row .fast-thinking[aria-pressed="true"]:hover{
+  background: color-mix(in srgb, var(--vscode-foreground) 26%, var(--picker-surface));
+}
+
+/* Compact rails keep all effort labels readable by hiding the Fast text. */
+#model-picker-popup.popup-tight #fast-thinking > span{ display: none; }
+
+/* Tight popups also trim segment padding so every effort label still fits. */
+#model-picker-popup.popup-tight .effort-seg { padding-left: 1px; padding-right: 1px; }
+
+#model-picker-popup .controls-title{
+  font-size: 1em;
+  font-weight: 600;
+  color: var(--dd-strong);
+}
+
+#model-picker-popup .controls-empty{
+  font-size: 0.85em;
+  color: var(--dd-dim);
+}
+
+/* One flat rail matching Copilot: a bordered transparent track with a 2px
+   inner inset, no internal borders, and segments that size to their label
+   with equal padding and grow to fill. */
+#model-picker-popup .effort-rail{
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+  border-radius: 6px;
+  background: transparent;
+}
+
+#model-picker-popup .effort-seg{
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: normal;
+  padding: 5px 8px;
+  border: none;
+  background: none;
+  font: inherit;
+  font-size: 0.85em;
+  color: var(--dd-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+#model-picker-popup .effort-seg:hover{ color: var(--dd-strong); background: var(--dd-strip); }
+
+#model-picker-popup .effort-seg[aria-checked="true"]{
+  color: var(--dd-strong);
+  background: var(--dd-sel);
+}
+
+#model-picker-popup .effort-seg:focus-visible{
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+/* Badges share icon spacing, while Fast uses the prototype's neutral colours. */
+#model-picker-popup .dd-item-badge{
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+#model-picker-popup .dd-item-badge .codicon{ font-size: 10px; }
+
+#model-picker-popup .dd-fast-badge{
+  background: rgba(127, 127, 127, 0.22);
+  color: var(--vscode-foreground);
+}
+
+#model-picker-popup .dd-fast-badge .codicon{ opacity: 1; }
+
+body.vscode-light #model-picker-popup .dd-fast-badge{
+  background: rgba(0, 0, 0, 0.1);
+}
+
+body.vscode-high-contrast #model-picker-popup .dd-fast-badge,
+body.vscode-high-contrast-light #model-picker-popup .dd-fast-badge{
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+}
+
+/* Status tags keep the shared badge shape and tint their foreground at 12%
+   for the background. */
+#model-picker-popup .dd-model-tag{
+  background: color-mix(in srgb, currentColor 12%, transparent);
+}
+
+#model-picker-popup .dd-model-tag-new{ color: var(--dd-tag-new); }
+#model-picker-popup .dd-model-tag-promotion{ color: var(--dd-tag-promotion); }
+#model-picker-popup .dd-model-tag-beta{ color: var(--dd-tag-beta); }
+
+body.vscode-light #model-picker-popup{
+  --dd-tag-new: #00602e;
+  --dd-tag-promotion: #015b7a;
+  --dd-tag-beta: #56563e;
+}
+
+body.vscode-high-contrast #model-picker-popup .dd-model-tag,
+body.vscode-high-contrast-light #model-picker-popup .dd-model-tag{
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+  outline: 1px solid var(--vscode-contrastBorder, var(--vscode-badge-foreground, var(--vscode-foreground)));
+}
+
+/* A row carrying status tags lets its metadata wrap under the name instead
+   of overflowing the tray. The two-class selector also wins over the card
+   title's own gap so wrapped rows keep the 3px rhythm. */
+#model-picker-popup .dd-item-content.dd-tagged-content,
+#model-picker-popup .dd-card-title.dd-tagged-content{
+  flex-wrap: wrap;
+  row-gap: 3px;
+}
+
+/* ---------- inline catalog details ---------- */
+
+#model-picker-popup .catalog-details{
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 12px;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+/* Both catalog boxes use the collapsed pricing fill in every state:
+   dim labels on the left, strong values flush right. */
+#model-picker-popup .catalog-box{
+  padding: 2px;
+  border-radius: 6px;
+  background: var(--dd-strip);
+}
+
+#model-picker-popup .catalog-box-head{
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  box-sizing: border-box;
+  min-height: 28px;
+  padding: 6px 10px;
+  border-radius: 4px;
+}
+
+#model-picker-popup summary.catalog-box-head{
+  cursor: pointer;
+  list-style: none;
+}
+
+#model-picker-popup summary.catalog-box-head::-webkit-details-marker{ display: none; }
+#model-picker-popup summary.catalog-box-head::marker{ content: ""; }
+
+#model-picker-popup .catalog-chevron{
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--dd-faint);
+  transition: transform 120ms ease;
+}
+
+#model-picker-popup .catalog-pricing[open] .catalog-chevron{ transform: rotate(90deg); }
+
+/* The title fills the space before the badge and chevron. */
+#model-picker-popup .catalog-box-titles{
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+#model-picker-popup .catalog-box-label{
+  font-weight: 600;
+  color: var(--vscode-foreground);
+}
+
+/* Token Limits rows share the pricing body insets and the dim label,
+   strong value pair. */
+#model-picker-popup .catalog-limits{
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0 10px 8px;
+}
+
+#model-picker-popup .catalog-limit{
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+#model-picker-popup .catalog-limit dt{
+  color: color-mix(in srgb, var(--vscode-foreground) 82%, var(--picker-surface));
+}
+
+#model-picker-popup .catalog-limit dd{
+  margin: 0;
+  color: var(--vscode-foreground);
+  font-weight: 500;
+}
+
+#model-picker-popup .catalog-empty{
+  margin: 0;
+  color: color-mix(in srgb, var(--vscode-foreground) 82%, var(--picker-surface));
+}
+
+/* Copilot tier pills: a filled hue tint with no border, fully rounded. */
+#model-picker-popup .catalog-tier{
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  line-height: 14px;
+  font-weight: 600;
+}
+
+#model-picker-popup .catalog-tier.cost-low{
+  color: color-mix(in srgb, var(--vscode-charts-green, #89d185) 2%, var(--dd-strong));
+  background: color-mix(in srgb, var(--vscode-charts-green, #89d185) 13%, transparent);
+}
+
+#model-picker-popup .catalog-tier.cost-medium{
+  color: color-mix(in srgb, var(--vscode-charts-yellow, #cca700) 2%, var(--dd-strong));
+  background: color-mix(in srgb, var(--vscode-charts-yellow, #cca700) 13%, transparent);
+}
+
+#model-picker-popup .catalog-tier.cost-high{
+  color: color-mix(in srgb, var(--vscode-charts-orange, #d18616) 2%, var(--dd-strong));
+  background: color-mix(in srgb, var(--vscode-charts-orange, #d18616) 13%, transparent);
+}
+
+#model-picker-popup .catalog-tier.cost-very-high{
+  color: color-mix(in srgb, var(--vscode-charts-red, var(--vscode-errorForeground)) 2%, var(--dd-strong));
+  background: color-mix(in srgb, var(--vscode-charts-red, var(--vscode-errorForeground)) 13%, transparent);
+}
+
+#model-picker-popup .catalog-pricing-body{
+  padding: 0 10px 8px;
+}
+
+#model-picker-popup .catalog-unit{
+  margin: 0;
+  font-size: 11px;
+  line-height: 16px;
+  color: color-mix(in srgb, var(--vscode-foreground) 82%, var(--picker-surface));
+}
+
+#model-picker-popup .catalog-prices{
+  width: 100%;
+  margin-top: 4px;
+  border-collapse: collapse;
+}
+
+#model-picker-popup .catalog-prices th,
+#model-picker-popup .catalog-prices td{
+  padding: 3px 8px 3px 0;
+  text-align: right;
+}
+
+#model-picker-popup .catalog-prices thead th{
+  color: color-mix(in srgb, var(--vscode-foreground) 82%, var(--picker-surface));
+  font-size: 0.85em;
+  font-weight: 600;
+}
+
+#model-picker-popup .catalog-prices thead th:first-child,
+#model-picker-popup .catalog-prices tbody th[scope="row"]{
+  text-align: left;
+}
+
+#model-picker-popup .catalog-prices tbody th[scope="row"]{
+  font-weight: 400;
+  color: color-mix(in srgb, var(--vscode-foreground) 82%, var(--picker-surface));
+}
+
+#model-picker-popup .catalog-prices tbody td{
+  color: var(--vscode-foreground);
+  font-weight: 500;
+}
+
+/* Pricing keeps compact rows and shares the Token Limits surface. */
+#model-picker-popup .catalog-pricing{
+  padding: 0;
+  border-radius: 4px;
+  background: var(--dd-strip);
+}
+
+#model-picker-popup .catalog-pricing .catalog-pricing-head{
+  min-height: 30px;
+  padding: 6px 12px;
+}
+
+#model-picker-popup .catalog-pricing-badges{
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+#model-picker-popup .catalog-pricing .catalog-tier{
+  padding: 0 7px;
+  font-size: 11px;
+  line-height: 16px;
+  font-weight: 400;
+}
+
+#model-picker-popup .catalog-pricing .catalog-pricing-body{
+  padding: 3px 12px 8px;
+}
+
+#model-picker-popup .catalog-pricing .catalog-unit{
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--vscode-descriptionForeground);
+}
+
+#model-picker-popup .catalog-pricing .catalog-prices th,
+#model-picker-popup .catalog-pricing .catalog-prices td{
+  padding: 0;
+  line-height: 20px;
+}
+
+#model-picker-popup .catalog-pricing .catalog-prices thead th,
+#model-picker-popup .catalog-pricing .catalog-prices tbody th[scope="row"]{
+  color: var(--vscode-descriptionForeground);
+}
+
+#model-picker-popup .catalog-pricing .catalog-prices tbody td{
+  color: var(--vscode-foreground);
+  font-weight: 600;
+}
+
+body.vscode-high-contrast #model-picker-popup{
+  --dd-sel: color-mix(in srgb, var(--vscode-foreground) 15%, var(--picker-surface));
+  --dd-strip: var(--vscode-list-hoverBackground);
+}
+
+@media (prefers-reduced-motion: reduce){
+  #model-picker-popup, #model-picker-popup .effort-seg, #model-picker-popup .role-opt-face, #model-picker-popup .catalog-chevron {
+    transition: none;
+  }
+}
+
+#model-picker-popup .dd-item.selected > .dd-item-effort,
+#model-picker-popup .dd-item:hover > .dd-item-effort,
+#model-picker-popup .dd-item:focus-within > .dd-item-effort {
+  opacity: 1;
+}
+
+#model-picker-popup .dd-card-title {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+#model-picker-popup .dd-card-title .dd-item-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#model-picker-group .dd {
+  display: flex;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+#model-picker-group.mode-fusion #model-dd {
+  flex: 0 0 auto;
+}
+
+#model-picker-group.mode-fusion #thinking-dd {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+#model-picker-group .zap-fill {
+  fill: currentColor;
+}
+
+/* Ordered composer collapse: fitComposer adds these one at a time until the
+   measured content fits, so text leaves before any control does. The whole
+   block sits at the end of the sheet because several targets also take a
+   display value from rules above (#model-picker-group, .usage-ring, the
+   group's .dd wrappers), and a cascade that falls back to source order has
+   to see the collapse last. */
+#input-box.cmp-mode-icon #mode-dd .dd-label { display: none; }
+#input-box.cmp-no-effort #thinking-dd,
+#input-box.cmp-no-effort #model-picker-group .picker-div { display: none; }
+#input-box.cmp-model-icon #modelBtn .dd-label { display: none; }
+#input-box.cmp-no-usage #usage,
+#input-box.cmp-no-mode #mode-dd,
+#input-box.cmp-no-attach #attach,
+#input-box.cmp-no-models #model-picker-group { display: none !important; }
+#input-box.cmp-no-left #toolbar .toolbar-left { display: none !important; }
+
+/* Borrowed for one synchronous measure pass on the left cluster only: its
+   natural width, never painted. The right cluster keeps its live styles,
+   because fitComposer reserves each percentage's hidden content width
+   arithmetically from scrollWidth, which leaves no transition state to
+   restart and keeps the resting collapse stable. */
+#toolbar .toolbar-left.cmp-measure {
+  flex: 0 0 auto;
+  width: max-content;
+}
+#toolbar .toolbar-left.cmp-measure #model-picker-group { flex: 0 0 auto; }

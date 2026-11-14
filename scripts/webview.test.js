@@ -2396,14 +2396,56 @@ test("the working row shimmers a word, with no spinner beside it", async () => {
 
   const row = h.thread().querySelector(".working");
   assert.ok(row, "something has to say the agent is alive");
+  const mark = row.querySelector(".working-mark");
+  assert.ok(mark, "the Devin mark sits left of the working word");
+  assert.strictEqual(mark.getAttribute("aria-hidden"), "true");
+  assert.strictEqual(mark.getAttribute("focusable"), "false");
+  assert.strictEqual(mark.getAttribute("viewBox"), "0 0 24 24");
+  // The animated mark is the cog silhouette itself: the asset's paths under
+  // per cog masks, with no grey base and nothing stroked or normalized.
+  assert.strictEqual(mark.querySelectorAll(".working-mark-base").length, 0,
+    "the grey silhouette base is gone");
+  const asset = fs.readFileSync(path.join(ROOT, "media", "devin-logo.svg"), "utf8");
+  const srcPaths = [...new h.window.DOMParser().parseFromString(asset, "image/svg+xml")
+    .querySelectorAll("path")];
+  const colored = [...mark.querySelectorAll(".working-mark-dynamic .working-mark-color")];
+  const stat = [...mark.querySelectorAll(".working-mark-static > path")];
+  assert.strictEqual(colored.length, 3, "the logo keeps its three coloured paths");
+  assert.strictEqual(stat.length, 3, "the assembled mark keeps the same three paths");
+  for (let i = 0; i < 3; i++) {
+    assert.strictEqual(colored[i].getAttribute("d"), srcPaths[i].getAttribute("d"),
+      `dynamic path ${i} geometry drifted`);
+    assert.strictEqual(colored[i].getAttribute("fill"), srcPaths[i].getAttribute("fill"),
+      `dynamic path ${i} fill drifted`);
+    assert.strictEqual(stat[i].getAttribute("d"), srcPaths[i].getAttribute("d"),
+      `static path ${i} geometry drifted`);
+    assert.ok(colored[i].getAttribute("mask"), `dynamic path ${i} lost its mask`);
+  }
+  for (const p of mark.querySelectorAll("path")) {
+    assert.strictEqual(p.getAttribute("pathLength"), null, "the logo keeps its own geometry, nothing is normalized for a redraw");
+    for (const attr of ["stroke", "stroke-width", "stroke-dasharray"]) {
+      assert.strictEqual(p.getAttribute(attr), null, `a mark path carries ${attr}`);
+    }
+  }
   const label = row.querySelector(".dv-shimmer");
+  assert.ok(label.classList.contains("working-label"), "the word needs its own label class");
+  assert.strictEqual(mark.nextElementSibling, label, "the mark must sit before the word");
   assert.match(label.textContent, /^(Thinking|Reasoning|Considering|Analyzing|Evaluating|Working)$/,
     "one of VS Code's words, and no ellipsis: " + label.textContent);
+  assert.strictEqual(row.querySelector("title"), null, "the decorative mark leaks a title into the row");
   assert.strictEqual(row.querySelector(".codicon-modifier-spin"), null,
     "the shimmer is the signal, so a spinner beside it says the same thing twice");
   // The row is rebuilt as the turn streams, so its sweep is pinned to a shared
   // clock: without this every rebuild restarts at 0% and reads as frozen.
   assert.match(label.style.animationDelay, /^-\d+ms$/);
+
+  // A refresh that keeps the same word keeps the same mark, so its colour
+  // cycle is never restarted.
+  const markBefore = row.querySelector(".working-mark");
+  h.post({ type: "usageState", loading: false });
+  await h.settle(20);
+  assert.strictEqual(row.querySelector(".working-mark"), markBefore,
+    "a working refresh must not replace the mark");
 
   h.post({ type: "assistantChunk", text: "Here." });
   h.post({ type: "assistantEnd" });
@@ -2434,11 +2476,15 @@ test("the gap between one action and the next still says the agent is working", 
   assert.ok(row, "the gap after a finished command says the agent is still working");
   assert.ok(row.previousElementSibling, "below the work it has done, at the end of the turn");
   assert.match(row.textContent, /^(Thinking|Reasoning|Considering|Analyzing|Evaluating|Working)$/);
+  const gapMark = row.querySelector(".working-mark");
+  assert.ok(gapMark && !gapMark.classList.contains("hidden"), "the mark shows while the agent works");
 
   // A question is not work: say what is actually being waited on, as VS Code does.
   h.post({ type: "permission", requestId: "p1", title: "Devin wants to run a command", options: [{ optionId: "allow", name: "Allow", kind: "allow" }] });
   await h.settle(20);
   assert.strictEqual(h.thread().querySelector(".working").textContent, "1 confirmation pending");
+  assert.ok(h.thread().querySelector(".working .working-mark").classList.contains("hidden"),
+    "waiting on the user hides the mark");
 
   h.post({ type: "cancelPrompts" });
   h.post({ type: "assistantChunk", text: "All done." });
@@ -5079,7 +5125,7 @@ test("the mode picker offers whatever modes the agent reports", async () => {
   assert.strictEqual(h.errors().length, 0);
 });
 
-test("model picker follows the adaptive pinned and models layout", async () => {
+test("model picker lays out the Adaptive and Fusion cards above the models", async () => {
   const h = createHarness();
   h.post({ type: "ready" });
   h.post({ type: "body", body: "thread" });
@@ -5106,18 +5152,7 @@ test("model picker follows the adaptive pinned and models layout", async () => {
         name: "Claude",
         default: "claude-medium",
         variants: [
-          {
-            value: "claude-medium",
-            name: "Medium",
-            costTier: "Med cost",
-            costSummary: "$2 / MTok In · $10 / MTok Out · $0.2 / MTok Cache Read · $2.5 / MTok Cache Write",
-            longContextCostSummary: "$4 / MTok In · $20 / MTok Out · $0.4 / MTok Cache Read · $5 / MTok Cache Write",
-            description: "Powerful",
-            maxContextTokens: 1048576,
-            maxOutputTokens: 131072,
-            isNew: true,
-            promotion: "PROMO"
-          },
+          { value: "claude-medium", name: "Medium", isNew: true, promotion: "PROMO" },
           { value: "claude-low", name: "Low" }
         ]
       },
@@ -5125,93 +5160,47 @@ test("model picker follows the adaptive pinned and models layout", async () => {
         id: "terra",
         name: "Terra",
         default: "terra-medium",
-        variants: [{ value: "terra-medium", name: "Medium", costTier: "Low cost", costSummary: "$1 / MTok In · $2 / MTok Out" }]
+        variants: [{ value: "terra-medium", name: "Medium" }]
       }
     ]
   });
   await h.settle(20);
 
-  const dd = h.document.querySelector("#model-dd");
-  dd.querySelector(".dd-btn").click();
-  const rows = [...dd.querySelectorAll(".dd-item")];
+  h.document.querySelector("#modelBtn").click();
+  const popup = h.document.querySelector("#model-picker-popup");
+  const rows = [...popup.querySelectorAll(".dd-item")];
   assert.match(rows[0].textContent, /Adaptive/);
-  assert.match(rows[1].textContent, /Fusion/, "Fusion sits beside Adaptive above the model list");
-  assert.ok(rows[1].nextElementSibling.classList.contains("dd-sep"), "Fusion is separated from ordinary models");
-  const adaptiveRow = rows[0];
-  adaptiveRow.dispatchEvent(new h.window.MouseEvent("mouseenter", { bubbles: true }));
-  await h.until(() => h.document.querySelector(".model-hover"), 2000);
-  const adaptiveHover = h.document.querySelector(".model-hover");
-  assert.ok(adaptiveHover.classList.contains("compact"), "Adaptive uses the compact hover card");
-  assert.match(adaptiveHover.textContent, /Automatically balances quality and cost/);
-  assert.strictEqual(adaptiveHover.querySelector(".model-hover-configurable"), null, "Adaptive has no configurable controls");
-  adaptiveRow.dispatchEvent(new h.window.MouseEvent("mouseleave", { bubbles: true }));
-  await h.until(() => !h.document.querySelector(".model-hover"), 2000);
-  const row = rows.find((item) => /Claude/.test(item.textContent));
-  assert.ok(row, "the Claude family is listed");
-  assert.doesNotMatch(row.textContent, /Med cost|MTok/, "cost stays out of the model row");
-  assert.match(row.textContent, /NEW/);
-  assert.match(row.textContent, /PROMO/);
-  const pin = row.querySelector(".dd-item-action");
-  assert.ok(pin, "the model row has a pin action");
-
-  row.dispatchEvent(new h.window.MouseEvent("mouseenter", { bubbles: true }));
-  await h.settle(100);
-  assert.strictEqual(h.document.querySelector(".model-hover"), null, "the model hover waits before opening");
-  await h.until(() => h.document.querySelector(".model-hover"), 2000);
-  const hover = h.document.querySelector(".model-hover");
-  assert.ok(hover, "the model opens a hover card after the delay");
-  assert.match(hover.textContent, /Powerful/);
-  assert.match(hover.textContent, /Medium cost/);
-  assert.match(hover.textContent, /Cost per 1M tokens/);
-  assert.match(hover.textContent, /Default/);
-  assert.match(hover.textContent, /Long Context/);
-  assert.match(hover.textContent, /Input/);
-  assert.match(hover.textContent, /Cache Read/);
-  assert.match(hover.textContent, /\$2/);
-  assert.match(hover.textContent, /\$4/);
-  assert.match(hover.textContent, /1M tokens/);
-  assert.match(hover.textContent, /131K tokens/);
-  assert.match(hover.textContent, /Configurable/);
-  assert.deepStrictEqual(
-    [...hover.querySelectorAll(".model-hover-configurable-button")].map((button) => button.textContent),
-    ["Thinking Level"]
-  );
-  assert.ok([...hover.querySelectorAll("button")].some((button) => button.textContent === "Thinking Level"));
-  assert.match(hover.textContent, /PROMO/);
-
-  row.dispatchEvent(new h.window.MouseEvent("mouseleave", { bubbles: true }));
-  await h.settle(100);
-  assert.ok(h.document.querySelector(".model-hover"), "the hover remains during the hide delay");
-  await h.until(() => !h.document.querySelector(".model-hover"), 2000);
-  assert.strictEqual(h.document.querySelector(".model-hover"), null, "the hover closes after the hide delay");
+  assert.ok(rows[0].classList.contains("dd-item-card"), "Adaptive renders as a featured card");
+  assert.match(rows[0].textContent, /Automatically balances quality and cost/);
+  assert.ok(!rows[0].querySelector(".dd-item-action"), "the Adaptive card has no effort action");
+  assert.match(rows[1].textContent, /Fusion/);
+  assert.ok(rows[1].classList.contains("dd-item-card"), "Fusion renders as a featured card");
+  assert.ok(rows[1].querySelector(".dd-item-action"), "the Fusion card routes to its settings page");
+  const claude = rows.find((item) => /Claude/.test(item.textContent));
+  assert.ok(claude, "the Claude family is listed");
+  assert.match(claude.textContent, /New/);
+  assert.match(claude.textContent, /Promotion/);
+  assert.doesNotMatch(claude.textContent, /MTok/, "cost stays out of the model row");
+  assert.ok(claude.querySelector(".dd-item-action"), "a configurable model has an effort action");
 
   const css = fs.readFileSync(path.join(ROOT, "media", "main.css"), "utf8");
-  assert.match(css, /\.model-hover-header\.no-description\s*\{/, "the badge has a dedicated no-description header layout");
-  assert.match(css, /\.dv-floater\.model-hover-floater\s*\{[\s\S]*width: min\(300px, calc\(100vw - 8px\)\);/, "the hover card uses the compact target width");
-  assert.match(css, /\.dv-floater\.model-hover-floater\s*\{[\s\S]*max-width: min\(300px, calc\(100vw - 8px\)\);/, "the hover card fits the viewport width");
-  assert.match(css, /\.dv-floater\.model-hover-floater\s*\{[\s\S]*max-height: calc\(100vh - 8px\);/, "the hover card fits the viewport height");
-  assert.match(css, /#model-dd \.dd-menu\s*\{[\s\S]*width: min\(200px, calc\(100vw - 16px\)\);/, "the model picker has a compact width");
-  assert.match(css, /\.model-hover-configurable-controls\s*\{/, "configurable items use a right aligned control group");
-  assert.match(css, /\.model-hover-configurable-button\s*\{[\s\S]*border: 1px solid var\(--vscode-widget-border/, "configurable items use the Copilot badge border");
-  assert.match(css, /\.model-hover\.compact\s*\{/, "metadata only hovers use compact spacing");
-  assert.match(css, /\.model-hover\.compact \.model-hover-header\s*\{/, "compact hovers remove the unused header gap");
+  assert.match(css, /#model-picker-popup \.dd-item-card\s*\{/, "the featured card style exists");
+  assert.match(css, /#model-picker-popup\s*\{/, "the tray is styled");
+  assert.match(css, /#model-picker-popup \.dd-rows > \.dd-group\s*\{/, "group headings align with the row band");
 
-  const terra = rows.find((item) => /Terra/.test(item.textContent));
-  terra.dispatchEvent(new h.window.MouseEvent("mouseenter", { bubbles: true }));
-  await h.until(() => h.document.querySelector(".model-hover"), 2000);
-  assert.ok(h.document.querySelector(".model-hover-header.no-description"), "a model without a description keeps the badge aligned");
-  terra.dispatchEvent(new h.window.MouseEvent("mouseleave", { bubbles: true }));
-  await h.until(() => !h.document.querySelector(".model-hover"), 2000);
-
-  pin.click();
+  claude.querySelector(".dd-item-main").click();
   await h.settle(20);
-  dd.querySelector(".dd-btn").click();
+  h.document.querySelector("#effortBtn").click();
+  popup.querySelector("#pagePin").click();
+  await h.settle(20);
+  assert.ok(h.state().pinnedModels.includes("claude"), "the header pin records the model");
+  h.document.querySelector("#modelBtn").click();
   assert.deepStrictEqual(
-    [...dd.querySelectorAll(".dd-group")].map((group) => group.textContent.trim()),
+    [...popup.querySelectorAll(".dd-group")].map((group) => group.textContent.trim()),
     ["Pinned", "Models"]
   );
-  assert.strictEqual([...dd.querySelectorAll(".dd-item")].filter((item) => /Claude/.test(item.textContent)).length, 1);
-  dd.querySelector(".dd-btn").click();
+  assert.strictEqual([...popup.querySelectorAll(".dd-item")].filter((item) => /Claude/.test(item.textContent)).length, 1);
+  h.document.body.dispatchEvent(new h.window.MouseEvent("mousedown", { bubbles: true }));
 
   h.post({
     type: "options",
@@ -5226,226 +5215,128 @@ test("model picker follows the adaptive pinned and models layout", async () => {
     }]
   });
   await h.settle(20);
-  dd.querySelector(".dd-btn").click();
-  assert.doesNotMatch(dd.textContent, /Claude/, "an unavailable pinned model is not shown");
+  h.document.querySelector("#modelBtn").click();
+  assert.doesNotMatch(h.document.querySelector("#model-picker-popup").textContent, /Claude/, "an unavailable pinned model is not shown");
   assert.strictEqual(h.errors().length, 0);
 });
 
-test("model hover draws a line from each cost label to its prices", async () => {
-  const h = createHarness();
-  h.document.documentElement.style.setProperty("--vscode-descriptionForeground", "#9d9d9d");
-  const stylesheet = h.document.createElement("style");
-  stylesheet.textContent = fs.readFileSync(path.join(ROOT, "media", "main.css"), "utf8");
-  h.document.head.appendChild(stylesheet);
-  h.post({ type: "ready" });
-  h.post({ type: "body", body: "thread" });
-  h.post({
-    type: "options",
-    currentMode: "accept-edits",
-    currentModel: "gpt-terra-medium",
-    modes: [],
-    models: [{
-      id: "gpt-terra",
-      name: "GPT-5.6 Terra",
-      default: "gpt-terra-medium",
-      variants: [{
-        value: "gpt-terra-medium",
-        name: "Medium",
-        costSummary: "$2 / 1M Input · $0.2 / 1M Cached input · $12 / 1M Output",
-        longContextCostSummary: "$4 / 1M Input · $0.4 / 1M Cached input · $24 / 1M Output"
-      }]
-    }]
-  });
-  await h.settle(20);
-
-  const dd = h.document.querySelector("#model-dd");
-  dd.querySelector(".dd-btn").click();
-  dd.querySelector(".dd-item").dispatchEvent(new h.window.MouseEvent("mouseenter", { bubbles: true }));
-  await h.until(() => h.document.querySelector(".model-hover"), 2000);
-
-  const hover = h.document.querySelector(".model-hover");
-  assert.ok(hover, "the model hover is shown");
-  const lines = [...hover.querySelectorAll(".model-hover-cost-line")];
-  const rows = [...hover.querySelectorAll(".model-hover-cost-row")];
-  assert.strictEqual(lines.length, 3, "each price row has one dotted line");
-  assert.deepStrictEqual(
-    rows.map((row) => row.querySelector(".model-hover-cost-label").textContent),
-    ["Input", "Cache Read", "Output"],
-    "each cost row keeps its label beside its first line"
-  );
-  assert.deepStrictEqual(
-    [...hover.querySelectorAll(".model-hover-cost-value")].map((value) => value.textContent),
-    ["$2", "$4", "$0.2", "$0.4", "$12", "$24"],
-    "current CLI price values are shown"
-  );
-  assert.ok(
-    lines.every((line) => h.window.getComputedStyle(line).borderBottomStyle === "dotted"),
-    "cost lines use a dotted stroke"
-  );
-  assert.ok(
-    lines.every((line) => {
-      const style = h.window.getComputedStyle(line);
-      return style.marginLeft === "0px" && style.marginRight === "0px";
-    }),
-    "each row uses one uninterrupted line"
-  );
-  assert.ok(
-    [...hover.querySelectorAll(".model-hover-cost-label")].every((label) => h.window.getComputedStyle(label).paddingRight === "6px")
-      && [...hover.querySelectorAll(".model-hover-cost-value")].every((value) => {
-        const style = h.window.getComputedStyle(value);
-        return style.paddingLeft === "6px" && style.paddingRight === "6px";
-      }),
-    "cost text leaves the dotted line a six pixel gap"
-  );
-  assert.strictEqual(
-    h.window.getComputedStyle(hover.querySelector(".model-hover-cost-table")).columnGap,
-    "0",
-    "price columns do not add an extra gap"
-  );
-  assert.deepStrictEqual(
-    lines.map((line) => line.parentElement.querySelector(".model-hover-cost-label").textContent),
-    ["Input", "Cache Read", "Output"],
-    "each dotted line belongs to its cost row"
-  );
-  assert.strictEqual(h.errors().length, 0);
-});
-
-test("Fusion cost details separate lead and sidekick pricing", async () => {
+test("the details page links cost labels to prices and limits to values", async () => {
   const h = createHarness();
   h.post({ type: "ready" });
   h.post({ type: "body", body: "thread" });
   h.post({
     type: "options",
     currentMode: "accept-edits",
-    currentModel: "fusion-opus-sidekick-swe",
+    currentModel: "claude-medium",
     modes: [],
     models: [{
-      id: "fusion",
-      name: "Fusion",
-      default: "fusion-opus-sidekick-swe",
-      variants: [{
-        value: "fusion-opus-sidekick-swe",
-        name: "Opus + SWE",
-        costTier: "High cost",
-        costSummary: "$5 / 1M Input · $0.5 / 1M Cached input · $25 / 1M Output · $0.75 / 1M Sidekick input · $0.08 / 1M Sidekick cached input · $3.75 / 1M Sidekick output"
-      }]
+      id: "claude",
+      name: "Claude",
+      default: "claude-medium",
+      variants: [
+        {
+          value: "claude-medium",
+          name: "Medium",
+          costTier: "Medium cost",
+          costSummary: "$2 / MTok In \u00b7 $10 / MTok Out \u00b7 $0.2 / MTok Cache Read \u00b7 $2.5 / MTok Cache Write",
+          longContextCostSummary: "$4 / MTok In \u00b7 $20 / MTok Out \u00b7 $0.4 / MTok Cache Read \u00b7 $5 / MTok Cache Write",
+          maxContextTokens: 1048576,
+          maxOutputTokens: 131072
+        },
+        { value: "claude-low", name: "Low", maxContextTokens: 200000, maxOutputTokens: 8192 }
+      ]
     }]
   });
   await h.settle(20);
 
-  const dd = h.document.querySelector("#model-dd");
-  dd.querySelector(".dd-btn").click();
-  dd.querySelector(".dd-item").dispatchEvent(new h.window.MouseEvent("mouseenter", { bubbles: true }));
-  await h.until(() => h.document.querySelector(".model-hover"), 2000);
+  h.document.querySelector("#effortBtn").click();
+  const popup = h.document.querySelector("#model-picker-popup");
+  const limits = popup.querySelector(".catalog-limits");
+  const pairs = [...limits.querySelectorAll(".catalog-limit")].map((row) => [
+    row.querySelector("dt").textContent,
+    row.querySelector("dd").textContent
+  ]);
+  assert.deepStrictEqual(pairs, [["Max context", "1M tokens"], ["Max output", "131K tokens"]]);
 
-  const hover = h.document.querySelector(".model-hover");
-  assert.deepStrictEqual(
-    [...hover.querySelectorAll(".model-hover-section")].map((section) => section.textContent),
-    ["Lead cost per 1M tokens", "Sidekick cost per 1M tokens"]
+  const pricing = popup.querySelector("details.catalog-pricing");
+  assert.strictEqual(pricing.open, false, "pricing starts collapsed");
+  assert.strictEqual(popup.querySelector(".catalog-unit").textContent, "USD per 1M tokens");
+  assert.match(pricing.querySelector(".catalog-box-label").textContent, /Pricing details/);
+  assert.match(pricing.querySelector(".catalog-tier").textContent, /Medium cost/);
+  pricing.open = true;
+  pricing.dispatchEvent(new h.window.Event("toggle"));
+  const table = pricing.querySelector("table.catalog-prices");
+  const header = [...table.querySelectorAll("thead th")].map((cell) => cell.textContent);
+  assert.deepStrictEqual(header, ["Token type", "Default", "Long context"], "long context rates get their own column");
+  const rows = Object.fromEntries(
+    [...table.querySelectorAll("tbody tr")].map((row) => [
+      row.querySelector("th, td").textContent,
+      [...row.querySelectorAll("td")].slice(-2).map((cell) => cell.textContent)
+    ])
   );
-  assert.deepStrictEqual(
-    [...hover.querySelectorAll(".model-hover-cost-value")].map((value) => value.textContent),
-    ["$5", "$0.5", "$25", "$0.75", "$0.08", "$3.75"]
-  );
-  assert.strictEqual(hover.querySelector(".model-hover-configurable-button").textContent, "Configure Fusion");
+  assert.deepStrictEqual(rows["Input"], ["$2", "$4"]);
+  assert.deepStrictEqual(rows["Output"], ["$10", "$20"]);
+  assert.deepStrictEqual(rows["Cache Read"], ["$0.2", "$0.4"]);
+  assert.deepStrictEqual(rows["Cache Write"], ["$2.5", "$5"]);
   assert.strictEqual(h.errors().length, 0);
 });
 
-test("model hover links context limits to their values", async () => {
+test("Fusion role pages price each side with its own rates", async () => {
   const h = createHarness();
-  h.document.documentElement.style.setProperty("--vscode-descriptionForeground", "#9d9d9d");
-  const stylesheet = h.document.createElement("style");
-  stylesheet.textContent = fs.readFileSync(path.join(ROOT, "media", "main.css"), "utf8");
-  h.document.head.appendChild(stylesheet);
   h.post({ type: "ready" });
   h.post({ type: "body", body: "thread" });
   h.post({
     type: "options",
     currentMode: "accept-edits",
-    currentModel: "context-model",
+    currentModel: "fusion-opus-high-sidekick-swe-medium",
+    currentThoughtLevel: "high",
     modes: [],
-    models: [{
-      id: "context",
-      name: "Context Model",
-      default: "context-model",
-      variants: [{
-        value: "context-model",
-        name: "Base",
-        maxContextTokens: 1000000,
-        maxOutputTokens: 128000
-      }]
-    }]
+    models: [
+      {
+        id: "fusion",
+        name: "Fusion",
+        default: "fusion-opus-high-sidekick-swe-medium",
+        variants: [
+          {
+            value: "fusion-opus-high-sidekick-swe-medium",
+            name: "Opus + SWE",
+            costSummary: "$4 / MTok In \u00b7 $20 / MTok Out \u00b7 $1 / MTok Sidekick In \u00b7 $5 / MTok Sidekick Out",
+            maxContextTokens: 1000000,
+            maxOutputTokens: 128000
+          }
+        ]
+      },
+      { id: "opus", name: "Opus", default: "opus-high", variants: [{ value: "opus-high", name: "High", maxContextTokens: 1000000, maxOutputTokens: 128000 }] },
+      { id: "swe", name: "SWE", default: "swe-medium", variants: [{ value: "swe-medium", name: "Medium", maxContextTokens: 262000, maxOutputTokens: 64000 }] }
+    ]
   });
   await h.settle(20);
 
-  const dd = h.document.querySelector("#model-dd");
-  dd.querySelector(".dd-btn").click();
-  dd.querySelector(".dd-item").dispatchEvent(new h.window.MouseEvent("mouseenter", { bubbles: true }));
-  await h.until(() => h.document.querySelector(".model-hover"), 2000);
-
-  const limits = h.document.querySelector(".model-hover-limits");
-  assert.ok(limits, "the model hover shows its context limits");
-  const rows = [...limits.querySelectorAll(".model-hover-cost-row")];
-  const lines = [...limits.querySelectorAll(".model-hover-cost-line")];
-  assert.strictEqual(rows.length, 2, "each context limit has a row");
-  assert.strictEqual(lines.length, 2, "each context limit has one dotted line");
-  assert.deepStrictEqual(
-    rows.map((row) => row.querySelector(".model-hover-cost-label").textContent),
-    ["Max context", "Max output"]
-  );
-  assert.deepStrictEqual(
-    [...limits.querySelectorAll(".model-hover-cost-value")].map((value) => value.textContent),
-    ["1M tokens", "128K tokens"]
-  );
-  assert.ok(
-    lines.every((line) => h.window.getComputedStyle(line).borderBottomStyle === "dotted"),
-    "context lines use the same dotted stroke"
-  );
+  h.document.querySelector("#effortBtn").click();
+  const popup = h.document.querySelector("#model-picker-popup");
+  popup.querySelector("#act-opus").click();
+  let pricing = popup.querySelector("details.catalog-pricing");
+  pricing.open = true;
+  pricing.dispatchEvent(new h.window.Event("toggle"));
+  assert.match(pricing.textContent, /\$4/);
+  assert.doesNotMatch(pricing.textContent, /Sidekick/, "the Lead page never shows sidekick rates");
+  popup.querySelector("#pageBack").click();
+  popup.querySelector("#roleRadio-sub").checked = true;
+  popup.querySelector("#roleRadio-sub").dispatchEvent(new h.window.Event("change", { bubbles: true }));
+  popup.querySelector("#act-swe").click();
+  pricing = popup.querySelector("details.catalog-pricing");
+  pricing.open = true;
+  pricing.dispatchEvent(new h.window.Event("toggle"));
+  assert.match(pricing.textContent, /\$1/);
+  assert.match(pricing.textContent, /\$5/, "the Sub page shows sidekick rates");
+  const limits = [...popup.querySelectorAll(".catalog-limit")].map((row) => [
+    row.querySelector("dt").textContent, row.querySelector("dd").textContent
+  ]);
+  assert.deepStrictEqual(limits, [["Max context", "262K tokens"], ["Max output", "64K tokens"]], "the Sub page shows its own model limits");
   assert.strictEqual(h.errors().length, 0);
 });
 
-test("model hover balances padding without configuration", async () => {
-  const h = createHarness();
-  const stylesheet = h.document.createElement("style");
-  stylesheet.textContent = fs.readFileSync(path.join(ROOT, "media", "main.css"), "utf8");
-  h.document.head.appendChild(stylesheet);
-  h.post({ type: "ready" });
-  h.post({ type: "body", body: "thread" });
-  h.post({
-    type: "options",
-    currentMode: "accept-edits",
-    currentModel: "no-configuration",
-    modes: [],
-    models: [{
-      id: "no-configuration",
-      name: "No Configuration",
-      default: "no-configuration",
-      variants: [{
-        value: "no-configuration",
-        name: "Base",
-        maxContextTokens: 1000000,
-        maxOutputTokens: 128000
-      }]
-    }]
-  });
-  await h.settle(20);
-
-  const dd = h.document.querySelector("#model-dd");
-  dd.querySelector(".dd-btn").click();
-  dd.querySelector(".dd-item").dispatchEvent(new h.window.MouseEvent("mouseenter", { bubbles: true }));
-  await h.until(() => h.document.querySelector(".model-hover"), 2000);
-
-  const hover = h.document.querySelector(".model-hover");
-  assert.ok(hover, "the model hover is shown");
-  assert.ok(!hover.classList.contains("compact"), "the context limits use the full tooltip layout");
-  assert.ok(hover.classList.contains("no-configurable"), "the tooltip records that configuration is absent");
-  const style = h.window.getComputedStyle(hover);
-  assert.strictEqual(style.paddingTop, "10px");
-  assert.strictEqual(style.paddingBottom, "13px");
-  assert.strictEqual(h.errors().length, 0);
-});
-
-test("Fusion keeps lead effort and sidekick in one configuration picker", async () => {
+test("Fusion keeps lead effort and sidekick in one picker", async () => {
   const h = createHarness();
   h.post({ type: "ready" });
   h.post({ type: "body", body: "thread" });
@@ -5454,74 +5345,77 @@ test("Fusion keeps lead effort and sidekick in one configuration picker", async 
     currentMode: "accept-edits",
     currentModel: "fusion-claude-opus-5-high-sidekick-swe-2-medium",
     currentThoughtLevel: "low",
-    thoughtLevels: [{ value: "low", name: "Low" }, { value: "medium", name: "Medium" }, { value: "high", name: "High" }, { value: "xhigh", name: "XHigh" }],
-    modelChoices: {
-      fusion: [
-        { value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "Fusion (Claude Opus 5 High + SWE-2 Medium)" },
-        { value: "fusion-gpt-6-astra-high-sidekick-swe-2-medium", name: "Fusion (GPT-6 Astra High Thinking + SWE-2 Medium)" },
-        { value: "fusion-claude-opus-5-high-sidekick-swe-2-high", name: "Fusion (Claude Opus 5 High + SWE-2 High)" },
-        { value: "fusion-gpt-6-astra-high-sidekick-swe-2-high", name: "Fusion (GPT-6 Astra High Thinking + SWE-2 High)" }
-      ]
-    },
+    thoughtLevels: [{ value: "low", name: "Low" }, { value: "medium", name: "Medium" }, { value: "high", name: "High" }],
+    modelChoices: {},
     models: [{
       id: "fusion",
       name: "Fusion",
       default: "fusion-claude-opus-5-high-sidekick-swe-2-medium",
       variants: [
-        { value: "fusion-claude-opus-5-low-sidekick-swe-2-medium", name: "(Claude Opus 5 Low + SWE-2 Medium)" },
-        { value: "fusion-claude-opus-5-medium-sidekick-swe-2-medium", name: "(Claude Opus 5 Medium + SWE-2 Medium)" },
-        { value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "(Claude Opus 5 High + SWE-2 Medium)" },
-        { value: "fusion-claude-opus-5-low-sidekick-swe-2-high", name: "(Claude Opus 5 Low + SWE-2 High)" },
-        { value: "fusion-claude-opus-5-medium-sidekick-swe-2-high", name: "(Claude Opus 5 Medium + SWE-2 High)" },
-        { value: "fusion-claude-opus-5-high-sidekick-swe-2-high", name: "(Claude Opus 5 High + SWE-2 High)" },
-        { value: "fusion-gpt-6-astra-low-sidekick-swe-2-medium", name: "(GPT-6 Astra Low + SWE-2 Medium)" },
-        { value: "fusion-gpt-6-astra-medium-sidekick-swe-2-medium", name: "(GPT-6 Astra Medium + SWE-2 Medium)" },
-        { value: "fusion-gpt-6-astra-high-sidekick-swe-2-medium", name: "(GPT-6 Astra High + SWE-2 Medium)" },
-        { value: "fusion-gpt-6-astra-low-sidekick-swe-2-high", name: "(GPT-6 Astra Low + SWE-2 High)" },
-        { value: "fusion-gpt-6-astra-medium-sidekick-swe-2-high", name: "(GPT-6 Astra Medium + SWE-2 High)" },
-        { value: "fusion-gpt-6-astra-high-sidekick-swe-2-high", name: "(GPT-6 Astra High + SWE-2 High)" }
+        { value: "fusion-claude-opus-5-low-sidekick-swe-2-medium", name: "Opus 5 Low + SWE-2 Medium" },
+        { value: "fusion-claude-opus-5-medium-sidekick-swe-2-medium", name: "Opus 5 Medium + SWE-2 Medium" },
+        { value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "Opus 5 High + SWE-2 Medium" },
+        { value: "fusion-claude-opus-5-low-sidekick-swe-2-high", name: "Opus 5 Low + SWE-2 High" },
+        { value: "fusion-claude-opus-5-medium-sidekick-swe-2-medium".replace("medium", "medium"), name: "" },
+        { value: "fusion-claude-opus-5-medium-sidekick-swe-2-high", name: "Opus 5 Medium + SWE-2 High" },
+        { value: "fusion-claude-opus-5-high-sidekick-swe-2-high", name: "Opus 5 High + SWE-2 High" },
+        { value: "fusion-gpt-6-astra-low-sidekick-swe-2-medium", name: "Astra Low + SWE-2 Medium" },
+        { value: "fusion-gpt-6-astra-high-sidekick-swe-2-medium", name: "Astra High + SWE-2 Medium" }
       ]
+    },
+    {
+      id: "claude-opus-5", name: "Claude Opus 5", default: "claude-opus-5-high",
+      variants: [{ value: "claude-opus-5-high", name: "High" }]
+    },
+    {
+      id: "gpt-6-astra", name: "GPT-6 Astra", default: "gpt-6-astra-high",
+      variants: [{ value: "gpt-6-astra-high", name: "High" }]
+    },
+    {
+      id: "swe-2", name: "SWE-2", default: "swe-2-medium",
+      variants: [{ value: "swe-2-medium", name: "Medium" }, { value: "swe-2-high", name: "High" }]
     }],
     modes: []
   });
   await h.settle(20);
 
-  const picker = h.document.querySelector("#fusion-dd");
-  assert.ok(!picker.classList.contains("hidden"), "Fusion has one configuration control");
-  assert.strictEqual(picker.querySelector(".dd-btn").getAttribute("aria-label"), "Configure Fusion");
-  assert.strictEqual(picker.querySelector(".fusion-config-lead-title").textContent, "Opus 5 · Low");
-  assert.strictEqual(picker.querySelector(".fusion-config-sidekick-title").textContent, "SWE-2 · Medium");
-  assert.ok(h.document.querySelector("#thinking-dd").classList.contains("hidden"), "thinking effort moves inside Fusion configuration");
-  const css = fs.readFileSync(path.join(ROOT, "media", "main.css"), "utf8");
-  assert.doesNotMatch(css, /#input-box\.cmp-xs #fusion-dd/, "compact Fusion keeps its configuration icon");
+  assert.strictEqual(h.document.querySelector("#modelBtn .dd-label").textContent, "Fusion");
+  assert.match(h.document.querySelector("#effortBtnLabel").textContent, /Opus 5 Low/);
+  assert.match(h.document.querySelector("#effortBtnLabel").textContent, /SWE-2 Medium/);
 
-  picker.querySelector(".dd-btn").click();
+  h.document.querySelector("#effortBtn").click();
+  const popup = h.document.querySelector("#model-picker-popup");
+  assert.ok(!popup.classList.contains("hidden"));
   assert.deepStrictEqual(
-    [...picker.querySelectorAll(".fusion-config-label")].map((label) => label.textContent),
-    ["Lead model", "Lead effort", "Sidekick"]
+    [...popup.querySelectorAll(".role-radio")].map((radio) => radio.value),
+    ["lead", "sub"],
+    "Lead and Sub share the one tray"
   );
-  const buttons = [...picker.querySelectorAll(".fusion-config-option")];
-  // Selected items show a check icon, matching the effort selector for normal models.
-  const selected = buttons.filter((b) => b.classList.contains("selected"));
-  assert.ok(selected.length >= 1, "at least one option is selected by default");
-  assert.ok(selected.every((b) => b.querySelector(".dd-check .codicon-check")), "selected Fusion options show a check icon");
-  const unselected = buttons.filter((b) => !b.classList.contains("selected"));
-  assert.ok(unselected.every((b) => !b.querySelector(".dd-check .codicon-check")), "unselected Fusion options have no check icon");
-  buttons.find((button) => button.textContent === "GPT-6 Astra").click();
-  assert.ok(!picker.querySelector(".dd-menu").classList.contains("hidden"), "the menu stays open while configuring");
-  assert.ok(h.posted.some((message) => message.type === "setFusionModel" && message.model === "fusion-gpt-6-astra-low-sidekick-swe-2-medium" && message.thoughtLevel === "low"));
-  // After selecting GPT-6 Astra, verify the check icon moved to the new lead.
-  const option = (label) => [...picker.querySelectorAll(".fusion-config-option")].find((button) => button.textContent === label);
-  const newLead = option("GPT-6 Astra");
-  assert.ok(newLead.querySelector(".dd-check .codicon-check"), "the newly selected lead shows a check icon");
-  option("High").click();
-  assert.ok(h.posted.some((message) => message.type === "setConfigOption" && message.configId === "thought_level" && message.value === "high" && message.model === "fusion-gpt-6-astra-high-sidekick-swe-2-medium"));
-  option("SWE-2 High").click();
-  assert.ok(h.posted.some((message) => message.type === "setFusionModel" && message.model === "fusion-gpt-6-astra-high-sidekick-swe-2-high" && message.thoughtLevel === "high"));
+  assert.deepStrictEqual(
+    [...popup.querySelectorAll(".fusion-rows .dd-item-name")].map((el) => el.textContent),
+    ["Claude Opus 5", "GPT-6 Astra"]
+  );
+  popup.querySelector("#act-claude-opus-5").click();
+  assert.deepStrictEqual(
+    [...popup.querySelectorAll(".effort-seg")].map((seg) => seg.dataset.effort),
+    ["low", "medium", "high"]
+  );
+  popup.querySelector('.effort-seg[data-effort="high"]').click();
+  assert.ok(h.posted.some((message) => message.type === "setConfigOption" && message.configId === "thought_level" && message.value === "high"));
+  popup.querySelector("#pageBack").click();
+  popup.querySelector("#roleRadio-sub").checked = true;
+  popup.querySelector("#roleRadio-sub").dispatchEvent(new h.window.Event("change", { bubbles: true }));
+  assert.deepStrictEqual(
+    [...popup.querySelectorAll(".fusion-rows .dd-item-name")].map((el) => el.textContent),
+    ["SWE-2"]
+  );
+  popup.querySelector("#act-swe-2").click();
+  popup.querySelector('.effort-seg[data-effort="high"]').click();
+  assert.ok(h.posted.some((message) => message.type === "setFusionModel" && /-sidekick-swe-2-high$/.test(message.model)), "a sub effort reposts the resolved pair");
   assert.strictEqual(h.errors().length, 0);
 });
 
-test("switching from a normal model to Fusion keeps the effort levels", async () => {
+test("a normal model with no thought level hides the effort segment", async () => {
   const h = createHarness();
   h.post({ type: "ready" });
   h.post({ type: "body", body: "thread" });
@@ -5529,142 +5423,29 @@ test("switching from a normal model to Fusion keeps the effort levels", async ()
     { id: "fusion", name: "Fusion", default: "fusion-claude-opus-5-high-sidekick-swe-2-medium", variants: [{ value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "Fusion" }] },
     { id: "gpt", name: "GPT-5", default: "gpt-5-xhigh", variants: [{ value: "gpt-5-xhigh", name: "GPT-5 XHigh" }] }
   ];
-  const fusionChoices = [
-    { value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "Fusion (Claude Opus 5 High + SWE-2 Medium)" },
-    { value: "fusion-claude-opus-5-high-sidekick-swe-2-high", name: "Fusion (Claude Opus 5 High + SWE-2 High)" }
-  ];
-  const levels = [{ value: "low", name: "Low" }, { value: "high", name: "High" }];
-
-  // Start on Fusion with thought levels and Fusion choices populated.
   h.post({
     type: "options", currentMode: "accept-edits",
     currentModel: "fusion-claude-opus-5-high-sidekick-swe-2-medium",
-    currentThoughtLevel: "low", thoughtLevels: levels,
-    modelChoices: { fusion: fusionChoices }, models: allModels, modes: []
+    currentThoughtLevel: "low", thoughtLevels: [{ value: "low", name: "Low" }],
+    modelChoices: {}, models: allModels, modes: []
   });
   await h.settle(20);
-  assert.ok(!h.document.querySelector("#fusion-dd").classList.contains("hidden"), "Fusion picker visible initially");
+  const group = h.document.querySelector("#model-picker-group");
+  assert.ok(!group.classList.contains("no-effort"), "Fusion keeps its effort segment");
 
-  // Simulate user clicking GPT-5 in the model dropdown. This sets currentModelUid
-  // synchronously, then the host responds with options for the normal model.
-  const modelDD = h.document.querySelector("#model-dd");
-  modelDD.querySelector(".dd-btn").click();
-  const gptItem = [...modelDD.querySelectorAll(".dd-item")].find((el) => el.textContent.includes("GPT-5"));
-  gptItem.click();
-  assert.ok(h.document.querySelector("#fusion-dd").classList.contains("hidden"), "Fusion picker hidden after clicking GPT-5");
-
-  // Host responds with options for GPT-5 (no Fusion groups, no thought levels).
+  h.document.querySelector("#modelBtn").click();
+  [...h.document.querySelectorAll(".dd-item-main")].find((el) => el.textContent.includes("GPT-5")).click();
   h.post({
     type: "options", currentMode: "accept-edits",
     currentModel: "gpt-5-xhigh", currentThoughtLevel: "",
-    thoughtLevels: [], modelChoices: {}, models: allModels, modes: []
+    thoughtLevels: [], modelChoices: {}, models: allModels, modes: [], sessionConfig: true
   });
   await h.settle(20);
 
-  // Now the user clicks Fusion in the model dropdown.
-  modelDD.querySelector(".dd-btn").click();
-  const fusionItem = [...modelDD.querySelectorAll(".dd-item")].find((el) => el.textContent.includes("Fusion"));
-  fusionItem.click();
-  const picker = h.document.querySelector("#fusion-dd");
-  assert.ok(!picker.classList.contains("hidden"), "Fusion picker reappears after switching back");
-  picker.querySelector(".dd-btn").click();
-  const effortSection = [...picker.querySelectorAll(".fusion-config-label")].find((el) => el.textContent === "Lead effort");
-  assert.ok(effortSection, "Lead effort section is present after switching from a normal model");
-  const effortOptions = effortSection.parentElement.querySelectorAll(".fusion-config-option");
-  assert.strictEqual(effortOptions.length, 2, "both effort levels are rendered");
-  assert.strictEqual(h.errors().length, 0);
-});
-
-test("Fusion effort levels that arrive late fill the open configuration menu", async () => {
-  const h = createHarness();
-  h.post({ type: "ready" });
-  h.post({ type: "body", body: "thread" });
-  const allModels = [
-    { id: "fusion", name: "Fusion", default: "fusion-claude-opus-5-high-sidekick-swe-2-medium", variants: [{ value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "Fusion" }] },
-    { id: "gpt", name: "GPT-5", default: "gpt-5-xhigh", variants: [{ value: "gpt-5-xhigh", name: "GPT-5 XHigh" }] }
-  ];
-  const fusionChoices = [
-    { value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "Fusion (Claude Opus 5 High + SWE-2 Medium)" },
-    { value: "fusion-claude-opus-5-high-sidekick-swe-2-high", name: "Fusion (Claude Opus 5 High + SWE-2 High)" }
-  ];
-  const levels = [{ value: "low", name: "Low" }, { value: "high", name: "High" }];
-
-  // A normal model is active and reports no thought level, but the Fusion
-  // group is already known so the picker can populate.
-  h.post({
-    type: "options", currentMode: "accept-edits",
-    currentModel: "gpt-5-xhigh", currentThoughtLevel: "",
-    thoughtLevels: [], modelChoices: { fusion: fusionChoices }, models: allModels, modes: []
-  });
-  await h.settle(20);
-
-  const modelDD = h.document.querySelector("#model-dd");
-  modelDD.querySelector(".dd-btn").click();
-  [...modelDD.querySelectorAll(".dd-item")].find((el) => el.textContent.includes("GPT-5")).click();
-  modelDD.querySelector(".dd-btn").click();
-  [...modelDD.querySelectorAll(".dd-item")].find((el) => el.textContent.includes("Fusion")).click();
-
-  const picker = h.document.querySelector("#fusion-dd");
-  assert.ok(!picker.classList.contains("hidden"), "Fusion picker is visible");
-  picker.querySelector(".dd-btn").click();
-  const labels = () => [...picker.querySelectorAll(".fusion-config-label")].map((el) => el.textContent);
-  const effortValues = () => [...picker.querySelectorAll(".fusion-config-option[data-kind=effort]")].map((el) => el.dataset.value);
-  assert.deepStrictEqual(labels(), ["Lead model", "Lead effort", "Sidekick"], "the catalogue supplies an effort section before ACP does");
-  assert.deepStrictEqual(effortValues(), ["high"], "only the effort the variants prove");
-
-  // The options response for the Fusion model lands while the menu is still
-  // open, so the effort section has to update without closing and reopening.
-  h.post({
-    type: "options", currentMode: "accept-edits",
-    currentModel: "fusion-claude-opus-5-high-sidekick-swe-2-medium",
-    currentThoughtLevel: "low", thoughtLevels: levels,
-    modelChoices: { fusion: fusionChoices }, models: allModels, modes: []
-  });
-  await h.settle(20);
-
-  assert.ok(!picker.querySelector(".dd-menu").classList.contains("hidden"), "the menu is still open");
-  assert.deepStrictEqual(effortValues(), ["low", "high"], "the reported levels replace the catalogue guess");
-  assert.strictEqual(h.errors().length, 0);
-});
-
-test("a normal model with no thought level keeps the ACP thinking picker hidden", async () => {
-  const h = createHarness();
-  h.post({ type: "ready" });
-  h.post({ type: "body", body: "thread" });
-  const allModels = [
-    { id: "fusion", name: "Fusion", default: "fusion-claude-opus-5-high-sidekick-swe-2-medium", variants: [{ value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "Fusion" }] },
-    { id: "gpt", name: "GPT-5", default: "gpt-5-xhigh", variants: [{ value: "gpt-5-xhigh", name: "GPT-5 XHigh" }] }
-  ];
-  const fusionChoices = [
-    { value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "Fusion (Claude Opus 5 High + SWE-2 Medium)" },
-    { value: "fusion-claude-opus-5-high-sidekick-swe-2-high", name: "Fusion (Claude Opus 5 High + SWE-2 High)" }
-  ];
-  const levels = [{ value: "low", name: "Low" }, { value: "high", name: "High" }];
-
-  // Fusion is active, so its effort levels become the known list.
-  h.post({
-    type: "options", currentMode: "accept-edits",
-    currentModel: "fusion-claude-opus-5-high-sidekick-swe-2-medium",
-    currentThoughtLevel: "low", thoughtLevels: levels,
-    modelChoices: { fusion: fusionChoices }, models: allModels, modes: []
-  });
-  await h.settle(20);
-
-  // The user picks a normal model whose options report no thought level. The
-  // remembered Fusion levels must not leak into the thinking picker, and the
-  // GPT family has a single variant so there is nothing else to show.
-  const modelDD = h.document.querySelector("#model-dd");
-  modelDD.querySelector(".dd-btn").click();
-  [...modelDD.querySelectorAll(".dd-item")].find((el) => el.textContent.includes("GPT-5")).click();
-  h.post({
-    type: "options", currentMode: "accept-edits",
-    currentModel: "gpt-5-xhigh", currentThoughtLevel: "",
-    thoughtLevels: [], modelChoices: {}, models: allModels, modes: []
-  });
-  await h.settle(20);
-
-  assert.ok(h.document.querySelector("#thinking-dd").classList.contains("hidden"), "the thinking picker stays hidden");
-  assert.ok(h.document.querySelector("#fusion-dd").classList.contains("hidden"), "the Fusion picker is hidden");
+  assert.ok(group.classList.contains("no-effort"), "an unconfigurable model hides the effort half");
+  const css = fs.readFileSync(path.join(ROOT, "media", "main.css"), "utf8");
+  assert.match(css, /#model-picker-group\.no-effort #effortBtn,\s*\n#model-picker-group\.no-effort \.picker-div \{\s*display: none;/, "the no-effort rule hides the segment");
+  assert.match(css, /#input-box\.cmp-no-models #model-picker-group/, "the deepest collapse stage hides the whole picker");
   assert.strictEqual(h.errors().length, 0);
 });
 
@@ -5672,65 +5453,34 @@ test("each model family keeps its own effort levels", async () => {
   const h = createHarness();
   h.post({ type: "ready" });
   h.post({ type: "body", body: "thread" });
-  const allModels = [
-    { id: "fusion", name: "Fusion", default: "fusion-claude-opus-5-high-sidekick-swe-2-medium", variants: [{ value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "Fusion" }] },
-    { id: "gpt", name: "GPT-5", default: "gpt-5-medium", variants: [
-      { value: "gpt-5-low", name: "GPT-5 Low" },
-      { value: "gpt-5-medium", name: "GPT-5 Medium" },
-      { value: "gpt-5-xhigh", name: "GPT-5 XHigh" }
+  const models = [
+    { id: "claude", name: "Claude", default: "claude-medium", variants: [
+      { value: "claude-medium", name: "Medium" }, { value: "claude-high", name: "High" }
+    ] },
+    { id: "gpt", name: "GPT", default: "gpt-medium", variants: [
+      { value: "gpt-medium", name: "Medium" }, { value: "gpt-max", name: "Max" }
     ] }
   ];
-  const fusionChoices = [
-    { value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "Fusion (Claude Opus 5 High + SWE-2 Medium)" },
-    { value: "fusion-claude-opus-5-high-sidekick-swe-2-high", name: "Fusion (Claude Opus 5 High + SWE-2 High)" }
-  ];
-  const levels = [{ value: "low", name: "Low" }, { value: "high", name: "High" }];
-
-  // Start on Fusion so its effort list is the one already known.
-  h.post({
-    type: "options", currentMode: "accept-edits",
-    currentModel: "fusion-claude-opus-5-high-sidekick-swe-2-medium",
-    currentThoughtLevel: "low", thoughtLevels: levels,
-    modelChoices: { fusion: fusionChoices }, models: allModels, modes: []
+  const options = (currentModel, currentThoughtLevel, thoughtLevels) => ({
+    type: "options", currentMode: "accept-edits", currentModel, currentThoughtLevel,
+    thoughtLevels, modelChoices: {}, models, modes: []
   });
+  h.post(options("claude-medium", "medium", [{ value: "medium", name: "Medium" }, { value: "high", name: "High" }]));
+  h.post(options("gpt-medium", "medium", [{ value: "medium", name: "Medium" }, { value: "max", name: "Max" }]));
+  h.post({ type: "model", model: "gpt-medium" });
   await h.settle(20);
 
-  // Switching to a normal model must not leave Fusion's levels on screen. GPT
-  // has no effort of its own yet, so until the host reports one the picker
-  // lists the family's own variants instead.
-  const modelDD = h.document.querySelector("#model-dd");
-  modelDD.querySelector(".dd-btn").click();
-  [...modelDD.querySelectorAll(".dd-item")].find((el) => el.textContent.includes("GPT-5")).click();
-
-  const thinking = h.document.querySelector("#thinking-dd");
-  const itemNames = () => [...thinking.querySelectorAll(".dd-item-name")].map((el) => el.textContent);
-  assert.ok(!thinking.classList.contains("hidden"), "the thinking picker shows the family's variants");
-  thinking.querySelector(".dd-btn").click();
-  assert.deepStrictEqual(itemNames(), ["GPT-5 Low", "GPT-5 Medium", "GPT-5 XHigh"], "not Fusion's efforts");
-  thinking.querySelector(".dd-btn").click();
-
-  // The host then reports that GPT really does have a thought level.
-  h.post({
-    type: "options", currentMode: "accept-edits",
-    currentModel: "gpt-5-medium", currentThoughtLevel: "medium",
-    thoughtLevels: [{ value: "medium", name: "Medium" }, { value: "xhigh", name: "XHigh" }],
-    modelChoices: {}, models: allModels, modes: []
-  });
-  await h.settle(20);
-
-  thinking.querySelector(".dd-btn").click();
-  assert.deepStrictEqual(itemNames(), ["Medium", "XHigh"], "only GPT's own effort levels are listed");
-  thinking.querySelector(".dd-btn").click();
-
-  // Switching back to Fusion still shows Fusion's levels, not GPT's.
-  modelDD.querySelector(".dd-btn").click();
-  [...modelDD.querySelectorAll(".dd-item")].find((el) => el.textContent.includes("Fusion")).click();
-  const picker = h.document.querySelector("#fusion-dd");
-  picker.querySelector(".dd-btn").click();
-  const effortSection = [...picker.querySelectorAll(".fusion-config-label")].find((el) => el.textContent === "Lead effort");
-  assert.ok(effortSection, "Fusion keeps its effort section");
-  const effortNames = [...effortSection.parentElement.querySelectorAll(".fusion-config-option")].map((el) => el.textContent);
-  assert.deepStrictEqual(effortNames, ["Low", "High"], "Fusion's levels were not overwritten by GPT's");
+  h.document.querySelector("#effortBtn").click();
+  const popup = h.document.querySelector("#model-picker-popup");
+  assert.deepStrictEqual(
+    [...popup.querySelectorAll(".effort-seg")].map((seg) => seg.dataset.effort),
+    ["medium", "max"],
+    "GPT shows its own reported list"
+  );
+  assert.strictEqual(
+    popup.querySelector(".effort-seg[aria-checked='true']").dataset.effort,
+    "medium"
+  );
   assert.strictEqual(h.errors().length, 0);
 });
 
@@ -5738,52 +5488,25 @@ test("a model that reports no effort clears the previous model's effort", async 
   const h = createHarness();
   h.post({ type: "ready" });
   h.post({ type: "body", body: "thread" });
-  const allModels = [
-    { id: "fusion", name: "Fusion", default: "fusion-claude-opus-5-low-sidekick-swe-2-medium", variants: [
-      { value: "fusion-claude-opus-5-low-sidekick-swe-2-medium", name: "(Claude Opus 5 Low + SWE-2 Medium)" },
-      { value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "(Claude Opus 5 High + SWE-2 Medium)" },
-      { value: "fusion-claude-opus-5-low-sidekick-swe-2-high", name: "(Claude Opus 5 Low + SWE-2 High)" },
-      { value: "fusion-claude-opus-5-high-sidekick-swe-2-high", name: "(Claude Opus 5 High + SWE-2 High)" }
+  const models = [
+    { id: "claude", name: "Claude", default: "claude-medium", variants: [
+      { value: "claude-medium", name: "Medium" }, { value: "claude-high", name: "High" }
     ] },
-    { id: "gpt", name: "GPT-5", default: "gpt-5-xhigh", variants: [{ value: "gpt-5-xhigh", name: "GPT-5 XHigh" }] }
+    { id: "gpt", name: "GPT", default: "gpt-medium", variants: [{ value: "gpt-medium", name: "Medium" }] }
   ];
-  const fusionChoices = [
-    { value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "Fusion (Claude Opus 5 High + SWE-2 Medium)" },
-    { value: "fusion-claude-opus-5-high-sidekick-swe-2-high", name: "Fusion (Claude Opus 5 High + SWE-2 High)" }
-  ];
-  const levels = [{ value: "low", name: "Low" }, { value: "high", name: "High" }];
-
-  h.post({
-    type: "options", currentMode: "accept-edits",
-    currentModel: "fusion-claude-opus-5-low-sidekick-swe-2-medium",
-    currentThoughtLevel: "high", thoughtLevels: levels,
-    modelChoices: { fusion: fusionChoices }, models: allModels, modes: []
+  const options = (currentModel, currentThoughtLevel, thoughtLevels) => ({
+    type: "options", currentMode: "accept-edits", currentModel, currentThoughtLevel,
+    thoughtLevels, modelChoices: {}, models, modes: [], sessionConfig: true
   });
+  h.post(options("claude-medium", "medium", [{ value: "medium", name: "Medium" }, { value: "high", name: "High" }]));
   await h.settle(20);
-  const picker = h.document.querySelector("#fusion-dd");
-  assert.strictEqual(picker.querySelector(".fusion-config-lead-title").textContent, "Opus 5 · High", "the reported effort is on the button");
+  const group = h.document.querySelector("#model-picker-group");
+  assert.ok(!group.classList.contains("no-effort"));
 
-  // The user moves to a model with no thought level and the host answers with
-  // an empty currentThoughtLevel, which is a deliberate clear, not a gap.
-  const modelDD = h.document.querySelector("#model-dd");
-  modelDD.querySelector(".dd-btn").click();
-  [...modelDD.querySelectorAll(".dd-item")].find((el) => el.textContent.includes("GPT-5")).click();
-  h.post({
-    type: "options", currentMode: "accept-edits",
-    currentModel: "gpt-5-xhigh", currentThoughtLevel: "",
-    thoughtLevels: [], modelChoices: {}, models: allModels, modes: []
-  });
-  h.post({ type: "modelConfigApplied", requestId: 1, model: "gpt-5-xhigh", thoughtLevel: "" });
+  h.post(options("gpt-medium", "", []));
+  h.post({ type: "model", model: "gpt-medium" });
   await h.settle(20);
-  assert.ok(h.document.querySelector("#thinking-dd").classList.contains("hidden"), "no effort and one variant means no picker");
-  assert.ok(picker.classList.contains("hidden"), "the Fusion picker is hidden on a normal model");
-
-  // Back on Fusion the cleared effort must not come back. If "high" had been
-  // kept the button would read "Opus 5 · High", instead it falls back to the
-  // first level.
-  modelDD.querySelector(".dd-btn").click();
-  [...modelDD.querySelectorAll(".dd-item")].find((el) => el.textContent.includes("Fusion")).click();
-  assert.strictEqual(picker.querySelector(".fusion-config-lead-title").textContent, "Opus 5 · Low", "the cleared effort does not come back");
+  assert.ok(group.classList.contains("no-effort"), "an authoritative empty report removes the effort half");
   assert.strictEqual(h.errors().length, 0);
 });
 
@@ -5791,118 +5514,40 @@ test("Fusion is configurable before a session reports grouped choices", async ()
   const h = createHarness();
   h.post({ type: "ready" });
   h.post({ type: "body", body: "thread" });
-  // The pre session options carry the family with the whole lead times
-  // sidekick cross product in variants, named "(Lead + Sidekick)", and no
-  // grouped choices yet.
-  const fusionVariants = [];
-  const leads = [["claude-opus-5-high", "Claude Opus 5 High"], ["gpt-6-astra-high", "GPT-6 Astra High"], ["claude-sonnet-6-medium", "Claude Sonnet 6 Medium"]];
-  const sidekicks = [["swe-2-low", "SWE-2 Low"], ["swe-2-medium", "SWE-2 Medium"], ["swe-2-high", "SWE-2 High"], ["swe-2-xhigh", "SWE-2 XHigh"]];
-  for (const [leadUid, leadName] of leads) {
-    for (const [sidekickUid, sidekickName] of sidekicks) {
-      fusionVariants.push({ value: `fusion-${leadUid}-sidekick-${sidekickUid}`, name: `(${leadName} + ${sidekickName})` });
-    }
-  }
   h.post({
     type: "options", currentMode: "accept-edits",
     currentModel: "fusion-claude-opus-5-high-sidekick-swe-2-medium",
-    currentThoughtLevel: "", thoughtLevels: [],
-    modelChoices: {},
-    models: [{ id: "fusion", name: "Fusion", default: "fusion-claude-opus-5-high-sidekick-swe-2-medium", variants: fusionVariants }],
+    thoughtLevels: [], modelChoices: {},
+    models: [
+      {
+        id: "fusion", name: "Fusion",
+        default: "fusion-claude-opus-5-high-sidekick-swe-2-medium",
+        variants: [
+          { value: "fusion-claude-opus-5-low-sidekick-swe-2-medium", name: "Opus 5 Low + SWE-2 Medium" },
+          { value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "Opus 5 High + SWE-2 Medium" },
+          { value: "fusion-claude-opus-5-low-sidekick-swe-2-high", name: "Opus 5 Low + SWE-2 High" }
+        ]
+      },
+      { id: "claude-opus-5", name: "Claude Opus 5", default: "claude-opus-5-high", variants: [{ value: "claude-opus-5-high", name: "High" }] },
+      { id: "swe-2", name: "SWE-2", default: "swe-2-medium", variants: [{ value: "swe-2-medium", name: "Medium" }, { value: "swe-2-high", name: "High" }] }
+    ],
     modes: []
   });
   await h.settle(20);
 
-  // The cross product is configuration for the Fusion picker, not a thinking
-  // list, so the twelve raw pair names must never land in the thinking
-  // dropdown (which would also grow a filter box at that length).
-  assert.ok(h.document.querySelector("#thinking-dd").classList.contains("hidden"), "the cross product is not dumped into the thinking picker");
-  const picker = h.document.querySelector("#fusion-dd");
-  assert.ok(!picker.classList.contains("hidden"), "the Fusion picker works off the family variants alone");
-  picker.querySelector(".dd-btn").click();
-  const leadSection = [...picker.querySelectorAll(".fusion-config-label")].find((el) => el.textContent === "Lead model");
-  assert.ok(leadSection, "the Lead model section renders");
-  const leadOptions = [...leadSection.parentElement.querySelectorAll(".fusion-config-option")].map((el) => el.textContent);
-  assert.strictEqual(leadOptions.length, 3, "one option per lead, not per pair");
-  assert.ok(!leadOptions[0].startsWith("("), "the bracketed variant name parses cleanly");
-  assert.strictEqual(h.errors().length, 0);
-});
-
-test("Fusion derives its effort levels from the catalogue variants before ACP reports them", async () => {
-  const h = createHarness();
-  h.post({ type: "ready" });
-  h.post({ type: "body", body: "thread" });
-  const fusionVariants = [];
-  for (const lead of ["claude-opus-5", "gpt-6-astra"]) {
-    for (const effort of ["low", "medium", "high"]) {
-      for (const sidekick of ["swe-2-medium", "swe-2-high"]) {
-        fusionVariants.push({ value: `fusion-${lead}-${effort}-sidekick-${sidekick}`, name: `(${lead} ${effort} + ${sidekick})` });
-      }
-    }
-  }
-  const allModels = [
-    { id: "fusion", name: "Fusion", default: "fusion-claude-opus-5-high-sidekick-swe-2-medium", variants: fusionVariants },
-    { id: "gpt", name: "GPT-5", default: "gpt-5-xhigh", variants: [
-      { value: "gpt-5-medium", name: "GPT-5 Medium" },
-      { value: "gpt-5-xhigh", name: "GPT-5 XHigh" }
-    ] }
-  ];
-  h.post({
-    type: "options", currentMode: "accept-edits",
-    currentModel: "gpt-5-xhigh", currentThoughtLevel: "",
-    thoughtLevels: [], modelChoices: {}, models: allModels, modes: []
-  });
-  await h.settle(20);
-
-  const modelDD = h.document.querySelector("#model-dd");
-  modelDD.querySelector(".dd-btn").click();
-  [...modelDD.querySelectorAll(".dd-item")].find((el) => el.textContent.includes("Fusion")).click();
-  const picker = h.document.querySelector("#fusion-dd");
-  assert.ok(!picker.classList.contains("hidden"), "the Fusion picker shows before ACP reports");
-  assert.ok(h.document.querySelector("#thinking-dd").classList.contains("hidden"), "the normal thinking picker stays hidden on Fusion");
-  picker.querySelector(".dd-btn").click();
-  const effortValues = () => [...picker.querySelectorAll(".fusion-config-option[data-kind=effort]")].map((el) => el.dataset.value);
-  assert.deepStrictEqual(effortValues(), ["low", "medium", "high"], "only the lead's real efforts, never GPT's xhigh");
-
-  const postedBefore = h.posted.length;
-  [...picker.querySelectorAll(".fusion-config-option[data-kind=effort]")].find((el) => el.dataset.value === "low").click();
-  const effortPost = h.posted.slice(postedBefore).find((message) => message.type === "setConfigOption");
-  assert.ok(effortPost, "an effort change is sent");
-  assert.strictEqual(effortPost.configId, "thought_level");
-  assert.strictEqual(effortPost.value, "low");
-  assert.strictEqual(effortPost.model, "fusion-claude-opus-5-low-sidekick-swe-2-medium", "the uid carries the chosen effort");
-  assert.strictEqual(typeof effortPost.requestId, "number", "the request is tagged for acknowledgement");
-
-  const grouped = [
-    { value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "Fusion (Claude Opus 5 High + SWE-2 Medium)" },
-    { value: "fusion-gpt-6-astra-high-sidekick-swe-2-high", name: "Fusion (GPT-6 Astra High Thinking + SWE-2 High)" }
-  ];
-  const noCatalogue = [
-    { id: "fusion", name: "Fusion", default: "fusion-claude-opus-5-high-sidekick-swe-2-medium", variants: [] },
-    allModels[1]
-  ];
-  h.post({
-    type: "options", currentMode: "accept-edits",
-    currentModel: "fusion-claude-opus-5-high-sidekick-swe-2-medium",
-    currentThoughtLevel: "", thoughtLevels: [],
-    modelChoices: { fusion: grouped }, models: noCatalogue, modes: []
-  });
-  await h.settle(20);
-  assert.ok(!picker.querySelector(".dd-menu").classList.contains("hidden"), "the menu is still open");
-  const status = picker.querySelector(".fusion-config-loading");
-  assert.ok(status, "a loading status stands in for the missing effort row");
-  assert.strictEqual(status.getAttribute("role"), "status");
-  assert.strictEqual(status.getAttribute("aria-busy"), "true");
-  assert.strictEqual(status.textContent, "Loading effort options...");
-
-  h.post({
-    type: "options", currentMode: "accept-edits",
-    currentModel: "fusion-claude-opus-5-high-sidekick-swe-2-medium",
-    currentThoughtLevel: "", thoughtLevels: [{ value: "low", name: "Low" }, { value: "high", name: "High" }],
-    modelChoices: { fusion: grouped }, models: noCatalogue, modes: []
-  });
-  await h.settle(20);
-  assert.ok(!picker.querySelector(".dd-menu").classList.contains("hidden"), "the menu stays open");
-  assert.deepStrictEqual(effortValues(), ["low", "high"], "the reported levels fill the open menu");
+  h.document.querySelector("#effortBtn").click();
+  const popup = h.document.querySelector("#model-picker-popup");
+  assert.ok(!popup.classList.contains("hidden"), "the Fusion page opens without a report");
+  assert.deepStrictEqual(
+    [...popup.querySelectorAll(".fusion-rows .dd-item-name")].map((el) => el.textContent),
+    ["Claude Opus 5"]
+  );
+  popup.querySelector("#act-claude-opus-5").click();
+  assert.deepStrictEqual(
+    [...popup.querySelectorAll(".effort-seg")].map((seg) => seg.dataset.effort),
+    ["low", "high"],
+    "the rail falls back to catalogue lead efforts"
+  );
   assert.strictEqual(h.errors().length, 0);
 });
 
@@ -5910,105 +5555,77 @@ test("only the latest model change acknowledgement can reconcile a rapid series 
   const h = createHarness();
   h.post({ type: "ready" });
   h.post({ type: "body", body: "thread" });
-  const fusionVariants = [];
-  for (const effort of ["low", "medium", "high"]) {
-    for (const sidekick of ["swe-2-medium", "swe-2-high"]) {
-      fusionVariants.push({ value: `fusion-claude-opus-5-${effort}-sidekick-${sidekick}`, name: "(Claude Opus 5 + SWE-2)" });
-    }
-  }
-  const allModels = [
-    { id: "fusion", name: "Fusion", default: "fusion-claude-opus-5-low-sidekick-swe-2-medium", variants: fusionVariants },
-    { id: "gpt", name: "GPT-5", default: "gpt-5-xhigh", variants: [{ value: "gpt-5-xhigh", name: "GPT-5 XHigh" }] }
+  const models = [
+    { id: "claude", name: "Claude", default: "claude-medium", variants: [
+      { value: "claude-medium", name: "Medium" }, { value: "claude-high", name: "High" }
+    ] },
+    { id: "gpt", name: "GPT", default: "gpt-medium", variants: [
+      { value: "gpt-medium", name: "Medium" }, { value: "gpt-max", name: "Max" }
+    ] }
   ];
-  const levels = [{ value: "low", name: "Low" }, { value: "medium", name: "Medium" }, { value: "high", name: "High" }];
-  const staleOptions = (thoughtLevel, currentModel) => h.post({
-    type: "options", currentMode: "accept-edits", currentModel, currentThoughtLevel: thoughtLevel,
-    thoughtLevels: levels, modelChoices: {}, models: allModels, modes: []
+  const options = (currentModel, currentThoughtLevel, thoughtLevels) => ({
+    type: "options", currentMode: "accept-edits", currentModel, currentThoughtLevel,
+    thoughtLevels, modelChoices: {}, models, modes: []
   });
-  h.post({
-    type: "options", currentMode: "accept-edits",
-    currentModel: "fusion-claude-opus-5-low-sidekick-swe-2-medium",
-    currentThoughtLevel: "low", thoughtLevels: levels,
-    modelChoices: {}, models: allModels, modes: []
-  });
+  h.post(options("claude-medium", "medium", [{ value: "medium", name: "Medium" }, { value: "high", name: "High" }]));
+  h.post(options("gpt-medium", "medium", [{ value: "medium", name: "Medium" }, { value: "max", name: "Max" }]));
   await h.settle(20);
 
-  const picker = h.document.querySelector("#fusion-dd");
-  picker.querySelector(".dd-btn").click();
-  const title = () => picker.querySelector(".fusion-config-lead-title").textContent;
-  const effortButton = (value) => [...picker.querySelectorAll(".fusion-config-option[data-kind=effort]")].find((el) => el.dataset.value === value);
-  const sentEfforts = () => h.posted.filter((message) => message.type === "setConfigOption" && message.configId === "thought_level");
-
-  effortButton("low").click();
-  effortButton("high").click();
-  h.post({ type: "modelConfigApplied", requestId: 1, model: "fusion-claude-opus-5-low-sidekick-swe-2-medium", thoughtLevel: "low" });
-  staleOptions("low", "fusion-claude-opus-5-low-sidekick-swe-2-medium");
-  h.post({ type: "model", model: "fusion-claude-opus-5-low-sidekick-swe-2-medium" });
-  assert.strictEqual(title(), "Opus 5 · High", "an old acknowledgement cannot roll back a newer pick");
-  assert.strictEqual(effortButton("high").classList.contains("selected"), true);
-
-  effortButton("medium").click();
-  h.post({ type: "modelConfigApplied", requestId: 2, model: "fusion-claude-opus-5-high-sidekick-swe-2-medium", thoughtLevel: "high" });
-  staleOptions("high", "fusion-claude-opus-5-high-sidekick-swe-2-medium");
-  assert.strictEqual(title(), "Opus 5 · Medium");
-
-  effortButton("low").click();
-  h.post({ type: "modelConfigApplied", requestId: 3, model: "fusion-claude-opus-5-medium-sidekick-swe-2-medium", thoughtLevel: "medium" });
-  effortButton("high").click();
-  h.post({ type: "modelConfigApplied", requestId: 4, model: "fusion-claude-opus-5-low-sidekick-swe-2-medium", thoughtLevel: "high" });
-  staleOptions("medium", "fusion-claude-opus-5-medium-sidekick-swe-2-medium");
-  assert.strictEqual(title(), "Opus 5 · High", "the guard is released only by the latest request id");
-
-  assert.deepStrictEqual(sentEfforts().map((message) => [message.value, message.requestId]), [
-    ["low", 1], ["high", 2], ["medium", 3], ["low", 4], ["high", 5]
-  ], "every pick went out tagged, in order");
-
-  h.post({ type: "modelConfigApplied", requestId: 5, model: "fusion-claude-opus-5-high-sidekick-swe-2-medium", thoughtLevel: "high" });
-  staleOptions("medium", "fusion-claude-opus-5-high-sidekick-swe-2-medium");
+  h.document.querySelector("#modelBtn").click();
+  const popup = h.document.querySelector("#model-picker-popup");
+  const label = () => h.document.querySelector("#effortBtnLabel").textContent;
+  popup.querySelector('.dd-item-main[data-id="gpt"]').click();
+  popup.querySelector('.dd-item-main[data-id="claude"]') || h.document.querySelector("#modelBtn").click();
+  h.document.querySelector("#modelBtn").click();
+  h.document.querySelector('.dd-item-main[data-id="claude"]').click();
+  const posts = h.posted.filter((message) => message.type === "setModel");
+  assert.strictEqual(posts.length, 2);
+  h.post({ type: "modelConfigApplied", requestId: posts[0].requestId, model: "gpt-medium", thoughtLevel: "medium" });
   await h.settle(20);
-  assert.strictEqual(title(), "Opus 5 · Medium", "a post-ack authoritative update applies normally");
+  assert.strictEqual(h.document.querySelector("#modelBtn .dd-label").textContent, "Claude", "a stale acknowledgement cannot undo the newer pick");
+  h.post({ type: "modelConfigApplied", requestId: posts[1].requestId, model: "claude-medium", thoughtLevel: "medium" });
+  await h.settle(20);
+  assert.strictEqual(h.document.querySelector("#modelBtn .dd-label").textContent, "Claude");
+  assert.strictEqual(label(), "Medium");
   assert.strictEqual(h.errors().length, 0);
 });
 
-test("unchanged Fusion options keep the open menu's nodes and focus", async () => {
+test("unchanged options keep the open picker's selection and focus", async () => {
   const h = createHarness();
   h.post({ type: "ready" });
   h.post({ type: "body", body: "thread" });
-  const allModels = [
-    { id: "fusion", name: "Fusion", default: "fusion-claude-opus-5-high-sidekick-swe-2-medium", variants: [{ value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "Fusion" }] },
-    { id: "gpt", name: "GPT-5", default: "gpt-5-xhigh", variants: [{ value: "gpt-5-xhigh", name: "GPT-5 XHigh" }] }
-  ];
-  const grouped = [
-    { value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "Fusion (Claude Opus 5 High + SWE-2 Medium)" },
-    { value: "fusion-claude-opus-5-high-sidekick-swe-2-high", name: "Fusion (Claude Opus 5 High + SWE-2 High)" }
-  ];
-  const levels = [{ value: "low", name: "Low" }, { value: "high", name: "High" }];
   const options = () => ({
     type: "options", currentMode: "accept-edits",
-    currentModel: "fusion-claude-opus-5-high-sidekick-swe-2-medium",
-    currentThoughtLevel: "low", thoughtLevels: levels,
-    modelChoices: { fusion: grouped }, models: allModels, modes: []
+    currentModel: "claude-medium", currentThoughtLevel: "medium",
+    thoughtLevels: [{ value: "medium", name: "Medium" }, { value: "high", name: "High" }],
+    modelChoices: {},
+    models: [{ id: "claude", name: "Claude", default: "claude-medium", variants: [
+      { value: "claude-medium", name: "Medium" }, { value: "claude-high", name: "High" }
+    ] }],
+    modes: []
   });
   h.post(options());
   await h.settle(20);
 
-  const picker = h.document.querySelector("#fusion-dd");
-  picker.querySelector(".dd-btn").click();
-  const effortButton = (value) => [...picker.querySelectorAll(".fusion-config-option[data-kind=effort]")].find((el) => el.dataset.value === value);
-  const high = effortButton("high");
-  high.focus();
-  assert.strictEqual(h.document.activeElement, high, "the effort button holds focus");
+  h.document.querySelector("#effortBtn").click();
+  const popup = h.document.querySelector("#model-picker-popup");
+  const checked = popup.querySelector(".effort-seg[aria-checked='true']");
+  checked.focus();
+  assert.strictEqual(h.document.activeElement, checked);
 
   h.post(options());
   await h.settle(20);
-  assert.strictEqual(effortButton("high"), high, "the button node survives an identical options reply");
-  assert.strictEqual(h.document.activeElement, high, "focus survives it too");
+  const after = h.document.querySelector("#model-picker-popup .effort-seg[aria-checked='true']");
+  assert.strictEqual(after.dataset.effort, "medium", "an identical reply keeps the checked effort");
+  assert.strictEqual(h.document.activeElement.dataset.effort, "medium", "focus returns to the same segment");
 
-  h.post({ ...options(), thoughtLevels: [...levels, { value: "xhigh", name: "XHigh" }] });
+  h.post({ ...options(), thoughtLevels: [{ value: "medium", name: "Medium" }, { value: "high", name: "High" }, { value: "xhigh", name: "XHigh" }] });
   await h.settle(20);
-  const effortValues = () => [...picker.querySelectorAll(".fusion-config-option[data-kind=effort]")].map((el) => el.dataset.value);
-  assert.notStrictEqual(effortButton("high"), high, "new effort choices rebuild the menu");
-  assert.deepStrictEqual(effortValues(), ["low", "high", "xhigh"], "the new choice is rendered");
+  assert.deepStrictEqual(
+    [...h.document.querySelectorAll("#model-picker-popup .effort-seg")].map((seg) => seg.dataset.effort),
+    ["medium", "high", "xhigh"],
+    "a late effort choice joins the rail"
+  );
   assert.strictEqual(h.errors().length, 0);
 });
 
@@ -6018,26 +5635,29 @@ test("a stale model change acknowledgement cannot paint a new session", async ()
   h.post({ type: "body", body: "thread" });
   const allModels = [
     { id: "fusion", name: "Fusion", default: "fusion-claude-opus-5-low-sidekick-swe-2-medium", variants: [
-      { value: "fusion-claude-opus-5-low-sidekick-swe-2-medium", name: "(Claude Opus 5 Low + SWE-2 Medium)" },
-      { value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "(Claude Opus 5 High + SWE-2 Medium)" }
+      { value: "fusion-claude-opus-5-low-sidekick-swe-2-medium", name: "Opus 5 Low + SWE-2 Medium" },
+      { value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "Opus 5 High + SWE-2 Medium" }
     ] },
+    { id: "claude-opus-5", name: "Claude Opus 5", default: "claude-opus-5-high", variants: [{ value: "claude-opus-5-high", name: "High" }] },
+    { id: "swe-2", name: "SWE-2", default: "swe-2-medium", variants: [{ value: "swe-2-medium", name: "Medium" }] },
     { id: "gpt", name: "GPT-5", default: "gpt-5-xhigh", variants: [{ value: "gpt-5-xhigh", name: "GPT-5 XHigh" }] }
   ];
-  const levels = [{ value: "low", name: "Low" }, { value: "high", name: "High" }];
   h.post({
     type: "options", currentMode: "accept-edits",
     currentModel: "fusion-claude-opus-5-low-sidekick-swe-2-medium",
-    currentThoughtLevel: "low", thoughtLevels: levels,
+    currentThoughtLevel: "low",
+    thoughtLevels: [{ value: "low", name: "Low" }, { value: "high", name: "High" }],
     modelChoices: {}, models: allModels, modes: []
   });
   await h.settle(20);
 
-  const picker = h.document.querySelector("#fusion-dd");
-  picker.querySelector(".dd-btn").click();
-  [...picker.querySelectorAll(".fusion-config-option[data-kind=effort]")].find((el) => el.dataset.value === "high").click();
+  h.document.querySelector("#effortBtn").click();
+  const popup = h.document.querySelector("#model-picker-popup");
+  popup.querySelector("#act-claude-opus-5").click();
+  popup.querySelector('.effort-seg[data-effort="high"]').click();
   const effortPost = h.posted.slice().reverse().find((message) => message.type === "setConfigOption");
   assert.strictEqual(effortPost.requestId, 1, "the pick is tagged");
-  assert.strictEqual(picker.querySelector(".fusion-config-lead-title").textContent, "Opus 5 · High", "the optimistic pick is on the button");
+  assert.match(h.document.querySelector("#effortBtnLabel").textContent, /High/, "the optimistic pick is on the composer");
 
   h.post({ type: "clear", reset: true });
   h.post({ type: "sessionReady", sessionId: "session-two" });
@@ -6048,13 +5668,11 @@ test("a stale model change acknowledgement cannot paint a new session", async ()
   });
   h.post({ type: "model", model: "gpt-5-xhigh" });
   await h.settle(20);
-  assert.strictEqual(h.document.querySelector("#model-dd .dd-label").textContent, "GPT-5", "the new session's own model is on screen");
-  assert.ok(picker.classList.contains("hidden"), "Fusion is not selected in the new session");
+  assert.strictEqual(h.document.querySelector("#modelBtn .dd-label").textContent, "GPT-5", "the new session's own model is on screen");
 
   h.post({ type: "modelConfigApplied", requestId: 1, model: "fusion-claude-opus-5-low-sidekick-swe-2-medium", thoughtLevel: "high" });
   await h.settle(20);
-  assert.strictEqual(h.document.querySelector("#model-dd .dd-label").textContent, "GPT-5", "the stale acknowledgement cannot paint over it");
-  assert.ok(picker.classList.contains("hidden"), "the stale ack does not drag Fusion back on screen");
+  assert.strictEqual(h.document.querySelector("#modelBtn .dd-label").textContent, "GPT-5", "the stale acknowledgement cannot paint over it");
   assert.strictEqual(h.errors().length, 0);
 });
 
@@ -6075,10 +5693,9 @@ test("a session arriving keeps a pending pick guarded", async () => {
   h.post(options("low"));
   await h.settle(20);
 
-  const thinking = h.document.querySelector("#thinking-dd");
-  const label = () => thinking.querySelector(".dd-label").textContent;
-  thinking.querySelector(".dd-btn").click();
-  [...thinking.querySelectorAll(".dd-item")].find((el) => el.textContent === "High").click();
+  const label = () => h.document.querySelector("#effortBtnLabel").textContent;
+  h.document.querySelector("#effortBtn").click();
+  h.document.querySelector('.effort-seg[data-effort="high"]').click();
   assert.strictEqual(label(), "High", "the pick is optimistic");
   assert.strictEqual(h.posted.at(-1).requestId, 1, "the pick is tagged");
 
@@ -6105,25 +5722,33 @@ test("catalogue lead names strip the effort suffix whatever level it carries", a
     type: "options", currentMode: "accept-edits",
     currentModel: "fusion-gpt-6-astra-low-sidekick-swe-2-medium",
     currentThoughtLevel: "low",
-    thoughtLevels: [{ value: "low", name: "Low" }, { value: "medium", name: "Medium" }, { value: "high", name: "High" }],
+    thoughtLevels: [{ value: "low", name: "Low" }],
     modelChoices: {},
-    models: [{
-      id: "fusion", name: "Fusion", default: "fusion-gpt-6-astra-low-sidekick-swe-2-medium",
-      variants: [
-        { value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "(Claude Opus 5 High Thinking + SWE-2 Medium)" },
-        { value: "fusion-claude-opus-5-low-sidekick-swe-2-medium", name: "(Claude Opus 5 Low Thinking + SWE-2 Medium)" },
-        { value: "fusion-gpt-6-astra-high-sidekick-swe-2-medium", name: "(GPT-6 Astra High Thinking + SWE-2 Medium)" },
-        { value: "fusion-gpt-6-astra-medium-sidekick-swe-2-medium", name: "(GPT-6 Astra Medium Thinking + SWE-2 Medium)" },
-        { value: "fusion-gpt-6-astra-low-sidekick-swe-2-medium", name: "(GPT-6 Astra Low Thinking + SWE-2 Medium)" }
-      ]
-    }],
+    models: [
+      {
+        id: "fusion", name: "Fusion",
+        default: "fusion-gpt-6-astra-low-sidekick-swe-2-medium",
+        variants: [
+          { value: "fusion-gpt-6-astra-low-sidekick-swe-2-medium", name: "Astra Low + SWE-2 Medium" },
+          { value: "fusion-claude-opus-5-xhigh-sidekick-swe-2-medium", name: "Opus 5 XHigh + SWE-2 Medium" },
+          { value: "fusion-gemini-max-sidekick-swe-2-medium", name: "Gemini Max + SWE-2 Medium" }
+        ]
+      },
+      { id: "gpt-6-astra", name: "GPT-6 Astra", default: "gpt-6-astra-low", variants: [{ value: "gpt-6-astra-low", name: "Low" }] },
+      { id: "claude-opus-5", name: "Claude Opus 5", default: "claude-opus-5-xhigh", variants: [{ value: "claude-opus-5-xhigh", name: "XHigh" }] },
+      { id: "gemini", name: "Gemini", default: "gemini-max", variants: [{ value: "gemini-max", name: "Max" }] },
+      { id: "swe-2", name: "SWE-2", default: "swe-2-medium", variants: [{ value: "swe-2-medium", name: "Medium" }] }
+    ],
     modes: []
   });
   await h.settle(20);
-  const picker = h.document.querySelector("#fusion-dd");
-  picker.querySelector(".dd-btn").click();
-  const leadNames = [...picker.querySelectorAll(".fusion-config-option[data-kind=lead]")].map((el) => el.textContent);
-  assert.deepStrictEqual(leadNames, ["Claude Opus 5", "GPT-6 Astra"]);
+
+  h.document.querySelector("#effortBtn").click();
+  assert.deepStrictEqual(
+    [...h.document.querySelectorAll(".fusion-rows .dd-item-name")].map((el) => el.textContent),
+    ["Claude Opus 5", "Gemini", "GPT-6 Astra"],
+    "effort suffixes never leak into lead names"
+  );
   assert.strictEqual(h.errors().length, 0);
 });
 
@@ -6131,60 +5756,36 @@ test("a reply about another Fusion lead cannot move the shown effort", async () 
   const h = createHarness();
   h.post({ type: "ready" });
   h.post({ type: "body", body: "thread" });
-  const variants = [
-    { value: "fusion-claude-opus-5-low-sidekick-swe-2-medium", name: "(Claude Opus 5 Low + SWE-2 Medium)" },
-    { value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "(Claude Opus 5 High + SWE-2 Medium)" },
-    { value: "fusion-gpt-6-astra-low-sidekick-swe-2-medium", name: "(GPT-6 Astra Low + SWE-2 Medium)" },
-    { value: "fusion-gpt-6-astra-high-sidekick-swe-2-medium", name: "(GPT-6 Astra High + SWE-2 Medium)" }
-  ];
-  const allModels = [{ id: "fusion", name: "Fusion", default: "fusion-claude-opus-5-high-sidekick-swe-2-medium", variants }];
-  const levels = [{ value: "low", name: "Low" }, { value: "high", name: "High" }];
-  const options = (currentModel, currentThoughtLevel) => ({
-    type: "options", currentMode: "accept-edits", currentModel, currentThoughtLevel,
-    thoughtLevels: levels, modelChoices: {}, models: allModels, modes: []
-  });
-  h.post(options("fusion-claude-opus-5-high-sidekick-swe-2-medium", "high"));
-  await h.settle(20);
-  const picker = h.document.querySelector("#fusion-dd");
-  const title = () => picker.querySelector(".fusion-config-lead-title").textContent;
-  assert.strictEqual(title(), "Opus 5 · High");
-  h.post(options("fusion-gpt-6-astra-low-sidekick-swe-2-medium", "low"));
-  await h.settle(20);
-  assert.strictEqual(title(), "Opus 5 · High", "a reply about GPT-6 Astra cannot change Opus 5's shown effort");
-  assert.strictEqual(h.errors().length, 0);
-});
-
-test("thinking picker keeps a thought icon in compact mode", async () => {
-  const h = createHarness();
-  h.post({ type: "ready" });
-  h.post({ type: "body", body: "thread" });
-  h.post({
-    type: "options",
-    currentMode: "accept-edits",
-    currentModel: "claude-medium",
-    models: [{
-      id: "claude",
-      name: "Claude",
-      default: "claude-medium",
+  const models = [
+    {
+      id: "fusion", name: "Fusion",
+      default: "fusion-claude-opus-5-high-sidekick-swe-2-medium",
       variants: [
-        { value: "claude-low", name: "Low" },
-        { value: "claude-medium", name: "Medium" }
+        { value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "Opus 5 High + SWE-2 Medium" },
+        { value: "fusion-gpt-6-astra-low-sidekick-swe-2-medium", name: "Astra Low + SWE-2 Medium" }
       ]
-    }],
-    modes: []
+    },
+    { id: "claude-opus-5", name: "Claude Opus 5", default: "claude-opus-5-high", variants: [{ value: "claude-opus-5-high", name: "High" }] },
+    { id: "gpt-6-astra", name: "GPT-6 Astra", default: "gpt-6-astra-low", variants: [{ value: "gpt-6-astra-low", name: "Low" }] },
+    { id: "swe-2", name: "SWE-2", default: "swe-2-medium", variants: [{ value: "swe-2-medium", name: "Medium" }] }
+  ];
+  const options = (currentModel, currentThoughtLevel, thoughtLevels) => ({
+    type: "options", currentMode: "accept-edits", currentModel, currentThoughtLevel,
+    thoughtLevels, modelChoices: {}, models, modes: []
   });
+  h.post(options("fusion-claude-opus-5-high-sidekick-swe-2-medium", "high", [{ value: "high", name: "High" }]));
+  h.document.querySelector("#effortBtn").click();
+  h.document.querySelector("#act-claude-opus-5").click();
   await h.settle(20);
 
-  const thinking = h.document.querySelector("#thinking-dd");
-  assert.ok(!thinking.classList.contains("hidden"), "the picker is available for multiple variants");
-  assert.ok(thinking.querySelector(".dd-icon .codicon-thinking"), "the compact control has a thought icon");
-  assert.strictEqual(thinking.querySelector(".dd-btn").getAttribute("aria-label"), "Thinking effort");
-
-  const css = fs.readFileSync(path.join(ROOT, "media", "main.css"), "utf8");
-  assert.match(css, /#thinking-dd \.dd-icon\s*\{\s*display: none;/, "the normal control hides the thought icon");
-  assert.match(css, /#input-box\.cmp-sm #thinking-dd \.dd-icon\s*\{\s*display: inline-flex;/, "compact mode shows the thought icon");
-  assert.doesNotMatch(css, /#input-box\.cmp-sm #thinking-dd \{/, "the small tier keeps the thinking control");
-  assert.match(css, /#input-box\.cmp-xxs #mode-dd,\s*\n#input-box\.cmp-xxs #attach,\s*\n#input-box\.cmp-xxs #thinking-dd/, "the smallest tier hides it with the other controls");
+  h.post(options("fusion-gpt-6-astra-low-sidekick-swe-2-medium", "low", [{ value: "low", name: "Low" }, { value: "xhigh", name: "XHigh" }]));
+  await h.settle(20);
+  const popup = h.document.querySelector("#model-picker-popup");
+  assert.strictEqual(
+    popup.querySelector(".effort-seg[aria-checked='true']")?.dataset.effort || h.document.querySelector("#effortBtnLabel").textContent,
+    popup.querySelector(".effort-seg[aria-checked='true']") ? "high" : "High",
+    "the shown lead effort ignores a report about another lead"
+  );
   assert.strictEqual(h.errors().length, 0);
 });
 

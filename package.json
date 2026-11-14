@@ -2,7 +2,7 @@
   "name": "devin-vscode",
   "displayName": "Devin for VS Code",
   "description": "A native chat panel for the Devin CLI, powered by the Agent Client Protocol. Streaming replies, per workspace sessions, and trackable diffs.",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "publisher": "shayanline",
   "author": "Shayan Khaksar",
   "license": "AGPL-3.0-or-later",
@@ -356,7 +356,8 @@
             "low",
             "medium",
             "high",
-            "xhigh"
+            "xhigh",
+            "max"
           ],
           "enumDescriptions": [
             "Follow the model or Devin CLI default",
@@ -364,10 +365,22 @@
             "Low thinking effort",
             "Medium thinking effort",
             "High thinking effort",
-            "Extra high thinking effort"
+            "Extra high thinking effort",
+            "Maximum thinking effort"
           ],
           "default": "",
           "markdownDescription": "Thinking effort for chats started in this extension. The thinking picker writes this setting when the Devin CLI exposes a `thought_level` session option."
+        },
+        "devin.defaultSpeed": {
+          "type": "string",
+          "enum": ["", "standard", "fast"],
+          "enumDescriptions": [
+            "Follow the model or Devin CLI default",
+            "Use standard inference speed",
+            "Use faster inference when the selected model supports it"
+          ],
+          "default": "",
+          "markdownDescription": "Inference speed for chats started in this extension. Fast thinking can cost more. The toggle writes this setting when the Devin CLI exposes a `speed` session option."
         },
         "devin.defaultMode": {
           "type": "string",

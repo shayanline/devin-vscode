@@ -15,6 +15,7 @@
 const fs = require("fs");
 const path = require("path");
 const { pathToFileURL } = require("url");
+const { options: modelOptions } = require("./model-fixture");
 
 // An href is a URL, not a path, so it keeps forward slashes on Windows too, and
 // it carries the file's modification time so a reload picks up the stylesheet or
@@ -107,6 +108,20 @@ const options = (currentModel, currentMode) => ({ type: "options", modes: MODES,
 // A rich conversation exercising text, thinking, plan, tool cards, file rows,
 // a follow-up message, plus a permission prompt and an interactive question.
 const SCENARIOS = {
+  fusion: [
+    { type: "ready" },
+    { type: "body", body: "thread" },
+    { type: "capabilities", contextUsage: true },
+    modelOptions(),
+    { type: "userMessage", text: "Use Fusion to review the session configuration and update the tests." },
+    { type: "assistantStart" },
+    { type: "assistantChunk", text: "The Lead model coordinates the work while the sub model handles implementation. You can configure each model and its effort in the Fusion picker." },
+    { type: "assistantEnd" },
+    { type: "usage", contexts: [
+      { modelId: "claude-opus-5-5-max", totalTokens: 184000, maxTokens: 1000000, sections: [{ kind: "systemPrompt", tokens: 12000 }, { kind: "tools", tokens: 24000 }, { kind: "messages", tokens: 148000 }] },
+      { modelId: "swe-2-medium", totalTokens: 131000, maxTokens: 262000, sections: [{ kind: "messages", tokens: 131000 }] }
+    ] }
+  ],
   full: [
     { type: "ready" },
     { type: "body", body: "thread" },
