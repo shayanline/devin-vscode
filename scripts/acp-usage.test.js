@@ -231,7 +231,7 @@ test("readUsage returns the scoped role windows and the session ACU sum", async 
     assert.equal(metas.filter((m) => m["cognition.ai/sessionStats"] !== undefined).length, 0);
     assert.ok(updates.some((n) => n.update?.content?.text === "context header"));
   } finally {
-    client.dispose();
+    await client.shutdown();
   }
 });
 
@@ -250,7 +250,7 @@ test("a user prompt waits behind the read, and cancel keeps it off the wire", as
     // The wire saw only the two reads, never the cancelled user prompt.
     assert.deepEqual(prompts(log), ["/context", "/session-stats"]);
   } finally {
-    client.dispose();
+    await client.shutdown();
   }
 
   const second = fakeAgent("usage-queue", { contextDelay: 200 });
@@ -265,7 +265,7 @@ test("a user prompt waits behind the read, and cancel keeps it off the wire", as
     // The user prompt followed the reads on the wire, never overtaking them.
     assert.deepEqual(prompts(second.log), ["/context", "/session-stats", "hello"]);
   } finally {
-    client2.dispose();
+    await client2.shutdown();
   }
 });
 
@@ -287,7 +287,7 @@ test("a real turn blocks a new read, while a manual /context stays visible", asy
       "a manual /context keeps its report visible");
     client.cancel("usage-s");
   } finally {
-    client.dispose();
+    await client.shutdown();
   }
 });
 
@@ -299,7 +299,7 @@ test("an agent without the advertised commands gets no probe prompts", async () 
     assert.deepEqual(await client.readUsage("usage-s"), {});
     assert.deepEqual(prompts(log), []);
   } finally {
-    client.dispose();
+    await client.shutdown();
   }
 });
 
@@ -322,7 +322,7 @@ test("a failed read keeps its capture for late replies and reports the error", a
     assert.ok(settled, "the late reply sentinel never arrived");
     assert.equal(updates.filter((n) => n.update?._meta?.["cognition.ai/sessionStats"] !== undefined).length, 0);
   } finally {
-    client.dispose();
+    await client.shutdown();
   }
 });
 
@@ -347,7 +347,7 @@ test("a settled read stops suppressing ordinary instant replies", async () => {
     assert.ok(settled, "the late reply sentinel never arrived");
     assert.equal(updates.filter((n) => n.update?._meta?.["cognition.ai/sessionStats"] !== undefined).length, 0);
   } finally {
-    client.dispose();
+    await client.shutdown();
   }
 });
 
@@ -366,7 +366,7 @@ test("an authoritative empty snapshot replaces an earlier object report", async 
     assert.equal(updates.filter((n) => n.update?._meta?.["cognition.ai/contextUsage"] !== undefined).length, 0);
     assert.deepEqual(prompts(log), ["/context", "/session-stats"]);
   } finally {
-    client.dispose();
+    await client.shutdown();
   }
 });
 
@@ -383,11 +383,11 @@ test("an in flight read is shared by session, never across sessions", async () =
     assert.equal(ra, rb, "the same session shares one in flight read");
     assert.equal(ra.sessionAcus, 1.9281);
   } finally {
-    client.dispose();
+    await client.shutdown();
   }
 });
 
 test.after(async () => {
-  await Promise.all([...clients].map((c) => Promise.resolve(c.dispose()).catch(() => {})));
-  fs.rmSync(TMP, { recursive: true, force: true });
+  await Promise.all([...clients].map((c) => c.shutdown()));
+  await fs.promises.rm(TMP, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });

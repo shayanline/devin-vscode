@@ -11,6 +11,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert");
+const { once } = require("node:events");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -214,7 +215,7 @@ test("ACP stderr keeps actionable lines without credentials", async () => {
   const logs = [];
   const conn = new JsonRpcConnection(child, async () => ({}), () => {}, (line) => logs.push(line));
   try {
-    await settle();
+    await once(child, "close", { signal: AbortSignal.timeout(5000) });
     assert.deepStrictEqual(logs, ["WARN connection failed Authorization:[redacted]"]);
   } finally {
     conn.dispose();
@@ -224,11 +225,11 @@ test("ACP stderr keeps actionable lines without credentials", async () => {
 
 test("ACP stdout drops an oversized unterminated frame", async () => {
   const { spawn } = require("child_process");
-  const child = spawn(process.execPath, ["-e", "process.stdout.write('x'.repeat(8 * 1024 * 1024 + 1)); setTimeout(() => {}, 1000)"], { stdio: ["pipe", "pipe", "pipe"] });
+  const child = spawn(process.execPath, ["-e", "process.stdout.write('x'.repeat(8 * 1024 * 1024 + 1))"], { stdio: ["pipe", "pipe", "pipe"] });
   const logs = [];
   const conn = new JsonRpcConnection(child, async () => ({}), () => {}, (line) => logs.push(line));
   try {
-    await settle(300);
+    await once(child, "close", { signal: AbortSignal.timeout(5000) });
     assert.strictEqual(conn.buffer, "");
     assert.ok(logs.some((line) => line.includes("frame exceeded")));
   } finally {
@@ -239,11 +240,11 @@ test("ACP stdout drops an oversized unterminated frame", async () => {
 
 test("ACP stdout drops an oversized complete frame", async () => {
   const { spawn } = require("child_process");
-  const child = spawn(process.execPath, ["-e", "process.stdout.write('x'.repeat(8 * 1024 * 1024 + 1) + '\\n'); setTimeout(() => {}, 1000)"], { stdio: ["pipe", "pipe", "pipe"] });
+  const child = spawn(process.execPath, ["-e", "process.stdout.write('x'.repeat(8 * 1024 * 1024 + 1) + '\\n')"], { stdio: ["pipe", "pipe", "pipe"] });
   const logs = [];
   const conn = new JsonRpcConnection(child, async () => ({}), () => {}, (line) => logs.push(line));
   try {
-    await settle(300);
+    await once(child, "close", { signal: AbortSignal.timeout(5000) });
     assert.ok(logs.some((line) => line.includes("frame exceeded")));
   } finally {
     conn.dispose();
@@ -253,11 +254,11 @@ test("ACP stdout drops an oversized complete frame", async () => {
 
 test("ACP stderr drops an oversized unterminated line", async () => {
   const { spawn } = require("child_process");
-  const child = spawn(process.execPath, ["-e", "process.stderr.write('x'.repeat(64 * 1024 + 1)); setTimeout(() => {}, 1000)"], { stdio: ["pipe", "pipe", "pipe"] });
+  const child = spawn(process.execPath, ["-e", "process.stderr.write('x'.repeat(64 * 1024 + 1))"], { stdio: ["pipe", "pipe", "pipe"] });
   const logs = [];
   const conn = new JsonRpcConnection(child, async () => ({}), () => {}, (line) => logs.push(line));
   try {
-    await settle(150);
+    await once(child, "close", { signal: AbortSignal.timeout(5000) });
     assert.strictEqual(conn.stderr, "");
     assert.ok(logs.some((line) => line.includes("stderr line exceeded")));
   } finally {
