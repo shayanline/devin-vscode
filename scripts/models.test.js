@@ -138,9 +138,11 @@ test("account status promotions enrich exact model uids the CLI omits", async ()
   const families = await list(fakeCli(JSON.stringify(sweCatalog)), undefined, async () => sweStatus);
   for (const uid of ["swe-2-high", "swe-2-medium", "swe-2-max"]) {
     assert.equal(variantOf(families, "swe-2", uid).promotion, "83% off", uid);
+    assert.equal(variantOf(families, "swe-2", uid).promotionEndDate, undefined, `${uid} has no reported end date`);
   }
   for (const uid of ["swe-2-flash-medium", "swe-2-flash-high", "swe-2-flash-max"]) {
     assert.equal(variantOf(families, "swe-2-flash", uid).promotion, "25% off", uid);
+    assert.equal(variantOf(families, "swe-2-flash", uid).promotionEndDate, undefined, `${uid} has no reported end date`);
   }
   const claude = variantOf(families, "claude", "claude-medium");
   assert.equal(claude.promotion, "CLI OFFER", "a variant with no status row keeps its CLI offer");
@@ -175,6 +177,68 @@ test("snake case status fields carry the same badge signals", async () => {
   const fast = variantOf(families, "swe-2", "swe-2-high-fast");
   assert.equal(fast.isNew, undefined, "a Fast uid never borrows the standard row's flags");
   assert.equal(fast.promotion, undefined);
+  assert.equal(fast.promotionEndDate, undefined);
+});
+
+test("account status promotion end dates reach exact model variants", async () => {
+  const { listModelFamilies: list } = loadModels("models-status-enddate");
+  const sweEnd = "2027-01-01T07:59:59.999999999Z";
+  const flashEnd = "2026-11-18T18:00:00Z";
+  const status = {
+    userStatus: {
+      cascadeModelConfigData: {
+        clientModelConfigs: [
+          { modelUid: "swe-2-high", promoStatus: { isActive: true, label: "83% off", endDate: sweEnd } },
+          { modelUid: "swe-2-medium", promoStatus: { isActive: true, label: "83% off", endDate: sweEnd } },
+          { modelUid: "swe-2-max", promoStatus: { isActive: true, label: "83% off", endDate: sweEnd } },
+          { modelUid: "swe-2-flash-medium", promoStatus: { isActive: true, label: "25% off", endDate: flashEnd } },
+          { modelUid: "swe-2-flash-high", promoStatus: { isActive: true, label: "25% off", endDate: flashEnd } },
+          { modelUid: "swe-2-flash-max", promoStatus: { isActive: true, label: "25% off", endDate: flashEnd } },
+          { modelUid: "claude-medium", promoStatus: { isActive: false, label: "OLD OFFER", endDate: sweEnd } }
+        ]
+      }
+    }
+  };
+  const families = await list(fakeCli(JSON.stringify(sweCatalog)), undefined, async () => status);
+  for (const uid of ["swe-2-high", "swe-2-medium", "swe-2-max"]) {
+    const variant = variantOf(families, "swe-2", uid);
+    assert.equal(variant.promotion, "83% off", uid);
+    assert.equal(variant.promotionEndDate, sweEnd, `${uid} keeps the nine digit timestamp verbatim`);
+  }
+  for (const uid of ["swe-2-flash-medium", "swe-2-flash-high", "swe-2-flash-max"]) {
+    const variant = variantOf(families, "swe-2-flash", uid);
+    assert.equal(variant.promotion, "25% off", uid);
+    assert.equal(variant.promotionEndDate, flashEnd, uid);
+  }
+  const claude = variantOf(families, "claude", "claude-medium");
+  assert.equal(claude.promotion, undefined, "an inactive promo clears the stale CLI offer");
+  assert.equal(claude.promotionEndDate, undefined, "an inactive promo carries no end date");
+});
+
+test("snake case status promo fields carry the end date", async () => {
+  const { listModelFamilies: list } = loadModels("models-status-enddate-snake");
+  const cli = fakeCli(JSON.stringify({
+    families: [{
+      family_label: "SWE-2 Flash", slug: "swe-2-flash",
+      variants: [
+        { model_uid: "swe-2-flash-high", label: "SWE-2 Flash High" },
+        { model_uid: "swe-2-flash-max", label: "SWE-2 Flash Max" }
+      ]
+    }]
+  }));
+  const status = {
+    user_status: {
+      cascade_model_config_data: {
+        client_model_configs: [
+          { model_uid: "swe-2-flash-high", promo_status: { is_active: true, label: "25% off", end_date: "2026-11-18T18:00:00Z" } },
+          { model_uid: "swe-2-flash-max", promo_status: { is_active: true, label: "25% off", end_date: "   " } }
+        ]
+      }
+    }
+  };
+  const families = await list(cli, undefined, async () => status);
+  assert.equal(variantOf(families, "swe-2-flash", "swe-2-flash-high").promotionEndDate, "2026-11-18T18:00:00Z");
+  assert.equal(variantOf(families, "swe-2-flash", "swe-2-flash-max").promotionEndDate, undefined, "a blank end date stays absent");
 });
 
 test("reported status rows clear stale CLI badge fields", async () => {

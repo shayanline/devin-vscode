@@ -2,6 +2,35 @@ import { fusionIdentity, modelIdentity } from "../src/cli/modelId";
 
 const ROW_ORDER = ["Input", "Output", "Cache Read", "Cache Write"];
 
+export function estimatedOriginalPrice(value, promotion) {
+  const discountMatch = /^(\d+(?:\.\d+)?)\s*%\s+off$/i.exec(String(promotion || "").trim());
+  const priceMatch = /^\$(\d+(?:\.\d+)?)$/.exec(String(value || "").trim());
+  if (!discountMatch || !priceMatch) return "";
+  const [priceWhole, priceDecimals = ""] = priceMatch[1].split(".");
+  const [discountWhole, discountDecimals = ""] = discountMatch[1].split(".");
+  const priceScale = 10n ** BigInt(priceDecimals.length);
+  const discountScale = 10n ** BigInt(discountDecimals.length);
+  const current = BigInt(priceWhole + priceDecimals);
+  const discount = BigInt(discountWhole + discountDecimals);
+  if (current <= 0n || discount <= 0n || discount >= 100n * discountScale) return "";
+  // Decimal integers keep an exact tenth from rounding up because of floating point noise.
+  const denominator = priceScale * (100n * discountScale - discount);
+  const numerator = current * discountScale * 1000n;
+  const tenths = (numerator + denominator - 1n) / denominator;
+  if (tenths >= 10n ** 22n) return "";
+  const fraction = tenths % 10n;
+  return `$${tenths / 10n}${fraction ? `.${fraction}` : ""}`;
+}
+
+export function pickerPromotionEndDate(value) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)) return "";
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "";
+  return date.toLocaleDateString("en-GB", {
+    day: "numeric", month: "short", year: "numeric", timeZone: "UTC"
+  });
+}
+
 export function pickerTokenCount(value) {
   const count = Number(value);
   if (!Number.isFinite(count) || count <= 0) return "";
@@ -54,12 +83,18 @@ function modelMetadata(family, effort, speed) {
     const source = sources.find((variant) => Number(variant[key]) > 0);
     return [label, pickerTokenCount(source?.[key])];
   }).filter(([, value]) => value);
+  // An exact Fast variant without its own promotion never inherits the
+  // standard variant's offer or expiry. Standard or base metadata only
+  // supplies them when no exact variant exists.
+  const promotionSource = exact || standard || base;
+  const promotion = String(promotionSource?.promotion || "").trim();
+  const promotionEndDate = promotion && typeof promotionSource?.promotionEndDate === "string"
+    ? promotionSource.promotionEndDate.trim()
+    : "";
   return {
     exact,
-    // An exact Fast variant without its own promotion never inherits the
-    // standard variant's. Standard or base metadata only supplies the offer
-    // when no exact variant exists.
-    promotion: (exact || standard || base)?.promotion || "",
+    promotion,
+    promotionEndDate,
     costTier: tierSource?.costTier || "",
     tierTitle: speed === "fast" && !exact?.costTier
       ? "Model cost tier. Fast rates are shown below when provided by the catalog."
@@ -72,6 +107,7 @@ export function singleModelPricing(family, effort, speed) {
   const metadata = modelMetadata(family, effort, speed);
   return {
     promotion: metadata.promotion,
+    promotionEndDate: metadata.promotionEndDate,
     costTier: metadata.costTier,
     tierTitle: metadata.tierTitle,
     contextRows: metadata.contextRows,
@@ -119,6 +155,7 @@ export function fusionRolePricing(families, pairs, selection, role) {
   const source = exact || commonRateSource(samePair, sub) || commonRateSource(matching, sub);
   return {
     promotion: metadata.promotion,
+    promotionEndDate: metadata.promotionEndDate,
     costTier: metadata.costTier,
     tierTitle: metadata.tierTitle,
     contextRows: metadata.contextRows,

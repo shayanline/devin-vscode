@@ -12,6 +12,7 @@ export interface ModelVariant {
   maxContextTokens?: number;
   maxOutputTokens?: number;
   promotion?: string;
+  promotionEndDate?: string;
   isNew?: boolean;
   isBeta?: boolean;
 }
@@ -200,6 +201,7 @@ interface StatusBadges {
   isNew: boolean;
   isBeta: boolean;
   promotion?: string;
+  promotionEndDate?: string;
 }
 
 // A reported row is authoritative for its exact uid: omitted protobuf
@@ -221,7 +223,8 @@ function statusBadgeRows(status: unknown): Map<string, StatusBadges> | undefined
     rows.set(uid, {
       isNew: (row.isNew ?? row.is_new) === true,
       isBeta: (row.isBeta ?? row.is_beta) === true,
-      promotion: active ? text(promo?.label) || "PROMO" : undefined
+      promotion: active ? text(promo?.label) || "PROMO" : undefined,
+      promotionEndDate: active ? text(promo?.endDate ?? promo?.end_date) : undefined
     });
   }
   return rows;
@@ -244,6 +247,7 @@ async function applyStatusSignals(families: ModelFamily[], read: () => Promise<u
       variant.isNew = badges.isNew;
       variant.isBeta = badges.isBeta;
       variant.promotion = badges.promotion;
+      variant.promotionEndDate = badges.promotionEndDate;
     }
   }
   return families;

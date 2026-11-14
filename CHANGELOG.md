@@ -23,6 +23,10 @@ the commit messages carry the detail.
 - Show each model's token limits, cost tier and reported token prices.
 - Keep Fusion Lead and Sub pricing separate, including reported Fast rates.
 - Show reported long context and cached token prices in pricing details.
+- Compare estimated original prices beside current promotion prices.
+- Check promotion expiry dates in pricing details.
+- Round estimated original prices up to one decimal.
+- Keep sent messages visible when stopped sessions resume after idle.
 - Display New, Promotion and Beta badges with the reported offer tooltips.
 - Match badges to the displayed model effort and speed.
 - Show context usage separately for Fusion Lead and Sub models.

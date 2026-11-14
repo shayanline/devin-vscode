@@ -6478,6 +6478,27 @@ body.vscode-high-contrast-light #model-picker-popup .dd-model-tag{
   font-weight: 500;
 }
 
+#model-picker-popup .catalog-price-original{
+  font-weight: 400;
+  color: var(--vscode-descriptionForeground);
+}
+
+/* Price pairs wrap when a narrow column cannot fit both values. */
+#model-picker-popup .catalog-price-pair{
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: baseline;
+  column-gap: 6px;
+}
+
+#model-picker-popup .catalog-promo-note{
+  margin: 8px 0 0;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--vscode-descriptionForeground);
+}
+
 /* Pricing keeps compact rows and shares the Token Limits surface. */
 #model-picker-popup .catalog-pricing{
   padding: 0;
@@ -6500,6 +6521,7 @@ body.vscode-high-contrast-light #model-picker-popup .dd-model-tag{
 
 #model-picker-popup .catalog-pricing .catalog-tier{
   padding: 0 7px;
+  border-radius: 3px;
   font-size: 11px;
   line-height: 16px;
   font-weight: 400;

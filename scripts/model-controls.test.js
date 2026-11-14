@@ -795,6 +795,173 @@ test("the pricing header shows one Promotion tag beside the cost badge, collapse
   assert.equal(h.errors().length, 0);
 });
 
+test("standalone pricing shows estimated originals and the promotion expiry", () => {
+  const swePromo = fixture.models.map((fam) => fam.id === "swe-2"
+    ? {
+      ...fam,
+      variants: [
+        { value: "swe-2-medium", name: "Medium" },
+        {
+          value: "swe-2-high", name: "High",
+          promotion: "83% off",
+          promotionEndDate: "2027-01-01T07:59:59.999999999Z",
+          costTier: "High cost",
+          costSummary: "$0.5/MTok In · $3/MTok Out · $0.05/MTok Cache Read",
+          longContextCostSummary: "$1/MTok In · $6/MTok Out"
+        }
+      ]
+    }
+    : fam);
+  const h = mount({ models: swePromo, currentModel: "swe-2-high", currentThoughtLevel: "high", thoughtLevels: [] });
+  openTray(h, "effort");
+  const openPricing = () => {
+    const d = popup(h).querySelector("details.catalog-pricing");
+    d.open = true;
+    d.dispatchEvent(new d.ownerDocument.defaultView.Event("toggle"));
+  };
+  openPricing();
+  const body = popup(h).querySelector(".catalog-pricing-body");
+  const cells = [...body.querySelectorAll(".catalog-prices tbody td")].map((td) => ({
+    original: td.querySelector(".catalog-price-original")?.textContent ?? null,
+    current: td.querySelector(".catalog-price-value")?.textContent ?? td.textContent
+  }));
+  assert.deepEqual(cells, [
+    { original: "$3", current: "$0.5" },
+    { original: "$5.9", current: "$1" },
+    { original: "$17.7", current: "$3" },
+    { original: "$35.3", current: "$6" },
+    { original: "$0.3", current: "$0.05" },
+    { original: null, current: "Not provided" }
+  ], "each USD cell pairs its estimate with the reported rate");
+  const pair = body.querySelector(".catalog-price-pair");
+  assert.deepEqual([...pair.querySelectorAll(".sr-only")].map((s) => s.textContent), ["Estimated original price ", " Current price "], "screen readers hear both labels before the values");
+  const notes = [...body.querySelectorAll(".catalog-promo-note")];
+  assert.equal(notes.length, 1, "only the expiry note renders");
+  assert.equal(notes[0].textContent, "Promotion ends on 1 Jan 2027 (UTC).");
+  const time = notes[0].querySelector("time");
+  assert.equal(time.getAttribute("datetime"), "2027-01-01T07:59:59.999999999Z", "the reported timestamp survives verbatim");
+  assert.equal(time.textContent, "1 Jan 2027", "the display stays date only in UTC");
+  assert.ok(!body.textContent.includes("estimates based on"), "the estimate disclaimer is gone");
+  const head = popup(h).querySelector(".catalog-pricing-head");
+  assert.equal(head.querySelectorAll(".dd-model-tag-promotion").length, 1, "the header keeps its single Promotion badge");
+  assert.equal(head.querySelector(".dd-model-tag-promotion").title, "Promotion: 83% off");
+  seg(popup(h), "medium").click();
+  const clean = popup(h).querySelector(".catalog-pricing-body");
+  assert.equal(clean.querySelectorAll(".catalog-price-original").length, 0, "a non promotional effort drops the estimates");
+  assert.equal(clean.querySelectorAll(".catalog-promo-note").length, 0, "both notes disappear with the offer");
+  assert.equal(popup(h).querySelector(".catalog-pricing-head .dd-model-tag-promotion"), null, "the badge clears too");
+  assert.equal(h.errors().length, 0);
+});
+
+test("Fusion role pricing shows the component's own estimated originals and expiry", () => {
+  const options = JSON.parse(JSON.stringify(pricingFixture));
+  options.models.find((m) => m.id === "gpt-5-6-sol").variants.forEach((v) => {
+    v.promotion = "20% off";
+    v.promotionEndDate = "2026-11-18T18:00:00Z";
+  });
+  // A promotional pair must never leak its offer or expiry into a role.
+  options.models.find((m) => m.id === "fusion").variants.forEach((v) => {
+    v.promotion = "PROMO";
+    v.promotionEndDate = "2030-01-01T00:00:00Z";
+  });
+  const h = mount(options);
+  const tray = openFusionPage(h);
+  pickRole(tray, "sub");
+  rowAction(popup(h), "gpt-5-6-sol").click();
+  const openPricing = () => {
+    const d = popup(h).querySelector("details.catalog-pricing");
+    d.open = true;
+    d.dispatchEvent(new d.ownerDocument.defaultView.Event("toggle"));
+  };
+  const cells = () => [...popup(h).querySelectorAll(".catalog-pricing-body .catalog-prices tbody td")].map((td) => ({
+    original: td.querySelector(".catalog-price-original")?.textContent ?? null,
+    current: td.querySelector(".catalog-price-value")?.textContent ?? td.textContent
+  }));
+  openPricing();
+  assert.deepEqual(cells(), [
+    { original: "$5", current: "$4" },
+    { original: "$25", current: "$20" },
+    { original: "$0.5", current: "$0.4" }
+  ], "the Sub's own offer estimates beside its reported rates");
+  const body = popup(h).querySelector(".catalog-pricing-body");
+  const notes = [...body.querySelectorAll(".catalog-promo-note")];
+  assert.equal(notes.length, 1);
+  assert.equal(notes[0].textContent, "Promotion ends on 18 Nov 2026 (UTC).");
+  assert.equal(notes[0].querySelector("time").getAttribute("datetime"), "2026-11-18T18:00:00Z");
+  assert.ok(!body.textContent.includes("2030"), "the pair's expiry never reaches the role");
+  assert.ok(!body.textContent.includes("estimates based on"), "the estimate disclaimer is gone");
+  popup(h).querySelector("#fast-thinking").click();
+  openPricing();
+  assert.deepEqual(cells().map((c) => c.original), ["$10", "$50", "$1"], "Fast rates get their own estimates");
+  assert.deepEqual(cells().map((c) => c.current), ["$8", "$40", "$0.8"], "reported Fast rates stay unchanged");
+  popup(h).querySelector("#pageBack").click();
+  pickRole(popup(h), "lead");
+  rowAction(popup(h), "claude-opus-5-5").click();
+  openPricing();
+  const leadBody = popup(h).querySelector(".catalog-pricing-body");
+  assert.equal(leadBody.querySelectorAll(".catalog-price-original").length, 0, "the non promotional Lead shows no estimates");
+  assert.equal(leadBody.querySelectorAll(".catalog-promo-note").length, 0, "no notes leak from the pair or the Sub");
+  assert.equal(h.errors().length, 0);
+});
+
+test("promotion pricing notes handle non numeric offers, bad dates and missing rates", () => {
+  const edge = (id, variant) => [{ id, name: id, default: `${id}-high`, variants: [variant] }];
+  const openDetails = (h) => {
+    openTray(h, "effort");
+    const d = popup(h).querySelector("details.catalog-pricing");
+    d.open = true;
+    d.dispatchEvent(new d.ownerDocument.defaultView.Event("toggle"));
+    return popup(h).querySelector(".catalog-pricing-body");
+  };
+  const mountEdge = (id, variant) => mount({
+    models: edge(id, variant), currentModel: `${id}-high`, currentThoughtLevel: "high", thoughtLevels: []
+  });
+
+  let h = mountEdge("edge-offer", {
+    value: "edge-offer-high", name: "High", promotion: "Launch offer",
+    promotionEndDate: "2026-12-01T00:00:00Z", costSummary: "$4/MTok In · $20/MTok Out"
+  });
+  let body = openDetails(h);
+  assert.equal(body.querySelectorAll(".catalog-price-original").length, 0, "a non numeric offer has no estimate");
+  assert.equal(body.querySelectorAll(".catalog-promo-note").length, 1, "only the expiry note renders");
+  assert.equal(body.querySelector(".catalog-promo-note").textContent, "Promotion ends on 1 Dec 2026 (UTC).");
+  assert.equal(body.querySelector("time").getAttribute("datetime"), "2026-12-01T00:00:00Z");
+
+  h = mountEdge("edge-baddate", {
+    value: "edge-baddate-high", name: "High", promotion: "20% off",
+    promotionEndDate: "soon", costSummary: "$4/MTok In · $20/MTok Out"
+  });
+  body = openDetails(h);
+  const baddateOriginals = [...body.querySelectorAll(".catalog-price-original")].map((d) => d.textContent);
+  assert.deepEqual(baddateOriginals, ["$5", "$25"], "the numeric offer still estimates");
+  assert.equal(body.querySelectorAll(".catalog-promo-note").length, 0, "a malformed date leaves no notes");
+  assert.equal(body.querySelector("time"), null, "a malformed date never renders");
+
+  h = mountEdge("edge-norates", {
+    value: "edge-norates-high", name: "High", promotion: "20% off",
+    promotionEndDate: "2027-01-01T07:59:59.999999999Z"
+  });
+  body = openDetails(h);
+  assert.ok(body.querySelector(".catalog-empty"), "missing rates keep the empty message");
+  assert.equal(body.querySelectorAll(".catalog-price-original").length, 0);
+  assert.equal(body.querySelectorAll(".catalog-promo-note").length, 1, "the expiry still shows without rates");
+  assert.equal(body.querySelector("time").getAttribute("datetime"), "2027-01-01T07:59:59.999999999Z");
+
+  h = mountEdge("edge-low", {
+    value: "edge-low-high", name: "High", promotion: "25% off",
+    promotionEndDate: "2026-11-18T18:00:00Z", costSummary: "$0.03/MTok In · $0.1/MTok Out"
+  });
+  body = openDetails(h);
+  const lowOriginals = [...body.querySelectorAll(".catalog-price-original")].map((d) => d.textContent);
+  assert.deepEqual(lowOriginals, ["$0.1", "$0.2"], "upward rounding never lands at or below the current rate");
+  const lowCurrents = [...body.querySelectorAll(".catalog-price-value")].map((s) => s.textContent);
+  assert.deepEqual(lowCurrents, ["$0.03", "$0.1"], "reported rates stay unchanged");
+  const lowNotes = [...body.querySelectorAll(".catalog-promo-note")];
+  assert.equal(lowNotes.length, 1, "only the expiry note renders");
+  assert.equal(lowNotes[0].textContent, "Promotion ends on 18 Nov 2026 (UTC).");
+  assert.equal(h.errors().length, 0);
+});
+
 test("host exposes speed and serializes it with Fusion effort", { skip: process.platform === "win32" }, async () => {
   const h = createChat({ config: { defaultMode: "", defaultModel: "", defaultThoughtLevel: "", defaultSpeed: "" } });
   const config = recordConfigWrites();

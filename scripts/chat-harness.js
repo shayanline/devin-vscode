@@ -188,6 +188,14 @@ process.stdin.on("data", async (chunk) => {
         break;
       case "session/load":
         await delay(num("DV_LOAD_DELAY"));
+        // The real CLI replays a loaded session's history as session/update
+        // traffic before answering. Tests configure that replay through
+        // DV_LOAD_UPDATES; absent or empty, the load replays nothing.
+        try {
+          for (const update of JSON.parse(process.env.DV_LOAD_UPDATES || "[]")) {
+            send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: msg.params.sessionId, update } });
+          }
+        } catch {}
         reply({});
         break;
       case "session/prompt": {
@@ -293,7 +301,10 @@ function createChat(opts = {}) {
     // Session config choices a test needs the agent to advertise, serialized
     // because the agent is a separate process. Absent values keep the defaults.
     DV_MODEL_OPTIONS: opts.modelOptions ? JSON.stringify(opts.modelOptions) : "",
-    DV_THOUGHT_LEVELS: opts.thoughtLevels ? JSON.stringify(opts.thoughtLevels) : ""
+    DV_THOUGHT_LEVELS: opts.thoughtLevels ? JSON.stringify(opts.thoughtLevels) : "",
+    // Exact ACP update objects the agent emits during session/load, standing in
+    // for the history the real CLI replays. Absent means no replay at all.
+    DV_LOAD_UPDATES: opts.loadUpdates ? JSON.stringify(opts.loadUpdates) : ""
   };
   globalThis.__dvConfig = Object.assign(
     {

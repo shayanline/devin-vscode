@@ -2291,7 +2291,14 @@ export class ChatController implements AcpHost {
       // A load/wake for this session is already running; make it the active one
       // and share its result rather than spawning a second acp.
       this.activeId = id;
-      return inflight;
+      await inflight;
+      // The shared operation just finished. If the panel is still on this
+      // session, rebuild its transcript from the local log: the webview that
+      // asked is showing a loader the silent wake never painted a replay for.
+      if (this.activeId === id && this.runtimes.has(id)) {
+        await this.activateSession(id, true);
+      }
+      return;
     }
     const p = this.doLoadSession(id);
     this.loading.set(id, p);
@@ -2306,9 +2313,10 @@ export class ChatController implements AcpHost {
     const already = this.runtimes.get(id);
     // Never reload a session whose turn is in flight: issuing a loadSession over
     // its live channel aborts the running prompt ("channel closed"). Re-attach
-    // to the running runtime instead (it keeps streaming).
+    // to the running runtime instead (it keeps streaming), rebuilding the
+    // transcript the requesting webview has no copy of.
     if (already && already.busy) {
-      await this.activateSession(id);
+      await this.activateSession(id, true);
       return;
     }
     const startedAt = Date.now();
@@ -2457,19 +2465,32 @@ export class ChatController implements AcpHost {
   // has kept its rendered transcript and restores it locally, so we only need to
   // re-point the active session and refresh the composer chrome. Falls back to a
   // full wake/load if the runtime is not alive. Item: switch without reload.
-  private async activateSession(id: string): Promise<void> {
+  private async activateSession(id: string, replay = false): Promise<void> {
     const rt = this.runtimes.get(id);
     if (!rt) {
       await this.loadSession(id);
       return;
     }
     this.activeId = id;
+    if (replay) {
+      // The caller has no usable transcript (a full load was asked for over a
+      // busy or still-waking session), so rebuild from the recorded log: this
+      // clears the loader, replays what was painted and empties the buffer of
+      // anything the log already covers.
+      this.replayLog(rt);
+    }
     this.markVisible(id);
     this.sendOpenDocuments(rt);
     this.postWorkingSet();
     // The composer belongs to this chat now, so it shows this chat's own unsent
     // text and staged files, not the ones from wherever we just were.
     await this.loadStaged(id);
+    // The awaits above can outlive this activation: the user can open another
+    // chat, or this runtime can be replaced, while staged files load. Nothing
+    // below may paint into a session that is no longer the one on screen.
+    if (this.activeId !== id || this.runtimes.get(id) !== rt) {
+      return;
+    }
     this.postDraft();
     this.currentMode = rt.mode;
     this.currentModel = rt.model;
@@ -4184,13 +4205,15 @@ export class ChatController implements AcpHost {
     // What was attached goes with the message, so the request keeps saying what it
     // was asked about instead of the context vanishing the moment it is sent.
     const attachments = this.shownAttachments(staged);
-    this.record(sent, { type: "userMessage", text, attachments });
-    // For a fresh chat the message was already rendered above; only echo it here
-    // for a send within an existing (visible) session, and only while that session
-    // is still the one on screen: a wake that finishes after the user has opened
-    // another chat would otherwise paint this message into their transcript.
-    if (!startNew && this.activeId === sent.id) {
-      this.post({ type: "userMessage", text, attachments });
+    const userMessage = { type: "userMessage", text, attachments };
+    if (startNew) {
+      // A fresh chat's echo was already posted. The log still needs it once.
+      this.record(sent, userMessage);
+    } else {
+      // emit records once, then posts while this session is on screen or buffers
+      // it for the transcript it misses: a wake that finishes after the user
+      // has left for the list or another chat used to drop the echo entirely.
+      this.emit(sent, userMessage);
     }
     const blocks: ContentBlock[] = [...this.buildImplicitBlocks(), ...staged.map((a) => a.block), { type: "text", text }];
     await this.runPrompt(sent, blocks);

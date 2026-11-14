@@ -1420,9 +1420,12 @@ test("leaving a working session and returning never shows two Working lines", as
     .find((r) => r.querySelector(".session-code").textContent === code)
     .querySelector(".session-main").click();
 
-  // Open A and leave it mid turn, with the "Working…" line on screen.
+  // Open A and leave it mid turn, with the "Working…" line on screen. The row
+  // click asks the host to load the session, so `loaded` is what ends the
+  // loader a real load would have sent.
   openRow("aaa");
   h.post({ type: "sessionReady", sessionId: "aaa" });
+  h.post({ type: "loaded" });
   h.post({ type: "userMessage", text: "go" });
   h.post({ type: "assistantStart" });
   h.post({ type: "busy", value: true });
@@ -1432,6 +1435,7 @@ test("leaving a working session and returning never shows two Working lines", as
   // Switch away and back (the transcript is retained), then send again.
   openRow("bbb");
   h.post({ type: "sessionReady", sessionId: "bbb" });
+  h.post({ type: "loaded" });
   await h.settle(10);
   openRow("aaa");
   await h.settle(10);
@@ -2452,6 +2456,41 @@ test("the working row shimmers a word, with no spinner beside it", async () => {
   h.post({ type: "busy", value: false });
   await h.settle(20);
   assert.strictEqual(h.thread().querySelector(".working"), null, "and it goes when the turn does");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a session waking after idle says so without pretending a turn is running", async () => {
+  const h = createHarness();
+  h.replay([
+    { role: "user", text: "earlier request" },
+    { role: "assistant", text: "earlier answer" }
+  ]);
+  h.post({ type: "sessionReady", sessionId: "S1", title: "Chat" });
+  h.post({ type: "busy", value: false });
+  await h.settle(20);
+
+  // The host reports the session waking: the row says so honestly, while no
+  // turn is busy and Stop stays hidden.
+  h.post({ type: "sessionStatuses", statuses: { S1: "starting" }, activeId: "S1" });
+  await h.settle(20);
+  const waking = h.thread().querySelector(".working .working-label");
+  assert.ok(waking, "the working row appears while the session wakes");
+  assert.strictEqual(waking.textContent, "Waking session");
+  assert.ok(h.document.getElementById("stop").classList.contains("hidden"),
+    "Stop stays hidden: nothing is running yet");
+
+  // The wake settling to idle takes the row away again.
+  h.post({ type: "sessionStatuses", statuses: { S1: "idle" }, activeId: "S1" });
+  await h.settle(20);
+  assert.strictEqual(h.thread().querySelector(".working"), null, "the row clears when the wake ends");
+
+  // And it does not follow the panel to the session list.
+  h.post({ type: "sessionStatuses", statuses: { S1: "starting" }, activeId: "S1" });
+  await h.settle(20);
+  assert.ok(h.thread().querySelector(".working .working-label"), "the row is back for another wake");
+  h.post({ type: "body", body: "list" });
+  await h.settle(20);
+  assert.strictEqual(h.thread().querySelector(".working"), null, "the row stays with the thread it belongs to");
   assert.strictEqual(h.errors().length, 0);
 });
 

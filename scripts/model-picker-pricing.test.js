@@ -9,7 +9,53 @@ const bundle = esbuild.buildSync({
 }).outputFiles[0].text;
 const pricingModule = { exports: {} };
 new Function("module", "exports", bundle)(pricingModule, pricingModule.exports);
-const { pickerTokenCount, singleModelPricing, fusionRolePricing } = pricingModule.exports;
+const {
+  estimatedOriginalPrice, pickerPromotionEndDate, pickerTokenCount, singleModelPricing, fusionRolePricing
+} = pricingModule.exports;
+
+test("original price estimates round upward to at most one decimal", () => {
+  for (const [current, promotion, original] of [
+    ["$0.5", "83% off", "$3"],
+    ["$3", "83% off", "$17.7"],
+    ["$0.05", "83% off", "$0.3"],
+    ["$0.75", "25% off", "$1"],
+    ["$0.08", "25% off", "$0.2"],
+    ["$2", "83.5% off", "$12.2"],
+    ["$1.00", " 20 % OFF ", "$1.3"],
+    ["$2.619", "10% off", "$3"],
+    ["$2.601", "10% off", "$2.9"],
+    ["$2.1", "25% off", "$2.8"],
+    ["$9.075", "25% off", "$12.1"]
+  ]) {
+    assert.equal(estimatedOriginalPrice(current, promotion), original, `${current} with ${promotion}`);
+  }
+});
+
+test("price estimates stay absent when the label or USD rate cannot be reversed reliably", () => {
+  for (const promotion of [
+    "", null, undefined, "PROMO", "Half off", "Up to 83% off", "83% off selected tokens",
+    "25% to 83% off", "-25% off", "0% off", "100% off", "101% off"
+  ]) assert.equal(estimatedOriginalPrice("$1", promotion), "", String(promotion));
+  for (const current of [
+    "", null, undefined, "$0", "$-1", "Free", "Not provided", "EUR 1", "$1 to $2", "$NaN",
+    "$1e3", `$${"9".repeat(310)}`, "$1000000000000000000000"
+  ]) assert.equal(estimatedOriginalPrice(current, "83% off"), "", String(current));
+});
+
+test("upward rounding preserves positive low rates without trailing zeroes", () => {
+  assert.equal(estimatedOriginalPrice("$0.03", "25% off"), "$0.1");
+  assert.equal(estimatedOriginalPrice("$0.1", "25% off"), "$0.2");
+  assert.equal(estimatedOriginalPrice("$1", "1% off"), "$1.1");
+});
+
+test("promotion dates accept the catalogue's nanosecond timestamp and always use UTC", () => {
+  assert.equal(pickerPromotionEndDate("2027-01-01T07:59:59.999999999Z"), "1 Jan 2027");
+  assert.equal(pickerPromotionEndDate("2026-11-18T18:00:00Z"), "18 Nov 2026");
+  assert.equal(pickerPromotionEndDate("2027-01-01T00:30:00+01:00"), "31 Dec 2026");
+  for (const value of [
+    "", null, undefined, 0, "not a date", "2027-01-01", "2027-01-01T00:30:00", "2027-13-01T00:00:00Z"
+  ]) assert.equal(pickerPromotionEndDate(value), "", String(value));
+});
 
 const lead = {
   id: "claude-opus-5-5", default: "claude-opus-5-5-high",
@@ -123,6 +169,64 @@ test("each Fusion role exposes only its own model's promotion, never the pair's"
   const sel = { ...selection, subModel: "swe-2", subEffort: "medium" };
   assert.equal(fusionRolePricing([lead, promoSub], [promoPair], sel, "sub").promotion, "Launch offer");
   assert.equal(fusionRolePricing([lead, promoSub], [promoPair], sel, "lead").promotion, "");
+});
+
+test("the promotion end date follows the same variant source as the offer", () => {
+  const endDate = "2027-01-01T07:59:59.999999999Z";
+  const dated = {
+    ...sub,
+    variants: [{ ...sub.variants[0], promotion: "20% off", promotionEndDate: `  ${endDate}  ` }]
+  };
+  const standard = singleModelPricing(dated, "high", "standard");
+  assert.equal(standard.promotion, "20% off");
+  assert.equal(standard.promotionEndDate, endDate, "the date is trimmed with the offer source");
+  const noFast = singleModelPricing(dated, "high", "fast");
+  assert.equal(noFast.promotion, "20% off", "a missing Fast variant still falls back to the standard offer");
+  assert.equal(noFast.promotionEndDate, endDate);
+  const withFast = {
+    ...dated,
+    variants: [...dated.variants, { value: "gpt-5-6-sol-high-priority", costTier: "Very high cost" }]
+  };
+  const fast = singleModelPricing(withFast, "high", "fast");
+  assert.equal(fast.promotion, "", "an explicit Fast variant never inherits the standard offer");
+  assert.equal(fast.promotionEndDate, "", "nor its expiry");
+  const datedFast = {
+    ...withFast,
+    variants: withFast.variants.map((v) => v.value === "gpt-5-6-sol-high-priority"
+      ? { ...v, promotion: "10% off", promotionEndDate: "2026-12-01T00:00:00Z" } : v)
+  };
+  const ownFast = singleModelPricing(datedFast, "high", "fast");
+  assert.equal(ownFast.promotion, "10% off");
+  assert.equal(ownFast.promotionEndDate, "2026-12-01T00:00:00Z", "a Fast variant's own offer wins");
+});
+
+test("an end date without a nonblank promotion stays hidden", () => {
+  for (const promotion of ["", "   ", null, undefined]) {
+    const family = {
+      ...sub,
+      variants: [{ ...sub.variants[0], promotion, promotionEndDate: "2027-01-01T07:59:59Z" }]
+    };
+    const value = singleModelPricing(family, "high", "standard");
+    assert.equal(value.promotionEndDate, "", JSON.stringify(promotion));
+  }
+});
+
+test("each Fusion role exposes only its own model's promotion end date", () => {
+  const datedSub = {
+    id: "swe-2", default: "swe-2-medium",
+    variants: [{
+      value: "swe-2-medium", costTier: "Medium cost",
+      promotion: "83% off", promotionEndDate: "2027-01-01T07:59:59.999999999Z"
+    }]
+  };
+  const datedPair = { ...standardPair, promotion: "PROMO", promotionEndDate: "2030-01-01T00:00:00Z" };
+  const sel = { ...selection, subModel: "swe-2", subEffort: "medium" };
+  const subValue = fusionRolePricing([lead, datedSub], [datedPair], sel, "sub");
+  assert.equal(subValue.promotion, "83% off");
+  assert.equal(subValue.promotionEndDate, "2027-01-01T07:59:59.999999999Z", "the Sub keeps its own offer expiry");
+  const leadValue = fusionRolePricing([lead, datedSub], [datedPair], sel, "lead");
+  assert.equal(leadValue.promotion, "");
+  assert.equal(leadValue.promotionEndDate, "", "neither the Lead nor the pair leaks an expiry");
 });
 
 test("token limits round binary counts without displaying long raw numbers", () => {

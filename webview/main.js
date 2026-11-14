@@ -1,6 +1,6 @@
 import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
 import { EFFORT_NAMES, EFFORT_ORDER, fusionIdentity, fusionModelKey, modelIdentity } from "../src/cli/modelId";
-import { singleModelPricing, fusionRolePricing } from "./modelPickerPricing";
+import { singleModelPricing, fusionRolePricing, estimatedOriginalPrice, pickerPromotionEndDate } from "./modelPickerPricing";
 import { contextPercent, normalizeContextUsage, fusionUsageRoles } from "./contextUsage";
 import { acuText } from "../src/acp/usage";
 import { createWorkingMark } from "./workingMark.js";
@@ -1085,7 +1085,26 @@ import { createWorkingMark } from "./workingMark.js";
 
   // --- Pricing and limits ---------------------------------------------------
 
-  function pickerPriceTable(section) {
+  function pickerPriceCell(value, promotion) {
+    const cell = document.createElement("td");
+    const estimate = estimatedOriginalPrice(value, promotion);
+    if (!estimate) {
+      cell.textContent = value;
+      return cell;
+    }
+    const pair = pickerNode("span", "catalog-price-pair");
+    pair.append(
+      pickerNode("span", "sr-only", "Estimated original price "),
+      pickerNode("del", "catalog-price-original", estimate),
+      pickerNode("span", "sr-only", " Current price "),
+      " ",
+      pickerNode("span", "catalog-price-value", value)
+    );
+    cell.appendChild(pair);
+    return cell;
+  }
+
+  function pickerPriceTable(section, promotion) {
     const table = pickerNode("table", "catalog-prices");
     const longContext = section.longRows.length > 0;
     if (longContext) {
@@ -1110,9 +1129,9 @@ import { createWorkingMark } from "./workingMark.js";
       const heading = pickerNode("th", "", label);
       heading.scope = "row";
       row.appendChild(heading);
-      row.appendChild(pickerNode("td", "", defaults.has(label) ? defaults.get(label) : "Not provided"));
+      row.appendChild(pickerPriceCell(defaults.has(label) ? defaults.get(label) : "Not provided", promotion));
       if (longContext) {
-        row.appendChild(pickerNode("td", "", extended.has(label) ? extended.get(label) : "Not provided"));
+        row.appendChild(pickerPriceCell(extended.has(label) ? extended.get(label) : "Not provided", promotion));
       }
       body.appendChild(row);
     }
@@ -1167,10 +1186,20 @@ import { createWorkingMark } from "./workingMark.js";
     }
     for (const section of item.sections) {
       if (section.rows.length || section.longRows.length) {
-        body.appendChild(pickerPriceTable(section));
+        body.appendChild(pickerPriceTable(section, item.promotion));
       } else {
         body.appendChild(pickerNode("p", "catalog-empty", "The catalog does not provide pricing for this selection."));
       }
+    }
+    const promotion = typeof item.promotion === "string" ? item.promotion.trim() : "";
+    const endDate = promotion ? pickerPromotionEndDate(item.promotionEndDate) : "";
+    if (endDate) {
+      const note = pickerNode("p", "catalog-promo-note");
+      note.append("Promotion ends on ");
+      const time = pickerNode("time", "", endDate);
+      time.dateTime = item.promotionEndDate;
+      note.append(time, " (UTC).");
+      body.appendChild(note);
     }
     pricing.appendChild(body);
     pricing.addEventListener("toggle", () => { pickerState.pricingOpen = pricing.open; });
@@ -1182,6 +1211,7 @@ import { createWorkingMark } from "./workingMark.js";
     const p = singleModelPricing(fam, currentThoughtLevel, currentSpeed);
     return {
       promotion: p.promotion || "",
+      promotionEndDate: p.promotionEndDate || "",
       costTier: p.costTier || "",
       tierTitle: p.tierTitle || "",
       contextRows: p.contextRows || [],
@@ -1196,6 +1226,7 @@ import { createWorkingMark } from "./workingMark.js";
     const p = fusionRolePricing(modelFamilies, fusionPairs(fusionFam()), sel, role);
     return {
       promotion: p.promotion || "",
+      promotionEndDate: p.promotionEndDate || "",
       costTier: p.costTier || "",
       tierTitle: p.tierTitle || "",
       contextRows: p.contextRows || [],
@@ -4971,7 +5002,12 @@ import { createWorkingMark } from "./workingMark.js";
   // subagent its own working row, and a question is waiting on the user, which
   // is worth saying rather than calling it work.
   function workingLabel() {
-    if (!busy || body !== "thread" || !currentTurn) return null;
+    if (body !== "thread" || !currentTurn || loadingSession) return null;
+    // A session coming back from idle is working even though no turn is busy
+    // yet: say that honestly rather than nothing, or a working word for a turn
+    // that has not started.
+    if (curSessionId && sessionStatuses[curSessionId] === "starting") return "Waking session";
+    if (!busy) return null;
     const pending = el.permissionTray.children.length + el.elicitationTray.children.length;
     if (pending) return pending === 1 ? "1 confirmation pending" : pending + " confirmations pending";
     if (currentTurn.resp.querySelector(".tool.in_progress, .tool.pending, .subagent-active")) return null;
