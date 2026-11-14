@@ -410,7 +410,7 @@ function createChat(opts = {}) {
       await toHost({ type: "ready" });
       return api;
     },
-    // Start a chat and wait until it is really open, the common setup.
+    // Wait until the new session's user prompt reaches the agent.
     async startChat(text = "hello") {
       const before = controller.activeId;
       const promptsBefore = api.agentSaw("session/prompt").length;
@@ -419,11 +419,14 @@ function createChat(opts = {}) {
       if (!opened) {
         throw new Error("the chat never opened. Agent log: " + logs.join(" | "));
       }
-      const prompted = await api.until(() => api.agentSaw("session/prompt").length > promptsBefore);
+      const sessionId = controller.activeId;
+      const prompted = await api.until(() => api.agentSaw("session/prompt").slice(promptsBefore).some(
+        (request) => request.params.sessionId === sessionId && request.params.prompt.at(-1)?.text === text
+      ));
       if (!prompted) {
         throw new Error("the chat opened without sending its prompt. Agent log: " + logs.join(" | "));
       }
-      return controller.activeId;
+      return sessionId;
     },
     async dispose() {
       built.delete(api);

@@ -42,6 +42,56 @@ const readPrompts = (h) => h.agentSaw("session/prompt")
 
 const usagePosts = (h) => h.postsOf("usage");
 
+test("startChat waits for the user prompt after startup usage reads", { skip: process.platform === "win32" }, async () => {
+  const h = createChat({ usage });
+  let releasePrompt;
+  let startup;
+  try {
+    await h.ready();
+    // Hold only this controller's user prompts: the startup reads go through
+    // rt.client.readUsage, so they still complete while "hello" is gated.
+    const runPrompt = h.controller.runPrompt.bind(h.controller);
+    const promptGate = new Promise((resolve) => { releasePrompt = resolve; });
+    h.controller.runPrompt = async (...args) => {
+      await promptGate;
+      return runPrompt(...args);
+    };
+    // Watch the helper's own polling without changing what it sees, so the
+    // negative assertion cannot pass before startChat has evaluated the wire.
+    const agentSaw = h.agentSaw;
+    let promptPollSawRequest = false;
+    h.agentSaw = (method) => {
+      const requests = agentSaw(method);
+      if (method === "session/prompt" && requests.length > 0) {
+        promptPollSawRequest = true;
+      }
+      return requests;
+    };
+    let startupSettled = false;
+    startup = h.startChat("hello");
+    startup.then(
+      () => { startupSettled = true; },
+      () => { startupSettled = true; }
+    );
+    const settled = await h.until(
+      () => promptPollSawRequest && usagePosts(h).some((m) => m.sessionAcus === 1.9281)
+    );
+    assert.ok(settled, "the startup usage read never completed");
+    assert.equal(startupSettled, false, "startChat resolved before the user's prompt reached the agent");
+    const wireTexts = agentSaw("session/prompt").map((m) => (m.params.prompt || []).map((b) => b.text || "").join(" "));
+    assert.deepEqual(wireTexts, ["/context", "/session-stats"], "only the startup reads reached the agent while the prompt was gated");
+    releasePrompt();
+    const sessionId = await startup;
+    assert.equal(sessionId, h.activeId(), "startChat returned a different session than the active chat");
+    const after = agentSaw("session/prompt").map((m) => (m.params.prompt || []).map((b) => b.text || "").join(" "));
+    assert.deepEqual(after, ["/context", "/session-stats", "hello"], "the user prompt did not follow the startup reads");
+  } finally {
+    releasePrompt?.();
+    await startup?.catch(() => {});
+    await h.dispose();
+  }
+});
+
 test("opening a session reads usage once and emits only what the report supplies", { skip: process.platform === "win32" }, async () => {
   const h = createChat({ usage });
   try {
