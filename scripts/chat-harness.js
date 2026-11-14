@@ -130,7 +130,7 @@ const configOptions = () => [
 ];
 let buf = "";
 process.stdin.setEncoding("utf8");
-process.stdin.on("data", async (chunk) => {
+process.stdin.on("data", (chunk) => {
   buf += chunk;
   let i;
   while ((i = buf.indexOf("\\n")) !== -1) {
@@ -145,88 +145,93 @@ process.stdin.on("data", async (chunk) => {
       try { require("fs").appendFileSync(process.env.DV_LOG, JSON.stringify({ ...msg, _agent: process.pid }) + "\\n"); } catch {}
     }
     if (msg.id === undefined) continue;
-    const reply = (result) => send({ jsonrpc: "2.0", id: msg.id, result });
-    switch (msg.method) {
-      case "initialize":
-        reply({
-          protocolVersion: 1,
-          agentCapabilities: {
-            loadSession: true,
-            promptCapabilities: { image: true, embeddedContext: true },
-            _meta: { "cognition.ai/revert": true, "cognition.ai/sessionShare": true, ...(process.env.DV_DOCUMENT_LIFECYCLE === "1" ? { "cognition.ai/documentLifecycle": true } : {}) }
-          }
-        });
-        break;
-      case "session/new": {
-        const newId = idBase + "-" + ++seq;
-        // The real agent announces the session's mode before it answers, so this
-        // update arrives while its runtime is not yet in the pool to be found by
-        // id. Anything that answers such an update with "whatever is on screen"
-        // paints one chat's settings into another's.
-        send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: newId, update: { sessionUpdate: "current_mode_update", currentModeId: process.env.DV_MODE || "default" } } });
-        if (process.env.DV_USAGE) {
-          // Advertise only the two instant read commands the host may use. The
-          // announcement has to precede the reply so the first refresh finds them,
-          // unless the test holds it back to model commands announced late.
-          const advertise = () => send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: newId, update: { sessionUpdate: "available_commands_update", availableCommands: [{ name: "context" }, { name: "session-stats" }] } } });
-          const late = num("DV_USAGE_LATE");
-          if (late) setTimeout(advertise, late); else advertise();
+    void handleRequest(msg);
+  }
+});
+// Requests are answered off the read loop: a long prompt must not strand
+// configuration requests already buffered in the same chunk behind its delay.
+async function handleRequest(msg) {
+  const reply = (result) => send({ jsonrpc: "2.0", id: msg.id, result });
+  switch (msg.method) {
+    case "initialize":
+      reply({
+        protocolVersion: 1,
+        agentCapabilities: {
+          loadSession: true,
+          promptCapabilities: { image: true, embeddedContext: true },
+          _meta: { "cognition.ai/revert": true, "cognition.ai/sessionShare": true, ...(process.env.DV_DOCUMENT_LIFECYCLE === "1" ? { "cognition.ai/documentLifecycle": true } : {}) }
         }
-        await delay(num("DV_NEW_DELAY"));
-        reply({ sessionId: newId, modes: { currentModeId: process.env.DV_MODE || "default", availableModes: [{ id: "default", name: "Default" }, { id: "plan", name: "Plan" }] }, configOptions: configOptions() });
+      });
+      break;
+    case "session/new": {
+      const newId = idBase + "-" + ++seq;
+      // The real agent announces the session's mode before it answers, so this
+      // update arrives while its runtime is not yet in the pool to be found by
+      // id. Anything that answers such an update with "whatever is on screen"
+      // paints one chat's settings into another's.
+      send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: newId, update: { sessionUpdate: "current_mode_update", currentModeId: process.env.DV_MODE || "default" } } });
+      if (process.env.DV_USAGE) {
+        // Advertise only the two instant read commands the host may use. The
+        // announcement has to precede the reply so the first refresh finds them,
+        // unless the test holds it back to model commands announced late.
+        const advertise = () => send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: newId, update: { sessionUpdate: "available_commands_update", availableCommands: [{ name: "context" }, { name: "session-stats" }] } } });
+        const late = num("DV_USAGE_LATE");
+        if (late) setTimeout(advertise, late); else advertise();
+      }
+      await delay(num("DV_NEW_DELAY"));
+      reply({ sessionId: newId, modes: { currentModeId: process.env.DV_MODE || "default", availableModes: [{ id: "default", name: "Default" }, { id: "plan", name: "Plan" }] }, configOptions: configOptions() });
+      break;
+    }
+    case "session/set_config_option":
+      if (msg.params.configId === "model") {
+        currentModel = msg.params.value;
+        currentThoughtLevel = "high";
+        currentSpeed = "standard";
+      }
+      if (msg.params.configId === "thought_level") currentThoughtLevel = msg.params.value;
+      if (msg.params.configId === "speed") currentSpeed = msg.params.value;
+      reply({ configOptions: configOptions() });
+      break;
+    case "session/load":
+      await delay(num("DV_LOAD_DELAY"));
+      // The real CLI replays a loaded session's history as session/update
+      // traffic before answering. Tests configure that replay through
+      // DV_LOAD_UPDATES; absent or empty, the load replays nothing.
+      try {
+        for (const update of JSON.parse(process.env.DV_LOAD_UPDATES || "[]")) {
+          send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: msg.params.sessionId, update } });
+        }
+      } catch {}
+      reply({});
+      break;
+    case "session/prompt": {
+      const ptext = (msg.params.prompt || []).map((block) => block.text || "").join(" ");
+      const usageChunks = (name) => {
+        try { return JSON.parse(process.env[name] || "[]"); } catch { return []; }
+      };
+      const emit = (update) => send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: msg.params.sessionId, update } });
+      if (process.env.DV_USAGE && ptext.startsWith("/context")) {
+        const answer = () => { usageChunks("DV_CONTEXT_CHUNKS").forEach(emit); reply({ stopReason: "end_turn" }); };
+        const hold = num("DV_CONTEXT_DELAY");
+        if (hold) setTimeout(answer, hold); else answer();
         break;
       }
-      case "session/set_config_option":
-        if (msg.params.configId === "model") {
-          currentModel = msg.params.value;
-          currentThoughtLevel = "high";
-          currentSpeed = "standard";
-        }
-        if (msg.params.configId === "thought_level") currentThoughtLevel = msg.params.value;
-        if (msg.params.configId === "speed") currentSpeed = msg.params.value;
-        reply({ configOptions: configOptions() });
-        break;
-      case "session/load":
-        await delay(num("DV_LOAD_DELAY"));
-        // The real CLI replays a loaded session's history as session/update
-        // traffic before answering. Tests configure that replay through
-        // DV_LOAD_UPDATES; absent or empty, the load replays nothing.
-        try {
-          for (const update of JSON.parse(process.env.DV_LOAD_UPDATES || "[]")) {
-            send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: msg.params.sessionId, update } });
-          }
-        } catch {}
-        reply({});
-        break;
-      case "session/prompt": {
-        const ptext = (msg.params.prompt || []).map((block) => block.text || "").join(" ");
-        const usageChunks = (name) => {
-          try { return JSON.parse(process.env[name] || "[]"); } catch { return []; }
-        };
-        const emit = (update) => send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: msg.params.sessionId, update } });
-        if (process.env.DV_USAGE && ptext.startsWith("/context")) {
-          const answer = () => { usageChunks("DV_CONTEXT_CHUNKS").forEach(emit); reply({ stopReason: "end_turn" }); };
-          const hold = num("DV_CONTEXT_DELAY");
-          if (hold) setTimeout(answer, hold); else answer();
-          break;
-        }
-        if (process.env.DV_USAGE && ptext.startsWith("/session-stats")) {
-          usageChunks("DV_STATS_CHUNKS").forEach(emit);
-          reply({ stopReason: "end_turn" });
-          break;
-        }
-        // Long by default: a turn is running until the test says otherwise, which is
-        // what makes "busy" states reachable.
-        await delay(num("DV_PROMPT_DELAY") || 60000);
+      if (process.env.DV_USAGE && ptext.startsWith("/session-stats")) {
+        usageChunks("DV_STATS_CHUNKS").forEach(emit);
         reply({ stopReason: "end_turn" });
         break;
       }
-      case "_cognition.ai/revert/listSteps": await delay(num("DV_STEPS_DELAY")); reply({ steps: [] }); break;
-      case "session/list": reply({ sessions: [] }); break;
-      default: reply({});
+      // Long by default: a turn is running until the test says otherwise, which is
+      // what makes "busy" states reachable.
+      await delay(num("DV_PROMPT_DELAY") || 60000);
+      reply({ stopReason: "end_turn" });
+      break;
     }
+    case "_cognition.ai/revert/listSteps": await delay(num("DV_STEPS_DELAY")); reply({ steps: [] }); break;
+    case "session/list": reply({ sessions: [] }); break;
+    default: reply({});
   }
-});
+}
 process.stdin.on("end", () => process.exit(0));
 `;
 
