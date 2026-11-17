@@ -122,6 +122,36 @@ const SCENARIOS = {
       { modelId: "swe-2-medium", totalTokens: 131000, maxTokens: 262000, sections: [{ kind: "messages", tokens: 131000 }] }
     ] }
   ],
+  marketplace: [
+    { type: "ready" },
+    { type: "body", body: "thread" },
+    { type: "capabilities", root: "/Users/dev/Projects/web-app", revert: true, editRequests: "inline", checkpoints: true, showFileChanges: true },
+    modelOptions({ currentThoughtLevel: "high" }),
+    { type: "userMessage", text: "Refactor the auth module to centralise token handling, then run the auth tests.",
+      attachments: [{ label: "token.ts", type: "file" }] },
+    { type: "busy", value: true },
+    { type: "assistantStart" },
+    { type: "assistantChunk", text: "I'll separate token creation and refresh logic before updating the callers." },
+    { type: "toolCall", id: "mp-read", title: "Read src/auth/token.ts", kind: "read", status: "completed", locations: [{ path: "src/auth/token.ts", line: 42 }] },
+    { type: "toolCall", id: "mp-edit", title: "Edit src/auth/token-service.ts", kind: "edit", status: "completed", rawInput: { path: "src/auth/token-service.ts" }, content: [{ type: "diff", path: "src/auth/token-service.ts", added: 34, removed: 6 }] },
+    { type: "fileChange", path: "src/auth/token-service.ts", added: 34, removed: 6, created: true },
+    { type: "fileChange", path: "src/auth/session.ts", added: 4, removed: 2 },
+    { type: "assistantChunk", text: "The token helpers now live in [src/auth/token-service.ts](src/auth/token-service.ts). I'll run the auth tests after you approve the command." },
+    { type: "plan", entries: [
+      { content: "Read the auth module", status: "completed" },
+      { content: "Extract token handling and update callers", status: "completed" },
+      { content: "Run the auth tests", status: "pending" }
+    ] },
+    { type: "assistantEnd" },
+    { type: "workingSet", files: [
+      { path: "src/auth/token-service.ts", name: "token-service.ts", added: 34, removed: 6 },
+      { path: "src/auth/session.ts", name: "session.ts", added: 4, removed: 2 }
+    ] },
+    { type: "permission", requestId: "mp-permission", title: "Devin wants to run a command", command: "npm test --workspace=packages/auth", options: [
+      { optionId: "allow_once", name: "Allow once", kind: "allow_once" },
+      { optionId: "reject_once", name: "Reject", kind: "reject_once" }
+    ] }
+  ],
   full: [
     { type: "ready" },
     { type: "body", body: "thread" },
@@ -213,41 +243,41 @@ const SCENARIOS = {
     { type: "ready" },
     { type: "body", body: "thread" },
     { type: "capabilities", revert: true, contextUsage: true },
-    options("gpt-5"),
+    modelOptions({ currentModel: "gpt-6-astra-high", currentThoughtLevel: "high" }),
     { type: "userMessage", text: "Research the release process and draw the flow." },
     { type: "busy", value: true },
     { type: "assistantStart" },
     { type: "toolCall", id: "s1", title: "Searched web for release checklist", kind: "fetch", meta: { inferenceToolName: "web_search" }, status: "completed", rawInput: { query: "software release checklist best practices" }, content: [{ type: "text", text: 'Found 5 result(s) for "software release checklist best practices"' }] },
-    { type: "toolCall", id: "f1", title: "Fetched https://semver.org", kind: "fetch", meta: { inferenceToolName: "webfetch" }, status: "completed", rawInput: { url: "https://semver.org" }, content: [{ type: "text", text: "Fetched 4210 characters from https://semver.org" }] },
+    { type: "toolCall", id: "f1", title: "Read the Semantic Versioning specification", kind: "fetch", meta: { inferenceToolName: "webfetch" }, status: "completed", rawInput: { url: "https://semver.org" }, content: [{ type: "text", text: "Read the Semantic Versioning specification." }] },
     { type: "toolCall", id: "m1", title: "Calling get_current_time from time", meta: { eventType: "mcp_tool_call", toolName: "mcp__time__get_current_time", inferenceToolName: "mcp__time__get_current_time" }, status: "completed", rawInput: { timezone: "UTC" }, content: [{ type: "text", text: '{\n  "timezone": "UTC",\n  "datetime": "2026-07-30T13:35:18+00:00",\n  "is_dst": false\n}' }] },
     { type: "assistantChunk", text: "Now let me look at the code." },
     { type: "toolCall", id: "r1", title: "Read src/release/plan.ts", kind: "read", status: "completed" },
     { type: "toolCall", id: "r2", title: "Read src/release/tag.ts", kind: "read", status: "completed" },
     { type: "toolCall", id: "r3", title: "Grep for version bump", kind: "search", status: "completed", rawInput: { query: "bumpVersion" } },
-    { type: "assistantChunk", text: "Here is the release flow:\n\n```mermaid\nflowchart TD\n  A[Merge to main] --> B{Tests pass?}\n  B -- yes --> C[Bump version]\n  B -- no --> D[Fix and retry]\n  C --> E[Tag release]\n  E --> F[Publish]\n```\n\nThat covers the full path from merge to publish." },
+    { type: "assistantChunk", text: "The release process checks tests before creating and publishing a versioned tag.\n\n```mermaid\nflowchart LR\n  A[Run tests] --> B[Bump version]\n  B --> C[Tag release]\n  C --> D[Publish]\n```" },
     { type: "assistantEnd" },
     { type: "busy", value: false },
     { type: "usage", used: 88600, size: 200000, cost: 0.21 }
   ],
-  // A focused code-editing turn: reasoning, an edit rendered as a diff card, a
-  // benchmark run, the end-of-turn file-changes summary and the context ring.
+  // A focused code change with a test result and pending file review.
   diff: [
     { type: "ready" },
     { type: "body", body: "thread" },
     { type: "capabilities", revert: true, editRequests: "inline", checkpoints: true, showFileChanges: true, contextUsage: true },
-    options("claude-sonnet-4-5"),
-    { type: "userMessage", text: "Orders load with an N+1 query when I include their line items. Fix it and prove the win with the benchmark." },
+    modelOptions({ currentModel: "claude-opus-5-5-high", currentThoughtLevel: "high" }),
+    { type: "userMessage", text: "Fix the N+1 query when loading orders and their line items. Run the order tests." },
     { type: "busy", value: true },
     { type: "assistantStart" },
-    { type: "thoughtChunk", text: "The serializer touches `order.line_items` inside a loop, so each order triggers its own query.\n\nA single `prefetch_related(\"line_items\")` on the queryset collapses that into two queries total. Then I can run the benchmark task to confirm the drop." },
-    { type: "assistantChunk", text: "Found it. `OrderSerializer` walks `line_items` per order, so a page of 50 orders fires 51 queries. Switching the viewset queryset to prefetch the relation fixes it." },
+    { type: "thoughtChunk", text: "The serializer accesses `line_items` for each order. I'll prefetch the relation before running the order tests." },
+    { type: "assistantChunk", text: "I'll prefetch `line_items` in the orders queryset, then run the order tests." },
     { type: "toolCall", id: "d0", title: "Read orders/api/views.py", kind: "read", status: "completed", locations: [{ path: "orders/api/views.py", line: 61 }] },
     { type: "toolCall", id: "d1", title: "Edit orders/api/views.py", kind: "edit", status: "completed", rawInput: { path: "orders/api/views.py" }, content: [{ type: "diff", path: "orders/api/views.py", added: 5, removed: 3 }] },
-    { type: "toolCall", id: "d2", title: "Run python manage.py benchmark_orders", kind: "execute", status: "completed", rawInput: { command: "python manage.py benchmark_orders --page-size 50" }, content: [{ type: "text", text: "before:  51 queries   382 ms\nafter:    2 queries    24 ms\n\nrows returned: 50 (unchanged)\nOK" }] },
+    { type: "toolCall", id: "d2", title: "Run python manage.py test orders", kind: "execute", status: "completed", rawInput: { command: "python manage.py test orders" }, content: [{ type: "text", text: "Order tests passed." }] },
     { type: "fileChange", path: "orders/api/views.py", added: 5, removed: 3 },
-    { type: "assistantChunk", text: "Done. The page now runs **2 queries instead of 51** and drops from 382 ms to 24 ms, with the same rows returned. Change is in [orders/api/views.py](orders/api/views.py)." },
+    { type: "assistantChunk", text: "The orders queryset now prefetches `line_items`. The order tests pass. Review the change in [orders/api/views.py](orders/api/views.py)." },
     { type: "assistantEnd" },
     { type: "busy", value: false },
+    { type: "workingSet", files: [{ path: "orders/api/views.py", name: "views.py", added: 5, removed: 3 }] },
     { type: "usage", used: 33750, size: 200000, cost: 0.07 }
   ],
   // Two subagents running in parallel: one still working (shimmering title, its
@@ -280,7 +310,7 @@ const SCENARIOS = {
   // state (running / waiting / waking / not running) and varied ages.
   sessions: [
     { type: "ready" },
-    options("adaptive"),
+    modelOptions({ currentThoughtLevel: "high" }),
     { type: "sessions", activeId: "s1",
       folders: [
         { path: "/Users/dev/Projects/web-app", name: "web-app" },

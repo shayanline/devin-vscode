@@ -6,167 +6,51 @@
 [![CI](https://github.com/shayanline/devin-vscode/actions/workflows/ci.yml/badge.svg)](https://github.com/shayanline/devin-vscode/actions/workflows/ci.yml)
 [![License: AGPL-3.0-or-later](https://img.shields.io/badge/License-AGPL--3.0--or--later-blue.svg)](LICENSE.md)
 
-Use [Devin CLI](https://docs.devin.ai/cli) as a coding assistant without leaving VS Code. Ask Devin to explain code, fix bugs, build features, run commands, or edit files from a native chat panel.
+Devin for VS Code connects your installed [Devin CLI](https://docs.devin.ai/cli) to a chat panel in VS Code. Include workspace files or selected code in a request, then review edits in VS Code diffs with **Keep** and **Undo**. Chats are saved per workspace so you can resume them later.
 
-Each chat runs a real Devin CLI session in your workspace. Replies stream into the panel, tool calls wait for your approval, and file edits open as VS Code diffs that you can keep or undo. Sessions remain available after you restart VS Code.
+This is an independent open source extension, currently in preview. It requires Devin CLI and a Devin account with CLI access.
 
-> **Preview:** This independent open source extension is under active development. Features can change as the Devin CLI evolves.
+<img src="https://raw.githubusercontent.com/shayanline/devin-vscode/main/docs/screenshots/02-refactor-and-tests.png" width="620" alt="An illustrative Devin chat with tool activity, a plan, file review controls and a command approval request" />
 
-## See it in action
+*This screenshot uses a mock conversation.*
 
-<table>
-  <tr>
-    <td width="50%"><img src="https://raw.githubusercontent.com/shayanline/devin-vscode/main/docs/screenshots/01-session-list.png" width="100%" alt="The session browser with sessions grouped by workspace folder and a status indicator on each session" /></td>
-    <td width="50%"><img src="https://raw.githubusercontent.com/shayanline/devin-vscode/main/docs/screenshots/02-refactor-and-tests.png" width="100%" alt="A refactoring request with grouped tool calls, a file edit, a plan, a question, and a permission request" /></td>
-  </tr>
-  <tr>
-    <td width="50%"><img src="https://raw.githubusercontent.com/shayanline/devin-vscode/main/docs/screenshots/03-fix-with-diff.png" width="100%" alt="A bug fix with reasoning, grouped tools, and an edit opened as a VS Code diff" /></td>
-    <td width="50%"><img src="https://raw.githubusercontent.com/shayanline/devin-vscode/main/docs/screenshots/04-research-and-diagram.png" width="100%" alt="A research request with web and MCP tools plus a Mermaid diagram rendered in the reply" /></td>
-  </tr>
-</table>
+## Features
 
-## Before you start
+- **Share editor context.** Attach workspace files and symbols with `@`, or include selected code and VS Code diagnostics. You can also drop files or images into the chat.
+- **Review file changes.** Open VS Code diffs from the chat or the Devin source control view, then keep or undo individual files or the current chat's pending changes.
+- **Resume workspace sessions.** Search saved chats and filter them by status. Chats can run in the sidebar, an editor tab or a separate window.
+- **Follow tool activity.** Read command output and respond to permission requests in the conversation. The available models and modes depend on your installed CLI.
+- **Edit CLI configuration.** Manage instructions, skills, plugins, MCP servers, hooks and permissions in the built in settings editor. It updates the same configuration used by Devin CLI in your terminal.
 
-Before installing the extension, confirm these requirements:
+## Getting started
 
-- Your computer has VS Code 1.93 or newer.
-- The [Devin CLI](https://docs.devin.ai/cli) is installed on your computer.
-- Your Devin account can sign in through the CLI.
+You need VS Code 1.93 or newer and an installed [Devin CLI](https://docs.devin.ai/cli) that you can sign in to.
 
-## Install the extension
-
-1. Install **Devin for VS Code** from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=shayanline.devin-vscode), or run:
-
-   ```sh
-   code --install-extension shayanline.devin-vscode
-   ```
-
-2. Install the [Devin CLI](https://docs.devin.ai/cli) if it is not already available.
-3. Sign in from a terminal:
+1. Install **Devin for VS Code** from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=shayanline.devin-vscode).
+2. Sign in to Devin CLI from a terminal:
 
    ```sh
    devin auth login
    ```
 
-4. Open a project in VS Code, then select the **Devin** icon in the Activity Bar.
+3. Open a project in VS Code, select the **Devin** icon in the Activity Bar, then enter your request.
 
-The extension checks your CLI installation when the panel opens. If it cannot find the executable or your account is signed out, the setup screen will guide you through selecting the executable and signing in.
+The setup screen checks CLI availability and sign in status. If needed, run **Devin: Run Setup** from the Command Palette to select the executable or sign in.
 
-## Start your first chat
+## Permissions and data
 
-Type a request in the composer and press Enter. For example:
+The selected CLI mode controls which actions require approval. The default **Code** mode automatically approves workspace edits. **Smart** can approve actions its safety check considers safe, while **Bypass** approves every tool call automatically. Review the mode and permission scope before starting work.
 
-- `Explain how authentication works in this project.`
-- `Fix the TypeScript errors in the active file.`
-- `Add validation for empty email addresses and run the relevant tests.`
+The extension starts Devin CLI locally and has no separate telemetry or analytics client. Context sent to the CLI can be shared with Cognition services and configured MCP servers under their respective policies. Review the [data handling details](docs/usage.md#data-and-privacy) and [Cognition's security guidance](https://docs.devin.ai/admin/security) before using sensitive code or customer data.
 
-Devin can use the active file, your selected code, and diagnostics reported by VS Code as context. While it works, the panel shows its replies, tool activity, questions, command output, and file changes.
+## Documentation and support
 
-While Devin is working, Enter steers the current task and Alt+Enter queues a message until the response finishes. The send menu also offers Stop and Send. Pending messages can be edited, removed, sent immediately, or dragged into a new order. Steering requires a Devin CLI that advertises ACP mid turn prompt support. Older versions keep messages in the queue. You can change the default with `devin.sendWhileWorking`.
+Read the [usage guide](docs/usage.md) for controls, configuration and troubleshooting. Report extension bugs or request features through the [GitHub issue tracker](https://github.com/shayanline/devin-vscode/issues), using the [support guide](SUPPORT.md) for the details to include.
 
-When Devin requests permission, review the proposed action before approving it. After Devin edits a file, open the diff to inspect the change, then choose **Keep** or **Undo**.
-
-## Add project context
-
-You can give Devin more precise context in several ways:
-
-- Select code before sending your request. The active selection appears in the composer and can be removed for an individual message.
-- Type `@` to attach a file or symbol from your workspace.
-- Right click selected code and choose **Devin: Explain This**.
-- Right click an editor and choose **Devin: Fix Problems Here** to include the diagnostics reported for that file.
-- Right click a file and choose **Devin: Add File to Chat**.
-- Drag files, folders, or images onto the chat. Hold Shift while dragging from the VS Code Explorer or an editor tab.
-- Paste an image directly into the composer.
-
-Type `/` to browse the commands and skills provided by your Devin CLI setup.
-
-## Choose how Devin works
-
-Select a model and mode from the chat composer. The available choices come from your installed Devin CLI, so they can change after a CLI update.
-
-| Mode | Behaviour |
-| --- | --- |
-| **Code** | Devin can write and edit workspace files. Workspace edits are approved automatically. |
-| **Smart** | Devin can approve actions that its safety check considers safe. |
-| **Ask** | Devin answers questions without changing code. |
-| **Plan** | Devin investigates and prepares a plan in read only mode. |
-| **Bypass** | Devin approves every tool call automatically. Use this only when you trust the task and workspace. |
-
-Permission requests can also offer approval for the current action, the session, the project, or every project. Review the scope before choosing a broader permission.
-
-## Review changes and restore checkpoints
-
-Each file edit appears in the conversation and in the Devin source control view. You can:
-
-- Open the diff for an individual file.
-- Keep or undo one file.
-- Keep or undo all files changed by the current chat.
-- Restore an earlier checkpoint to rewind the conversation and compatible file changes.
-- Fork an earlier turn into a separate chat so you can try another approach while preserving the original conversation.
-
-Checkpoint and fork controls appear when your Devin CLI supports them.
-
-## Manage chats and sessions
-
-Sessions are saved per workspace and remain available after VS Code restarts. Open **Devin: Session List** from the Command Palette to search sessions, filter by status, or return to an earlier chat.
-
-Useful shortcuts include:
-
-- `Cmd+K Cmd+D` on macOS, or `Ctrl+K Ctrl+D` on Windows and Linux, opens the session list when the editor is not focused.
-- `Cmd+1` to `Cmd+9` on macOS, or `Ctrl+1` to `Ctrl+9` on Windows and Linux, opens one of the nine most recent sessions while the Devin chat is focused.
-
-Use the `+` menu to start a chat in the sidebar, an editor tab, a new window, or a terminal. You can also move a running chat between the side panel and an editor tab without stopping it.
-
-## Run commands
-
-By default, commands run through the Devin CLI while their output streams into the chat. Enable `devin.useIntegratedTerminal` if you want commands to run in a visible VS Code terminal that you can open and take over. This option requires [VS Code shell integration](https://code.visualstudio.com/docs/terminal/shell-integration).
-
-Long running commands can continue in the background while Devin works on the next step. Subagent work appears in a separate block, where supported by the CLI, and a running subagent can move between the foreground and background.
-
-## Change settings
-
-Run **Devin: Open Settings** from the Command Palette to manage the Devin CLI configuration in a built in editor. It supports instructions, skills, plugins, MCP servers, hooks, permissions, and other CLI options at machine or workspace scope. Changes are written to the CLI configuration that the `devin` command uses in your terminal.
-
-To configure the extension itself, open VS Code Settings and search for `@ext:shayanline.devin-vscode`. Available options include session behaviour, editor context, reasoning display, checkpoints, command execution, and the CLI executable path.
-
-## Data and privacy
-
-The extension starts your installed Devin CLI on your computer and communicates with it through the Agent Client Protocol. The extension does not contain a separate telemetry or analytics client.
-
-Prompts, selected code, attached files and images, editor diagnostics, tool responses, and other context you provide are passed to Devin CLI. The CLI can communicate with Cognition services and any MCP servers you configure. Their data handling depends on your Devin account, organization settings, deployment, and the services you connect. Review [Cognition security and privacy guidance](https://docs.devin.ai/admin/security) before using sensitive data.
-
-The extension stores session identifiers, titles, cached session details, and unsent drafts in VS Code workspace storage. It can also store staged attachment contents and original file contents needed for pending **Keep** or **Undo** actions in VS Code extension storage. Devin CLI manages full conversation history, authentication, and its own configuration separately.
-
-Remove secrets and unnecessary personal or customer data before attaching context. Review tool permissions and the data policies of configured MCP servers before approving access.
-
-## Troubleshooting
-
-### The extension cannot find the Devin CLI
-
-Open the Command Palette and run **Devin: Run Setup**, then choose **Browse** to select the `devin` executable. You can also set an absolute executable path in `devin.cliPath`. Choose **Re-check** after changing the path.
-
-### The extension says you are signed out
-
-Select **Log in** on the setup screen, complete `devin auth login` in the terminal, then choose **Re-check**.
-
-### A feature or control is missing
-
-Some controls depend on capabilities reported by the installed Devin CLI. Update the CLI using the [official CLI instructions](https://docs.devin.ai/cli), then start a new chat.
-
-### VS Code asks for a second command approval
-
-VS Code can show its own terminal approval after Devin approves a command when `devin.useIntegratedTerminal` is enabled. Disable that setting if you prefer to use the Devin permission prompt on its own. See the [known issue and workaround](docs/known-issues.md) for details.
-
-## Feedback and support
-
-Read the [support guide](SUPPORT.md) for troubleshooting and the information to include in a report. Use the [GitHub issue tracker](https://github.com/shayanline/devin-vscode/issues) for extension problems and feature requests.
-
-Report vulnerabilities privately by following the [security policy](SECURITY.md). Do not include security details, credentials, private code, personal information, or customer data in a public issue.
-
-Contributions are welcome. Read the [contribution guide](CONTRIBUTING.md) before opening a pull request.
+If you want to contribute, see the [contribution guide](CONTRIBUTING.md). Report vulnerabilities privately using the [security policy](SECURITY.md).
 
 ## License
 
-[AGPL-3.0-or-later](https://www.gnu.org/licenses/agpl-3.0.html), copyright Shayan Khaksar. You may use, study, change, and share the extension. If you distribute a modified version or run one as a network service, it must remain under the same license with its source available.
+The extension is licensed under [AGPL-3.0-or-later](LICENSE.md), copyright Shayan Khaksar.
 
-Commercial licences are available if these terms do not suit your use case. [Open an issue](https://github.com/shayanline/devin-vscode/issues) to ask about them.
+Commercial licences are available. [Open an issue](https://github.com/shayanline/devin-vscode/issues) to enquire.

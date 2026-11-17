@@ -2,7 +2,7 @@
 
 ## Extension help
 
-Start with the [README troubleshooting guide](README.md#troubleshooting) and the [known issues](docs/known-issues.md). Search the [GitHub issue tracker](https://github.com/shayanline/devin-vscode/issues) before creating a report because an existing issue may already contain a workaround.
+Start with the [troubleshooting guide](docs/usage.md#troubleshooting) and the [known issues](docs/known-issues.md). Search the [GitHub issue tracker](https://github.com/shayanline/devin-vscode/issues) before creating a report because an existing issue may already contain a workaround.
 
 If the problem belongs to this extension, [open a GitHub issue](https://github.com/shayanline/devin-vscode/issues) and include:
 
