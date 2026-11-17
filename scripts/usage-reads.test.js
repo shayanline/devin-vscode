@@ -151,7 +151,7 @@ test("the popup's refresh asks for a new read on the active session only", { ski
 });
 
 test("a refresh on an empty panel and a running turn both stay off the wire", { skip: process.platform === "win32" }, async () => {
-  const h = createChat({ usage });
+  const h = createChat({ usage, usageContextDelay: 250 });
   try {
     await h.ready();
     // No session at all: the popup message must be a no-op, not a crash.
@@ -162,7 +162,7 @@ test("a refresh on an empty panel and a running turn both stay off the wire", { 
     // While a real turn owns the channel a refresh is refused, and the turn's
     // own finish is what retries the read.
     h.setDelays({ promptDelay: 5600 });
-    await h.startChat("hello");
+    const id = await h.startChat("hello");
     await h.until(() => usagePosts(h).some((m) => m.sessionAcus === 1.9281));
     const reads = readPrompts(h).length;
     h.send({ type: "refreshUsage" });
@@ -170,6 +170,7 @@ test("a refresh on an empty panel and a running turn both stay off the wire", { 
     assert.equal(readPrompts(h).length, reads, "a read ran while the turn was busy");
     const finished = await h.until(() => readPrompts(h).length > reads, 9000);
     assert.ok(finished, "the turn end never retried the usage read");
+    await h.controller.runtimes.get(id).usagePending;
     assert.deepEqual(readPrompts(h).slice(reads), ["/context", "/session-stats"]);
   } finally {
     await h.dispose();
