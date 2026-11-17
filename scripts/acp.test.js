@@ -359,7 +359,8 @@ test("a diagnostics pull is answered in the shape the agent demands", async () =
   await client.shutdown();
 });
 
-test("session listing accepts a caller supplied timeout", async () => {
+test("session listing accepts a caller supplied timeout", async (t) => {
+  t.mock.method(Date, "now", () => 1000);
   const client = new AcpClient({ cliPath: "devin", cwd: TMP });
   let timeout;
   client.rpc = async (_method, _params, value) => {
