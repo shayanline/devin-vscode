@@ -1,13 +1,5 @@
 # Changelog
 
-All notable changes to **Devin for VS Code**, newest first. One line per change:
-the commit messages carry the detail.
-
-> This is a fast moving preview, so a few entries group several rapid builds
-> under one milestone version where those builds were only ever installed
-> locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
-> in 0.6.92.
-
 ## [0.15.0] - 2026-11-17
 
 ### Highlights
@@ -489,6 +481,8 @@ Chat quality: a message queue, background sessions, and calmer reading.
 - Every README screenshot is captured at one size, via a `--width` flag.
 
 ## [0.6.92] - 2026-08-04
+
+> This is a fast moving preview, so a few entries group several rapid builds under one milestone version where those builds were only ever installed locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together in 0.6.92.
 
 ### Highlights
 - Every settings action shows that it is working and cannot fire twice.
