@@ -1,6 +1,6 @@
 # Screenshots guide
 
-The documentation images are generated from mock conversations defined in [`scripts/preview.js`](../scripts/preview.js). The mock data is deliberately generic (no real project or personal data) so the screenshots are safe to publish. The README shows the main chat image, while the [usage guide](usage.md#interface-examples) contains the other examples. Keep these scenarios so the images can be regenerated without rebuilding the sample data.
+The documentation images are generated from mock conversations defined in [`scripts/preview.js`](../scripts/preview.js). The mock data is deliberately generic (no real project or personal data) so the screenshots are safe to publish. The README displays all four screenshots, and the [usage guide](usage.md#interface-examples) includes the session browser, code change and connected tools examples. Keep these scenarios so the images can be regenerated without rebuilding the sample data.
 
 ## What each image shows
 

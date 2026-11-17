@@ -12,8 +12,6 @@ This is an independent open source extension, currently in preview. It requires 
 
 <img src="https://raw.githubusercontent.com/shayanline/devin-vscode/main/docs/screenshots/02-refactor-and-tests.png" width="620" alt="An illustrative Devin chat with tool activity, a plan, file review controls and a command approval request" />
 
-*This screenshot uses a mock conversation.*
-
 ## Features
 
 - **Share editor context.** Attach workspace files and symbols with `@`, or include selected code and VS Code diagnostics. You can also drop files or images into the chat.
@@ -21,6 +19,20 @@ This is an independent open source extension, currently in preview. It requires 
 - **Resume workspace sessions.** Search saved chats and filter them by status. Chats can run in the sidebar, an editor tab or a separate window.
 - **Follow tool activity.** Read command output and respond to permission requests in the conversation. The available models and modes depend on your installed CLI.
 - **Edit CLI configuration.** Manage instructions, skills, plugins, MCP servers, hooks and permissions in the built in settings editor. It updates the same configuration used by Devin CLI in your terminal.
+
+## Screenshots
+
+### Workspace sessions
+
+<img src="https://raw.githubusercontent.com/shayanline/devin-vscode/main/docs/screenshots/01-session-list.png" width="620" alt="The session browser groups chats by workspace folder and shows their status." />
+
+### Change review
+
+<img src="https://raw.githubusercontent.com/shayanline/devin-vscode/main/docs/screenshots/03-fix-with-diff.png" width="620" alt="The chat shows a code change with tool activity and file review controls." />
+
+### Tools and diagrams
+
+<img src="https://raw.githubusercontent.com/shayanline/devin-vscode/main/docs/screenshots/04-research-and-diagram.png" width="620" alt="Web and MCP tools appear alongside a Mermaid diagram in the conversation." />
 
 ## Getting started
 
