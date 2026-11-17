@@ -607,6 +607,75 @@ test("a touched file still wins after the cap is applied", () => {
   assert.strictEqual(items[0].message, "the one that matters", "the cap must not throw away the relevant one");
 });
 
+test("mid turn prompts are a capability, and a second prompt needs no cancel", async () => {
+  // CLI 3000.13.4 advertises cognition.ai/midTurnPrompts: a second session/prompt
+  // on a running session steers the turn, and both replies wait for the same
+  // completion. The fake agent holds each reply briefly so both are in flight.
+  const { cli, log } = fakeAgent("midturn", { "cognition.ai/midTurnPrompts": true }, {
+    onMessage: `if (msg.method === "session/prompt") {
+      setTimeout(() => send({ jsonrpc: "2.0", id: msg.id, result: { stopReason: "end_turn" } }), 200);
+      continue;
+    }`
+  });
+  const client = start(cli);
+  await client.initialize();
+  assert.strictEqual(client.supportsMidTurnPrompts(), true);
+
+  const first = client.prompt("s1", [{ type: "text", text: "one" }]);
+  const second = client.prompt("s1", [{ type: "text", text: "two" }]);
+  await Promise.all([first, second]);
+
+  const prompts = seen(log).filter((m) => m.method === "session/prompt");
+  assert.strictEqual(prompts.length, 2, "both prompts went out while the first was still open");
+  assert.ok(
+    !seen(log).some((m) => m.method === "session/cancel"),
+    "steering is a prompt, never a cancel"
+  );
+  await client.shutdown();
+});
+
+test("mid turn prompts are off unless the agent advertises them", async () => {
+  const { cli } = fakeAgent("nomidturn", {});
+  const client = start(cli);
+  await client.initialize();
+  assert.strictEqual(client.supportsMidTurnPrompts(), false);
+  await client.shutdown();
+});
+
+test("a request that provably never reached the wire is a definite unsent error", async () => {
+  // Before start there is no connection at all.
+  const never = new AcpClient({ cliPath: "devin", cwd: TMP });
+  await assert.rejects(
+    () => never.prompt("s1", [{ type: "text", text: "x" }]),
+    (err) => err.name === "AcpRequestNotSentError"
+  );
+
+  // A closed connection rejects before the write, so delivery is impossible.
+  const { cli } = fakeAgent("unsent", {});
+  const client = start(cli);
+  await client.initialize();
+  await client.shutdown();
+  await assert.rejects(
+    () => client.prompt("s1", [{ type: "text", text: "x" }]),
+    (err) => err.name === "AcpRequestNotSentError"
+  );
+});
+
+test("a request lost to a dying process is ambiguous, not unsent", async () => {
+  // The prompt was written before the agent exited, so it may or may not have
+  // been delivered: the failure must NOT be the definite class, or the caller
+  // would resend a message the agent already has.
+  const { cli } = fakeAgent("dying", {}, {
+    onMessage: `if (msg.method === "session/prompt") { process.exit(1); }`
+  });
+  const client = start(cli);
+  await client.initialize();
+  await assert.rejects(
+    () => client.prompt("s1", [{ type: "text", text: "x" }]),
+    (err) => err.name !== "AcpRequestNotSentError"
+  );
+});
+
 test("query sessions do not start after shutdown begins", async () => {
   const { cli, log } = fakeAgent("query-shutdown", {});
   await shutdownQueryAgents();

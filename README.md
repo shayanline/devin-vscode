@@ -62,6 +62,8 @@ Type a request in the composer and press Enter. For example:
 
 Devin can use the active file, your selected code, and diagnostics reported by VS Code as context. While it works, the panel shows its replies, tool activity, questions, command output, and file changes.
 
+While Devin is working, Enter steers the current task and Alt+Enter queues a message until the response finishes. The send menu also offers Stop and Send. Pending messages can be edited, removed, sent immediately, or dragged into a new order. Steering requires a Devin CLI that advertises ACP mid turn prompt support. Older versions keep messages in the queue. You can change the default with `devin.sendWhileWorking`.
+
 When Devin requests permission, review the proposed action before approving it. After Devin edits a file, open the diff to inspect the change, then choose **Keep** or **Undo**.
 
 ## Add project context

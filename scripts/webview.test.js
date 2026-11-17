@@ -1824,13 +1824,13 @@ test("an internal multi file drag attaches every file, not just the first", asyn
   assert.strictEqual(h.errors().length, 0);
 });
 
-test("while busy, Send becomes a split button: queue it, or stop and send", async () => {
+test("while busy, Send becomes a split button: steer it, queue it, or stop and send", async () => {
   const h = createHarness();
   h.post({ type: "ready" });
   h.post({ type: "body", body: "thread" });
   h.post({ type: "clear" });
   h.post({ type: "sessionReady", sessionId: "A" });
-  h.post({ type: "capabilities", revert: true });
+  h.post({ type: "capabilities", revert: true, steering: true });
   h.post({ type: "userMessage", text: "go" });
   h.post({ type: "assistantStart" });
   h.post({ type: "busy", value: true });
@@ -1854,40 +1854,49 @@ test("while busy, Send becomes a split button: queue it, or stop and send", asyn
   // far end after it, which is the order VS Code's chat uses.
   const order = [...h.document.querySelector(".toolbar-right").children].map((c) => c.id);
   assert.ok(order.indexOf("stop") < order.indexOf("send-group"), "Stop comes first, Send last");
-  assert.match(send.querySelector("i").className, /codicon-newline/, "the default half queues it");
-  assert.strictEqual(send.title, "Send to Queue (Enter)");
+  // The default is steering: Enter sends a second prompt into the running turn.
+  assert.match(send.querySelector("i").className, /codicon-newline/, "the default half steers it");
+  assert.strictEqual(send.title, "Steer with Message (Enter)");
   assert.ok(!stop.classList.contains("hidden"), "Stop stays available alongside it");
 
-  // The chevron offers both, each saying what it does and on which key.
+  // The chevron offers all three in Copilot's order, each with its keys.
   more.click();
   await h.settle(10);
   const rows = [...h.document.querySelectorAll(".dv-menu .dv-menu-item")];
   assert.deepStrictEqual(rows.map((r) => r.querySelector(".dv-menu-text span").textContent),
-    ["Send to Queue", "Stop and Send"]);
-  assert.deepStrictEqual(rows.map((r) => r.querySelector(".dv-menu-keys").textContent), ["Enter", "Alt+Enter"]);
-  assert.match(rows[1].querySelector(".dv-menu-detail").textContent, /Stop what Devin is doing/);
+    ["Stop and Send", "Add to Queue", "Steer with Message"]);
+  assert.deepStrictEqual(rows.map((r) => r.querySelector(".dv-menu-keys").textContent), ["", "Alt+Enter", "Enter"]);
+  // The description is the hover title, not an inline paragraph: three of them
+  // do not fit the panel.
+  assert.match(rows[0].title, /Cancel the current request/);
+  assert.ok(!rows[0].querySelector(".dv-menu-detail"), "no inline detail in the compact menu");
+  assert.strictEqual(more.getAttribute("aria-expanded"), "true", "the chevron says its menu is open");
+  // The rows are radios, and the effective default carries the check.
+  assert.deepStrictEqual(rows.map((r) => r.getAttribute("role")), ["menuitemradio", "menuitemradio", "menuitemradio"]);
+  assert.deepStrictEqual(rows.map((r) => r.getAttribute("aria-checked")), ["false", "false", "true"],
+    "steer is the default here, so it is the checked radio");
 
-  rows[1].click();
+  rows[0].click();
   await h.settle(10);
   assert.ok(
     h.posted.some((m) => m.type === "stopAndSend" && m.text === "a follow up"),
-    "the second one ends the turn and sends"
+    "the first one ends the turn and sends"
   );
   assert.strictEqual(input.value, "", "and the composer is cleared either way");
 
-  // Enter queues, Alt+Enter stops and sends.
+  // Enter steers, Alt+Enter queues.
   input.value = "another";
   input.dispatchEvent(new h.window.Event("input", { bubbles: true }));
   await h.settle(5);
   input.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
   await h.settle(5);
-  assert.ok(h.posted.some((m) => m.type === "send" && m.text === "another"), "Enter queues it");
-  input.value = "urgent";
+  assert.ok(h.posted.some((m) => m.type === "send" && m.text === "another" && m.kind === "steer"), "Enter steers it");
+  input.value = "later";
   input.dispatchEvent(new h.window.Event("input", { bubbles: true }));
   await h.settle(5);
   input.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Enter", altKey: true, bubbles: true }));
   await h.settle(5);
-  assert.ok(h.posted.some((m) => m.type === "stopAndSend" && m.text === "urgent"), "Alt+Enter takes over");
+  assert.ok(h.posted.some((m) => m.type === "send" && m.text === "later" && m.kind === "queue"), "Alt+Enter queues it");
   assert.strictEqual(h.errors().length, 0);
 });
 
@@ -1897,7 +1906,7 @@ test("the split button's default follows the setting, and Alt shows the other", 
   h.post({ type: "body", body: "thread" });
   h.post({ type: "clear" });
   h.post({ type: "sessionReady", sessionId: "A" });
-  h.post({ type: "capabilities", revert: true, sendWhileWorking: "stopAndSend" });
+  h.post({ type: "capabilities", revert: true, steering: true, sendWhileWorking: "stopAndSend" });
   h.post({ type: "busy", value: true });
   const input = h.document.getElementById("input");
   input.value = "take over";
@@ -1906,6 +1915,7 @@ test("the split button's default follows the setting, and Alt shows the other", 
 
   const send = h.document.getElementById("send");
   assert.strictEqual(send.title, "Stop and Send (Enter)", "the setting decides what Enter does");
+  assert.match(send.querySelector("i").className, /codicon-arrow-right/);
   send.click();
   await h.settle(5);
   assert.ok(h.posted.some((m) => m.type === "stopAndSend" && m.text === "take over"));
@@ -1915,11 +1925,628 @@ test("the split button's default follows the setting, and Alt shows the other", 
   input.dispatchEvent(new h.window.Event("input", { bubbles: true }));
   h.document.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Alt", altKey: true, bubbles: true }));
   await h.settle(10);
-  assert.strictEqual(send.title, "Send to Queue (Alt+Enter)");
-  assert.match(send.querySelector("i").className, /codicon-newline/);
+  assert.strictEqual(send.title, "Add to Queue (Alt+Enter)");
+  assert.match(send.querySelector("i").className, /codicon-add/);
   send.click();
   await h.settle(5);
-  assert.ok(h.posted.some((m) => m.type === "send" && m.text === "and this after"));
+  assert.ok(h.posted.some((m) => m.type === "send" && m.text === "and this after" && m.kind === "queue"));
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("without steering support Enter queues and the steer action stays hidden", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  // steering is absent (an older CLI), and the default preference is steer.
+  h.post({ type: "capabilities", revert: true });
+  h.post({ type: "busy", value: true });
+  const input = h.document.getElementById("input");
+  input.value = "wait your turn";
+  input.dispatchEvent(new h.window.Event("input", { bubbles: true }));
+  await h.settle(10);
+
+  const send = h.document.getElementById("send");
+  assert.strictEqual(send.title, "Add to Queue (Enter)", "an unsupported steer falls back to queue");
+  assert.match(send.querySelector("i").className, /codicon-add/);
+  input.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  await h.settle(5);
+  assert.ok(h.posted.some((m) => m.type === "send" && m.text === "wait your turn" && m.kind === "queue"),
+    "and it is sent as a queue entry, never a steer the agent cannot take");
+
+  h.document.getElementById("send-more").click();
+  await h.settle(10);
+  const labels = [...h.document.querySelectorAll(".dv-menu .dv-menu-item")]
+    .map((r) => r.querySelector(".dv-menu-text span").textContent);
+  assert.deepStrictEqual(labels, ["Stop and Send", "Add to Queue"], "steer is not offered at all");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a queue preference makes Alt+Enter steer when the session supports it", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "capabilities", revert: true, steering: true, sendWhileWorking: "queue" });
+  h.post({ type: "busy", value: true });
+  const input = h.document.getElementById("input");
+  input.value = "change course";
+  input.dispatchEvent(new h.window.Event("input", { bubbles: true }));
+  await h.settle(10);
+
+  const send = h.document.getElementById("send");
+  assert.strictEqual(send.title, "Add to Queue (Enter)");
+  h.document.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Alt", altKey: true, bubbles: true }));
+  await h.settle(10);
+  assert.strictEqual(send.title, "Steer with Message (Alt+Enter)", "Alt flips queue into steer");
+  send.click();
+  await h.settle(5);
+  assert.ok(h.posted.some((m) => m.type === "send" && m.text === "change course" && m.kind === "steer"));
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("pending messages group under Steering and Queued dividers", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "queued", items: [
+    { id: "s1", kind: "steer", text: "steer one" },
+    { id: "s2", kind: "steer", text: "steer two" },
+    { id: "q1", kind: "queue", text: "queue one" },
+    { id: "q2", text: "queue two, kind missing like an old fixture" }
+  ] });
+  await h.settle(10);
+
+  const dividers = [...h.thread().querySelectorAll(".queued-divider")];
+  assert.deepStrictEqual(dividers.map((d) => d.textContent), ["Steering", "Queued"],
+    "steering sits above queued under plain native labels");
+  assert.match(dividers[0].title, /next opportunity/);
+  assert.match(dividers[1].title, /after the current request completes/);
+  const items = [...h.thread().querySelectorAll(".queued-item")];
+  assert.deepStrictEqual(items.map((i) => i.querySelector(".queued-bubble").textContent),
+    ["steer one", "steer two", "queue one", "queue two, kind missing like an old fixture"],
+    "and the rows keep the host's order inside their groups");
+  assert.ok(items[0].classList.contains("steering"), "a steer row is marked");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a same kind drag posts reorderQueued, a cross kind one does not", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "queued", items: [
+    { id: "q1", kind: "queue", text: "first" },
+    { id: "q2", kind: "queue", text: "second" },
+    { id: "s1", kind: "steer", text: "steer" }
+  ] });
+  await h.settle(10);
+
+  // The steering group renders above the queued one, so find rows by text.
+  const rows = [...h.thread().querySelectorAll(".queued-item")];
+  const byText = (t) => rows.find((r) => r.querySelector(".queued-bubble").textContent === t);
+  const q1 = byText("first");
+  const q2 = byText("second");
+  const s1 = byText("steer");
+  const drag = (el, type, y) => {
+    const e = new h.window.Event(type, { bubbles: true, cancelable: true });
+    e.dataTransfer = {
+      setData() {}, getData: () => "", effectAllowed: "", dropEffect: "",
+      setDragImage(...args) { e.dragImage = args; }
+    };
+    if (y !== undefined) { e.clientY = y; }
+    el.dispatchEvent(e);
+    return e;
+  };
+  const gripOf = (row) => row.querySelector(".queued-grip");
+  assert.ok(gripOf(q1) && gripOf(q2) && gripOf(s1), "every pending row has a drag grip");
+
+  // Internal drags are claimed at the row: nothing may bubble to the window's
+  // file drop surface, not even over a target the drag cannot land on.
+  let leaked = 0;
+  const count = () => { leaked++; };
+  ["dragstart", "dragover", "drop", "dragend"].forEach((t) => h.window.addEventListener(t, count));
+
+  // Drag q1 onto the lower half of q2: q1 lands after q2. jsdom reports empty
+  // rects, so the midpoint is 0 and any positive clientY reads as "after".
+  drag(gripOf(q1), "dragstart");
+  drag(q2, "dragover", 1);
+  assert.ok(q2.classList.contains("drop-after"), "the insertion rule shows on the target edge");
+  drag(q2, "drop", 1);
+  await h.settle(5);
+  assert.ok(h.posted.some((m) => m.type === "reorderQueued" && m.id === "q1" && m.targetId === "q2" && m.before === false),
+    "the drop posts the reorder to the host, which stays authoritative");
+  drag(gripOf(q1), "dragend");
+
+  // A steer row refuses a queue drag: dragover accepts nothing and drop posts nothing.
+  const before = h.posted.filter((m) => m.type === "reorderQueued").length;
+  drag(gripOf(q1), "dragstart");
+  drag(s1, "dragover", 1);
+  assert.ok(!s1.classList.contains("drop-before") && !s1.classList.contains("drop-after"),
+    "a different kind is not a valid target");
+  drag(s1, "drop", 1);
+  drag(gripOf(q1), "dragend");
+  await h.settle(5);
+  assert.strictEqual(h.posted.filter((m) => m.type === "reorderQueued").length, before,
+    "and nothing is posted for it");
+  assert.strictEqual(leaked, 0, "no internal drag event reached the window");
+  ["dragstart", "dragover", "drop", "dragend"].forEach((t) => h.window.removeEventListener(t, count));
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("pending groups use plain native labels and only a same kind pair gets a live grip", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "queued", items: [
+    { id: "s1", kind: "steer", text: "steer one" },
+    { id: "q1", kind: "queue", text: "queue one" }
+  ] });
+  await h.settle(10);
+
+  const dividers = [...h.thread().querySelectorAll(".queued-divider")];
+  assert.deepStrictEqual(dividers.map((d) => d.textContent), ["Steering", "Queued"],
+    "the groups carry the native labels with no count suffix");
+  assert.strictEqual(dividers[0].title, "Steering message will be sent at the next opportunity");
+  assert.strictEqual(dividers[1].title, "Queued messages will be sent after the current request completes");
+
+  const gripState = (id) => {
+    const grip = h.thread().querySelector(`.queued-item[data-id="${id}"] .queued-grip`);
+    return { hidden: grip.classList.contains("hidden"), draggable: grip.draggable,
+      iconHidden: grip.querySelector("i").getAttribute("aria-hidden") };
+  };
+  // A lone row of each kind keeps an inert grip: reorder needs a same kind target.
+  ["s1", "q1"].forEach((id) => {
+    const g = gripState(id);
+    assert.ok(g.hidden && !g.draggable, `${id} grip sleeps while its kind has no sibling`);
+    assert.strictEqual(g.iconHidden, "true", "the decorative grip icon is hidden from AT");
+  });
+
+  // A second steer wakes both steering grips. The queue row stays inert because
+  // its own kind still has no sibling to land on.
+  h.post({ type: "queued", items: [
+    { id: "s1", kind: "steer", text: "steer one" },
+    { id: "s2", kind: "steer", text: "steer two" },
+    { id: "q1", kind: "queue", text: "queue one" }
+  ] });
+  await h.settle(10);
+  ["s1", "s2"].forEach((id) => {
+    const g = gripState(id);
+    assert.ok(!g.hidden && g.draggable, `${id} grip is live beside a same kind sibling`);
+  });
+  assert.ok(gripState("q1").hidden && !gripState("q1").draggable,
+    "a queue row cannot reorder into the steering group");
+
+  // Losing the sibling puts the survivor's grip back to sleep.
+  h.post({ type: "queued", items: [
+    { id: "s2", kind: "steer", text: "steer two" },
+    { id: "q1", kind: "queue", text: "queue one" }
+  ] });
+  await h.settle(10);
+  assert.ok(gripState("s2").hidden && !gripState("s2").draggable,
+    "the surviving steer grip sleeps alone again");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a queued refresh reuses unchanged rows so action focus survives", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  const items = () => [
+    { id: "q1", kind: "queue", text: "first" },
+    { id: "q2", kind: "queue", text: "second" }
+  ];
+  h.post({ type: "queued", items: items() });
+  await h.settle(10);
+
+  const rowOf = (id) => h.thread().querySelector(`.queued-item[data-id="${id}"]`);
+  const removeBtn = (row) => row.querySelectorAll(".queued-actions button")[2];
+  const q1 = rowOf("q1");
+  const btn = removeBtn(q1);
+  btn.focus();
+  assert.strictEqual(h.document.activeElement, btn, "precondition: the remove button holds focus");
+
+  // An identical refresh keeps the very same row and button elements.
+  h.post({ type: "queued", items: items() });
+  await h.settle(10);
+  assert.strictEqual(rowOf("q1"), q1, "an unchanged row keeps its DOM");
+  assert.strictEqual(removeBtn(rowOf("q1")), btn, "and its action button");
+  assert.strictEqual(h.document.activeElement, btn, "focus survives the refresh");
+
+  // Appending an unrelated message still leaves the focused row alone.
+  h.post({ type: "queued", items: [...items(), { id: "q3", kind: "queue", text: "third" }] });
+  await h.settle(10);
+  assert.strictEqual(rowOf("q1"), q1, "the appended message did not rebuild the row");
+  assert.strictEqual(h.document.activeElement, btn, "and did not steal focus");
+
+  // Editing one id's text replaces only that row, and its actions carry the
+  // new content.
+  const q2old = rowOf("q2");
+  h.post({ type: "queued", items: [
+    { id: "q1", kind: "queue", text: "first" },
+    { id: "q2", kind: "queue", text: "second, edited" },
+    { id: "q3", kind: "queue", text: "third" }
+  ] });
+  await h.settle(10);
+  assert.strictEqual(rowOf("q1"), q1, "the untouched row is still the same element");
+  const q2 = rowOf("q2");
+  assert.ok(q2 && q2 !== q2old, "the edited row was rebuilt");
+  q2.querySelector(".queued-actions button").click();
+  await h.settle(10);
+  assert.strictEqual(h.document.getElementById("input").value, "second, edited",
+    "the rebuilt row's edit action loads the current text");
+
+  // Emptying the queue removes the rows. A session clear does the same and a
+  // drag in flight cannot leak into the next session.
+  h.post({ type: "queued", items: [] });
+  await h.settle(10);
+  assert.strictEqual(h.thread().querySelectorAll(".queued-item").length, 0);
+  h.post({ type: "queued", items: items() });
+  await h.settle(10);
+  const grip = rowOf("q1").querySelector(".queued-grip");
+  const start = new h.window.Event("dragstart", { bubbles: true, cancelable: true });
+  start.dataTransfer = { setData() {}, getData: () => "", effectAllowed: "", dropEffect: "", setDragImage() {} };
+  grip.dispatchEvent(start);
+  assert.ok(rowOf("q1").classList.contains("dragging"), "the drag marks the row");
+  h.post({ type: "clear" });
+  await h.settle(10);
+  assert.strictEqual(h.thread().querySelectorAll(".queued-item").length, 0, "the clear wipes the rows");
+  h.post({ type: "queued", items: items() });
+  await h.settle(10);
+  const over = new h.window.Event("dragover", { bubbles: true, cancelable: true });
+  over.dataTransfer = { setData() {}, getData: () => "", effectAllowed: "", dropEffect: "" };
+  over.clientY = 1;
+  rowOf("q1").dispatchEvent(over);
+  assert.ok(!rowOf("q1").classList.contains("drop-before") && !rowOf("q1").classList.contains("drop-after"),
+    "no stale drag id survives into the next session's queue");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a rebuilt or removed earlier row does not move the focused row behind it", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  const withSteer = (queue) => [{ id: "s1", kind: "steer", text: "steer one" }, ...queue];
+  h.post({ type: "queued", items: withSteer([
+    { id: "q1", kind: "queue", text: "first" },
+    { id: "q2", kind: "queue", text: "second" },
+    { id: "q3", kind: "queue", text: "third" }
+  ]) });
+  await h.settle(10);
+
+  const rowOf = (id) => h.thread().querySelector(`.queued-item[data-id="${id}"]`);
+  const removeBtn = (row) => row.querySelectorAll(".queued-actions button")[2];
+  const q3 = rowOf("q3");
+  const btn = removeBtn(q3);
+  btn.focus();
+  assert.strictEqual(h.document.activeElement, btn, "precondition: q3's remove button holds focus");
+
+  // A move inside the box shows up as a remove plus an add of the same row,
+  // so watch for q3's row leaving and coming back across each refresh.
+  const moved = [];
+  const mo = new h.window.MutationObserver((records) => {
+    records.forEach((r) => {
+      [...r.removedNodes, ...r.addedNodes].forEach((n) => {
+        if (n.nodeType === 1 && n.classList.contains("queued-item") && n.dataset.id === "q3") {
+          moved.push(r.type);
+        }
+      });
+    });
+  });
+  mo.observe(h.thread().querySelector(".queued-inline"), { childList: true });
+
+  // q2's content changes: only its row rebuilds. q3 must not be carried across
+  // the stale node a remove after the walk would leave on the cursor.
+  h.post({ type: "queued", items: withSteer([
+    { id: "q1", kind: "queue", text: "first" },
+    { id: "q2", kind: "queue", text: "second, edited", attachments: [{ label: "notes.txt", type: "file" }] },
+    { id: "q3", kind: "queue", text: "third" }
+  ]) });
+  await h.settle(10);
+  assert.strictEqual(rowOf("q3"), q3, "the row after a rebuilt sibling kept its DOM");
+  assert.strictEqual(removeBtn(rowOf("q3")), btn, "and its action button");
+  assert.strictEqual(h.document.activeElement, btn, "focus survived a preceding row rebuild");
+  assert.deepStrictEqual(moved, [], "q3's row never left the box");
+
+  // Removing q1 outright still leaves q3 where it was.
+  moved.length = 0;
+  h.post({ type: "queued", items: withSteer([
+    { id: "q2", kind: "queue", text: "second, edited", attachments: [{ label: "notes.txt", type: "file" }] },
+    { id: "q3", kind: "queue", text: "third" }
+  ]) });
+  await h.settle(10);
+  assert.strictEqual(rowOf("q3"), q3, "the focused row kept its DOM when the row before it left");
+  assert.strictEqual(h.document.activeElement, btn, "and kept focus");
+  assert.deepStrictEqual(moved, [], "q3's row did not move for the removal either");
+
+  // Dropping the whole Steering group ahead of the queue moves nothing either.
+  moved.length = 0;
+  h.post({ type: "queued", items: [
+    { id: "q2", kind: "queue", text: "second, edited", attachments: [{ label: "notes.txt", type: "file" }] },
+    { id: "q3", kind: "queue", text: "third" }
+  ] });
+  await h.settle(10);
+  assert.strictEqual(rowOf("q3"), q3, "the focused row kept its DOM when an earlier group left");
+  assert.strictEqual(h.document.activeElement, btn, "and kept focus");
+  assert.deepStrictEqual(moved, [], "q3's row stayed put through the group drop");
+  assert.strictEqual(h.thread().querySelectorAll(".queued-divider").length, 1,
+    "only the Queued divider remains");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a pending drag marks the whole row, refuses invalid targets and cleans up on end", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "queued", items: [
+    { id: "q1", kind: "queue", text: "first" },
+    { id: "q2", kind: "queue", text: "second" },
+    { id: "s1", kind: "steer", text: "steer" }
+  ] });
+  await h.settle(10);
+
+  const rowOf = (id) => h.thread().querySelector(`.queued-item[data-id="${id}"]`);
+  const drag = (el, type, y) => {
+    const e = new h.window.Event(type, { bubbles: true, cancelable: true });
+    e.dataTransfer = {
+      setData() {}, getData: () => "", effectAllowed: "", dropEffect: "",
+      setDragImage(...args) { e.dragImage = args; }
+    };
+    if (y !== undefined) { e.clientY = y; }
+    el.dispatchEvent(e);
+    return e;
+  };
+  const q1 = rowOf("q1");
+  const q2 = rowOf("q2");
+  const s1 = rowOf("s1");
+  const grip = q1.querySelector(".queued-grip");
+
+  const start = drag(grip, "dragstart");
+  assert.strictEqual(start.dragImage[0], q1, "the drag image is the whole row");
+  assert.deepStrictEqual(start.dragImage.slice(1), [0, 0]);
+  assert.ok(q1.classList.contains("dragging"), "the source row is marked while dragging");
+
+  // Self and cross kind targets accept nothing: no mark, no preventDefault.
+  const selfOver = drag(q1, "dragover", 1);
+  assert.ok(!q1.classList.contains("drop-before") && !q1.classList.contains("drop-after"),
+    "dragging over itself shows no insertion line");
+  assert.strictEqual(selfOver.defaultPrevented, false, "self is not a drop target");
+  const crossOver = drag(s1, "dragover", 1);
+  assert.ok(!s1.classList.contains("drop-before") && !s1.classList.contains("drop-after"),
+    "a different kind shows no insertion line");
+  assert.strictEqual(crossOver.defaultPrevented, false, "cross kind is not a drop target");
+
+  // A valid target takes the mark and the drop. Moving to an invalid one clears it.
+  const okOver = drag(q2, "dragover", 1);
+  assert.ok(q2.classList.contains("drop-after"), "the valid target shows the insertion line");
+  assert.strictEqual(okOver.defaultPrevented, true, "the valid target accepts the drop");
+  drag(s1, "dragover", 1);
+  assert.ok(!q2.classList.contains("drop-before") && !q2.classList.contains("drop-after"),
+    "moving to an invalid target clears the old mark");
+  drag(grip, "dragend");
+  assert.ok(!q1.classList.contains("dragging"), "drag end clears the row mark");
+
+  // A drop on the source row itself posts nothing.
+  drag(grip, "dragstart");
+  drag(q1, "drop", 1);
+  await h.settle(5);
+  assert.strictEqual(h.posted.filter((m) => m.type === "reorderQueued").length, 0,
+    "dropping on itself is not a reorder");
+  drag(grip, "dragend");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("editing a pending message offers its kind in the send split", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "capabilities", revert: true, steering: true });
+  h.post({ type: "busy", value: true });
+  h.post({ type: "queued", items: [{ id: "q1", kind: "queue", text: "queued words" }] });
+  await h.settle(10);
+
+  const row = h.thread().querySelector(".queued-item");
+  row.querySelector(".codicon-edit").parentElement.click();
+  await h.settle(10);
+  const input = h.document.getElementById("input");
+  assert.strictEqual(input.value, "queued words");
+
+  // The split is up even though the composer is editing, and its default is the
+  // row's own kind: queue here, so Enter keeps it queued.
+  const send = h.document.getElementById("send");
+  assert.ok(h.document.getElementById("send-group").classList.contains("split"), "the split applies while editing pending");
+  assert.strictEqual(send.title, "Add to Queue (Enter)");
+
+  // Pick Steer from the menu: the edit carries the new kind.
+  h.document.getElementById("send-more").click();
+  await h.settle(10);
+  const steerRow = [...h.document.querySelectorAll(".dv-menu .dv-menu-item")]
+    .find((r) => r.querySelector(".dv-menu-text span").textContent === "Steer with Message");
+  steerRow.click();
+  await h.settle(10);
+  const edit = h.posted.find((m) => m.type === "editQueued");
+  assert.ok(edit && edit.id === "q1" && edit.kind === "steer", "the edit says it is now a steer");
+  const release = h.posted.findIndex((m) => m.type === "queueEditing" && m.id === null);
+  assert.ok(release > h.posted.indexOf(edit), "and the hold is released after the edit lands");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("Stop and Send on an edited pending row sends it immediately, in order", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "capabilities", revert: true, steering: true });
+  h.post({ type: "busy", value: true });
+  h.post({ type: "queued", items: [{ id: "q1", kind: "queue", text: "queued words" }] });
+  await h.settle(10);
+
+  h.thread().querySelector(".queued-item .codicon-edit").parentElement.click();
+  await h.settle(10);
+  const input = h.document.getElementById("input");
+  input.value = "queued words, edited";
+  input.dispatchEvent(new h.window.Event("input", { bubbles: true }));
+  await h.settle(5);
+
+  h.document.getElementById("send-more").click();
+  await h.settle(10);
+  const stopRow = [...h.document.querySelectorAll(".dv-menu .dv-menu-item")]
+    .find((r) => r.querySelector(".dv-menu-text span").textContent === "Stop and Send");
+  stopRow.click();
+  await h.settle(10);
+
+  const types = h.posted.map((m) => m.type).filter((t) => ["editQueued", "sendQueuedNow", "queueEditing"].includes(t));
+  assert.deepStrictEqual(types.slice(-3), ["editQueued", "sendQueuedNow", "queueEditing"],
+    "the edit lands, then the immediate send, then the hold is released");
+  const edit = h.posted.filter((m) => m.type === "editQueued").pop();
+  assert.strictEqual(edit.text, "queued words, edited");
+  const now = h.posted.filter((m) => m.type === "sendQueuedNow").pop();
+  assert.strictEqual(now.id, "q1");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a steered pending row's own buttons order edit, pick and release", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "capabilities", revert: true, steering: true });
+  h.post({ type: "busy", value: true });
+  h.post({ type: "queued", items: [{ id: "s1", kind: "steer", text: "steer words" }] });
+  await h.settle(10);
+
+  const row = h.thread().querySelector(".queued-item.steering");
+  const input = h.document.getElementById("input");
+  const edit = row.querySelector(".codicon-edit").parentElement;
+  const sendNow = row.querySelector(".codicon-newline").parentElement;
+  const remove = row.querySelector(".codicon-close").parentElement;
+
+  // Send Immediately on the row being edited: the edit must land first, then
+  // the priority pick, and only then may the hold be released. Releasing early
+  // would let the drain steer the stale text before its edit exists.
+  edit.click();
+  await h.settle(10);
+  input.value = "steer words, edited";
+  input.dispatchEvent(new h.window.Event("input", { bubbles: true }));
+  await h.settle(5);
+  sendNow.click();
+  await h.settle(10);
+  const ordered = h.posted.map((m) => m.type)
+    .filter((t) => ["editQueued", "sendQueuedNow", "queueEditing"].includes(t));
+  assert.deepStrictEqual(ordered.slice(-3), ["editQueued", "sendQueuedNow", "queueEditing"],
+    "edit, then send immediately, then release");
+  assert.strictEqual(h.posted.filter((m) => m.type === "editQueued").pop().id, "s1");
+  assert.strictEqual(h.posted.filter((m) => m.type === "sendQueuedNow").pop().id, "s1");
+  assert.ok(!h.posted.some((m) => m.type === "send" && /steer words/.test(m.text || "")),
+    "the row never falls through to a plain send");
+
+  // Remove on the row being edited: the removal lands before the release, so
+  // the drain cannot pick the message being deleted.
+  edit.click();
+  await h.settle(10);
+  input.value = "steer words, edited again";
+  input.dispatchEvent(new h.window.Event("input", { bubbles: true }));
+  await h.settle(5);
+  const mark = h.posted.length;
+  remove.click();
+  await h.settle(10);
+  const tail = h.posted.slice(mark).map((m) => m.type);
+  assert.deepStrictEqual(tail.filter((t) => ["editQueued", "removeQueued", "sendQueuedNow", "queueEditing"].includes(t)),
+    ["removeQueued", "queueEditing"], "removal first, release second, and no sendQueuedNow at all");
+  assert.strictEqual(h.posted.filter((m) => m.type === "removeQueued").pop().id, "s1");
+  assert.ok(!h.posted.slice(mark).some((m) => m.type === "send" || m.type === "sendQueuedNow"),
+    "a removed row is never sent");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("the send menu is fully keyboard reachable from the split", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "capabilities", revert: true, steering: true });
+  h.post({ type: "busy", value: true });
+  const input = h.document.getElementById("input");
+  input.value = "steer this";
+  input.dispatchEvent(new h.window.Event("input", { bubbles: true }));
+  await h.settle(10);
+
+  const send = h.document.getElementById("send");
+  const more = h.document.getElementById("send-more");
+  const key = (el, k, opts = {}) => el.dispatchEvent(new h.window.KeyboardEvent("keydown",
+    Object.assign({ key: k, bubbles: true, cancelable: true }, opts)));
+
+  // ArrowRight walks from the primary half to the chevron, ArrowLeft back.
+  send.focus();
+  key(send, "ArrowRight");
+  assert.strictEqual(h.document.activeElement, more, "ArrowRight on Send focuses the chevron");
+  key(more, "ArrowLeft");
+  assert.strictEqual(h.document.activeElement, send, "ArrowLeft on the chevron focuses Send");
+
+  // ArrowDown opens the menu without a click and lands on the default row.
+  key(more, "ArrowDown");
+  await h.settle(10);
+  let rows = [...h.document.querySelectorAll(".dv-menu .dv-menu-item")];
+  assert.strictEqual(rows.length, 3);
+  assert.strictEqual(h.document.activeElement, rows[2], "focus lands on the checked default (steer)");
+  assert.strictEqual(more.getAttribute("aria-expanded"), "true");
+
+  // Arrows wrap, Home and End jump.
+  key(rows[2], "ArrowDown");
+  assert.strictEqual(h.document.activeElement, rows[0], "ArrowDown wraps to the top");
+  key(rows[0], "End");
+  assert.strictEqual(h.document.activeElement, rows[2]);
+  key(rows[2], "Home");
+  assert.strictEqual(h.document.activeElement, rows[0]);
+  key(rows[0], "ArrowUp");
+  assert.strictEqual(h.document.activeElement, rows[2], "ArrowUp wraps to the bottom");
+
+  // Escape closes, returns focus to the chevron, and sends nothing.
+  const cancels = h.posted.filter((m) => m.type === "cancel").length;
+  key(rows[2], "Escape");
+  await h.settle(10);
+  assert.ok(!h.document.querySelector(".dv-menu"), "the menu is closed");
+  assert.strictEqual(h.document.activeElement, more, "focus is back on the chevron");
+  assert.strictEqual(more.getAttribute("aria-expanded"), "false");
+  assert.strictEqual(h.posted.filter((m) => m.type === "cancel").length, cancels, "Escape sent no cancel");
+
+  // ArrowDown while closed reopens and refocuses the default. A click does too.
+  key(more, "ArrowDown");
+  await h.settle(10);
+  rows = [...h.document.querySelectorAll(".dv-menu .dv-menu-item")];
+  assert.strictEqual(h.document.activeElement, rows[2], "reopening lands on the default again");
+  key(rows[1], "ArrowRight");
+  await h.settle(5);
+  assert.ok(!h.document.querySelector(".dv-menu"), "ArrowRight closes back to the split");
+  assert.strictEqual(h.document.activeElement, more);
+
+  // Activating an action returns focus to the composer.
+  more.click();
+  await h.settle(10);
+  rows = [...h.document.querySelectorAll(".dv-menu .dv-menu-item")];
+  assert.strictEqual(h.document.activeElement, rows[2]);
+  rows[0].click();
+  await h.settle(10);
+  assert.strictEqual(h.document.activeElement, input, "focus returns to the composer after an action");
+  assert.ok(h.posted.some((m) => m.type === "stopAndSend" && m.text === "steer this"));
   assert.strictEqual(h.errors().length, 0);
 });
 

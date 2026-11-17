@@ -475,3 +475,84 @@ test("usage reserves its expanded width at rest and outlives the left controls",
     h.dom.window.close();
   }
 });
+
+// The pending rows mirror VS Code's own pending request styling: a dimmed
+// .7 row that stays dim on hover, an absolute grip that fades in over .15s,
+// absolute hover actions and a 2px absolute insertion line, with no entrance,
+// reorder or exit animation on the path.
+test("the pending rows carry the native pending styling contract", () => {
+  const body = (needle) => {
+    const at = MAIN_CSS.indexOf(needle);
+    assert.notStrictEqual(at, -1, `missing rule containing ${needle}`);
+    const open = MAIN_CSS.indexOf("{", at);
+    const close = MAIN_CSS.indexOf("}", open);
+    return MAIN_CSS.slice(open + 1, close);
+  };
+
+  const item = body(".queued-item {");
+  assert.ok(item.includes("opacity: 0.7"), "the pending row sits at the native .7 dim");
+  assert.ok(!item.includes("opacity: 1"), "hover must not brighten the row");
+  assert.ok(!/animation|transition/.test(item), "the row itself has no motion");
+
+  assert.ok(body(".queued-item.dragging").includes("opacity: 0.4"), "a dragged row dims to .4");
+
+  const grip = body(".queued-grip {");
+  for (const decl of ["position: absolute", "left: 0", "top: 50%", "cursor: grab",
+    "opacity: 0", "transition: opacity 0.15s", "user-select: none",
+    "color: var(--vscode-descriptionForeground)"]) {
+    assert.ok(grip.includes(decl), `the grip is missing ${decl}`);
+  }
+  assert.ok(body(".queued-item:hover .queued-grip,").includes("opacity: 1"),
+    "row hover reveals the grip");
+
+  const bubble = body(".queued-bubble {");
+  for (const decl of ["position: relative", "width: fit-content", "max-width: 90%",
+    "margin-left: auto", "margin-bottom: 5px"]) {
+    assert.ok(bubble.includes(decl), `the bubble is missing ${decl}`);
+  }
+  assert.ok(body(".queued-item.editing .queued-bubble").includes("outline: 1px solid var(--vscode-focusBorder)"),
+    "the edited row keeps its focus outline");
+
+  const divider = body(".queued-divider {");
+  for (const decl of ["padding: 8px 16px", "font-weight: 500", "text-transform: uppercase",
+    "letter-spacing: 0.5px", "color: var(--vscode-descriptionForeground)"]) {
+    assert.ok(divider.includes(decl), `the divider is missing ${decl}`);
+  }
+  assert.ok(divider.includes("--vscode-chat-font-size-body-xs"), "the divider uses the native chat label size");
+  assert.strictEqual(MAIN_CSS.indexOf(".queued-divider::after"), -1,
+    "the decorative divider rule is gone");
+  assert.strictEqual(MAIN_CSS.indexOf(".queued-divider::before"), -1,
+    "and no pseudo element replaces it");
+
+  const actions = body(".queued-actions {");
+  for (const decl of ["position: absolute", "top: -17px", "right: 20px", "height: 26px",
+    "opacity: 0", "pointer-events: none"]) {
+    assert.ok(actions.includes(decl), `the hover actions are missing ${decl}`);
+  }
+  assert.ok(!actions.includes("margin-top"), "the actions overlay instead of reserving flow space");
+  assert.ok(!/transition|animation/.test(actions), "the pending toolbar has no fade transition");
+
+  const line = body(".queued-item.drop-before::before,");
+  for (const decl of ["position: absolute", "height: 2px", "pointer-events: none",
+    "background: var(--vscode-focusBorder)"]) {
+    assert.ok(line.includes(decl), `the insertion line is missing ${decl}`);
+  }
+  assert.ok(MAIN_CSS.includes(".queued-item.drop-after::after { top: 100%; }"),
+    "the after variant anchors to the row's bottom edge");
+
+  assert.ok(body("\n#thread > .queued-inline").includes("calc(100% + 24px)"),
+    "the block still bleeds through the transcript padding to the panel edge");
+
+  const keyframes = MAIN_CSS.match(/@keyframes\s+[\w-]+/g) || [];
+  assert.ok(!keyframes.some((k) => /queued|pending/i.test(k)),
+    "no queued entrance or exit animation exists");
+  for (const sel of ["\n.queued-inline {", ".queued-bubble {", ".queued-actions {"]) {
+    assert.ok(!/animation|transition/.test(body(sel)), `${sel} carries no motion`);
+  }
+
+  const reduced = MAIN_CSS.indexOf(".queued-grip { transition: none; }");
+  assert.notStrictEqual(reduced, -1, "reduced motion must disable the grip fade");
+  const mediaAt = MAIN_CSS.lastIndexOf("@media", reduced);
+  assert.ok(MAIN_CSS.slice(mediaAt, reduced).includes("prefers-reduced-motion"),
+    "the grip transition override lives inside the reduced motion block");
+});

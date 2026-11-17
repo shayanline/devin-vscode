@@ -8,6 +8,20 @@ the commit messages carry the detail.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
+## [0.15.0] - 2026-11-17
+
+### Highlights
+- Steer a running request with Enter, or queue a follow up with Alt+Enter.
+- Choose steering, queuing, or Stop and Send as the default busy action.
+- Edit, remove, or send pending messages immediately.
+- Drag pending messages to reorder them within Steering or Queued.
+- Match Copilot's pending message layout, hover controls, and drag feedback.
+
+### Under the hood
+- Send ACP steering prompts without cancelling the running request.
+- Fall back to queuing when the installed CLI does not support steering.
+- Keep pending messages and attachments intact when moving a running chat.
+
 ## [0.14.0] - 2026-11-14
 
 ### Highlights

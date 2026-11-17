@@ -76,6 +76,8 @@ exec ${JSON.stringify(process.execPath)} ${JSON.stringify(js)}
 const AGENT_SOURCE = `
 // A minimal but honest ACP agent. Line delimited JSON-RPC on stdio, the same as the
 // real one, with its delays read from the environment so a test can hold a call open.
+const fs = require("fs");
+const path = require("path");
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 const num = (k) => Number(process.env[k] || 0);
 // Every chat gets its own agent process, so the id has to be unique across them:
@@ -129,6 +131,12 @@ const configOptions = () => [
   }
 ];
 let buf = "";
+// In flight prompts, so a session/cancel can settle them the way the real agent
+// does (both replies of a shared turn end together). Keyed by session id, valued
+// by a per agent prompt sequence number.
+const pendingPrompts = new Map();
+const cancelledPrompts = new Set();
+let promptSeq = 0;
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => {
   buf += chunk;
@@ -142,7 +150,17 @@ process.stdin.on("data", (chunk) => {
     // Every request, in order, so a test can assert what the agent was really asked:
     // which prompt carried which attachment, and how many prompts arrived at all.
     if (process.env.DV_LOG) {
-      try { require("fs").appendFileSync(process.env.DV_LOG, JSON.stringify({ ...msg, _agent: process.pid }) + "\\n"); } catch {}
+      try { fs.appendFileSync(process.env.DV_LOG, JSON.stringify({ ...msg, _agent: process.pid }) + "\\n"); } catch {}
+    }
+    // session/cancel is a notification: it carries no id and gets no reply, but
+    // the prompts it names still have to end. DV_CANCEL_DELAY models the agent
+    // taking a moment to actually stop the turn.
+    if (msg.method === "session/cancel") {
+      const sid = msg.params && msg.params.sessionId;
+      const fire = () => { (pendingPrompts.get(sid) || []).forEach((s) => cancelledPrompts.add(s)); };
+      const hold = num("DV_CANCEL_DELAY");
+      if (hold) setTimeout(fire, hold); else fire();
+      continue;
     }
     if (msg.id === undefined) continue;
     void handleRequest(msg);
@@ -154,12 +172,15 @@ async function handleRequest(msg) {
   const reply = (result) => send({ jsonrpc: "2.0", id: msg.id, result });
   switch (msg.method) {
     case "initialize":
+      // DV_INIT_DELAY holds the handshake open, which is the window where a
+      // runtime exists but its capabilities are not yet known.
+      await delay(num("DV_INIT_DELAY"));
       reply({
         protocolVersion: 1,
         agentCapabilities: {
           loadSession: true,
           promptCapabilities: { image: true, embeddedContext: true },
-          _meta: { "cognition.ai/revert": true, "cognition.ai/sessionShare": true, ...(process.env.DV_DOCUMENT_LIFECYCLE === "1" ? { "cognition.ai/documentLifecycle": true } : {}) }
+          _meta: { "cognition.ai/revert": true, "cognition.ai/sessionShare": true, ...(process.env.DV_DOCUMENT_LIFECYCLE === "1" ? { "cognition.ai/documentLifecycle": true } : {}), ...(process.env.DV_MID_TURN === "1" ? { "cognition.ai/midTurnPrompts": true } : {}) }
         }
       });
       break;
@@ -222,9 +243,48 @@ async function handleRequest(msg) {
         break;
       }
       // Long by default: a turn is running until the test says otherwise, which is
-      // what makes "busy" states reachable.
+      // what makes "busy" states reachable. With DV_PROMPT_GATE set, each prompt
+      // instead waits for its own release file (prompt-<seq>.release in that
+      // directory) or for a session/cancel, so a test can settle two prompts of
+      // one shared turn in either order. DV_PROMPT_FAIL maps a seq to "error"
+      // (a JSON-RPC error reply) or "cancelled" (an early cancelled result).
+      const seq = ++promptSeq;
+      const sid = msg.params.sessionId;
+      let failures = {};
+      try { failures = JSON.parse(process.env.DV_PROMPT_FAIL || "{}"); } catch {}
+      const gateDir = process.env.DV_PROMPT_GATE || "";
+      if (!pendingPrompts.has(sid)) pendingPrompts.set(sid, new Set());
+      pendingPrompts.get(sid).add(seq);
+      const finish = (result) => {
+        pendingPrompts.get(sid).delete(seq);
+        cancelledPrompts.delete(seq);
+        reply(result);
+      };
+      const failNow = () => {
+        pendingPrompts.get(sid).delete(seq);
+        cancelledPrompts.delete(seq);
+        const fail = failures[seq];
+        if (fail === "error") {
+          send({ jsonrpc: "2.0", id: msg.id, error: { code: -32000, message: "prompt failed" } });
+        } else {
+          reply({ stopReason: fail === "cancelled" ? "cancelled" : "end_turn" });
+        }
+      };
+      if (gateDir) {
+        // Keyed by session as well as sequence: every chat is its own agent
+        // process with its own numbering, and they share the gate directory.
+        const release = path.join(gateDir, sid + "-" + seq + ".release");
+        const deadline = Date.now() + 120000;
+        while (Date.now() < deadline) {
+          if (cancelledPrompts.has(seq)) { finish({ stopReason: "cancelled" }); return; }
+          if (fs.existsSync(release)) break;
+          await delay(20);
+        }
+        failNow();
+        return;
+      }
       await delay(num("DV_PROMPT_DELAY") || 60000);
-      reply({ stopReason: "end_turn" });
+      failNow();
       break;
     }
     case "_cognition.ai/revert/listSteps": await delay(num("DV_STEPS_DELAY")); reply({ steps: [] }); break;
@@ -271,7 +331,7 @@ function webviewDouble(posted) {
  * how a reload is written. `opts.config` overrides the settings the controller reads.
  */
 function createChat(opts = {}) {
-  const { ChatController, SessionStore, ChangeTracker } = load();
+  const { ChatController, SessionStore, ChangeTracker, AcpRequestNotSentError } = load();
   const vscode = globalThis.__dvVscode;
   agentPath = agentPath || writeAgent();
 
@@ -289,11 +349,23 @@ function createChat(opts = {}) {
   // than this process's environment because the controller reads that on every spawn,
   // while the environment it inherits is read from a login shell once and cached for
   // the run: a delay set through that would only ever reach the first agent.
+  // `opts.promptGate` (true, or a directory) switches prompts to per sequence
+  // release files instead of one flat delay, so two prompts of a shared turn can
+  // be settled in either order.
+  const gateDir = opts.promptGate === true ? path.join(storage, "prompt-gate") : (opts.promptGate || "");
+  if (gateDir) fs.mkdirSync(gateDir, { recursive: true });
   const agentEnv = {
     DV_LOG: agentLog,
     DV_NEW_DELAY: String(opts.newDelay || 0),
     DV_LOAD_DELAY: String(opts.loadDelay || 0),
+    DV_INIT_DELAY: String(opts.initDelay || 0),
     DV_PROMPT_DELAY: String(opts.promptDelay || 0),
+    // Steering support and per prompt release gates, for the mid turn prompt
+    // tests: the gate directory holds one release file per prompt sequence.
+    DV_MID_TURN: opts.midTurnPrompts ? "1" : "",
+    DV_PROMPT_GATE: opts.promptGate ? gateDir : "",
+    DV_CANCEL_DELAY: String(opts.cancelDelay || 0),
+    DV_PROMPT_FAIL: opts.promptFail ? JSON.stringify(opts.promptFail) : "",
     DV_STEPS_DELAY: String(opts.stepsDelay || 0),
     DV_DOCUMENT_LIFECYCLE: opts.documentLifecycle ? "1" : "",
     // The instant usage reads the host may send: advertised only when the test
@@ -349,6 +421,9 @@ function createChat(opts = {}) {
     store,
     changes,
     state,
+    // The class the bundled controller's `instanceof` checks against, for tests
+    // that stub a client's prompt to fail before it reaches the wire.
+    AcpRequestNotSentError,
     posted,
     logs,
     webview,
@@ -405,6 +480,16 @@ function createChat(opts = {}) {
     // What the user picks in a modal (Terminate, Discard). The controller asks through
     // window.showWarningMessage, so this is the answer it gets.
     answerWith: (choice) => { vscode.window.answer = choice; return api; },
+    // The prompts the agent has been sent, in order across every chat this
+    // harness owns (each chat is its own agent process, so sequence numbers are
+    // per process: filter by sessionId when a test shares the log).
+    promptCount: () => api.agentSaw("session/prompt").length,
+    // Release prompt number `seq` (1 based, the order session/prompt arrived on
+    // that chat's agent) for session `id`. Only meaningful with `promptGate`.
+    releasePrompt(id, seq) {
+      if (gateDir) fs.writeFileSync(path.join(gateDir, id + "-" + seq + ".release"), "");
+      return api;
+    },
     // Announce the page is listening, which is what unblocks anything waiting on it.
     async ready() {
       await toHost({ type: "ready" });

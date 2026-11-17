@@ -8,3 +8,6 @@
 export { ChatController } from "../src/chat/chatViewProvider";
 export { SessionStore } from "../src/session/sessionStore";
 export { ChangeTracker } from "../src/diff/changeTracker";
+// The definite unsent class has to be the same object the bundled controller
+// checks with `instanceof`, so tests reach it through this entry too.
+export { AcpRequestNotSentError } from "../src/acp/types";

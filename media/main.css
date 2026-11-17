@@ -1478,74 +1478,135 @@ body.vscode-high-contrast-light #chat-main {
   white-space: nowrap;
 }
 
-/* Queued messages (sent after the current turn finishes). Rendered at the
-   bottom of the transcript under a divider (VS Code's placement); `order` keeps
-   the block below every turn even after a flush appends a new turn. */
+/* Queued messages (sent after the current turn finishes). The block bleeds
+   through #thread's 12px padding so the 16px row insets land on the panel
+   edge. #thread's max-width still caps it in a wide editor. */
+#thread > .queued-inline {
+  width: calc(100% + 24px);
+}
+
 .queued-inline {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 0;
   order: 1;
-  margin-top: 4px;
+  margin-top: 0;
 }
 
 .queued-divider {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 0.78em;
+  padding: 8px 16px;
+  font-size: var(--vscode-chat-font-size-body-xs, 0.846em);
+  font-weight: 500;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
-  opacity: 0.6;
-  padding: 2px 2px 1px;
+  letter-spacing: 0.5px;
+  color: var(--vscode-descriptionForeground);
 }
 
-.queued-divider::after {
-  content: "";
-  flex: 1;
-  border-top: 1px solid var(--vscode-panel-border, var(--vscode-editorWidget-border));
-  opacity: 0.6;
-}
-
-/* Each queued message mirrors the user request bubble (right aligned, content
-   hugging), dimmed to read as pending, like VS Code's .pending-request rows. */
 .queued-item {
   position: relative;
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  /* VS Code's .interactive-item-container.pending-request opacity. */
+  padding: 5px 16px;
   opacity: 0.7;
 }
 
-.queued-item:hover,
-.queued-item.editing { opacity: 1; }
+.queued-item.dragging { opacity: 0.4; }
 
 .queued-bubble {
+  position: relative;
   background: var(--vscode-chat-requestBubbleBackground, var(--vscode-chat-requestBackground, rgba(127, 127, 127, 0.12)));
-  border: 1px solid var(--vscode-chat-requestBorder, transparent);
-  border-radius: var(--dv-radius-xl);
+  border-radius: var(--vscode-cornerRadius-xLarge, var(--dv-radius-xl));
   padding: 8px 12px;
   width: fit-content;
   max-width: 90%;
   margin-left: auto;
+  margin-bottom: 5px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
-.queued-item.editing .queued-bubble {
-  border-color: var(--vscode-focusBorder);
+.queued-item.editing .queued-bubble { outline: 1px solid var(--vscode-focusBorder); }
+
+body.vscode-high-contrast .queued-bubble,
+body.vscode-high-contrast-light .queued-bubble { border: 1px dotted var(--vscode-focusBorder); }
+
+.queued-grip {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: grab;
+  opacity: 0;
+  transition: opacity 0.15s;
+  user-select: none;
+  color: var(--vscode-descriptionForeground);
+  margin-top: -4px;
 }
+
+.queued-item:hover .queued-grip,
+.queued-item:focus-within .queued-grip { opacity: 1; }
+
+/* The insertion line is absolute so showing it never reflows the rows. */
+.queued-item.drop-before::before,
+.queued-item.drop-after::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  width: 100%;
+  height: 2px;
+  background: var(--vscode-focusBorder);
+  pointer-events: none;
+  z-index: 100;
+}
+
+.queued-item.drop-before::before { top: 0; }
+.queued-item.drop-after::after { top: 100%; }
 
 .queued-actions {
+  position: absolute;
+  overflow: hidden;
+  z-index: 100;
+  top: -17px;
+  right: 20px;
   display: flex;
-  gap: 2px;
-  margin-top: 2px;
+  gap: 0;
+  box-sizing: content-box;
+  height: 26px;
+  background: var(--vscode-interactive-result-editor-background-color, var(--vscode-editor-background));
+  border: 1px solid var(--vscode-chat-requestBorder, transparent);
+  border-radius: 3px;
   opacity: 0;
+  pointer-events: none;
 }
 
+.queued-actions .icon-btn {
+  width: 22px;
+  height: 22px;
+  margin: 4px 2px 0;
+  padding: 3px;
+  border-radius: 4px;
+}
+
+.queued-actions .icon-btn .codicon { font-size: 16px; }
+
 .queued-item:hover .queued-actions,
-.queued-item:focus-within .queued-actions { opacity: 0.85; }
+.queued-item:focus-within .queued-actions,
+.queued-item.editing .queued-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .queued-grip { transition: none; }
+}
 
 /* Attachment chips */
 #attachments {

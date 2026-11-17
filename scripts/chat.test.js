@@ -1728,4 +1728,527 @@ test("catalogue uids are translated to the values the session's model option acc
   }
 });
 
+// --- Steering and the pending queue ---------------------------------------
+// A steer is a second session/prompt on a running session (the agent advertises
+// cognition.ai/midTurnPrompts), both replies wait for the shared turn's
+// completion, and anything else waits in a client owned queue. The fake agent's
+// promptGate holds each prompt until its release file appears, which is what
+// makes settling them in either order reachable.
+
+test("a steer joins the running turn as a second prompt, and the turn ends once", posixOnly, async () => {
+  const h = createChat({ midTurnPrompts: true, promptGate: true });
+  await h.ready();
+  const id = await h.startChat("the turn");
+  assert.strictEqual(h.last("capabilities").sendWhileWorking, "steer");
+  assert.strictEqual(h.last("capabilities").steering, true);
+  await h.until(() => h.postsOf("busy").some((m) => m.value));
+
+  h.send({ type: "send", text: "steer the work", kind: "steer" });
+  assert.ok(await h.until(() => h.agentSaw("session/prompt").length === 2, 6000), "the steer reached the agent while the first was open");
+  const seen = h.agentSaw("session/prompt");
+  assert.strictEqual(seen[1].params.sessionId, id, "on the same session");
+  assert.strictEqual(seen[1].params.prompt.at(-1).text, "steer the work");
+  assert.ok(!h.agentSaw("session/cancel").length, "and it never cancels");
+  assert.strictEqual(h.postsOf("assistantStart").length, 1, "one turn preamble, not two");
+  assert.ok(h.postsOf("busy").some((m) => m.value === true) && !h.postsOf("busy").some((m) => m.value === false), "still busy while both are open");
+
+  // The steer settles first: the shared barrier must wait for the original too.
+  h.releasePrompt(id, 2);
+  await h.settle(400);
+  assert.ok(!h.postsOf("busy").some((m) => m.value === false), "one reply is not the end of the turn");
+  h.releasePrompt(id, 1);
+  assert.ok(await h.until(() => h.postsOf("busy").some((m) => m.value === false), 6000));
+  await h.dispose();
+});
+
+test("the shared turn also waits when the original settles first", posixOnly, async () => {
+  const h = createChat({ midTurnPrompts: true, promptGate: true });
+  await h.ready();
+  const id = await h.startChat("the turn");
+  await h.until(() => h.postsOf("busy").some((m) => m.value));
+  h.send({ type: "send", text: "steer the work", kind: "steer" });
+  assert.ok(await h.until(() => h.agentSaw("session/prompt").length === 2, 6000));
+
+  h.releasePrompt(id, 1);
+  await h.settle(400);
+  assert.ok(!h.postsOf("busy").some((m) => m.value === false), "the steer's reply is still owed");
+  h.releasePrompt(id, 2);
+  assert.ok(await h.until(() => h.postsOf("busy").some((m) => m.value === false), 6000));
+  await h.dispose();
+});
+
+test("a queued message waits for both replies, then drains in order", posixOnly, async () => {
+  const h = createChat({ midTurnPrompts: true, promptGate: true });
+  await h.ready();
+  const id = await h.startChat("the turn");
+  await h.until(() => h.postsOf("busy").some((m) => m.value));
+  h.send({ type: "send", text: "steer the work", kind: "steer" });
+  assert.ok(await h.until(() => h.agentSaw("session/prompt").length === 2, 6000));
+  h.send({ type: "send", text: "queued behind", kind: "queue" });
+  assert.ok(await h.until(() => (h.last("queued") || { items: [] }).items.length === 1));
+  assert.strictEqual(h.last("queued").items[0].kind, "queue");
+
+  h.releasePrompt(id, 1);
+  h.releasePrompt(id, 2);
+  assert.ok(await h.until(() => h.agentSaw("session/prompt").length === 3, 6000), "the queue drains once the shared turn ends");
+  const texts = prompts(h).map((p) => p.text);
+  assert.deepStrictEqual(texts, ["the turn", "steer the work", "queued behind"]);
+  assert.ok(!h.agentSaw("session/cancel").length);
+  h.releasePrompt(id, 3);
+  assert.ok(await h.until(() => h.postsOf("busy").some((m) => m.value === false), 6000));
+  await h.dispose();
+});
+
+test("several steers share the one running turn", posixOnly, async () => {
+  const h = createChat({ midTurnPrompts: true, promptGate: true });
+  await h.ready();
+  const id = await h.startChat("the turn");
+  await h.until(() => h.postsOf("busy").some((m) => m.value));
+  h.send({ type: "send", text: "steer one", kind: "steer" });
+  h.send({ type: "send", text: "steer two", kind: "steer" });
+  assert.ok(await h.until(() => h.agentSaw("session/prompt").length === 3, 6000));
+  assert.strictEqual(h.postsOf("assistantStart").length, 1, "still one turn");
+  assert.strictEqual(h.controller.runtimes.get(id).turnCount, 1, "and one turn count");
+  for (const n of [1, 2, 3]) h.releasePrompt(id, n);
+  assert.ok(await h.until(() => h.postsOf("busy").some((m) => m.value === false), 8000));
+  await h.dispose();
+});
+
+test("a requested steer queues quietly when the agent cannot take it", posixOnly, async () => {
+  const h = createChat({ promptDelay: 60000 });
+  await h.ready();
+  await h.startChat("the turn");
+  await h.until(() => h.postsOf("busy").some((m) => m.value));
+
+  h.send({ type: "send", text: "steer words", kind: "steer" });
+  assert.ok(await h.until(() => (h.last("queued") || { items: [] }).items.length === 1));
+  assert.strictEqual(h.last("queued").items[0].kind, "queue", "unsupported steering normalizes to queue");
+  await h.settle(200);
+  assert.strictEqual(h.agentSaw("session/prompt").length, 1, "nothing extra reached the agent");
+  assert.ok(!h.agentSaw("session/cancel").length, "and nothing was cancelled for it");
+  await h.dispose();
+});
+
+test("a steer's attachments belong to it, not to the message queued behind", posixOnly, async () => {
+  const h = createChat({ midTurnPrompts: true, promptGate: true });
+  await h.ready();
+  const id = await h.startChat("the turn");
+  await h.until(() => h.postsOf("busy").some((m) => m.value));
+
+  h.send({ type: "attachImage", name: "steer-only.png", mime: "image/png", data: PNG });
+  await h.until(() => ((h.last("attachments") || {}).items || []).length === 1);
+  h.send({ type: "send", text: "steer with file", kind: "steer" });
+  assert.ok(await h.until(() => h.agentSaw("session/prompt").length === 2, 6000));
+  h.send({ type: "send", text: "plain queue", kind: "queue" });
+  assert.ok(await h.until(() => (h.last("queued") || { items: [] }).items.length === 1));
+
+  h.releasePrompt(id, 1);
+  h.releasePrompt(id, 2);
+  assert.ok(await h.until(() => h.agentSaw("session/prompt").length === 3, 6000));
+  const sent = prompts(h);
+  assert.deepStrictEqual(sent.map((p) => p.images), [0, 1, 0], "the image went with the steer only");
+  h.releasePrompt(id, 3);
+  await h.dispose();
+});
+
+test("reordering the queue changes the order messages actually go out", posixOnly, async () => {
+  const h = createChat({ promptGate: true });
+  await h.ready();
+  const id = await h.startChat("the turn");
+  await h.until(() => h.postsOf("busy").some((m) => m.value));
+  h.send({ type: "send", text: "first" });
+  h.send({ type: "send", text: "second" });
+  assert.ok(await h.until(() => (h.last("queued") || { items: [] }).items.length === 2));
+  const items = h.last("queued").items;
+
+  // Bogus reorders change nothing: an unknown id, and a message onto itself.
+  h.send({ type: "reorderQueued", id: "q-nope", targetId: items[0].id, before: true });
+  h.send({ type: "reorderQueued", id: items[0].id, targetId: items[0].id, before: true });
+  await h.settle(150);
+  assert.deepStrictEqual(h.last("queued").items.map((q) => q.text), ["first", "second"]);
+
+  h.send({ type: "reorderQueued", id: items[1].id, targetId: items[0].id, before: true });
+  assert.ok(await h.until(() => h.last("queued").items[0].text === "second"));
+
+  h.releasePrompt(id, 1);
+  assert.ok(await h.until(() => h.agentSaw("session/prompt").length === 2, 6000));
+  assert.strictEqual(prompts(h)[1].text, "second", "the reordered message went first");
+  h.releasePrompt(id, 2);
+  assert.ok(await h.until(() => h.agentSaw("session/prompt").length === 3, 6000));
+  assert.strictEqual(prompts(h)[2].text, "first");
+  h.releasePrompt(id, 3);
+  await h.dispose();
+});
+
+test("an edited pending message can change kind, and reorder stays inside a kind", posixOnly, async () => {
+  const h = createChat({ midTurnPrompts: true, promptGate: true });
+  await h.ready();
+  const id = await h.startChat("the turn");
+  await h.until(() => h.postsOf("busy").some((m) => m.value));
+  h.send({ type: "send", text: "queue-a" });
+  h.send({ type: "send", text: "queue-b" });
+  assert.ok(await h.until(() => (h.last("queued") || { items: [] }).items.length === 2));
+  const items = h.last("queued").items;
+
+  // Hold queue-a for editing and convert it to a steer: it moves to the steering
+  // group but stays put until the edit is released.
+  h.send({ type: "queueEditing", id: items[0].id });
+  h.send({ type: "editQueued", id: items[0].id, text: "queue-a steered", kind: "steer" });
+  assert.ok(await h.until(() => h.last("queued").items.some((q) => q.id === items[0].id && q.kind === "steer")));
+
+  // Cross kind reorders are refused in both directions.
+  h.send({ type: "reorderQueued", id: items[1].id, targetId: items[0].id, before: true });
+  h.send({ type: "reorderQueued", id: items[0].id, targetId: items[1].id, before: true });
+  await h.settle(150);
+  const after = h.last("queued").items;
+  assert.strictEqual(after.find((q) => q.id === items[0].id).kind, "steer");
+  assert.strictEqual(after.find((q) => q.id === items[1].id).kind, "queue");
+
+  // Releasing the edit lets the steer join the running turn mid flight.
+  h.send({ type: "queueEditing", id: null });
+  assert.ok(await h.until(() => h.agentSaw("session/prompt").length === 2, 6000), "the steered edit went out without waiting");
+  assert.strictEqual(prompts(h)[1].text, "queue-a steered");
+  assert.ok(!h.agentSaw("session/cancel").length);
+  assert.strictEqual(h.last("queued").items.length, 1, "queue-b still waits");
+
+  for (const n of [1, 2, 3]) h.releasePrompt(id, n);
+  assert.ok(await h.until(() => h.agentSaw("session/prompt").length === 3, 6000));
+  assert.strictEqual(prompts(h)[2].text, "queue-b");
+  await h.dispose();
+});
+
+test("send immediately wins over the waiting queue and cancels once", posixOnly, async () => {
+  const h = createChat({ midTurnPrompts: true, promptGate: true, cancelDelay: 200 });
+  await h.ready();
+  const id = await h.startChat("the turn");
+  await h.until(() => h.postsOf("busy").some((m) => m.value));
+  h.send({ type: "send", text: "wait-a" });
+  h.send({ type: "send", text: "wait-b" });
+  assert.ok(await h.until(() => (h.last("queued") || { items: [] }).items.length === 2));
+  const items = h.last("queued").items;
+
+  h.send({ type: "sendQueuedNow", id: items[1].id });
+  assert.ok(await h.until(() => h.agentSaw("session/cancel").length === 1, 6000), "the running turn is cancelled for it");
+  // A steer typed into the cancellation window cannot join the dying turn. The
+  // agent's cancel lands after cancelDelay, so this check runs well inside it.
+  h.send({ type: "send", text: "steer-late", kind: "steer" });
+  await h.settle(80);
+  assert.ok(!h.agentSaw("session/prompt").some((m) => (m.params.prompt || []).some((b) => b.text === "steer-late")),
+    "it did not reach the wire during the cancel");
+  assert.ok(h.last("queued").items.some((q) => q.text === "steer-late"), "it waits instead");
+  // Repeated Stop does not put another session/cancel on the wire.
+  h.send({ type: "cancel" });
+  await h.settle(300);
+  assert.strictEqual(h.agentSaw("session/cancel").length, 1, "one cancel for the whole cancellation");
+
+  // wait-b was the pick: it is the next prompt once the cancelled turn settles,
+  // and the late steer joins THAT turn rather than queueing behind it. The two
+  // dispatch in one drain, so count at least, never exactly.
+  assert.ok(await h.until(() => h.agentSaw("session/prompt").length >= 2, 6000));
+  assert.strictEqual(prompts(h)[1].text, "wait-b");
+  assert.ok(await h.until(() => h.agentSaw("session/prompt").length >= 3, 6000), "the steer joins the new turn");
+  assert.strictEqual(prompts(h)[2].text, "steer-late");
+  h.releasePrompt(id, 2);
+  h.releasePrompt(id, 3);
+  assert.ok(await h.until(() => h.agentSaw("session/prompt").length >= 4, 6000));
+  assert.strictEqual(prompts(h)[3].text, "wait-a", "the rest of the queue drains after");
+  h.releasePrompt(id, 4);
+  await h.dispose();
+});
+
+test("removing the message being edited lets the queue drain again", posixOnly, async () => {
+  const h = createChat({ promptDelay: 60000 });
+  await h.ready();
+  await h.startChat("the turn");
+  await h.until(() => h.postsOf("busy").some((m) => m.value));
+  h.send({ type: "send", text: "blocked" });
+  h.send({ type: "send", text: "behind it" });
+  assert.ok(await h.until(() => (h.last("queued") || { items: [] }).items.length === 2));
+  const items = h.last("queued").items;
+
+  // Hold the head for editing: nothing behind it may pass.
+  h.send({ type: "queueEditing", id: items[0].id });
+  await h.settle(200);
+  assert.strictEqual(h.agentSaw("session/prompt").length, 1);
+
+  // Removing it clears the hold, so the drain resumes with what is left.
+  h.send({ type: "removeQueued", id: items[0].id });
+  assert.ok(await h.until(() => (h.last("queued") || { items: [] }).items.length === 1));
+  // Still busy, so "behind it" stays queued. The point is the hold is gone and
+  // the surviving item is now the head the drain will pick.
+  assert.strictEqual(h.last("queued").items[0].text, "behind it");
+  await h.dispose();
+});
+
+test("a prompt that never reached the wire returns its text and files to the draft", posixOnly, async () => {
+  const h = createChat({ promptDelay: 300 });
+  await h.ready();
+  const id = await h.startChat("first");
+  assert.ok(await h.until(() => h.postsOf("busy").some((m) => m.value === false), 6000), "the first turn ends");
+
+  h.send({ type: "attachImage", name: "back-to-you.png", mime: "image/png", data: PNG });
+  await h.until(() => ((h.last("attachments") || {}).items || []).length === 1);
+  const rt = h.controller.runtimes.get(id);
+  const realPrompt = rt.client.prompt.bind(rt.client);
+  rt.client.prompt = () => Promise.reject(new h.AcpRequestNotSentError("ACP connection is closed"));
+
+  h.send({ type: "send", text: "never sent", kind: "queue" });
+  assert.ok(await h.until(() => /never sent/.test(h.store.draft(id) || ""), 6000), "the text is back in the draft");
+  assert.ok(await h.until(() => ((h.last("attachments") || {}).items || []).some((a) => a.label === "back-to-you.png")), "and so are its files");
+  assert.strictEqual(h.agentSaw("session/prompt").length, 1, "nothing reached the agent, so nothing is retried");
+  assert.ok(h.postsOf("error").length > 0, "and the failure is surfaced");
+  rt.client.prompt = realPrompt;
+  await h.dispose();
+});
+
+test("an ambiguous prompt failure is surfaced without a retry or a duplicate", posixOnly, async () => {
+  const h = createChat({ promptDelay: 300 });
+  await h.ready();
+  const id = await h.startChat("first");
+  assert.ok(await h.until(() => h.postsOf("busy").some((m) => m.value === false), 6000));
+
+  const rt = h.controller.runtimes.get(id);
+  const realPrompt = rt.client.prompt.bind(rt.client);
+  rt.client.prompt = () => Promise.reject(new Error("ACP process exited"));
+
+  h.send({ type: "send", text: "maybe sent", kind: "queue" });
+  assert.ok(await h.until(() => h.postsOf("error").length > 0, 6000), "the failure is surfaced");
+  await h.settle(300);
+  assert.strictEqual(h.agentSaw("session/prompt").length, 1, "and it is not sent again: delivery was unknown");
+  rt.client.prompt = realPrompt;
+  await h.dispose();
+});
+
+test("a steer written while a chat wakes goes out once it is ready, to its own session", posixOnly, async () => {
+  const h = createChat({ midTurnPrompts: true, promptGate: true });
+  await h.ready();
+  const id = await h.startChat("first");
+  h.releasePrompt(id, 1);
+  assert.ok(await h.until(() => h.postsOf("busy").some((m) => m.value === false), 6000));
+  h.answerWith("Terminate");
+  h.send({ type: "terminateSession", id });
+  await h.until(() => h.liveChats() === 0, 6000);
+  h.answerWith(undefined);
+
+  const other = await h.startChat("the chat opened instead");
+  h.releasePrompt(other, 1);
+  await h.until(() => h.postsOf("busy").some((m) => m.value === false), 6000);
+  h.send({ type: "leaveToList" });
+  await h.settle(100);
+
+  h.setDelays({ loadDelay: 900 });
+  h.send({ type: "wakeSession", id });
+  await h.settle(250);
+  h.send({ type: "send", text: "steer after wake", kind: "steer" });
+  await h.settle(100);
+  h.send({ type: "activateSession", id: other });
+  await h.until(() => h.activeId() === other, 4000);
+
+  assert.ok(await h.until(() => h.agentSaw("session/prompt").length === 3, 8000), "the steer went out after the load");
+  const last = h.agentSaw("session/prompt").at(-1);
+  assert.strictEqual(last.params.sessionId, id, "to the session it was written in, not the one on screen");
+  assert.strictEqual(last.params.prompt.at(-1).text, "steer after wake");
+  h.releasePrompt(id, 2);
+  await h.dispose();
+});
+
+test("a steered turn finishes and drains on the surface that took it", posixOnly, async () => {
+  const from = createChat({ midTurnPrompts: true, promptGate: true });
+  await from.ready();
+  const id = await from.startChat("the turn");
+  await from.until(() => from.postsOf("busy").some((m) => m.value));
+  from.send({ type: "send", text: "steer the work", kind: "steer" });
+  assert.ok(await from.until(() => from.agentSaw("session/prompt").length === 2, 6000));
+  from.send({ type: "send", text: "queued behind", kind: "queue" });
+  assert.ok(await from.until(() => (from.last("queued") || { items: [] }).items.length === 1));
+  const pendingId = from.last("queued").items[0].id;
+
+  const transfer = from.controller.exportRuntime(id);
+  assert.strictEqual(transfer.rt.queued[0]?.id, pendingId, "the pending id survives the handover unchanged");
+  const to = createChat({ promptGate: path.join(from.storage, "prompt-gate") });
+  await to.ready();
+  await to.controller.importRuntime(transfer);
+
+  const endsBefore = from.postsOf("assistantEnd").length;
+  from.releasePrompt(id, 1);
+  from.releasePrompt(id, 2);
+  assert.ok(await to.until(() => to.postsOf("busy").some((m) => m.value === false), 8000), "the new owner saw the turn end");
+  assert.strictEqual(from.postsOf("assistantEnd").length, endsBefore, "the old surface did not finish it too");
+  assert.ok(await from.until(() => from.agentSaw("session/prompt").length === 3, 6000), "and its queue drained on the new owner");
+  assert.strictEqual(prompts(from)[2]?.text, "queued behind");
+  from.releasePrompt(id, 3);
+  await to.dispose();
+  await from.dispose();
+});
+
+// A steer's reply can fail or come back cancelled while the original prompt is
+// still open. The shared barrier owes both replies, so the turn must stay busy
+// and the queue must not drain until the original settles too.
+for (const mode of ["error", "cancelled"]) {
+  test(`a steer reply that ends ${mode} still waits for the shared turn`, posixOnly, async () => {
+    const h = createChat({ midTurnPrompts: true, promptGate: true, promptFail: { 2: mode } });
+    await h.ready();
+    const id = await h.startChat("the turn");
+    await h.until(() => h.postsOf("busy").some((m) => m.value));
+    h.send({ type: "send", text: "steer the work", kind: "steer" });
+    assert.ok(await h.until(() => h.agentSaw("session/prompt").length === 2, 6000));
+    h.send({ type: "send", text: "queued behind", kind: "queue" });
+    assert.ok(await h.until(() => (h.last("queued") || { items: [] }).items.length === 1));
+
+    h.releasePrompt(id, 2);
+    await h.settle(400);
+    assert.strictEqual(h.controller.runtimes.get(id).busy, true, "one settled reply is not the turn's end");
+    assert.strictEqual(h.postsOf("assistantEnd").length, 0, "and the turn has not ended");
+    assert.strictEqual(h.agentSaw("session/prompt").length, 2, "the queued message was not dispatched");
+    assert.strictEqual((h.last("queued") || { items: [] }).items.length, 1, "it still waits");
+
+    h.releasePrompt(id, 1);
+    assert.ok(await h.until(() => h.agentSaw("session/prompt").length === 3, 6000), "the queue drains once the barrier settles");
+    if (mode === "error") {
+      assert.ok(await h.until(() => h.postsOf("error").length === 1, 6000), "the failure is surfaced once");
+    } else {
+      assert.ok(await h.until(() => h.postsOf("assistantEnd").some((m) => m.stopReason === "cancelled"), 6000),
+        "a cancelled reply ends the shared turn as cancelled");
+    }
+    h.releasePrompt(id, 3);
+    assert.ok(await h.until(() => h.postsOf("busy").some((m) => m.value === false), 8000));
+    await h.dispose();
+  });
+}
+
+test("removing the held queue head clears the files its edit borrowed", posixOnly, async () => {
+  const h = createChat({ promptGate: true });
+  await h.ready();
+  const id = await h.startChat("the turn");
+  await h.until(() => h.postsOf("busy").some((m) => m.value));
+
+  h.send({ type: "attachImage", name: "held-file.png", mime: "image/png", data: PNG });
+  await h.until(() => ((h.last("attachments") || {}).items || []).length === 1);
+  h.send({ type: "send", text: "blocked", kind: "queue" });
+  h.send({ type: "send", text: "behind it", kind: "queue" });
+  assert.ok(await h.until(() => (h.last("queued") || { items: [] }).items.length === 2));
+  const head = h.last("queued").items[0];
+
+  // Hold the head for editing: its files are copied into the composer, and the
+  // turn ending must not let anything behind it pass.
+  h.send({ type: "queueEditing", id: head.id });
+  await h.until(() => ((h.last("attachments") || {}).items || []).length === 1);
+  h.releasePrompt(id, 1);
+  assert.ok(await h.until(() => h.postsOf("busy").some((m) => m.value === false), 6000), "the turn ends idle");
+  await h.settle(200);
+  assert.strictEqual(h.agentSaw("session/prompt").length, 1, "the held head blocks the drain");
+  assert.strictEqual((h.last("queued") || { items: [] }).items.length, 2);
+
+  // Removing it while idle: the borrowed files go with it, and the message
+  // behind drains. The removed text must never reach the agent.
+  h.send({ type: "removeQueued", id: head.id });
+  assert.ok(await h.until(() => h.agentSaw("session/prompt").length === 2, 6000), "the next message drains");
+  assert.strictEqual(prompts(h)[1].text, "behind it");
+  assert.ok(!prompts(h).some((p) => p.text === "blocked"), "the removed message was never sent");
+  assert.ok(await h.until(() => ((h.last("attachments") || {}).items || []).length === 0),
+    "the composer's borrowed copy is cleared, not left for the next draft");
+  h.releasePrompt(id, 2);
+  await h.dispose();
+});
+
+test("an unsent prompt restores to the surface that owns the chat after the wait", posixOnly, async () => {
+  // One drafts object shared by both surfaces' stores, the way a workspace's
+  // storage is shared when a chat moves between the panel and an editor tab.
+  const drafts = {};
+  const seed = { "devin.drafts.v1": drafts };
+  const from = createChat({ promptDelay: 300, state: seed });
+  await from.ready();
+  const id = await from.startChat("first");
+  assert.ok(await from.until(() => from.postsOf("busy").some((m) => m.value === false), 6000), "the first turn ends");
+
+  from.send({ type: "attachImage", name: "hand-back.png", mime: "image/png", data: PNG });
+  await from.until(() => ((from.last("attachments") || {}).items || []).length === 1);
+  const rt = from.controller.runtimes.get(id);
+  const realPrompt = rt.client.prompt.bind(rt.client);
+  rt.client.prompt = () => Promise.reject(new from.AcpRequestNotSentError("ACP connection is closed"));
+
+  // Hold the draft write open so the chat can be handed to another surface
+  // while the recovery is still waiting on it.
+  const realBack = from.store.queuedBackToDrafts.bind(from.store);
+  let releaseWrite;
+  const writeGate = new Promise((resolve) => { releaseWrite = resolve; });
+  let writeStarted = false;
+  from.store.queuedBackToDrafts = (entries) => {
+    writeStarted = true;
+    return writeGate.then(() => realBack(entries));
+  };
+
+  from.send({ type: "send", text: "never sent", kind: "queue" });
+  assert.ok(await from.until(() => writeStarted, 6000), "the recovery reached the draft write");
+
+  const transfer = from.controller.exportRuntime(id);
+  const to = createChat({ state: seed });
+  await to.ready();
+  await to.controller.importRuntime(transfer);
+  const fromAttachments = from.postsOf("attachments").length;
+  releaseWrite();
+
+  assert.ok(await to.until(() => ((to.last("attachments") || {}).items || []).some((a) => a.label === "hand-back.png"), 6000),
+    "the files land on the surface that owns the chat now");
+  assert.ok(await to.until(() => /never sent/.test((to.last("draft") || {}).text || ""), 6000),
+    "and the text is back in its composer");
+  await from.settle(200);
+  assert.strictEqual(from.postsOf("attachments").length, fromAttachments,
+    "and nothing is restored onto the surface it left");
+  assert.strictEqual(from.agentSaw("session/prompt").length, 1, "the failed prompt never reached the wire, so nothing is retried");
+  await to.until(() => to.postsOf("busy").some((m) => m.value === false), 6000);
+  await to.dispose();
+  await from.dispose();
+});
+
+// A message typed while a session is still loading has its kind decided before
+// the agent's capabilities exist: initialize is still pending, so
+// supportsMidTurnPrompts cannot answer yet. The queue must keep a requested
+// steer as a steer through that window and let the drain normalize it once the
+// real answer arrives, in either direction.
+for (const midTurnPrompts of [true, false]) {
+  test(`a steer sent before capabilities are known keeps its kind through the load (${midTurnPrompts ? "supported" : "unsupported"})`, posixOnly, async () => {
+    const h = createChat({ midTurnPrompts, initDelay: 700, promptDelay: 400 });
+    await h.ready();
+    const id = await h.startChat("first");
+    assert.ok(await h.until(() => h.postsOf("busy").some((m) => m.value === false), 8000), "the first turn ends");
+    h.answerWith("Terminate");
+    h.send({ type: "terminateSession", id });
+    await h.until(() => h.liveChats() === 0, 6000);
+    h.answerWith(undefined);
+
+    h.send({ type: "activateSession", id });
+    // The runtime exists and is replaying while initialize is still pending:
+    // this is the window where capabilities cannot be known yet.
+    assert.ok(await h.until(() => {
+      const rt = h.controller.runtimes.get(id);
+      return rt && !rt.initialized && rt.replaying;
+    }, 6000), "the load is inside its initialization window");
+    const cancels = h.agentSaw("session/cancel").length;
+
+    h.send({ type: "send", text: "queue words", kind: "queue" });
+    h.send({ type: "send", text: "steer words", kind: "steer" });
+    assert.ok(await h.until(() => (h.last("queued") || { items: [] }).items.length === 2, 6000),
+      "both waited for the channel instead of being sent into the replay");
+    const steerItem = h.last("queued").items.find((q) => q.text === "steer words");
+    assert.strictEqual(steerItem.kind, "steer",
+      "the steer kept its kind even though capabilities were not yet known");
+
+    // Once the load drains, the supported agent takes the steer first even
+    // though it was written second. The unsupported one keeps plain FIFO with
+    // the steer normalized to a queue entry.
+    assert.ok(await h.until(() => h.agentSaw("session/prompt").length === 3, 10000),
+      "the queue drained after the load");
+    const wire = h.agentSaw("session/prompt").slice(1);
+    assert.deepStrictEqual(wire.map((m) => m.params.prompt.at(-1).text),
+      midTurnPrompts ? ["steer words", "queue words"] : ["queue words", "steer words"],
+      midTurnPrompts ? "steer joins ahead of the queue" : "unsupported steering stays FIFO");
+    assert.ok(wire.every((m) => m.params.sessionId === id),
+      "both went to the session they were written in");
+    assert.strictEqual(h.agentSaw("session/cancel").length, cancels, "steering never cancelled anything");
+    assert.ok(await h.until(() => h.postsOf("busy").some((m) => m.value === false), 8000));
+    await h.dispose();
+  });
+}
+
 test.after(() => cleanup());
