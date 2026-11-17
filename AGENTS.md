@@ -94,6 +94,8 @@ its *own* capabilities. It does **not** confirm the ones we declared:
 gate a method **we call** on the echoed key (plus treat `-32601` as unsupported), and
 never gate a capability **we serve** on the echo, or it silently stops working.
 
+**Steering is a concurrent prompt.** On CLI 3000.13.4, `agentCapabilities._meta["cognition.ai/midTurnPrompts"]` advertises support. Send another `session/prompt` on the same session while its turn runs, without `session/cancel`. The prompt replies share the turn's completion, so keep the runtime busy until all settle. The client owns queued messages. `cognition.ai/queuedMessages` was not advertised by this build.
+
 **Client capabilities this build looks for**, from the binary's own list: `revert`,
 `subagentSupport`, `subagentControl`, `partialContent`, `groupedSessionConfigOptions`,
 `stopOnReject`, `mcp`, `plugins`, `workspaceDirCommands`, `clipboardWrite`,

@@ -1,12 +1,18 @@
 # Changelog
 
-All notable changes to **Devin for VS Code**, newest first. One line per change:
-the commit messages carry the detail.
+## [0.15.0] - 2026-11-17
 
-> This is a fast moving preview, so a few entries group several rapid builds
-> under one milestone version where those builds were only ever installed
-> locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
-> in 0.6.92.
+### Highlights
+- Steer a running request with Enter, or queue a follow up with Alt+Enter.
+- Choose steering, queuing, or Stop and Send as the default busy action.
+- Edit, remove, or send pending messages immediately.
+- Drag pending messages to reorder them within Steering or Queued.
+- Match Copilot's pending message layout, hover controls, and drag feedback.
+
+### Under the hood
+- Send ACP steering prompts without cancelling the running request.
+- Fall back to queuing when the installed CLI does not support steering.
+- Keep pending messages and attachments intact when moving a running chat.
 
 ## [0.14.0] - 2026-11-14
 
@@ -475,6 +481,8 @@ Chat quality: a message queue, background sessions, and calmer reading.
 - Every README screenshot is captured at one size, via a `--width` flag.
 
 ## [0.6.92] - 2026-08-04
+
+> This is a fast moving preview, so a few entries group several rapid builds under one milestone version where those builds were only ever installed locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together in 0.6.92.
 
 ### Highlights
 - Every settings action shows that it is working and cannot fire twice.

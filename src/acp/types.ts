@@ -7,6 +7,18 @@ export type ContentBlock =
   | { type: "resource"; resource: { uri: string; mimeType?: string; text?: string } }
   | { type: "resource_link"; uri: string; name?: string };
 
+// Rejected only when the request provably never reached the agent: the
+// connection was already closed, or the write to its stdin failed before
+// anything was sent. Everything after the write (a later disconnect, a dead
+// process) leaves delivery unknown and stays an ordinary Error, so a caller
+// can hand the message back without risking a duplicate send.
+export class AcpRequestNotSentError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AcpRequestNotSentError";
+  }
+}
+
 export interface InitializeResult {
   protocolVersion: number;
   agentCapabilities?: {

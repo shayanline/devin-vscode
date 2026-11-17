@@ -4,6 +4,7 @@ import { cliCommand } from "../cli/locate";
 import { JsonRpcConnection } from "./connection";
 import { contextReportFromUpdate, mergeContextReports, sessionAcuUsage } from "./usage";
 import {
+  AcpRequestNotSentError,
   AcpSessionRow,
   AgentStopped,
   CliOutput,
@@ -319,6 +320,13 @@ export class AcpClient extends EventEmitter {
     return this.agentCapability("cognition.ai/subagentControl");
   }
 
+  // True when the agent takes a second session/prompt while a turn is still
+  // running (agentCapabilities._meta["cognition.ai/midTurnPrompts"]). The new
+  // prompt joins the running turn: both replies wait for the same completion.
+  supportsMidTurnPrompts(): boolean {
+    return this.agentCapability("cognition.ai/midTurnPrompts");
+  }
+
   private agentCapability(key: string): boolean {
     const meta = this.initializeResult?.agentCapabilities?._meta as Record<string, unknown> | undefined;
     return meta?.[key] === true;
@@ -555,7 +563,7 @@ export class AcpClient extends EventEmitter {
 
   private rpc<T>(method: string, params?: unknown, timeoutMs?: number): Promise<T> {
     if (!this.conn) {
-      return Promise.reject(new Error("ACP connection not started"));
+      return Promise.reject(new AcpRequestNotSentError("ACP connection not started"));
     }
     return this.conn.request<T>(method, params, timeoutMs);
   }

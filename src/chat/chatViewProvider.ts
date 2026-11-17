@@ -5,6 +5,7 @@ import * as path from "path";
 import * as crypto from "crypto";
 import { AcpClient, AcpHost } from "../acp/client";
 import {
+  AcpRequestNotSentError,
   AgentStopped,
   CliOutput,
   ConfigOption,
@@ -44,6 +45,17 @@ import { cachedFamilies, familyOf, listModelFamilies, ModelFamily } from "../cli
 import { fusionIdentity, fusionModelKey, modelIdentity } from "../cli/modelId";
 import { lockOwner, removeLock } from "../cli/sessionLocks";
 import { contextReportFromUpdate } from "../acp/usage";
+
+// A message waiting behind a turn, either for the turn to end ("queue") or to
+// join it while it runs ("steer", which the agent must advertise support for).
+type PendingKind = "queue" | "steer";
+interface PendingMessage {
+  id: string;
+  kind: PendingKind;
+  text: string;
+  implicit: ContentBlock[];
+  attachments: Staged[];
+}
 
 // One live session: its own `devin acp` process and terminal manager, plus the
 // per-session state that used to be flat on the provider. Several of these can
@@ -93,11 +105,21 @@ interface Runtime {
   replay: Record<string, unknown>[];
   // False once the oldest entries were dropped, which makes a rebuild partial.
   logFull: boolean;
-  // Messages the user submitted while a turn was in flight. The implicit context
-  // is snapshotted at queue time and the attachments travel with the message, so
-  // editing one can hand them back to the composer and take them again. The host
-  // sends them in order as the session frees up (VS Code's chat queue).
-  queued: { id: string; text: string; implicit: ContentBlock[]; attachments: Staged[] }[];
+  // Messages the user submitted while a turn was in flight, in submission order.
+  // The implicit context is snapshotted at queue time and the attachments travel
+  // with the message, so editing one can hand them back to the composer and take
+  // them again. The host sends them as the session frees up (VS Code's chat
+  // queue). The drain picks steers ahead of queued ones and may let a steer join
+  // the running turn instead.
+  queued: PendingMessage[];
+  // Set between asking the agent to stop a turn and that turn actually settling:
+  // steering is off the table while the cancel is in flight, and the composer
+  // stays busy until the shared turn really ends.
+  cancelling?: boolean;
+  // The queued message "Send Immediately" (or Stop and Send) picked, which the
+  // next drain sends ahead of everything else, of either kind. One shot: it is
+  // cleared when the message goes out or leaves the queue.
+  runNextId?: string;
   // Webview messages a background turn produced while this session was not the
   // visible one. Replayed when the session is reopened so its progress is shown
   // even for a turn that is still running (capped so it can't grow unbounded).
@@ -124,10 +146,11 @@ interface Runtime {
   // A usage read in flight for this session, so overlapping triggers coalesce
   // into one /context + /session-stats pair.
   usagePending?: Promise<void>;
-  // The surface that currently owns this session's usage reporting. A read can
-  // outlive a surface transfer, so the reply goes to whoever holds the runtime
-  // when it lands rather than the controller that asked for it.
-  usageOwner?: ChatController;
+  // The surface that currently owns this runtime's reports and recovery. A read
+  // or a failed prompt can outlive a surface transfer, so the reply goes to
+  // whoever holds the runtime when it lands rather than the controller that
+  // asked for it.
+  owner: ChatController;
   // When the last usage read was scheduled; non-forced triggers inside the
   // window are skipped so every signal does not become its own read.
   usageRefreshedAt: number;
@@ -1009,7 +1032,7 @@ export class ChatController implements AcpHost {
     this.runtimes.set(rt.id, rt);
     // A usage read that was already in flight reports to this surface now that
     // the runtime lives here.
-    rt.usageOwner = this;
+    rt.owner = this;
     rt.client.setHost(this);
     rt.client.on("log", (line: string) => this.log(line));
     rt.client.on("update", (n: SessionUpdateNotification) => this.onUpdate(n, rt));
@@ -1048,7 +1071,7 @@ export class ChatController implements AcpHost {
     }
     // A turn that was already running is finished by this surface from now on.
     if (rt.busy && rt.turn) {
-      this.adoptTurn(rt, rt.turn);
+      void this.adoptTurn(rt, rt.turn);
     }
     this.post({ type: "body", body: "thread" });
     if (rt.busy) {
@@ -1169,7 +1192,8 @@ export class ChatController implements AcpHost {
       pendingTerminals: [],
       subagentSpawns: [],
       subagentIds: new Map(),
-      usageRefreshedAt: 0
+      usageRefreshedAt: 0,
+      owner: this
     };
     ref = rt;
     this.spawnedRuntimes.add(rt);
@@ -1489,7 +1513,12 @@ export class ChatController implements AcpHost {
           await this.onWebviewReady();
           return;
         case "send":
-          await this.handleSend(String(msg.text || ""), !!msg.newSession, !!msg.preserveTranscript);
+          await this.handleSend(
+            String(msg.text || ""),
+            !!msg.newSession,
+            !!msg.preserveTranscript,
+            msg.kind === "steer" ? "steer" : "queue"
+          );
           return;
         case "stopAndSend":
           this.stopAndSend(String(msg.text || ""));
@@ -1498,7 +1527,14 @@ export class ChatController implements AcpHost {
           this.removeQueued(String(msg.id || ""));
           return;
         case "editQueued":
-          this.editQueued(String(msg.id || ""), String(msg.text || ""));
+          this.editQueued(
+            String(msg.id || ""),
+            String(msg.text || ""),
+            msg.kind === "steer" || msg.kind === "queue" ? msg.kind : undefined
+          );
+          return;
+        case "reorderQueued":
+          this.reorderQueued(String(msg.id || ""), String(msg.targetId || ""), !!msg.before);
           return;
         case "sendQueuedNow":
           this.sendQueuedNow(String(msg.id || ""));
@@ -2306,6 +2342,13 @@ export class ChatController implements AcpHost {
       await p;
     } finally {
       this.loading.delete(id);
+      // Anything typed while it was opening was queued rather than sent. The
+      // load's own flush ran while `loading` still held the id and gated out,
+      // so the drain happens here, the same as a wake's does.
+      const opened = this.runtimes.get(id);
+      if (opened) {
+        this.flushQueue(opened);
+      }
     }
   }
 
@@ -4100,7 +4143,7 @@ export class ChatController implements AcpHost {
 
   // --- Prompting -----------------------------------------------------------
 
-  private async handleSend(text: string, startNew = false, preserveTranscript = false): Promise<void> {
+  private async handleSend(text: string, startNew = false, preserveTranscript = false, kind: PendingKind = "queue"): Promise<void> {
     if (!text.trim()) {
       return;
     }
@@ -4114,10 +4157,14 @@ export class ChatController implements AcpHost {
     // user can open another one while they run. Taken now rather than cleared later, so a
     // second message written in the meantime cannot pick up the same files.
     const staged = this.takeStaged(draftFor);
+    // The whole message is captured before the first await, so the context it
+    // carries is the one it was written with, not whatever the editor shows once
+    // a wake or a create has finished.
+    const message = this.pendingMessage(text, staged, kind);
     const giveBack = (why?: string) => {
-      this.store.setDraft(draftFor, text);
-      this.restoreStaged(draftFor, staged);
-      this.post({ type: "draft", id: draftFor || null, text });
+      this.store.setDraft(draftFor, message.text);
+      this.restoreStaged(draftFor, message.attachments);
+      this.post({ type: "draft", id: draftFor || null, text: message.text });
       if (why) {
         this.post({ type: "error", text: why });
       }
@@ -4144,7 +4191,8 @@ export class ChatController implements AcpHost {
       // seeming to vanish.
       const rt = this.runtimes.get(target);
       if (rt && (rt.replaying || this.loading.has(target))) {
-        this.enqueueMessage(rt, text, staged);
+        this.enqueueMessage(rt, message);
+        this.flushQueue(rt);
         return;
       }
     }
@@ -4157,15 +4205,17 @@ export class ChatController implements AcpHost {
       // started from the list never flashes the welcome while the ACP session
       // spins up.
       this.post({ type: "clear", pendingSend: true });
-      this.post({ type: "userMessage", text, attachments: this.shownAttachments(staged) });
+      this.post({ type: "userMessage", text: message.text, attachments: this.shownAttachments(message.attachments) });
     }
 
     let rt = startNew || !target ? undefined : this.runtimes.get(target);
-    // One turn at a time within a session: a message sent while the visible
-    // session is mid-turn is queued (and shown as a pending row) rather than
-    // dropped, then auto-sent when the turn finishes.
+    // One turn at a time within a session, except a steering message the agent
+    // takes mid turn: anything else sent while the visible session is mid turn
+    // is queued (and shown as a pending row) rather than dropped, then
+    // sent when the turn finishes.
     if (rt && rt.busy) {
-      this.enqueueMessage(rt, text, staged);
+      this.enqueueMessage(rt, message);
+      this.flushQueue(rt);
       return;
     }
     if (!rt) {
@@ -4192,20 +4242,19 @@ export class ChatController implements AcpHost {
     // A turn can have started while the wake or the create was running: opening a
     // chat drains whatever was typed while it opened, and two sends from the new chat
     // box share one session/new and so arrive at one runtime. The busy check above
-    // ran before all of that. ACP has no way to hand a prompt to a live one, so a
-    // second here does not queue behind the first, it contends with it: the two
-    // arrive out of order and the channel can be lost. It goes to the queue, which is
-    // where a message sent during a turn goes.
+    // ran before all of that. What does not fit goes to the queue, which is where
+    // a message sent during a turn goes.
     if (rt.busy) {
-      this.enqueueMessage(rt, text, staged);
+      this.enqueueMessage(rt, message);
+      this.flushQueue(rt);
       return;
     }
 
     const sent = rt;
     // What was attached goes with the message, so the request keeps saying what it
     // was asked about instead of the context vanishing the moment it is sent.
-    const attachments = this.shownAttachments(staged);
-    const userMessage = { type: "userMessage", text, attachments };
+    const attachments = this.shownAttachments(message.attachments);
+    const userMessage = { type: "userMessage", text: message.text, attachments };
     if (startNew) {
       // A fresh chat's echo was already posted. The log still needs it once.
       this.record(sent, userMessage);
@@ -4215,45 +4264,64 @@ export class ChatController implements AcpHost {
       // has left for the list or another chat used to drop the echo entirely.
       this.emit(sent, userMessage);
     }
-    const blocks: ContentBlock[] = [...this.buildImplicitBlocks(), ...staged.map((a) => a.block), { type: "text", text }];
-    await this.runPrompt(sent, blocks);
+    await this.runPrompt(sent, message);
   }
 
   // Run one prompt turn against a runtime and stream its outcome, rendering only
   // while that session is the visible one. On completion it flushes the next
   // queued message, so a session's queue drains itself turn by turn. Shared by a
   // live send and a queued flush.
-  private async runPrompt(rt: Runtime, blocks: ContentBlock[]): Promise<void> {
+  //
+  // A steering message does not start a turn: the agent takes a second
+  // session/prompt while the first runs, and both replies wait for the same
+  // completion. `rt.turn` is a barrier over every prompt that joined the turn,
+  // and only the newest barrier owns its completion (see adoptTurn).
+  private async runPrompt(rt: Runtime, message: PendingMessage): Promise<void> {
     // Last stop before the wire. Attaching already refuses an image the model
     // cannot read, but the model can be changed after that (or while the message
     // sat in the queue), and an image block the model cannot decode does not fail
     // the turn, it breaks the session for good.
-    blocks = this.withoutUnreadableImages(rt, blocks);
-    rt.steps = [];
-    rt.stepsKnown = false;
-    this.setRuntimeBusy(rt, true);
-    if (this.activeId === rt.id) {
-      this.post({ type: "assistantStart" });
+    const blocks = this.withoutUnreadableImages(rt, this.messageBlocks(message));
+    const prior = rt.turn;
+    if (!prior) {
+      // Only a genuinely new turn resets the checkpoint view, flips busy and
+      // counts: a steer joining the running one repeats none of that.
+      rt.steps = [];
+      rt.stepsKnown = false;
+      this.setRuntimeBusy(rt, true);
+      if (this.activeId === rt.id) {
+        this.post({ type: "assistantStart" });
+      }
+      rt.turnCount++;
     }
-    rt.turnCount++;
-    const turn = rt.client.prompt(rt.id, blocks);
+    const prompt = rt.client.prompt(rt.id, blocks).catch(async (error: unknown) => {
+      if (error instanceof AcpRequestNotSentError) {
+        // The request provably never reached the agent, so the message is safe
+        // to hand back. The store write is workspace state and always lands.
+        // The composer it returns to is read AFTER the await, because a surface
+        // move in between retargets who owns the runtime now.
+        await rt.owner.store.queuedBackToDrafts([{ id: rt.id, text: message.text }]);
+        const owner = rt.owner;
+        owner.restoreStaged(rt.id, message.attachments);
+        if (owner.activeId === rt.id) {
+          owner.postDraft();
+        }
+      }
+      throw error;
+    });
+    const turn: Promise<PromptResult> = prior
+      ? Promise.allSettled([prior, prompt]).then(([previous, current]) => {
+          if (previous.status === "rejected") {
+            throw previous.reason;
+          }
+          if (current.status === "rejected") {
+            throw current.reason;
+          }
+          return current.value;
+        })
+      : prompt;
     rt.turn = turn;
-    try {
-      const result = await turn;
-      // Only render the completion if this session is still the visible one.
-      if (this.activeId === rt.id) {
-        this.post({ type: "assistantEnd", stopReason: result.stopReason });
-      }
-    } catch (err) {
-      if (this.activeId === rt.id) {
-        this.post({ type: "error", text: err instanceof Error ? err.message : String(err) });
-      }
-    } finally {
-      if (rt.turn === turn) {
-        rt.turn = undefined;
-      }
-      this.endTurn(rt);
-    }
+    await this.adoptTurn(rt, turn);
   }
 
   // Close out a finished turn, but only for the surface that still holds the
@@ -4261,9 +4329,9 @@ export class ChatController implements AcpHost {
   // `adoptTurn`), which owns the webview the result belongs to and its queue.
   private endTurn(rt: Runtime): void {
     if (this.runtimes.get(rt.id) !== rt) {
-      rt.busy = false;
       return;
     }
+    rt.cancelling = false;
     this.setRuntimeBusy(rt, false);
     // Send the next queued message first: the revert-head probe below is an
     // extra round trip on the same channel, and awaiting it here is what used
@@ -4286,52 +4354,67 @@ export class ChatController implements AcpHost {
     }
   }
 
-  // Take over a turn that was already running when the session arrived here, so
-  // it ends on this surface: the reply settles, the working state clears, and the
-  // queue drains here rather than on the surface it left.
-  private adoptTurn(rt: Runtime, turn: Promise<PromptResult>): void {
-    void turn
-      .then(
-        (result) => {
-          if (this.activeId === rt.id) {
-            this.post({ type: "assistantEnd", stopReason: result.stopReason });
-          }
-        },
-        (err) => {
-          if (this.activeId === rt.id) {
-            this.post({ type: "error", text: err instanceof Error ? err.message : String(err) });
-          }
-        }
-      )
-      .then(() => this.endTurn(rt));
+  // Own the completion of a turn barrier: only the controller still holding
+  // `rt.turn` when it settles reports the end and drains the queue, so an
+  // earlier barrier or a departed surface does none of that.
+  private async adoptTurn(rt: Runtime, turn: Promise<PromptResult>): Promise<void> {
+    const ownsTurn = () => this.runtimes.get(rt.id) === rt && rt.turn === turn;
+    try {
+      const result = await turn;
+      if (ownsTurn() && this.activeId === rt.id) {
+        this.post({ type: "assistantEnd", stopReason: result.stopReason });
+      }
+    } catch (err) {
+      if (ownsTurn() && this.activeId === rt.id) {
+        this.post({ type: "error", text: err instanceof Error ? err.message : String(err) });
+      }
+    } finally {
+      if (ownsTurn()) {
+        rt.turn = undefined;
+        this.endTurn(rt);
+      }
+    }
   }
 
-  private queueSeq = 0;
+  // Snapshot a message the moment it is submitted: the implicit context and the
+  // staged attachments it was written with, its text, and what it is (a queue
+  // entry, or a steer into the running turn).
+  private pendingMessage(text: string, attachments: Staged[], kind: PendingKind = "queue"): PendingMessage {
+    return { id: `q-${crypto.randomUUID()}`, kind, text, implicit: this.buildImplicitBlocks(), attachments };
+  }
   // The queued message currently being edited in the composer, if any. The queue
-  // still drains past it: only that one message is held back when it reaches the
-  // head, so earlier messages keep going and later ones stay behind it.
+  // still drains past it: only that one message is held back when it is chosen,
+  // so earlier messages keep going and later ones stay behind it.
   private queueEditingId?: string;
 
-  // Snapshot a message (implicit context + attachments + text) and add it to the
-  // runtime's queue, then reflect the queue in the composer.
-  // `staged` is passed rather than read from the composer: a message can be queued
-  // after an await, by which time the composer belongs to whatever chat the user
-  // opened in the meantime.
-  private enqueueMessage(rt: Runtime, text: string, staged: Staged[], first = false): void {
-    const message = { id: `q-${++this.queueSeq}`, text, implicit: this.buildImplicitBlocks(), attachments: staged };
-    if (first) {
-      rt.queued.unshift(message);
-    } else {
-      rt.queued.push(message);
+  // Add a captured message to the runtime's queue and reflect it in the
+  // composer. The list stays chronological: a steer the agent cannot take is
+  // only downgraded once capabilities are actually known (rt.initialized),
+  // because a wake or load holds the queue before initialize has answered.
+  // Which message the drain picks next is flushQueue's call, not this one's.
+  private enqueueMessage(rt: Runtime, message: PendingMessage): void {
+    if (rt.initialized && message.kind === "steer" && !rt.client.supportsMidTurnPrompts()) {
+      message.kind = "queue";
     }
+    rt.queued.push(message);
     this.postQueued(rt);
   }
 
-  // Send a message into a turn that is already running. ACP has no way to hand one
-  // to a live prompt (what VS Code calls steering, and what its own agents support
-  // through their SDKs), so the nearest honest thing is to put it at the head of
-  // the queue and end the turn: the queue drains the moment it settles, so this is
-  // the next thing the agent sees, and nothing is lost that the turn had done.
+  // Ask the agent to stop the turn in flight, once: a second Stop while the
+  // cancel is still settling must not put another session/cancel on the wire.
+  // Anything the agent was asking is answered "cancelled" at the same time.
+  private cancelRuntime(rt: Runtime): void {
+    if (rt.busy && !rt.cancelling) {
+      rt.cancelling = true;
+      rt.client.cancel(rt.id);
+    }
+    this.settleRequestsFor(rt.id);
+  }
+
+  // VS Code's "Stop and Send": the message is queued like any other, but named
+  // by `runNextId` so the drain picks it ahead of everything waiting, of either
+  // kind, the moment the cancelled turn settles. With no turn running it is an
+  // ordinary send.
   private stopAndSend(text: string): void {
     if (!text.trim()) {
       return;
@@ -4342,37 +4425,84 @@ export class ChatController implements AcpHost {
       return;
     }
     this.store.setDraft(this.activeId, "");
-    this.enqueueMessage(rt, text, this.takeStaged(this.activeId), true);
-    rt.client.cancel(rt.id);
+    const message = this.pendingMessage(text, this.takeStaged(this.activeId), "queue");
+    this.enqueueMessage(rt, message);
+    rt.runNextId = message.id;
+    // A load in flight is not a turn to cancel: the priority pick waits for it,
+    // and the load's own drain sends it first.
+    if (!rt.replaying && !rt.waking && !this.loading.has(rt.id)) {
+      this.cancelRuntime(rt);
+    }
+    this.flushQueue(rt);
   }
 
   // Send the next queued message once a runtime is free. Runs one at a time:
   // runPrompt calls back into this in its finally, so the queue drains in order.
+  //
+  // While a turn is running, only a steering message the agent advertised goes
+  // out, and it joins that turn rather than waiting for it: the prompt is a
+  // second session/prompt on the same session, never a session/cancel. A queue
+  // message, an unsupported steer, a turn being cancelled, or a "send
+  // immediately" pick all wait for the turn to end instead.
   private flushQueue(rt: Runtime): void {
-    if (rt.busy || rt.queued.length === 0) {
+    // The same gates a load applies to itself: a prompt sent into a replaying
+    // or waking channel is swallowed, so the queue waits for the load's
+    // own flush instead of draining back into it. !rt.initialized belongs here
+    // too: supportsMidTurnPrompts cannot answer before initialize has, and a
+    // steer kept chronological through that window is normalized below once
+    // the real answer exists.
+    if (rt.replaying || rt.waking || !rt.initialized || this.loading.has(rt.id)) {
       return;
     }
-    // A session still replaying its history has its channel busy, and a prompt
-    // sent into that is swallowed: the queue is where a message typed during a
-    // load waits, so it must not be drained back into the load. The load calls
-    // this itself once the replay is over.
-    if (rt.replaying) {
-      return;
+    const supportsSteering = rt.client.supportsMidTurnPrompts();
+    if (!supportsSteering && rt.queued.some((q) => q.kind === "steer")) {
+      for (const message of rt.queued) message.kind = "queue";
+      this.postQueued(rt);
     }
-    // Hold only the message being edited, and only once it reaches the head: the
-    // ones before it still send, the ones after it wait behind it. Resumes when
-    // the edit is committed or cancelled (see the queueEditing message).
-    if (this.queueEditingId && rt.queued[0].id === this.queueEditingId) {
-      return;
+    while (rt.queued.length) {
+      // "Send Immediately" is authoritative over the order: its message is
+      // sent next whatever kind it is. A stale pick (its message was removed)
+      // is dropped and the ordinary order resumes. Otherwise a supported steer
+      // goes before the queued messages behind it, keeping submission order
+      // inside each kind.
+      let index = supportsSteering ? rt.queued.findIndex((q) => q.kind === "steer") : 0;
+      if (index === -1) index = 0;
+      if (rt.runNextId) {
+        const at = rt.queued.findIndex((q) => q.id === rt.runNextId);
+        if (at === -1) {
+          rt.runNextId = undefined;
+          continue;
+        }
+        index = at;
+      }
+      const message = rt.queued[index];
+      // Hold only the message being edited, and only once it is chosen: the
+      // ones before it still send, the ones after it wait behind it. Resumes
+      // when the edit is committed or cancelled (see the queueEditing message).
+      if (this.queueEditingId === message.id) {
+        return;
+      }
+      if (rt.busy) {
+        const canSteer = message.kind === "steer"
+          && supportsSteering
+          && !rt.cancelling
+          && !rt.runNextId;
+        if (!canSteer) {
+          return;
+        }
+      }
+      rt.queued.splice(index, 1);
+      if (rt.runNextId === message.id) {
+        rt.runNextId = undefined;
+      }
+      this.postQueued(rt);
+      // Route the echo through emit so a flush that happens while the session
+      // is backgrounded is buffered and replays (its user bubble shows on
+      // return), instead of being dropped like the old active only post. What
+      // was attached goes with it, as it does for a message sent straight away.
+      this.emit(rt, { type: "userMessage", text: message.text, attachments: this.shownAttachments(message.attachments) });
+      void this.runPrompt(rt, message);
     }
-    const next = rt.queued.shift()!;
-    this.postQueued(rt);
-    // Route the echo through emit so a flush that happens while the session is
-    // backgrounded is buffered and replays (its user bubble shows on return),
-    // instead of being dropped like the old active-only post. What was attached
-    // goes with it, as it does for a message sent straight away.
-    this.emit(rt, { type: "userMessage", text: next.text, attachments: this.shownAttachments(next.attachments) });
-    void this.runPrompt(rt, this.messageBlocks(next));
   }
 
   // Start or stop editing a queued message. Its attachments are copied into the
@@ -4400,6 +4530,9 @@ export class ChatController implements AcpHost {
   }
 
   // Remove a queued message the user dropped or moved back to the composer.
+  // If it was the "send immediately" pick or the one being edited, those go
+  // with it, and the drain runs again so removing a blocker cannot strand the
+  // queue behind it.
   private removeQueued(id: string): void {
     const rt = this.active();
     if (!rt) {
@@ -4408,31 +4541,71 @@ export class ChatController implements AcpHost {
     const before = rt.queued.length;
     rt.queued = rt.queued.filter((q) => q.id !== id);
     if (rt.queued.length !== before) {
+      if (rt.runNextId === id) {
+        rt.runNextId = undefined;
+      }
+      if (this.queueEditingId === id) {
+        this.queueEditingId = undefined;
+        // The edit borrowed the composer's staged files for this message. With
+        // the message gone they must not leak into the next draft or send.
+        if (this.stagedFor(this.activeId).length) {
+          this.staged.set(this.stagedKey(this.activeId), []);
+          this.stagedChanged(this.activeId);
+        }
+      }
       this.postQueued(rt);
+      this.flushQueue(rt);
     }
   }
 
+  // Move one queued message within its own kind's group, the drag reorder
+  // Copilot's pending rows offer. Anything else (an unknown id, a target of a
+  // different kind, the message onto itself) is not a reorder and changes
+  // nothing.
+  private reorderQueued(id: string, targetId: string, before: boolean): void {
+    const rt = this.active();
+    if (!rt || id === targetId) {
+      return;
+    }
+    const from = rt.queued.findIndex((q) => q.id === id);
+    const to = rt.queued.findIndex((q) => q.id === targetId);
+    if (from === -1 || to === -1 || rt.queued[from].kind !== rt.queued[to].kind) {
+      return;
+    }
+    const [moved] = rt.queued.splice(from, 1);
+    // The target's index moved with the removal, so it is found again rather
+    // than adjusted by arithmetic that a second removal would break.
+    const at = rt.queued.findIndex((q) => q.id === targetId);
+    rt.queued.splice(before ? at : at + 1, 0, moved);
+    this.postQueued(rt);
+    this.flushQueue(rt);
+  }
+
   // VS Code's "Send Immediately" on a pending request, which means now rather
-  // than next: it moves the message to the front, cancels the request in flight
-  // and lets the queue drain into the gap (chatServiceImpl's
-  // sendPendingRequestImmediately). Moving it alone did nothing at all, since a
-  // queue only exists while a turn is running and the drain waits for the turn.
+  // than next: the message is named by `runNextId`, the request in flight is
+  // cancelled and the queue drains into the gap once it settles
+  // (chatServiceImpl's sendPendingRequestImmediately). The pick also moves to
+  // the front of its own kind for display, matching Copilot. On an idle
+  // session there is nothing to cancel, so it simply goes next.
   private sendQueuedNow(id: string): void {
     const rt = this.active();
     if (!rt) {
       return;
     }
     const at = rt.queued.findIndex((q) => q.id === id);
-    if (at <= -1) {
+    if (at === -1) {
       return;
     }
-    if (at > 0) {
-      rt.queued.unshift(rt.queued.splice(at, 1)[0]);
-      this.postQueued(rt);
-    }
-    if (rt.busy) {
-      // The turn ending drains the queue, and this message is now its head.
-      rt.client.cancel(rt.id);
+    const message = rt.queued[at];
+    rt.queued.splice(at, 1);
+    const front = rt.queued.findIndex((q) => q.kind === message.kind);
+    rt.queued.splice(front === -1 ? rt.queued.length : front, 0, message);
+    rt.runNextId = id;
+    this.postQueued(rt);
+    // The turn ending drains the queue, and this message is the pick. A load in
+    // flight is not a turn to cancel: the pick waits for the load's own drain.
+    if (rt.busy && !rt.replaying && !rt.waking && !this.loading.has(rt.id)) {
+      this.cancelRuntime(rt);
       return;
     }
     this.flushQueue(rt);
@@ -4462,22 +4635,35 @@ export class ChatController implements AcpHost {
     return kept;
   }
 
-  // Update a queued message's text in place, keeping its position in the queue
-  // (editing must not move it to the end). Editing borrowed the composer, so
+  // Update a queued message's text in place. Editing borrowed the composer, so
   // whatever is staged there is now this message's context: that is both what
-  // the edit started with and anything attached while editing.
-  private editQueued(id: string, text: string): void {
+  // the edit started with and anything attached while editing. A kind change
+  // (queue to steer or back, as the send menu offers while editing) moves the
+  // message to the end of the list, since the drain picks steers first anyway
+  // and its place in line was chosen under the old kind. The implicit context
+  // it was queued with stays.
+  private editQueued(id: string, text: string, kind?: PendingKind): void {
     const rt = this.active();
     if (!rt || !text.trim()) {
       return;
     }
-    const q = rt.queued.find((x) => x.id === id);
-    if (!q) {
+    const at = rt.queued.findIndex((x) => x.id === id);
+    if (at === -1) {
       return;
     }
+    const q = rt.queued[at];
     q.text = text;
     q.attachments = this.takeStaged(this.activeId);
+    const nextKind = kind === "steer" && rt.initialized && !rt.client.supportsMidTurnPrompts()
+      ? "queue"
+      : kind || q.kind;
+    if (nextKind !== q.kind) {
+      rt.queued.splice(at, 1);
+      q.kind = nextKind;
+      rt.queued.push(q);
+    }
     this.postQueued(rt);
+    this.flushQueue(rt);
   }
 
   // Replay a backgrounded session's buffered stream into the (now visible)
@@ -4560,7 +4746,7 @@ export class ChatController implements AcpHost {
     if (this.activeId === rt.id) {
       this.post({
         type: "queued",
-        items: rt.queued.map((q) => ({ id: q.id, text: q.text, attachments: this.shownAttachments(q.attachments) }))
+        items: rt.queued.map((q) => ({ id: q.id, kind: q.kind, text: q.text, attachments: this.shownAttachments(q.attachments) }))
       });
     }
   }
@@ -4810,21 +4996,17 @@ export class ChatController implements AcpHost {
       // Stop interrupts only the current turn; any queued messages remain and
       // are sent once the interrupt settles (the user clears the queue by hand
       // if they meant to abandon it).
-      rt.client.cancel(rt.id);
-      this.settleRequestsFor(rt.id);
+      this.cancelRuntime(rt);
     }
     // Whatever the agent was asking is answered now, with "cancelled", so the
     // question goes with the turn it belonged to. Settling the requests only
     // tells the agent: the widgets are on the other side and were left on
     // screen, still offering to answer a question nobody was waiting on.
     this.post({ type: "cancelPrompts" });
-    // The composer is free again, but the turn is not over: cancel is a
+    // The composer stays busy until the turn really ends: cancel is a
     // notification, and the prompt stays open until the agent answers it, which
-    // can take as long as the command it is waiting on. Clearing `rt.busy` here
-    // let the next message past the one gate there is and put a second prompt on
-    // a channel that already had one. `endTurn` clears it when the turn really
-    // ends, and drains anything queued in between.
-    this.post({ type: "busy", value: false });
+    // can take as long as the command it is waiting on. `endTurn` clears it
+    // when the turn really ends, and drains anything queued in between.
   }
 
   // The menu uses cached usage until the user selects Refresh account usage.
@@ -4976,6 +5158,7 @@ export class ChatController implements AcpHost {
       revert: !!this.active()?.client.supportsRevert(),
       subagentControl: !!this.active()?.client.supportsSubagentControl(),
       sessionShare: !!this.active()?.client.supportsSessionShare(),
+      steering: !!this.active()?.client.supportsMidTurnPrompts(),
       editRequests: this.cfg().get<string>("editRequests", "inline"),
       checkpoints: this.cfg().get<boolean>("checkpoints.enabled", true),
       showFileChanges: this.cfg().get<boolean>("checkpoints.showFileChanges", true),
@@ -4987,7 +5170,7 @@ export class ChatController implements AcpHost {
       thinkingStyle: this.cfg().get<string>("thinking.style", "fixedScrolling"),
       streamAnim: this.cfg().get<string>("incrementalRendering.animationStyle", "rise"),
       panelSide: this.cfg().get<string>("sessionsPanel.side", "right"),
-      sendWhileWorking: this.cfg().get<string>("sendWhileWorking", "queue"),
+      sendWhileWorking: this.cfg().get<string>("sendWhileWorking", "steer"),
       surface: this.kind
     });
   }
@@ -5001,7 +5184,7 @@ export class ChatController implements AcpHost {
     if (rt?.id && this.runtimes.get(rt.id) === rt) {
       // The report lands on whichever surface owns the session when it
       // resolves, so a transfer mid read does not drop it.
-      rt.usageOwner = this;
+      rt.owner = this;
     }
     if (!rt || !rt.id || !rt.initialized || rt.busy || rt.replaying || rt.silentReplay || rt.client.hasExited()) {
       return;
@@ -5021,7 +5204,7 @@ export class ChatController implements AcpHost {
     const model = rt.model;
     this.emit(rt, { type: "usageState", loading: true });
     const pending = rt.client.readUsage(sessionId).then((report) => {
-      const owner = rt.usageOwner;
+      const owner = rt.owner;
       if (!owner || owner.closed || owner.runtimes.get(sessionId) !== rt) {
         return;
       }
@@ -5043,7 +5226,7 @@ export class ChatController implements AcpHost {
       }
       owner.emit(rt, { type: "usageState", loading: false, error: report.error });
     }).catch(() => {
-      const owner = rt.usageOwner;
+      const owner = rt.owner;
       if (owner && !owner.closed && owner.runtimes.get(sessionId) === rt) {
         owner.emit(rt, { type: "usageState", loading: false, error: "Could not refresh usage." });
       }

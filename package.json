@@ -2,7 +2,7 @@
   "name": "devin-vscode",
   "displayName": "Devin for VS Code",
   "description": "A native chat panel for the Devin CLI, powered by the Agent Client Protocol. Streaming replies, per workspace sessions, and trackable diffs.",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "publisher": "shayanline",
   "author": "Shayan Khaksar",
   "license": "AGPL-3.0-or-later",
@@ -550,15 +550,17 @@
         "devin.sendWhileWorking": {
           "type": "string",
           "enum": [
+            "steer",
             "queue",
             "stopAndSend"
           ],
           "enumDescriptions": [
+            "Send the message right away, steering the current request",
             "Send the message after the current request finishes",
             "Stop what Devin is doing, then send the message"
           ],
-          "default": "queue",
-          "description": "What Enter does with a message typed while Devin is working. The other action is always on Alt+Enter, and on the chevron beside Send."
+          "default": "steer",
+          "description": "What Enter does with a message typed while Devin is working. Alt+Enter queues when steering or Stop and Send is selected, and steers when queuing is selected and supported."
         },
         "devin.extraArgs": {
           "type": "array",

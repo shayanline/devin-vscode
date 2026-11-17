@@ -1,4 +1,5 @@
 import { ChildProcessWithoutNullStreams } from "child_process";
+import { AcpRequestNotSentError } from "./types";
 
 // A minimal JSON-RPC 2.0 connection over a child process' stdio, using
 // newline-delimited JSON framing (as spoken by `devin acp`).
@@ -164,7 +165,7 @@ export class JsonRpcConnection {
   // legitimately run for many minutes.
   request<T = unknown>(method: string, params?: unknown, timeoutMs?: number): Promise<T> {
     if (this.closed) {
-      return Promise.reject(new Error("ACP connection is closed"));
+      return Promise.reject(new AcpRequestNotSentError("ACP connection is closed"));
     }
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {
@@ -191,7 +192,7 @@ export class JsonRpcConnection {
       // now rather than leaving it pending forever.
       if (!this.send({ jsonrpc: "2.0", id, method, params })) {
         clear();
-        reject(new Error("Failed to write to ACP process"));
+        reject(new AcpRequestNotSentError("Failed to write to ACP process"));
       }
     });
   }

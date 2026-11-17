@@ -2724,51 +2724,86 @@ import { createWorkingMark } from "./workingMark.js";
     updateSendState();
   }
 
-  // While Devin is working, a message can either wait its turn or take over. The
-  // protocol cannot hand a message to a running prompt (Copilot calls that
-  // steering, and its agents support it), so the second option ends the turn and
-  // sends straight after it. Same split button as Copilot's: the primary half is
-  // the default action, Alt flips it, and the chevron offers the other.
-  // Both are a send, so both keep the send glyph: the queue is the plain one, and
-  // taking over the turn carries the restart arrow. A plus would read as the attach
-  // button sitting at the other end of the same toolbar.
+  // While Devin is working, a message can wait its turn, steer the running
+  // request, or take it over. Steering is a second prompt on the same session
+  // (the agent advertises `cognition.ai/midTurnPrompts`), so it only appears
+  // when the session says it can. Same split button as Copilot's: the primary
+  // half is the default action, Alt flips it, and the chevron offers all three.
   const SEND_ACTIONS = {
-    queue: {
-      icon: "codicon-newline",
-      label: "Send to Queue",
-      detail: "Send this after the current request finishes",
-      post: (text) => ({ type: "send", text })
-    },
     stopAndSend: {
-      icon: "codicon-debug-restart",
-      label: "Stop and Send",
-      detail: "Stop what Devin is doing, then send this",
+      icon: "codicon-arrow-right", label: "Stop and Send",
+      detail: "Cancel the current request and send this message immediately.",
       post: (text) => ({ type: "stopAndSend", text })
+    },
+    queue: {
+      icon: "codicon-add", label: "Add to Queue",
+      detail: "Queue this message to send after the current request completes. The current response will finish uninterrupted before the queued message is sent.",
+      post: (text) => ({ type: "send", text, kind: "queue" })
+    },
+    steer: {
+      icon: "codicon-newline", label: "Steer with Message",
+      detail: "Send this message at the next opportunity, signaling the current request to yield. The current response will stop and the new message will be sent immediately.",
+      post: (text) => ({ type: "send", text, kind: "steer" })
     }
   };
   let altHeld = false;
   function defaultSendAction() {
-    return caps.sendWhileWorking === "stopAndSend" ? "stopAndSend" : "queue";
+    // Editing a pending message: its own kind is the default, so Enter keeps it
+    // steering or queued rather than silently reclassifying it.
+    const editing = editingQueuedId ? queuedItems.find((q) => q.id === editingQueuedId) : null;
+    if (editing) {
+      return editing.kind === "steer" && caps.steering ? "steer" : "queue";
+    }
+    if (caps.sendWhileWorking === "stopAndSend") return "stopAndSend";
+    if (caps.sendWhileWorking === "steer") return caps.steering ? "steer" : "queue";
+    return "queue";
   }
   function otherSendAction() {
-    return defaultSendAction() === "queue" ? "stopAndSend" : "queue";
+    // Queue is the safe alternate for steer and Stop and Send. When queuing is
+    // the default, Alt steers if the session can take it.
+    if (defaultSendAction() === "queue") return caps.steering ? "steer" : "queue";
+    return "queue";
   }
   // What the primary half does right now: the default, or the other one while Alt
   // is held (VS Code flips the icon with the modifier, so it never lies).
   function primarySendAction() {
     return altHeld ? otherSendAction() : defaultSendAction();
   }
-  function runSendAction(name) {
-    const text = el.input.value.trim();
-    if (!text) return;
-    // Nothing is running, or the composer is borrowed for an edit: an ordinary send.
-    if (!busy || editingQueuedId || editingTurn || body === "list") { send(); return; }
-    vscode.postMessage(SEND_ACTIONS[name].post(text));
+  function clearComposerAfterSend() {
     el.input.value = "";
     savedDraft = "";
     closeAutocomplete();
     autosize();
     updateSendState();
+  }
+  // Committing an edit of a pending message through the send split. The kind
+  // the action implies goes with the edit, so Enter keeps the row's own kind
+  // while the menu can still flip it. Stop and Send is send immediately on the
+  // edited row: the edit lands first, then the priority pick, then the hold is
+  // released, so an idle queue cannot flush the wrong item in between.
+  function commitQueuedEdit(name) {
+    const text = el.input.value.trim();
+    if (!text || !editingQueuedId) return;
+    const id = editingQueuedId;
+    if (name === "stopAndSend") {
+      vscode.postMessage({ type: "editQueued", id, text });
+      vscode.postMessage({ type: "sendQueuedNow", id });
+      finishQueuedEdit();
+      return;
+    }
+    vscode.postMessage({ type: "editQueued", id, text, kind: name === "steer" ? "steer" : "queue" });
+    finishQueuedEdit();
+  }
+  function runSendAction(name) {
+    const text = el.input.value.trim();
+    if (!text) return;
+    // An edit of a pending message is a submit that carries its kind, busy or not.
+    if (editingQueuedId) { commitQueuedEdit(name); return; }
+    // Nothing is running, or the composer is borrowed for an edit of sent
+    // history, or this is the new chat box: an ordinary send.
+    if (!busy || editingTurn || body === "list") { send(); return; }
+    vscode.postMessage(SEND_ACTIONS[name].post(text));
+    clearComposerAfterSend();
   }
   el.send.addEventListener("click", () => runSendAction(primarySendAction()));
   el.sendMore.addEventListener("click", (e) => {
@@ -2776,30 +2811,116 @@ import { createWorkingMark } from "./workingMark.js";
     openSendMenu();
   });
   let sendFloater = null;
+  // The rows of the open send menu, so ArrowDown on the chevron can put focus
+  // back on the default without the menu having to be found in the DOM.
+  let sendMenuRows = [];
   // The chevron menu on a permission prompt, holding the grants that outlive it.
   let permissionFloater = null;
+  function focusSendMenuRow() {
+    const checked = sendMenuRows.find((r) => r.classList.contains("checked"));
+    (checked || sendMenuRows[0])?.focus();
+  }
   function openSendMenu() {
     if (sendFloater) { sendFloater.close(); return; }
     const menu = document.createElement("div");
     menu.className = "dv-menu";
-    [defaultSendAction(), otherSendAction()].forEach((name, i) => {
+    menu.setAttribute("role", "menu");
+    const enterName = defaultSendAction();
+    const altName = otherSendAction();
+    sendMenuRows = [];
+    ["stopAndSend", "queue", "steer"].forEach((name) => {
+      if (name === "steer" && !caps.steering) return;
       const a = SEND_ACTIONS[name];
       const row = document.createElement("button");
-      row.className = "dv-menu-item with-detail";
+      row.className = "dv-menu-item radio" + (name === enterName ? " checked" : "");
+      row.setAttribute("role", "menuitemradio");
+      row.setAttribute("aria-checked", name === enterName ? "true" : "false");
+      row.tabIndex = -1;
+      // The description lives in the hover title, not inline: three paragraphs
+      // do not fit a 320px panel.
+      row.title = a.detail;
+      const check = document.createElement("span");
+      check.className = "dv-menu-check";
+      check.appendChild(mkIcon("check"));
+      row.appendChild(check);
       row.appendChild(mkIcon(a.icon.replace("codicon-", "")));
       const text = document.createElement("span");
       text.className = "dv-menu-text";
       text.appendChild(Object.assign(document.createElement("span"), { textContent: a.label }));
-      text.appendChild(Object.assign(document.createElement("span"), { className: "dv-menu-detail", textContent: a.detail }));
       const keys = document.createElement("span");
       keys.className = "dv-menu-keys";
-      keys.textContent = i === 0 ? "Enter" : "Alt+Enter";
+      keys.textContent = name === enterName ? "Enter" : name === altName ? "Alt+Enter" : "";
       row.append(text, keys);
-      row.addEventListener("click", () => { if (sendFloater) sendFloater.close(); runSendAction(name); });
+      row.addEventListener("click", () => {
+        if (sendFloater) sendFloater.close();
+        runSendAction(name);
+        el.input.focus();
+      });
       menu.appendChild(row);
+      sendMenuRows.push(row);
     });
-    sendFloater = makeFloater(el.sendGroup, menu, "right", () => { sendFloater = null; });
+    // Arrow keys walk the rows, Escape closes back to the chevron, and the
+    // horizontal arrows hand focus back to the split's two halves.
+    menu.addEventListener("keydown", (e) => {
+      const at = sendMenuRows.indexOf(document.activeElement);
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        // The floater's own capture handler usually closes first. Either way
+        // focus still returns to the chevron.
+        if (sendFloater) sendFloater.close();
+        el.sendMore.focus();
+      } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        e.stopPropagation();
+        const next = e.key === "ArrowDown"
+          ? (at + 1) % sendMenuRows.length
+          : (at - 1 + sendMenuRows.length) % sendMenuRows.length;
+        sendMenuRows[next].focus();
+      } else if (e.key === "Home" || e.key === "End") {
+        e.preventDefault();
+        e.stopPropagation();
+        sendMenuRows[e.key === "Home" ? 0 : sendMenuRows.length - 1].focus();
+      } else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+        e.preventDefault();
+        e.stopPropagation();
+        if (sendFloater) sendFloater.close();
+        (e.key === "ArrowLeft" ? el.send : el.sendMore).focus();
+      }
+    });
+    el.sendMore.setAttribute("aria-expanded", "true");
+    sendFloater = makeFloater(el.sendGroup, menu, "right", () => {
+      sendFloater = null;
+      sendMenuRows = [];
+      el.sendMore.setAttribute("aria-expanded", "false");
+    });
+    // Land on the effective default so the keyboard carries straight on.
+    focusSendMenuRow();
   }
+  // The split's halves trade focus with the horizontal arrows, the way VS Code's
+  // action widgets do. ArrowDown on the chevron opens its menu.
+  el.send.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowRight" && !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey
+        && !el.sendMore.classList.contains("hidden")) {
+      e.preventDefault();
+      e.stopPropagation();
+      el.sendMore.focus();
+    }
+  });
+  el.sendMore.addEventListener("keydown", (e) => {
+    if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      e.stopPropagation();
+      el.send.focus();
+    } else if (e.key === "ArrowDown") {
+      e.preventDefault();
+      e.stopPropagation();
+      // Open without toggling: an open menu just gets its row focused.
+      if (!sendFloater) openSendMenu();
+      focusSendMenuRow();
+    }
+  });
   // Holding Alt swaps the primary half, so what it will do is always what it shows.
   function trackAlt(e) {
     if (e.altKey === altHeld) return;
@@ -3000,9 +3121,10 @@ import { createWorkingMark } from "./workingMark.js";
   // are not limited to the keyboard.
   function updateComposerButtons() {
     const hasText = !!el.input.value.trim();
-    // The split only applies to a message sent into a running turn: an edit of a
-    // queued or an already sent message is an ordinary submit.
-    const split = busy && hasText && !editingQueuedId && !editingTurn && body !== "list";
+    // The split applies to a message sent into a running turn and to an edit of
+    // a pending one (its kind is chosen through the same menu), but not to an
+    // edit of already sent history or the new chat box.
+    const split = hasText && !editingTurn && body !== "list" && (busy || !!editingQueuedId);
     el.stop.classList.toggle("hidden", !busy);
     // Keep Send visible unless a turn is running with nothing typed (Stop only).
     el.send.classList.toggle("hidden", busy && !hasText);
@@ -3011,6 +3133,7 @@ import { createWorkingMark } from "./workingMark.js";
     el.sendMore.classList.toggle("hidden", !split);
     const action = split ? SEND_ACTIONS[primarySendAction()] : null;
     el.send.title = action ? action.label + " (" + (altHeld ? "Alt+Enter" : "Enter") + ")" : "Send (Enter)";
+    el.send.setAttribute("aria-label", action ? action.label : "Send");
     const icon = el.send.querySelector("i");
     if (icon) icon.className = "codicon " + (action ? action.icon : "codicon-newline");
     if (!split && sendFloater) sendFloater.close();
@@ -3816,7 +3939,7 @@ import { createWorkingMark } from "./workingMark.js";
   // The surface comes from the page itself as well as from the host, so the chrome
   // is right from the first paint instead of being drawn as a side panel and then
   // corrected once a session loads.
-  let caps = { revert: false, subagentControl: false, editRequests: "inline", checkpoints: true, showFileChanges: true, confirmRemoval: true, verbose: true, progressBorder: true, contextUsage: true, inlineReferencesStyle: "box", thinkingStyle: "fixedScrolling", streamAnim: "rise", panelSide: "right", sendWhileWorking: "queue", surface: document.body.dataset.surface === "editor" ? "editor" : "view" };
+  let caps = { revert: false, subagentControl: false, steering: false, editRequests: "inline", checkpoints: true, showFileChanges: true, confirmRemoval: true, verbose: true, progressBorder: true, contextUsage: true, inlineReferencesStyle: "box", thinkingStyle: "fixedScrolling", streamAnim: "rise", panelSide: "right", sendWhileWorking: "steer", surface: document.body.dataset.surface === "editor" ? "editor" : "view" };
   // An editor tab holds exactly one chat: no session list, no back button and no
   // terminate control (closing the tab is how a chat in a tab is stopped).
   // Browsing sessions is the side panel's job.
@@ -7706,65 +7829,218 @@ import { createWorkingMark } from "./workingMark.js";
   let queuedItems = [];
   // The queued message being edited in the composer (null = not editing one).
   let editingQueuedId = null;
+  // The pending row being dragged, if any. Reorder is same kind only, the way
+  // Copilot's Steering and Queued groups behave, so the drag carries its kind.
+  let pendingDrag = null;
+
+  // Rows saved before kinds existed carry none. They are ordinary queue entries.
+  function queuedKind(q) { return q && q.kind === "steer" ? "steer" : "queue"; }
+  const QUEUED_GROUPS = {
+    steer: { label: "Steering", tip: "Steering message will be sent at the next opportunity" },
+    queue: { label: "Queued", tip: "Queued messages will be sent after the current request completes" }
+  };
+
+  function clearDropMarks() {
+    el.thread.querySelectorAll(".queued-item.drop-before, .queued-item.drop-after")
+      .forEach((it) => it.classList.remove("drop-before", "drop-after"));
+  }
+
+  function resetQueuedDrag() {
+    pendingDrag = null;
+    el.thread.querySelectorAll(".queued-item.dragging")
+      .forEach((it) => it.classList.remove("dragging"));
+    clearDropMarks();
+  }
+
+  // A row whose kind, text and attachments are unchanged keeps its DOM across
+  // host queue refreshes, so a focused action button survives an unrelated
+  // append. Keyed by element, so cached sessions never share signatures.
+  const queuedRowSignatures = new WeakMap();
+  function queuedSignature(q) {
+    return JSON.stringify([queuedKind(q), q.text, q.attachments || []]);
+  }
 
   function renderQueued(items) {
     queuedItems = Array.isArray(items) ? items : [];
+    resetQueuedDrag();
     // The item being edited may have flushed (its turn started) while editing;
     // drop the stale editing state so the banner does not dangle.
     if (editingQueuedId && !queuedItems.some((q) => q.id === editingQueuedId)) {
       clearQueuedEditState();
     }
-    const existing = el.thread.querySelector(".queued-inline");
-    if (existing) existing.remove();
-    if (queuedItems.length === 0) return;
-    const box = document.createElement("div");
-    box.className = "queued-inline";
-    const head = document.createElement("div");
-    head.className = "queued-divider";
-    // Show the depth so it is obvious the queue is draining as each one goes out.
-    head.textContent = queuedItems.length > 1 ? "Queued (" + queuedItems.length + ")" : "Queued";
-    head.title = "Sent in order once the current response finishes";
-    box.appendChild(head);
-    queuedItems.forEach((q) => box.appendChild(queuedRow(q)));
-    el.thread.appendChild(box);
+    let box = el.thread.querySelector(".queued-inline");
+    if (queuedItems.length === 0) {
+      if (box) box.remove();
+      return;
+    }
+    if (!box) {
+      box = document.createElement("div");
+      box.className = "queued-inline";
+      el.thread.appendChild(box);
+    }
+    // Copilot's pending area: a Steering group above the Queued one, each under
+    // its own labelled divider. A group only renders when it has rows.
+    const rows = new Map();
+    const dividers = new Map();
+    box.querySelectorAll(".queued-item[data-id]").forEach((row) => rows.set(row.dataset.id, row));
+    box.querySelectorAll(".queued-divider[data-kind]").forEach((head) => dividers.set(head.dataset.kind, head));
+    const desired = [];
+    ["steer", "queue"].forEach((kind) => {
+      const group = queuedItems.filter((q) => queuedKind(q) === kind);
+      if (!group.length) return;
+      let head = dividers.get(kind);
+      if (!head) {
+        head = document.createElement("div");
+        head.className = "queued-divider";
+        head.dataset.kind = kind;
+      }
+      head.textContent = QUEUED_GROUPS[kind].label;
+      head.title = QUEUED_GROUPS[kind].tip;
+      desired.push(head);
+      group.forEach((q) => {
+        const signature = queuedSignature(q);
+        let row = rows.get(q.id);
+        if (!row || queuedRowSignatures.get(row) !== signature) {
+          row = queuedRow(q);
+          queuedRowSignatures.set(row, signature);
+        }
+        row.classList.toggle("editing", q.id === editingQueuedId);
+        // Reorder is same kind only, so a lone row's grip stays hidden and
+        // inert until a sibling of its kind gives it somewhere to land.
+        const grip = row.querySelector(".queued-grip");
+        const reorderable = group.length > 1;
+        grip.classList.toggle("hidden", !reorderable);
+        grip.draggable = reorderable;
+        desired.push(row);
+      });
+    });
+    // Drop stale nodes before the walk: a removed row must not stay on the
+    // cursor and drag every later node across itself, which would move a
+    // focused button that never changed.
+    const focused = document.activeElement;
+    const keep = new Set(desired);
+    Array.from(box.children).forEach((child) => {
+      if (!keep.has(child)) child.remove();
+    });
+    // Walk the desired order against the mounted children and move a node only
+    // when it is not already in place, so an unchanged prefix keeps focus.
+    let cursor = box.firstElementChild;
+    desired.forEach((node) => {
+      if (cursor === node) {
+        cursor = cursor.nextElementSibling;
+        return;
+      }
+      box.insertBefore(node, cursor);
+    });
+    // A real browser can still drop focus when siblings around a reused row
+    // are removed or inserted, so put back a focus that survived inside this
+    // box on the same element.
+    const active = document.activeElement;
+    if (focused && focused.isConnected && box.contains(focused) && active !== focused &&
+        (!active || active === document.body || !active.isConnected)) {
+      focused.focus({ preventScroll: true });
+    }
     scrollToBottom();
   }
 
-  // One queued message, styled as a dimmed user request bubble (VS Code's pending
-  // request row) with edit/remove actions that appear on hover.
+  // One pending message, styled as a dimmed user request bubble (VS Code's
+  // pending request row) with a drag grip and edit, send immediately and remove actions that
+  // appear on hover.
   function queuedRow(q) {
+    const kind = queuedKind(q);
     const item = document.createElement("div");
-    item.className = "queued-item" + (q.id === editingQueuedId ? " editing" : "");
+    item.className = "queued-item" + (kind === "steer" ? " steering" : "") + (q.id === editingQueuedId ? " editing" : "");
     item.dataset.id = q.id;
+    const grip = document.createElement("span");
+    grip.className = "queued-grip hidden";
+    grip.title = "Drag to reorder " + QUEUED_GROUPS[kind].label.toLowerCase() + " messages";
+    const gripIcon = mkIcon("gripper");
+    gripIcon.setAttribute("aria-hidden", "true");
+    grip.appendChild(gripIcon);
+    grip.draggable = false;
+    // Internal drags only: the dedicated MIME keeps VS Code's own file drop and
+    // the attachment overlay out of it, and every handler stops propagation.
+    grip.addEventListener("dragstart", (e) => {
+      e.stopPropagation();
+      if (grip.classList.contains("hidden") || !grip.draggable) return;
+      pendingDrag = { id: q.id, kind };
+      item.classList.add("dragging");
+      // The whole row is the drag image, like Copilot's pending drag.
+      e.dataTransfer.setDragImage(item, 0, 0);
+      e.dataTransfer.setData("application/x-devin-pending", q.id);
+      e.dataTransfer.effectAllowed = "move";
+    });
+    grip.addEventListener("dragend", (e) => {
+      e.stopPropagation();
+      resetQueuedDrag();
+    });
+    item.appendChild(grip);
     // What it is queued with, above it, as on a request that has been sent.
     const context = attachedContextRow(q.attachments);
     if (context) item.appendChild(context);
     const bubble = document.createElement("div");
     bubble.className = "queued-bubble bubble";
     bubble.textContent = q.text;
+    item.appendChild(bubble);
     const actions = document.createElement("div");
     actions.className = "queued-actions";
-    actions.appendChild(iconBtn("codicon-edit", "Edit queued message", (e) => { e.stopPropagation(); startQueuedEdit(q); }));
+    actions.appendChild(iconBtn("codicon-edit", "Edit " + QUEUED_GROUPS[kind].label.toLowerCase() + " message", (e) => { e.stopPropagation(); startQueuedEdit(q); }));
     // VS Code's "Send Immediately" (Codicon.newLine), and its own words for what
-    // that costs: the turn in flight is ended so this one can go now.
+    // that costs: the turn in flight is ended so this one can go now. While the
+    // row is being edited the edit lands first and the hold is released LAST,
+    // so the drain cannot pick this message before its new text and kind exist.
     actions.appendChild(iconBtn("codicon-newline", "Cancel the current request and send this message immediately", (e) => {
       e.stopPropagation();
-      // Commit an in-progress edit of this same message first, so it is sent
-      // with what is currently typed rather than the stale text.
-      if (editingQueuedId === q.id) {
+      const editing = editingQueuedId === q.id;
+      if (editing) {
         const text = el.input.value.trim();
         if (text) vscode.postMessage({ type: "editQueued", id: q.id, text });
-        finishQueuedEdit();
       }
       vscode.postMessage({ type: "sendQueuedNow", id: q.id });
+      if (editing) finishQueuedEdit();
     }));
     actions.appendChild(iconBtn("codicon-close", "Remove from queue", (e) => {
       e.stopPropagation();
-      if (editingQueuedId === q.id) finishQueuedEdit();
+      // The row is gone before the hold is released, so the drain can never
+      // pick the message being deleted.
+      const editing = editingQueuedId === q.id;
       vscode.postMessage({ type: "removeQueued", id: q.id });
+      if (editing) finishQueuedEdit();
     }));
-    item.appendChild(bubble);
     item.appendChild(actions);
+    item.addEventListener("dragover", (e) => {
+      clearDropMarks();
+      if (!pendingDrag) return;
+      // An internal drag never reaches the window's file drop monitor, not even
+      // over a row it cannot land on.
+      e.stopPropagation();
+      if (pendingDrag.id === q.id || pendingDrag.kind !== kind) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      const rect = item.getBoundingClientRect();
+      const before = e.clientY < rect.top + rect.height / 2;
+      item.classList.toggle("drop-before", before);
+      item.classList.toggle("drop-after", !before);
+    });
+    item.addEventListener("dragleave", (e) => {
+      if (!pendingDrag) return;
+      e.stopPropagation();
+      if (e.relatedTarget && item.contains(e.relatedTarget)) return;
+      item.classList.remove("drop-before", "drop-after");
+    });
+    item.addEventListener("drop", (e) => {
+      if (!pendingDrag) return;
+      e.stopPropagation();
+      const drag = pendingDrag;
+      resetQueuedDrag();
+      // Self and cross kind targets never accepted the drag, so this only
+      // guards a stale state. The host validates the rest.
+      if (drag.id === q.id || drag.kind !== kind) return;
+      e.preventDefault();
+      const rect = item.getBoundingClientRect();
+      const before = e.clientY < rect.top + rect.height / 2;
+      vscode.postMessage({ type: "reorderQueued", id: drag.id, targetId: q.id, before });
+    });
     return item;
   }
 
@@ -7779,7 +8055,7 @@ import { createWorkingMark } from "./workingMark.js";
     vscode.postMessage({ type: "queueEditing", id: q.id });
     el.input.value = q.text;
     el.inputBox.classList.add("editing-request");
-    showEditingBanner("Editing queued message", cancelQueuedEdit);
+    showEditingBanner("Editing " + QUEUED_GROUPS[queuedKind(q)].label.toLowerCase() + " message", cancelQueuedEdit);
     el.input.focus();
     el.input.setSelectionRange(el.input.value.length, el.input.value.length);
     autosize();
@@ -9399,6 +9675,8 @@ import { createWorkingMark } from "./workingMark.js";
         // Drop any in-progress request edit so its banner/target don't dangle
         // over the freshly cleared thread.
         cancelInputEditing();
+        // A drag id from the old session must not survive into the new one.
+        resetQueuedDrag();
         el.thread.innerHTML = "";
         turns = [];
         currentTurn = null;
@@ -9565,6 +9843,7 @@ import { createWorkingMark } from "./workingMark.js";
           progressBorder: m.progressBorder !== undefined ? !!m.progressBorder : caps.progressBorder,
           contextUsage: m.contextUsage !== undefined ? !!m.contextUsage : caps.contextUsage,
           inlineReferencesStyle: m.inlineReferencesStyle || caps.inlineReferencesStyle,
+          steering: m.steering !== undefined ? !!m.steering : caps.steering,
           sendWhileWorking: m.sendWhileWorking || caps.sendWhileWorking,
           thinkingStyle: m.thinkingStyle || caps.thinkingStyle,
           streamAnim: m.streamAnim || caps.streamAnim,
@@ -9572,9 +9851,13 @@ import { createWorkingMark } from "./workingMark.js";
           surface: m.surface || caps.surface
         });
         applyCapPrefs();
+        // A session switch can take steering away, so an open menu rebuilt
+        // against the old session would offer an action that cannot run.
+        if (sendFloater) sendFloater.close();
         document.querySelectorAll(".resp-text, .subagent-prose-content, .subagent-section-body, .thinking-item-content")
           .forEach(enhanceAnchors);
         refreshTurnChrome();
+        updateComposerButtons();
         break;
       case "turnHead":
         if (typeof m.head === "number") {

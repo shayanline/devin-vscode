@@ -124,17 +124,26 @@ test("opening a session reads usage once and emits only what the report supplies
 
 test("the popup's refresh asks for a new read on the active session only", { skip: process.platform === "win32" }, async () => {
   // A short turn: the forced popup refresh still cannot run while it is busy.
-  const h = createChat({ usage, promptDelay: 300 });
+  const h = createChat({ usage, promptDelay: 300, usageContextDelay: 250 });
   try {
     await h.ready();
-    await h.startChat("hello");
-    await h.until(() => usagePosts(h).some((m) => m.sessionAcus === 1.9281));
-    await h.until(() => h.postsOf("busy").at(-1)?.value === false);
+    const id = await h.startChat("hello");
+    const idle = await h.until(() => h.postsOf("busy").at(-1)?.value === false);
+    assert.ok(idle, "the user turn never finished");
+    const rt = h.controller.runtimes.get(id);
+    // Turn completion starts another read before the popup can request its own.
+    await rt.usagePending;
+    const reports = usagePosts(h).filter((m) => m.sessionAcus === 1.9281).length;
+    assert.equal(reports, 2, "startup and turn completion each supplied a report");
+    assert.deepEqual(readPrompts(h), ["/context", "/session-stats", "/context", "/session-stats"]);
     const reads = readPrompts(h).length;
     h.send({ type: "refreshUsage" });
-    const again = await h.until(() => readPrompts(h).length > reads);
-    assert.ok(again, "the forced refresh never reached the agent");
-    await h.until(() => usagePosts(h).filter((m) => m.sessionAcus === 1.9281).length >= 2);
+    const refreshed = await h.until(() =>
+      usagePosts(h).filter((m) => m.sessionAcus === 1.9281).length === reports + 1
+      && h.postsOf("usageState").at(-1)?.loading === false
+    );
+    assert.ok(refreshed, "the forced refresh never completed a new report");
+    await rt.usagePending;
     assert.deepEqual(readPrompts(h).slice(reads), ["/context", "/session-stats"]);
   } finally {
     await h.dispose();
