@@ -15,7 +15,7 @@
 const test = require("node:test");
 const assert = require("node:assert");
 const path = require("node:path");
-const { createChat, cleanup } = require("./chat-harness");
+const { createChat, createManager, cleanup } = require("./chat-harness");
 
 // The fake agent is a `/bin/sh` wrapper, so the CLI resolver cannot run it on Windows:
 // the health check fails, no chat starts, and every test here would fail for that one
@@ -2250,5 +2250,867 @@ for (const midTurnPrompts of [true, false]) {
     await h.dispose();
   });
 }
+
+// --- Session search, prompt history, background shell stop -------------------
+
+test("a session search answers display rows and never prunes the store", posixOnly, async () => {
+  const h = createChat({
+    listLive: true,
+    listCaps: {
+      "cognition.ai/sessionListContentSearch": true,
+      "cognition.ai/sessionListOrderBy": ["updated_at", "created_at"],
+      "cognition.ai/sessionListSortDirection": true
+    }
+  });
+  try {
+    const id = await h.startChat("searchable chat");
+    // A tracked session the agent does not list: exactly what a pruned
+    // membership decision would silently drop.
+    h.store.add("ghost-session", h.cwd);
+    const trackedBefore = h.store.ids().slice().sort();
+
+    h.send({ type: "querySessions", requestId: "q1", query: "needle", orderBy: "created_at", sortDirection: "asc" });
+    assert.ok(await h.until(() => h.postsOf("sessionSearchResults").some((m) => m.requestId === "q1"), 8000),
+      "the search was answered");
+    const answer = h.postsOf("sessionSearchResults").find((m) => m.requestId === "q1");
+
+    assert.strictEqual(answer.contentSearch, true, "the query really went out as content");
+    assert.strictEqual(answer.serverSorted, true, "created_at + direction were honoured");
+    assert.deepStrictEqual(answer.capabilities, {
+      contentSearch: true,
+      orderBy: ["updated_at", "created_at"],
+      sortDirection: true
+    });
+    // The agent only knows the live chat's session, so the ghost cannot appear
+    // in the answer, and the live one maps through the shared row normalizer.
+    assert.deepStrictEqual(answer.sessions.map((s) => s.id), [id]);
+    assert.strictEqual(answer.sessions[0].tracked, true);
+    assert.strictEqual(typeof answer.sessions[0].last_activity_at, "number");
+
+    // The search is display data: membership, the cache, and the authoritative
+    // list push are all untouched.
+    assert.deepStrictEqual(h.store.ids().slice().sort(), trackedBefore, "nothing was pruned");
+    assert.strictEqual(h.postsOf("sessions").length, 0, "no authoritative list push came from a search");
+    const listCall = h.agentSaw("session/list").at(-1);
+    assert.strictEqual(listCall.params._meta["cognition.ai/content"], "needle");
+    assert.strictEqual(listCall.params._meta["cognition.ai/orderBy"], "created_at");
+    assert.strictEqual(listCall.params._meta["cognition.ai/sortDirection"], "asc");
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("a session deleted mid query is filtered out of the answer", posixOnly, async () => {
+  const h = createChat({ listLive: true, listDelay: 300 });
+  try {
+    const id = await h.startChat("doomed chat");
+    const listsBefore = h.agentSaw("session/list").length;
+    h.send({ type: "querySessions", requestId: "q2", query: "", orderBy: "updated_at", sortDirection: "desc" });
+    // The agent holds the list reply open (listDelay), so the request being
+    // observed means the answer is genuinely still in flight.
+    assert.ok(await h.until(() => h.agentSaw("session/list").length > listsBefore, 8000),
+      "the list request reached the agent");
+    h.store.remove(id);
+
+    assert.ok(await h.until(() => h.postsOf("sessionSearchResults").some((m) => m.requestId === "q2"), 8000));
+    const answer = h.postsOf("sessionSearchResults").find((m) => m.requestId === "q2");
+    assert.deepStrictEqual(answer.sessions, [], "a session gone before the answer landed is not shown");
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("a session search with no live agent answers with empty capabilities", posixOnly, async () => {
+  const h = createChat();
+  try {
+    h.send({ type: "querySessions", requestId: "q3", query: "anything", orderBy: "created_at", sortDirection: "asc" });
+    assert.ok(await h.until(() => h.postsOf("sessionSearchResults").some((m) => m.requestId === "q3"), 4000),
+      "the search was answered without spawning anything");
+    const answer = h.postsOf("sessionSearchResults").find((m) => m.requestId === "q3");
+    assert.strictEqual(answer.contentSearch, false);
+    assert.strictEqual(answer.serverSorted, false);
+    assert.strictEqual(answer.sessions, undefined, "no rows are invented for a missing agent");
+    assert.deepStrictEqual(answer.capabilities, { contentSearch: false, orderBy: [], sortDirection: false });
+    assert.strictEqual(h.agentSaw("session/list").length, 0, "no agent was asked");
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("a global session/list hit from another workspace never reaches the search", posixOnly, async () => {
+  const h = createChat({
+    listLive: true,
+    listExtra: [
+      { sessionId: "foreign-workspace-session", cwd: "/other/workspace", title: "Foreign chat", updatedAt: new Date().toISOString() },
+      { sessionId: "tracked-local-session", cwd: "/tracked/dir", title: "Local chat", updatedAt: new Date().toISOString() }
+    ],
+    listCaps: {
+      "cognition.ai/sessionListContentSearch": true,
+      "cognition.ai/sessionListOrderBy": ["updated_at", "created_at"],
+      "cognition.ai/sessionListSortDirection": true
+    }
+  });
+  try {
+    await h.startChat("live chat");
+    h.store.add("tracked-local-session", h.cwd);
+    const idsBefore = h.store.ids().slice().sort();
+
+    h.send({ type: "querySessions", requestId: "qf", query: "chat", orderBy: "updated_at", sortDirection: "desc" });
+    assert.ok(await h.until(() => h.postsOf("sessionSearchResults").some((m) => m.requestId === "qf"), 8000),
+      "the search was answered");
+    const answer = h.postsOf("sessionSearchResults").find((m) => m.requestId === "qf");
+    const offered = answer.sessions.map((s) => s.id);
+    assert.ok(offered.includes("tracked-local-session"), "this workspace's tracked hit is offered");
+    assert.ok(!offered.includes("foreign-workspace-session"),
+      "a global hit owned by another workspace is not");
+    assert.deepStrictEqual(h.store.ids().slice().sort(), idsBefore,
+      "and membership is untouched by the foreign row");
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("prompt history offers only this workspace's own submitted prompts", posixOnly, async () => {
+  // The native CLI history is global across every directory, so it can never be
+  // the source: a marker planted there must not reach the picker, and the only
+  // text offered is what this extension itself submitted in this workspace.
+  const h = createChat({
+    history: [
+      { text: "GLOBAL-OTHER-DIRECTORY-MARKER", isShell: false },
+      { text: "unrelated directory prompt", isShell: false }
+    ]
+  });
+  try {
+    const id = await h.startChat("owned workspace prompt");
+    h.answerWith({ text: "owned workspace prompt" });
+    h.send({ type: "promptHistory", requestId: "ph-j", sessionId: id });
+
+    assert.ok(await h.until(() => h.postsOf("promptHistorySelected").some((m) => m.requestId === "ph-j"), 8000),
+      "the picker was answered");
+    const answer = h.postsOf("promptHistorySelected").find((m) => m.requestId === "ph-j");
+    assert.strictEqual(answer.sessionId, id);
+    assert.strictEqual(answer.text, "owned workspace prompt");
+
+    const quickPick = globalThis.__dvVscode.window.lastQuickPick;
+    const items = await quickPick.items;
+    const texts = items.map((i) => i.text).filter(Boolean);
+    assert.ok(texts.includes("owned workspace prompt"), "the submitted prompt is offered");
+    assert.ok(!texts.some((t) => t.includes("GLOBAL-OTHER-DIRECTORY-MARKER")),
+      "the native global history marker never appears");
+    assert.ok(!texts.some((t) => t.includes("unrelated directory prompt")),
+      "nor any other directory's prompt");
+    assert.strictEqual(h.agentSaw("_cognition.ai/reads/promptHistory").length, 0,
+      "the native history endpoint is never called");
+    assert.strictEqual(quickPick.options.placeHolder, `Prompts from ${h.cwd}`);
+    assert.strictEqual(quickPick.options.matchOnDetail, true);
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("prompt history picks a recent workspace prompt into the composer draft", posixOnly, async () => {
+  const h = createChat();
+  try {
+    await h.startChat("fix the failing test");
+    const id = await h.startChat("deploy the build");
+    h.answerWith({ text: "deploy the build" });
+    h.send({ type: "promptHistory", requestId: "ph1", sessionId: id });
+
+    assert.ok(await h.until(() => h.postsOf("promptHistorySelected").some((m) => m.requestId === "ph1"), 8000),
+      "the picker was answered");
+    const answer = h.postsOf("promptHistorySelected").find((m) => m.requestId === "ph1");
+    assert.strictEqual(answer.sessionId, id);
+    assert.strictEqual(answer.text, "deploy the build");
+    assert.strictEqual(answer.error, undefined);
+
+    // Both prompts were submitted in this workspace's directory, newest first,
+    // and the journal is local: no agent is ever asked for history.
+    const quickPick = globalThis.__dvVscode.window.lastQuickPick;
+    const items = await quickPick.items;
+    assert.deepStrictEqual(items.map((i) => i.text), ["deploy the build", "fix the failing test"]);
+    assert.strictEqual(items[0].detail, "deploy the build", "full text stays searchable");
+    assert.strictEqual(quickPick.options.placeHolder, `Prompts from ${h.cwd}`);
+    assert.strictEqual(quickPick.options.matchOnDetail, true);
+    assert.strictEqual(h.agentSaw("_cognition.ai/reads/promptHistory").length, 0);
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("a cancelled prompt history picker replies without text", posixOnly, async () => {
+  const h = createChat();
+  try {
+    const id = await h.startChat("history cancel");
+    h.answerWith(undefined);
+    h.send({ type: "promptHistory", requestId: "ph2", sessionId: id });
+
+    assert.ok(await h.until(() => h.postsOf("promptHistorySelected").some((m) => m.requestId === "ph2"), 8000));
+    const answer = h.postsOf("promptHistorySelected").find((m) => m.requestId === "ph2");
+    assert.strictEqual(answer.sessionId, id);
+    assert.strictEqual(answer.text, undefined, "cancellation carries no text");
+    assert.strictEqual(answer.error, undefined);
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("an empty journal explains itself and never asks an agent", posixOnly, async () => {
+  const h = createChat();
+  try {
+    // Nothing has been submitted yet, and with no session the request carries
+    // no sessionId: it resolves the folder a new chat would be created in.
+    h.answerWith(undefined);
+    h.send({ type: "promptHistory", requestId: "ph3", sessionId: null });
+
+    assert.ok(await h.until(() => h.postsOf("promptHistorySelected").some((m) => m.requestId === "ph3"), 8000));
+    const answer = h.postsOf("promptHistorySelected").find((m) => m.requestId === "ph3");
+    assert.strictEqual(answer.sessionId, null);
+    assert.strictEqual(answer.text, undefined);
+    assert.strictEqual(answer.error, undefined);
+
+    const quickPick = globalThis.__dvVscode.window.lastQuickPick;
+    const items = await quickPick.items;
+    assert.strictEqual(items.length, 1);
+    assert.strictEqual(items[0].label, "No prompts have been recorded for this folder yet.");
+    assert.strictEqual(items[0].detail, "History records prompts sent through this extension.");
+    assert.strictEqual(items[0].alwaysShow, true, "a typed query cannot filter the explanation away");
+    assert.ok(!("text" in items[0]), "the row has no text property at all");
+    assert.strictEqual(quickPick.options.placeHolder, `Prompts from ${h.cwd}`);
+    assert.strictEqual(h.agentSaw("initialize").length, 0, "no query agent was spawned");
+    assert.strictEqual(h.agentSaw("_cognition.ai/reads/promptHistory").length, 0);
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("a failed prompt history picker still replies with the safe error", posixOnly, async () => {
+  const h = createChat();
+  try {
+    const id = await h.startChat("history picker dies");
+    globalThis.__dvVscode.window.answer = Promise.reject(new Error("picker died"));
+    h.send({ type: "promptHistory", requestId: "ph-f", sessionId: id });
+
+    assert.ok(await h.until(() => h.postsOf("promptHistorySelected").some((m) => m.requestId === "ph-f"), 8000));
+    const answer = h.postsOf("promptHistorySelected").find((m) => m.requestId === "ph-f");
+    assert.strictEqual(answer.error, "Could not load prompt history.");
+    assert.strictEqual(answer.text, undefined);
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("history follows the session's own directory, not the editor's folder", posixOnly, async () => {
+  const h = createChat();
+  try {
+    const id = await h.startChat("session A prompt");
+    // Another tracked session owns a different folder's prompts.
+    h.store.add("sess-b", "/other/folder-b");
+    h.store.rememberPrompt("sess-b", "folder B private prompt");
+    // The user is now looking at a file somewhere else entirely.
+    globalThis.__dvFolders = [
+      { name: "b", uri: globalThis.__dvVscode.Uri.file("/other/folder-b"), index: 0 }
+    ];
+    h.answerWith({ text: "session A prompt" });
+    h.send({ type: "promptHistory", requestId: "ph-d", sessionId: id });
+
+    assert.ok(await h.until(() => h.postsOf("promptHistorySelected").some((m) => m.requestId === "ph-d"), 8000));
+    const answer = h.postsOf("promptHistorySelected").find((m) => m.requestId === "ph-d");
+    assert.strictEqual(answer.text, "session A prompt");
+    const quickPick = globalThis.__dvVscode.window.lastQuickPick;
+    const items = await quickPick.items;
+    assert.deepStrictEqual(items.map((i) => i.text), ["session A prompt"]);
+    assert.strictEqual(quickPick.options.placeHolder, `Prompts from ${h.cwd}`,
+      "the scope is the session's directory, not the folder on screen");
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("a new chat reads its creation folder's journal without an agent", posixOnly, async () => {
+  const h = createChat();
+  try {
+    h.store.add("seeded", h.cwd);
+    h.store.rememberPrompt("seeded", "journaled before any chat");
+    h.answerWith({ text: "journaled before any chat" });
+    h.send({ type: "promptHistory", requestId: "ph-n", sessionId: null });
+
+    assert.ok(await h.until(() => h.postsOf("promptHistorySelected").some((m) => m.requestId === "ph-n"), 8000));
+    const answer = h.postsOf("promptHistorySelected").find((m) => m.requestId === "ph-n");
+    assert.strictEqual(answer.text, "journaled before any chat");
+
+    const quickPick = globalThis.__dvVscode.window.lastQuickPick;
+    const items = await quickPick.items;
+    assert.deepStrictEqual(items.map((i) => i.text), ["journaled before any chat"]);
+    assert.strictEqual(quickPick.options.placeHolder, `Prompts from ${h.cwd}`);
+    assert.strictEqual(h.agentSaw("initialize").length, 0, "no query agent was spawned");
+    assert.strictEqual(h.agentSaw("_cognition.ai/reads/promptHistory").length, 0);
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("a history request for a foreign session never opens a picker", posixOnly, async () => {
+  const h = createChat();
+  try {
+    await h.startChat("mine");
+    const before = globalThis.__dvVscode.window.lastQuickPick;
+    h.send({ type: "promptHistory", requestId: "ph-x", sessionId: "someone-elses-session" });
+
+    assert.ok(await h.until(() => h.postsOf("promptHistorySelected").some((m) => m.requestId === "ph-x"), 8000));
+    const answer = h.postsOf("promptHistorySelected").find((m) => m.requestId === "ph-x");
+    assert.strictEqual(answer.text, undefined);
+    assert.strictEqual(answer.error, undefined);
+    assert.strictEqual(globalThis.__dvVscode.window.lastQuickPick, before, "no picker was opened");
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("a history request on a closed surface never opens a picker", posixOnly, async () => {
+  const h = createChat();
+  try {
+    const id = await h.startChat("mine");
+    const before = globalThis.__dvVscode.window.lastQuickPick;
+    // A request the page queued before it closed still names this session:
+    // the dead surface must answer empty without opening a picker.
+    h.controller.markClosed();
+    h.send({ type: "promptHistory", requestId: "ph-c", sessionId: id });
+
+    assert.ok(await h.until(() => h.postsOf("promptHistorySelected").some((m) => m.requestId === "ph-c"), 8000));
+    const answer = h.postsOf("promptHistorySelected").find((m) => m.requestId === "ph-c");
+    assert.strictEqual(answer.text, undefined);
+    assert.strictEqual(answer.error, undefined);
+    assert.strictEqual(globalThis.__dvVscode.window.lastQuickPick, before, "no picker was opened");
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("a held picker cannot outlive its folder scope", posixOnly, async () => {
+  const h = createChat();
+  try {
+    h.store.add("seeded", h.cwd);
+    h.store.rememberPrompt("seeded", "folder one prompt");
+    let release;
+    globalThis.__dvVscode.window.answer = new Promise((resolve) => { release = resolve; });
+    h.send({ type: "promptHistory", requestId: "ph-h", sessionId: null });
+    assert.ok(await h.until(() => globalThis.__dvVscode.window.lastQuickPick, 4000), "the picker opened");
+
+    // Before the pick lands, the folder a new chat would be created in moves:
+    // the old scope's text must not be inserted into it.
+    globalThis.__dvFolders = [
+      { name: "two", uri: globalThis.__dvVscode.Uri.file("/tmp/other-folder"), index: 0 }
+    ];
+    release({ text: "folder one prompt" });
+
+    assert.ok(await h.until(() => h.postsOf("promptHistorySelected").some((m) => m.requestId === "ph-h"), 8000));
+    const answer = h.postsOf("promptHistorySelected").find((m) => m.requestId === "ph-h");
+    assert.strictEqual(answer.text, undefined, "a retargeted composer rejects the old folder's pick");
+    assert.strictEqual(answer.error, undefined);
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("a window that turns folderless mid pick rejects the selection", posixOnly, async () => {
+  const h = createChat();
+  try {
+    const id = await h.startChat("workspace prompt");
+    let release;
+    globalThis.__dvVscode.window.answer = new Promise((resolve) => { release = resolve; });
+    h.send({ type: "promptHistory", requestId: "ph-wf", sessionId: id });
+    assert.ok(await h.until(() => globalThis.__dvVscode.window.lastQuickPick, 4000), "the picker opened");
+
+    // The window loses its folder while the picker is still open, with the same
+    // session and cwd still active: the journal scope it was opened under no
+    // longer exists, so the pick belongs to nothing.
+    globalThis.__dvFolders = [];
+    release({ text: "workspace prompt" });
+
+    assert.ok(await h.until(() => h.postsOf("promptHistorySelected").some((m) => m.requestId === "ph-wf"), 8000));
+    const answer = h.postsOf("promptHistorySelected").find((m) => m.requestId === "ph-wf");
+    assert.strictEqual(answer.text, undefined, "a folderless switch mid pick rejects the selection");
+    assert.strictEqual(answer.error, undefined);
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("replayed chunks and usage output never enter the prompt journal", posixOnly, async () => {
+  const h = createChat({
+    promptDelay: 60,
+    bgUpdates: [
+      { sessionUpdate: "user_message_chunk", messageId: "u-replay", content: { type: "text", text: "REPLAYED-ATTACHED-FILE" } },
+      { sessionUpdate: "usage_update", used: 10, size: 100,
+        _meta: { "cognition.ai/contextUsage": { modelId: "m", totalTokens: 10, maxTokens: 100 } } }
+    ]
+  });
+  try {
+    const id = await h.startChat("the real submitted prompt");
+    const log = () => h.controller.runtimes.get(id)?.log || [];
+    assert.ok(await h.until(() => log().some((e) => e.type === "userChunk"), 8000),
+      "the replayed chunk reached the transcript");
+    assert.ok(await h.until(() => log().some((e) => e.type === "usage"), 8000),
+      "the usage report reached the transcript");
+    assert.deepStrictEqual(h.store.promptHistory(h.cwd), ["the real submitted prompt"],
+      "only the submitted prompt is journaled");
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("queued input joins the journal only when it is actually sent", posixOnly, async () => {
+  const h = createChat({ promptGate: true });
+  try {
+    const id = await h.startChat("first gated prompt");
+    h.send({ type: "send", text: "second queued prompt" });
+    assert.ok(await h.until(() => (h.controller.runtimes.get(id)?.queued || []).length === 1, 8000),
+      "the second message is queued behind the running turn");
+    assert.deepStrictEqual(h.store.promptHistory(h.cwd), ["first gated prompt"],
+      "a pending queue row is not journaled yet");
+
+    h.releasePrompt(id, 1);
+    assert.ok(await h.until(
+      () => h.agentSaw("session/prompt").filter((p) => p.params.sessionId === id).length === 2, 8000),
+      "the queued message was flushed");
+    assert.deepStrictEqual(h.store.promptHistory(h.cwd), ["second queued prompt", "first gated prompt"],
+      "the flush journals it once, newest first");
+    h.releasePrompt(id, 2);
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("a folderless window keeps history in memory only", posixOnly, async () => {
+  const leaked = [{ sessionId: "ghost", text: "WORKSPACE-ONLY-LEAK" }];
+  const h = createChat({ state: { "devin.promptHistory.v1": leaked } });
+  // The journal key must not be written at all in this mode, not even a prune
+  // that would drop the seeded row: watch every update the store attempts.
+  const journalWrites = [];
+  const realUpdate = h.state.update;
+  h.state.update = (key, value) => {
+    if (key === "devin.promptHistory.v1") {
+      journalWrites.push(value);
+    }
+    return realUpdate(key, value);
+  };
+  try {
+    globalThis.__dvFolders = [];
+    // With no session yet the picker explains the empty conversation journal.
+    h.answerWith(undefined);
+    h.send({ type: "promptHistory", requestId: "ph-f0", sessionId: null });
+    assert.ok(await h.until(() => h.postsOf("promptHistorySelected").some((m) => m.requestId === "ph-f0"), 8000));
+    let quickPick = globalThis.__dvVscode.window.lastQuickPick;
+    let items = await quickPick.items;
+    assert.strictEqual(items[0].label, "No prompts have been recorded for this conversation yet.");
+    assert.strictEqual(quickPick.options.placeHolder, "Prompts from this conversation");
+
+    const id = await h.startChat("folderless owned prompt");
+    h.answerWith({ text: "folderless owned prompt" });
+    h.send({ type: "promptHistory", requestId: "ph-f1", sessionId: id });
+    assert.ok(await h.until(() => h.postsOf("promptHistorySelected").some((m) => m.requestId === "ph-f1"), 8000));
+    const answer = h.postsOf("promptHistorySelected").find((m) => m.requestId === "ph-f1");
+    assert.strictEqual(answer.text, "folderless owned prompt");
+
+    quickPick = globalThis.__dvVscode.window.lastQuickPick;
+    items = await quickPick.items;
+    const texts = items.map((i) => i.text).filter(Boolean);
+    assert.deepStrictEqual(texts, ["folderless owned prompt"]);
+    assert.ok(!texts.some((t) => t.includes("WORKSPACE-ONLY-LEAK")),
+      "the workspace journal cannot leak into a folderless window");
+
+    // Removing the session runs the prune path the journal key would
+    // otherwise see rewritten to drop the untracked seeded row.
+    h.store.remove(id);
+    await h.settle(50);
+    assert.strictEqual(journalWrites.length, 0, "the journal key was never written");
+    assert.deepStrictEqual(h.state.__map.get("devin.promptHistory.v1"), leaked,
+      "the seeded journal is unchanged");
+  } finally {
+    await h.dispose();
+  }
+});
+
+// The palette command routes through the manager to the surface the user was
+// last in, which the single surface harness cannot express.
+test("the history command follows the last focused owned surface", posixOnly, async () => {
+  const m = createManager();
+  try {
+    m.resolveSidebar();
+    m.manager.newSessionEditor();
+    const panelCtrl = m.panelControllers()[0];
+    panelCtrl.autoNewSession = false;
+    const panelWebview = m.panelWebview(panelCtrl);
+    await m.ready(panelWebview);
+    await m.ready(m.sidebarWebview);
+
+    // Focus the editor chat, then blur into the palette the way a command does.
+    m.sendTo(panelWebview, { type: "chatFocus", value: true });
+    m.sendTo(panelWebview, { type: "chatFocus", value: false });
+    await m.manager.showPromptHistory();
+
+    assert.ok(m.panelPosted(panelCtrl).some((p) => p.type === "showPromptHistory"),
+      "the editor chat the user was in got the command");
+    assert.ok(!m.sidebarPosted.some((p) => p.type === "showPromptHistory"),
+      "the sidebar did not");
+  } finally {
+    await m.dispose();
+  }
+});
+
+test("a closed surface is ignored by the history command", posixOnly, async () => {
+  const m = createManager();
+  try {
+    m.resolveSidebar();
+    m.manager.newSessionEditor();
+    const panelCtrl = m.panelControllers()[0];
+    panelCtrl.autoNewSession = false;
+    const panelWebview = m.panelWebview(panelCtrl);
+    await m.ready(panelWebview);
+    await m.ready(m.sidebarWebview);
+
+    // The editor chat holds focus when its tab closes: no blur ever arrives,
+    // and a focus message still in flight from the dead page must not re-arm it.
+    m.sendTo(panelWebview, { type: "chatFocus", value: true });
+    panelCtrl.markClosed();
+    m.sendTo(panelWebview, { type: "chatFocus", value: true });
+    await m.manager.showPromptHistory();
+
+    assert.ok(m.sidebarPosted.some((p) => p.type === "showPromptHistory"),
+      "the command fell back to the side panel");
+    assert.ok(!m.panelPosted(panelCtrl).some((p) => p.type === "showPromptHistory"),
+      "the closed tab got nothing");
+  } finally {
+    await m.dispose();
+  }
+});
+
+test("a last focused controller from another manager is rejected", posixOnly, async () => {
+  const mine = createManager();
+  const other = createManager();
+  try {
+    mine.resolveSidebar();
+    other.resolveSidebar();
+    await mine.ready(mine.sidebarWebview);
+    await other.ready(other.sidebarWebview);
+
+    // The other window's sidebar was the last chat to hold focus anywhere.
+    other.sendTo(other.sidebarWebview, { type: "chatFocus", value: true });
+    other.sendTo(other.sidebarWebview, { type: "chatFocus", value: false });
+    await mine.manager.showPromptHistory();
+
+    assert.ok(mine.sidebarPosted.some((p) => p.type === "showPromptHistory"),
+      "this manager's sidebar got the command");
+    assert.ok(!other.sidebarPosted.some((p) => p.type === "showPromptHistory"),
+      "the foreign surface was never touched");
+  } finally {
+    await mine.dispose();
+    await other.dispose();
+  }
+});
+
+test("a reported background shell can be stopped, and the row is marked stopped", posixOnly, async () => {
+  const h = createChat({
+    promptDelay: 80,
+    terminalLifecycle: true,
+    bgUpdates: [
+      { sessionUpdate: "tool_call", toolCallId: "tc-bg", title: "sleep 90", status: "in_progress",
+        _meta: { "cognition.ai/inferenceToolName": "exec" } },
+      { sessionUpdate: "tool_call_update", toolCallId: "tc-bg", status: "in_progress",
+        _meta: { "cognition.ai/background": true, "cognition.ai/backgroundShellId": "sh-42",
+          "cognition.ai/backgroundCommand": "sleep 90" } }
+    ]
+  });
+  try {
+    const id = await h.startChat("run a background command");
+    assert.ok(await h.until(() => h.postsOf("backgroundShells").some((m) => m.items && m.items.length === 1), 8000),
+      "the live shell was published");
+    const published = h.postsOf("backgroundShells").find((m) => m.items && m.items.length === 1);
+    assert.strictEqual(published.sessionId, id);
+    assert.deepStrictEqual(published.items, [{ toolCallId: "tc-bg", stopping: false }]);
+    assert.ok(!JSON.stringify(h.postsOf("backgroundShells")).includes("sh-42"),
+      "the agent-side shell id never leaves the host");
+
+    // The registry outlives the turn: busy is false by now, the shell still runs.
+    await h.until(() => h.postsOf("busy").some((m) => m.value === false), 8000);
+    h.send({ type: "stopBackgroundShell", sessionId: id, toolCallId: "tc-bg" });
+
+    assert.ok(await h.until(() => h.agentSaw("_cognition.ai/terminal/killBackgroundShell").length === 1, 8000),
+      "the kill reached the agent");
+    assert.deepStrictEqual(h.agentSaw("_cognition.ai/terminal/killBackgroundShell")[0].params,
+      { sessionId: id, shellId: "sh-42" });
+    assert.ok(await h.until(() => h.postsOf("backgroundShells").some((m) => m.items && m.items.length === 0), 8000),
+      "the control went away once the shell was stopped");
+    assert.ok(h.postsOf("toolCallUpdate").some((m) => m.id === "tc-bg" && m.status === "cancelled" && m.stopped === true),
+      "the transcript row was marked stopped, non actionably");
+
+    // A stale request for a tool the registry no longer holds is ignored.
+    const kills = h.agentSaw("_cognition.ai/terminal/killBackgroundShell").length;
+    h.send({ type: "stopBackgroundShell", sessionId: id, toolCallId: "tc-bg" });
+    h.send({ type: "stopBackgroundShell", sessionId: "other-session", toolCallId: "tc-bg" });
+    await h.settle(200);
+    assert.strictEqual(h.agentSaw("_cognition.ai/terminal/killBackgroundShell").length, kills,
+      "stale stop requests are dropped, not queued");
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("an unsupported kill clears the controls instead of erroring per click", posixOnly, async () => {
+  const h = createChat({
+    promptDelay: 80,
+    terminalLifecycle: true,
+    killUnsupported: true,
+    bgUpdates: [
+      { sessionUpdate: "tool_call_update", toolCallId: "tc-bg2", status: "in_progress",
+        _meta: { "cognition.ai/background": true, "cognition.ai/backgroundShellId": "sh-7" } }
+    ]
+  });
+  try {
+    const id = await h.startChat("unsupported kill");
+    assert.ok(await h.until(() => h.postsOf("backgroundShells").some((m) => m.items && m.items.length === 1), 8000));
+    h.send({ type: "stopBackgroundShell", sessionId: id, toolCallId: "tc-bg2" });
+
+    assert.ok(await h.until(() => h.agentSaw("_cognition.ai/terminal/killBackgroundShell").length === 1, 8000));
+    assert.ok(await h.until(() => h.postsOf("backgroundShells").some((m) => m.items && m.items.length === 0), 8000),
+      "every control on the connection is cleared");
+    assert.strictEqual(h.postsOf("toolCallUpdate").filter((m) => m.stopped).length, 0,
+      "no stopped row is recorded for a kill that never happened");
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("live shell metadata without the advertised lifecycle grows no controls", posixOnly, async () => {
+  const h = createChat({
+    promptDelay: 80,
+    bgUpdates: [
+      { sessionUpdate: "tool_call_update", toolCallId: "tc-nocap", status: "in_progress",
+        _meta: { "cognition.ai/background": true, "cognition.ai/backgroundShellId": "sh-nocap" } }
+    ]
+  });
+  try {
+    const id = await h.startChat("shell without lifecycle");
+    await h.until(() => h.postsOf("busy").some((m) => m.value === false), 8000);
+    await h.settle(200);
+    const items = h.postsOf("backgroundShells").flatMap((m) => m.items || []);
+    assert.strictEqual(items.length, 0, "no advertised lifecycle means no stop control");
+    h.send({ type: "stopBackgroundShell", sessionId: id, toolCallId: "tc-nocap" });
+    await h.settle(200);
+    assert.strictEqual(h.agentSaw("_cognition.ai/terminal/killBackgroundShell").length, 0,
+      "and no kill is ever sent");
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("an unsupported kill cannot regrow shell controls on later updates", posixOnly, async () => {
+  const h = createChat({
+    promptDelay: 80,
+    terminalLifecycle: true,
+    killUnsupported: true,
+    bgUpdates: [
+      { sessionUpdate: "tool_call_update", toolCallId: "tc-regrow", status: "in_progress",
+        _meta: { "cognition.ai/background": true, "cognition.ai/backgroundShellId": "sh-regrow" } }
+    ]
+  });
+  try {
+    const id = await h.startChat("kill unsupported once");
+    assert.ok(await h.until(() => h.postsOf("backgroundShells").some((m) => m.items && m.items.length === 1), 8000),
+      "the first live update published a control");
+    h.send({ type: "stopBackgroundShell", sessionId: id, toolCallId: "tc-regrow" });
+    assert.ok(await h.until(() => h.agentSaw("_cognition.ai/terminal/killBackgroundShell").length === 1, 8000));
+    assert.ok(await h.until(() => h.postsOf("backgroundShells").some((m) => m.items && m.items.length === 0), 8000),
+      "the -32601 cleared every control");
+
+    // The same live update shape arrives again on the next turn. The
+    // connection already learned it cannot kill, so nothing may repopulate.
+    h.send({ type: "send", text: "another turn" });
+    assert.ok(await h.until(() => h.agentSaw("session/prompt").length === 2, 8000),
+      "the second turn ran and replayed the same metadata");
+    await h.settle(300);
+    // Everything published after the -32601 clear must stay empty: the
+    // stopping-in-flight publish before the kill resolved does not count.
+    const pubs = h.postsOf("backgroundShells");
+    let clearedAt = -1;
+    pubs.forEach((m, i) => { if (m.items && m.items.length === 0) clearedAt = i; });
+    const repopulated = pubs.slice(clearedAt + 1).flatMap((m) => m.items || []);
+    assert.strictEqual(repopulated.length, 0, "later live updates never repopulated the cleared controls");
+    assert.strictEqual(h.agentSaw("_cognition.ai/terminal/killBackgroundShell").length, 1,
+      "and no second kill was attempted");
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("an in-flight shell stop completes on the surface that owns the runtime", posixOnly, async () => {
+  const from = createChat({
+    promptDelay: 80,
+    terminalLifecycle: true,
+    killDelay: 1000,
+    killFailOnce: true,
+    bgUpdates: [
+      { sessionUpdate: "tool_call_update", toolCallId: "tc-move", status: "in_progress",
+        _meta: { "cognition.ai/background": true, "cognition.ai/backgroundShellId": "sh-move" } }
+    ]
+  });
+  try {
+    const id = await from.startChat("moving shell stop");
+    assert.ok(await from.until(() => from.postsOf("backgroundShells").some((m) => m.items && m.items.length === 1), 8000),
+      "the live shell was published");
+
+    // The first attempt fails once: the registry keeps the entry and the
+    // control offers an inline retry.
+    from.send({ type: "stopBackgroundShell", sessionId: id, toolCallId: "tc-move" });
+    assert.ok(await from.until(() => from.agentSaw("_cognition.ai/terminal/killBackgroundShell").length === 1, 8000));
+    assert.ok(await from.until(() => from.postsOf("backgroundShells").some((m) => m.items && m.items[0] && m.items[0].error), 8000),
+      "the failure kept the entry and showed the inline error");
+
+    // The retry is genuinely in flight (the agent holds it for killDelay)
+    // when the runtime moves to another surface mid request.
+    from.send({ type: "stopBackgroundShell", sessionId: id, toolCallId: "tc-move" });
+    assert.ok(await from.until(() => from.agentSaw("_cognition.ai/terminal/killBackgroundShell").length === 2, 8000),
+      "the retry reached the agent");
+    from.send({ type: "stopBackgroundShell", sessionId: id, toolCallId: "tc-move" });
+    await from.settle(100);
+    assert.strictEqual(from.agentSaw("_cognition.ai/terminal/killBackgroundShell").length, 2,
+      "a duplicate click while stopping is ignored");
+
+    const transfer = from.controller.exportRuntime(id);
+    assert.ok(transfer, "the runtime exported while the kill was pending");
+    const to = createChat();
+    await to.ready();
+    await to.controller.importRuntime(transfer);
+
+    assert.ok(await to.until(() => to.postsOf("backgroundShells").some((m) => m.items && m.items.length === 0), 10000),
+      "the arriving owner saw the shell cleared");
+    assert.ok(to.postsOf("toolCallUpdate").some((m) => m.id === "tc-move" && m.stopped === true),
+      "and recorded the stopped row itself");
+    assert.strictEqual(from.agentSaw("_cognition.ai/terminal/killBackgroundShell").length, 2,
+      "exactly one failure and one successful retry reached the agent");
+    assert.strictEqual(from.agentSaw("session/cancel").length, 0, "a kill is never a cancel");
+    assert.ok(!to.postsOf("busy").some((m) => m.value === true),
+      "the parent turn state was not corrupted by the handover");
+    assert.deepStrictEqual((to.last("queued") || { items: [] }).items, [], "and nothing queued up");
+    await to.dispose();
+  } finally {
+    await from.dispose();
+  }
+});
+
+test("silent replay metadata never authorizes a shell stop", posixOnly, async () => {
+  const h = createChat({
+    promptDelay: 80,
+    terminalLifecycle: true
+  });
+  try {
+    const id = await h.startChat("silent flag shell");
+    await h.until(() => h.postsOf("busy").some((m) => m.value === false), 8000);
+    const rt = h.controller.runtimes.get(id);
+    assert.ok(rt, "the runtime is live");
+
+    // A wake replays history with silentReplay set (and replaying already
+    // cleared by the time stray live updates can arrive). Drive the real
+    // update path with that flag up: the registry must stay empty.
+    rt.silentReplay = true;
+    rt.client.emit("update", {
+      sessionId: id,
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tc-silent",
+        status: "in_progress",
+        _meta: { "cognition.ai/background": true, "cognition.ai/backgroundShellId": "sh-silent" }
+      }
+    });
+    rt.silentReplay = false;
+    await h.settle(200);
+
+    const items = h.postsOf("backgroundShells").flatMap((m) => m.items || []);
+    assert.strictEqual(items.length, 0, "silent replay metadata never authorizes a stop");
+    h.send({ type: "stopBackgroundShell", sessionId: id, toolCallId: "tc-silent" });
+    await h.settle(200);
+    assert.strictEqual(h.agentSaw("_cognition.ai/terminal/killBackgroundShell").length, 0,
+      "and a stop for it reaches nothing");
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("background shell state replayed from history never authorizes a stop", posixOnly, async () => {
+  const first = createChat();
+  const id = await first.startChat("replayed shell");
+  await first.dispose();
+
+  // A reload replays the recorded tool updates. They carry the same metadata
+  // a live turn would, but the registry must not treat history as runnable.
+  const next = createChat({
+    storage: first.storage,
+    cwd: first.cwd,
+    terminalLifecycle: true,
+    loadUpdates: [
+      { sessionUpdate: "tool_call_update", toolCallId: "tc-replay", status: "in_progress",
+        _meta: { "cognition.ai/background": true, "cognition.ai/backgroundShellId": "sh-replay" } }
+    ]
+  });
+  try {
+    next.send({ type: "loadSession", id });
+    assert.ok(await next.until(() => next.activeId() === id, 8000), "the session loaded");
+    assert.ok(await next.until(() => next.postsOf("sessionReady").some((m) => m.sessionId === id), 8000),
+      "the replay finished");
+    await next.settle(200);
+    const items = next.postsOf("backgroundShells").flatMap((m) => m.items || []);
+    assert.strictEqual(items.length, 0, "replayed metadata never authorizes a stop control");
+    next.send({ type: "stopBackgroundShell", sessionId: id, toolCallId: "tc-replay" });
+    await next.settle(200);
+    assert.strictEqual(next.agentSaw("_cognition.ai/terminal/killBackgroundShell").length, 0,
+      "and a stop for it reaches nothing");
+  } finally {
+    await next.dispose();
+  }
+});
+
+test("two sessions sharing a toolCallId stop only their own shell", posixOnly, async () => {
+  const h = createChat({
+    promptDelay: 80,
+    terminalLifecycle: true,
+    bgUpdates: [
+      { sessionUpdate: "tool_call_update", toolCallId: "tc-same", status: "in_progress",
+        _meta: { "cognition.ai/background": true, "cognition.ai/backgroundShellId": "sh-${sessionId}" } }
+    ]
+  });
+  try {
+    const idA = await h.startChat("chat A");
+    const idB = await h.startChat("chat B");
+    const rtA = h.controller.runtimes.get(idA);
+    const rtB = h.controller.runtimes.get(idB);
+    assert.ok(await h.until(() => rtA?.backgroundShells?.has("tc-same") && rtB?.backgroundShells?.has("tc-same"), 8000),
+      "both runtimes registered the shared toolCallId");
+    assert.strictEqual(rtA.backgroundShells.get("tc-same").shellId, `sh-${idA}`);
+    assert.strictEqual(rtB.backgroundShells.get("tc-same").shellId, `sh-${idB}`);
+
+    // Back on A, a stop resolves A's own runtime: A's client, A's session id
+    // and A's shell id, even though B reports the same toolCallId.
+    h.send({ type: "activateSession", id: idA });
+    assert.ok(await h.until(() => h.activeId() === idA, 8000), "session A is on screen");
+    h.send({ type: "stopBackgroundShell", sessionId: idA, toolCallId: "tc-same" });
+    assert.ok(await h.until(() => h.agentSaw("_cognition.ai/terminal/killBackgroundShell").length === 1, 8000),
+      "the kill reached an agent");
+    assert.deepStrictEqual(h.agentSaw("_cognition.ai/terminal/killBackgroundShell")[0].params,
+      { sessionId: idA, shellId: `sh-${idA}` }, "A's own session and shell id were used");
+    assert.ok(await h.until(() => !rtA.backgroundShells?.has("tc-same"), 8000),
+      "A's registry retired the stopped shell");
+    assert.strictEqual(rtB.backgroundShells.get("tc-same")?.shellId, `sh-${idB}`,
+      "B's registry and shell id are untouched");
+
+    // Naming B while A is on screen is a foreign request: rejected, no kill.
+    h.send({ type: "stopBackgroundShell", sessionId: idB, toolCallId: "tc-same" });
+    await h.settle(200);
+    assert.strictEqual(h.agentSaw("_cognition.ai/terminal/killBackgroundShell").length, 1,
+      "the foreign stop never reached an agent");
+    assert.strictEqual(rtB.backgroundShells.get("tc-same")?.shellId, `sh-${idB}`);
+  } finally {
+    await h.dispose();
+  }
+});
 
 test.after(() => cleanup());

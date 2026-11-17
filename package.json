@@ -2,7 +2,7 @@
   "name": "devin-vscode",
   "displayName": "Devin for VS Code",
   "description": "A native chat panel for the Devin CLI, powered by the Agent Client Protocol. Streaming replies, per workspace sessions, and trackable diffs.",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "publisher": "shayanline",
   "author": "Shayan Khaksar",
   "license": "AGPL-3.0-or-later",
@@ -179,6 +179,10 @@
         "command": "devin.addFileToChat",
         "title": "Devin: Add File to Chat",
         "icon": "$(add)"
+      },
+      {
+        "command": "devin.showPromptHistory",
+        "title": "Devin: Show Prompt History"
       }
     ],
     "keybindings": [

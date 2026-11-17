@@ -202,8 +202,42 @@ Object.assign(window, {
   // `window.answer` to it, which is how the terminate and discard prompts are driven.
   answer: undefined,
   showInputBox: async () => window.answer,
-  showQuickPick: async () => window.answer,
-  showOpenDialog: async () => undefined
+  // Records what was offered so a test can inspect the items (which may be a
+  // promise) and the options, then answers with `window.answer` as before. The
+  // real picker waits for a promised item list before it can be answered, so
+  // the answer only lands once the items have settled.
+  showQuickPick: (items, options) => {
+    window.lastQuickPick = { items, options };
+    return Promise.resolve(items).then(() => window.answer);
+  },
+  showOpenDialog: async () => undefined,
+  // Enough of a chat editor panel for ChatManager: a webview the controller can
+  // bind to, lifecycle events a test can inspect, and a posted list to read.
+  // Every panel is kept on __dvPanels so a test can find the one it opened.
+  createWebviewPanel: (viewType, title, column, options) => {
+    const posted = [];
+    const panel = {
+      posted,
+      title,
+      visible: true,
+      active: true,
+      iconPath: undefined,
+      webview: {
+        options: {},
+        html: "",
+        cspSource: "vscode-webview:",
+        asWebviewUri: (uri) => uri,
+        postMessage: (m) => { posted.push(JSON.parse(JSON.stringify(m))); return Promise.resolve(true); },
+        onDidReceiveMessage: (fn) => { panel.webview._handler = fn; return { dispose() {} }; }
+      },
+      onDidDispose: (fn) => { panel._onDispose = fn; return { dispose() {} }; },
+      onDidChangeViewState: (fn) => { panel._onViewState = fn; return { dispose() {} }; },
+      reveal: () => {},
+      dispose: () => { if (panel._onDispose) panel._onDispose(); }
+    };
+    (globalThis.__dvPanels = globalThis.__dvPanels || []).push(panel);
+    return panel;
+  }
 });
 window.showWarningMessage = (m) => { window.shown.warning.push(String(m)); return Promise.resolve(window.answer); };
 window.showInformationMessage = (m) => { window.shown.info.push(String(m)); return Promise.resolve(window.answer); };
@@ -212,9 +246,6 @@ window.__fire.selectionChanged = selectionChanged;
 window.__fire.configChanged = configChanged;
 
 Object.assign(workspace, {
-  get workspaceFolders() {
-    return globalThis.__dvFolders;
-  },
   workspaceFile: undefined,
   textDocuments: [],
   asRelativePath: (p) => {
@@ -232,12 +263,23 @@ Object.assign(workspace, {
   onDidSaveTextDocument: docSaved.event
 });
 
+// Object.assign would read a getter's value once and freeze it at load time,
+// when no folders exist yet, so the live binding gets a real accessor.
+Object.defineProperty(workspace, "workspaceFolders", {
+  get: () => globalThis.__dvFolders,
+  enumerable: true,
+  configurable: true
+});
+
 const env = {
   clipboard: { writeText: async (t) => { env.clipboard.text = t; }, text: "" },
   openExternal: async () => true
 };
 
 const ConfigurationTarget = { Global: 1, Workspace: 2, WorkspaceFolder: 3 };
+
+// Only the members the host code under test reaches. Active is -1 in VS Code.
+const ViewColumn = { Active: -1, Beside: -2, One: 1, Two: 2, Three: 3 };
 
 class Position {
   constructor(line, character) {
@@ -263,7 +305,8 @@ const SymbolKind = {
 module.exports = {
   EventEmitter, Uri, Disposable, commands, workspace, scm, window, ThemeIcon,
   MarkdownString, StatusBarAlignment, QuickPickItemKind,
-  DiagnosticSeverity, languages, env, ConfigurationTarget, Position, Range, SymbolKind
+  DiagnosticSeverity, languages, env, ConfigurationTarget, Position, Range, SymbolKind,
+  ViewColumn
 };
 
 // The module under test is bundled with its own copy of this stub, so a test

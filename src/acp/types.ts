@@ -321,6 +321,22 @@ export interface AcpSessionRow {
   _meta?: Record<string, unknown>;
 }
 
+// Optional filters for `session/list`, each sent only when the agent advertises
+// the matching `cognition.ai/sessionList*` capability (see client.ts).
+export interface SessionListQuery {
+  content?: string;
+  orderBy?: "updated_at" | "created_at";
+  sortDirection?: "asc" | "desc";
+}
+
+// What this connection's agent actually supports for session/list queries,
+// after advertised flags and any compatibility fallback are accounted for.
+export interface SessionListCapabilities {
+  contentSearch: boolean;
+  orderBy: ("updated_at" | "created_at")[];
+  sortDirection: boolean;
+}
+
 // `_cognition.ai/request_diagnostics`: the agent asking the editor what is wrong
 // with the code, rather than spawning a compiler or a linter to find out what the
 // editor already knows. Unlocked by advertising

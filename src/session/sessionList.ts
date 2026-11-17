@@ -7,6 +7,7 @@ export interface DevinSession {
   short_id: string;
   working_directory: string;
   last_activity_at?: number;
+  created_at?: number;
   last_activity_ago?: string;
   title?: string;
   tracked?: boolean;
@@ -137,17 +138,27 @@ export function fromAcpRows(rows: AcpSessionRow[], trackedIds: string[]): ListRe
       }
       continue;
     }
-    sessions.push({
-      id,
-      short_id: id,
-      working_directory: row.cwd || "",
-      last_activity_at: epochSeconds(row.updatedAt),
-      title: row.title,
-      tracked: true
-    });
+    sessions.push(fromAcpRow(row));
   }
   sessions.sort((a, b) => (b.last_activity_at || 0) - (a.last_activity_at || 0));
   return { sessions, prunedIds };
+}
+
+// One protocol row as a panel session. Shared by the authoritative listing
+// (fromAcpRows, which also decides membership) and filtered display queries,
+// which must never take part in pruning: a search result is not proof a
+// tracked session still exists.
+export function fromAcpRow(row: AcpSessionRow): DevinSession {
+  const created = row._meta?.["cognition.ai/createdAt"];
+  return {
+    id: row.sessionId,
+    short_id: row.sessionId,
+    working_directory: row.cwd || "",
+    last_activity_at: epochSeconds(row.updatedAt),
+    created_at: epochSeconds(typeof created === "string" ? created : undefined),
+    title: row.title,
+    tracked: true
+  };
 }
 
 // `devin list` reports epoch seconds and the panel sorts and groups on that, so an

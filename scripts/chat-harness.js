@@ -89,6 +89,9 @@ const send = (o) => process.stdout.write(JSON.stringify(o) + "\\n");
 let currentModel = "fusion-claude-opus-5-high-sidekick-swe-2-medium";
 let currentThoughtLevel = "high";
 let currentSpeed = "standard";
+// Sessions this agent process created, so session/list can answer the way the
+// real CLI does for the sessions it knows.
+const knownSessions = new Map();
 const configOptions = () => [
   {
     id: "mode",
@@ -180,12 +183,13 @@ async function handleRequest(msg) {
         agentCapabilities: {
           loadSession: true,
           promptCapabilities: { image: true, embeddedContext: true },
-          _meta: { "cognition.ai/revert": true, "cognition.ai/sessionShare": true, ...(process.env.DV_DOCUMENT_LIFECYCLE === "1" ? { "cognition.ai/documentLifecycle": true } : {}), ...(process.env.DV_MID_TURN === "1" ? { "cognition.ai/midTurnPrompts": true } : {}) }
+          _meta: { "cognition.ai/revert": true, "cognition.ai/sessionShare": true, ...(process.env.DV_DOCUMENT_LIFECYCLE === "1" ? { "cognition.ai/documentLifecycle": true } : {}), ...(process.env.DV_MID_TURN === "1" ? { "cognition.ai/midTurnPrompts": true } : {}), ...(process.env.DV_TERMINAL_LIFECYCLE === "1" ? { "cognition.ai/terminalLifecycle": true } : {}), ...(process.env.DV_LIST_CAPS ? JSON.parse(process.env.DV_LIST_CAPS) : {}) }
         }
       });
       break;
     case "session/new": {
       const newId = idBase + "-" + ++seq;
+      knownSessions.set(newId, { sessionId: newId, cwd: (msg.params && msg.params.cwd) || "", title: "Chat " + newId, updatedAt: new Date().toISOString() });
       // The real agent announces the session's mode before it answers, so this
       // update arrives while its runtime is not yet in the pool to be found by
       // id. Anything that answers such an update with "whatever is on screen"
@@ -231,6 +235,18 @@ async function handleRequest(msg) {
         try { return JSON.parse(process.env[name] || "[]"); } catch { return []; }
       };
       const emit = (update) => send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: msg.params.sessionId, update } });
+      // Live tool updates a test scripts, standing in for what a running turn
+      // reports (background shells and friends). They arrive mid turn, never
+      // through the load replay path.
+      if (process.env.DV_BG_UPDATES) {
+        try {
+          for (const u of JSON.parse(process.env.DV_BG_UPDATES)) {
+            // \${sessionId} lets one scripted update give each session its own
+            // shell id, the way two chats can report the same toolCallId.
+            emit(JSON.parse(JSON.stringify(u).replaceAll("\${sessionId}", msg.params.sessionId)));
+          }
+        } catch {}
+      }
       if (process.env.DV_USAGE && ptext.startsWith("/context")) {
         const answer = () => { usageChunks("DV_CONTEXT_CHUNKS").forEach(emit); reply({ stopReason: "end_turn" }); };
         const hold = num("DV_CONTEXT_DELAY");
@@ -288,7 +304,45 @@ async function handleRequest(msg) {
       break;
     }
     case "_cognition.ai/revert/listSteps": await delay(num("DV_STEPS_DELAY")); reply({ steps: [] }); break;
-    case "session/list": reply({ sessions: [] }); break;
+    case "_cognition.ai/reads/promptHistory": {
+      // DV_HISTORY holds the entries array. Absent means the agent does not
+      // serve the read at all, the way an older CLI answers. The extension
+      // must never call this: the entries are global across directories.
+      const entries = JSON.parse(process.env.DV_HISTORY || "null");
+      if (entries === null) {
+        send({ jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "Method not found" } });
+      } else {
+        reply({ entries });
+      }
+      break;
+    }
+    case "_cognition.ai/terminal/killBackgroundShell": {
+      if (process.env.DV_KILL_UNSUPPORTED === "1") {
+        send({ jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "Method not found" } });
+      } else if (process.env.DV_KILL_FAIL_ONCE === "1" && !globalThis.__dvKillFailed) {
+        globalThis.__dvKillFailed = true;
+        send({ jsonrpc: "2.0", id: msg.id, error: { code: -32603, message: "kill failed" } });
+      } else {
+        await delay(num("DV_KILL_DELAY"));
+        reply({});
+      }
+      break;
+    }
+    case "session/list": {
+      await delay(num("DV_LIST_DELAY"));
+      // DV_LIST_LIVE answers with the sessions this agent created. Otherwise
+      // DV_LIST_SESSIONS is the exact row set, for tests that need a session
+      // the agent does not know about.
+      if (process.env.DV_LIST_LIVE === "1") {
+        // DV_LIST_EXTRA adds rows this agent does not own, standing in for the
+        // global hits a real session/list returns across every directory.
+        const extra = JSON.parse(process.env.DV_LIST_EXTRA || "[]");
+        reply({ sessions: [...knownSessions.values(), ...extra] });
+      } else {
+        reply({ sessions: JSON.parse(process.env.DV_LIST_SESSIONS || "[]") });
+      }
+      break;
+    }
     default: reply({});
   }
 }
@@ -310,16 +364,19 @@ function memento(seed) {
 }
 
 // The page, as far as the host can tell: it records what it was told, and lets the
-// test say what the user did.
+// test say what the user did. Each double keeps its own message handler on `_handler`
+// so a manager's several surfaces can be driven independently. `last` still points at
+// the most recent one for the single surface harnesses.
 function webviewDouble(posted) {
-  return {
+  const wv = {
     options: {},
     html: "",
     cspSource: "vscode-webview:",
     asWebviewUri: (uri) => uri,
     postMessage: (m) => { posted.push(JSON.parse(JSON.stringify(m))); return Promise.resolve(true); },
-    onDidReceiveMessage: (fn) => { webviewDouble.last = fn; return { dispose() {} }; }
+    onDidReceiveMessage: (fn) => { wv._handler = fn; webviewDouble.last = fn; return { dispose() {} }; }
   };
+  return wv;
 }
 
 /**
@@ -381,7 +438,21 @@ function createChat(opts = {}) {
     DV_THOUGHT_LEVELS: opts.thoughtLevels ? JSON.stringify(opts.thoughtLevels) : "",
     // Exact ACP update objects the agent emits during session/load, standing in
     // for the history the real CLI replays. Absent means no replay at all.
-    DV_LOAD_UPDATES: opts.loadUpdates ? JSON.stringify(opts.loadUpdates) : ""
+    DV_LOAD_UPDATES: opts.loadUpdates ? JSON.stringify(opts.loadUpdates) : "",
+    // The optional integrations under test: advertised capabilities, scripted
+    // history, scripted background shell updates, and the kill endpoint's
+    // supported/unsupported answers.
+    DV_TERMINAL_LIFECYCLE: opts.terminalLifecycle ? "1" : "",
+    DV_LIST_CAPS: opts.listCaps ? JSON.stringify(opts.listCaps) : "",
+    DV_LIST_LIVE: opts.listLive ? "1" : "",
+    DV_LIST_SESSIONS: opts.listSessions ? JSON.stringify(opts.listSessions) : "",
+    DV_LIST_EXTRA: opts.listExtra ? JSON.stringify(opts.listExtra) : "",
+    DV_LIST_DELAY: String(opts.listDelay || 0),
+    DV_HISTORY: opts.history !== undefined ? JSON.stringify(opts.history) : "",
+    DV_BG_UPDATES: opts.bgUpdates ? JSON.stringify(opts.bgUpdates) : "",
+    DV_KILL_UNSUPPORTED: opts.killUnsupported ? "1" : "",
+    DV_KILL_DELAY: String(opts.killDelay || 0),
+    DV_KILL_FAIL_ONCE: opts.killFailOnce ? "1" : ""
   };
   globalThis.__dvConfig = Object.assign(
     {
@@ -400,7 +471,8 @@ function createChat(opts = {}) {
   const posted = [];
   const logs = [];
   const state = memento(opts.state);
-  const store = new SessionStore(state);
+  const store = new SessionStore(state, () =>
+    !!vscode.workspace.workspaceFolders?.length || !!vscode.workspace.workspaceFile);
   const changes = new ChangeTracker();
   const context = {
     extensionUri: vscode.Uri.file(ROOT),
@@ -526,6 +598,105 @@ function createChat(opts = {}) {
   return api;
 }
 
+/**
+ * Build a whole ChatManager: the sidebar surface plus any editor panels it
+ * opens, sharing one SessionStore and ChangeTracker the way the extension does.
+ * Used for the routing tests, where which surface a command lands on is the
+ * thing under test. No agent is needed unless a test starts a chat: the fake
+ * agent path is the same `devin.env` config createChat installs.
+ */
+function createManager(opts = {}) {
+  const { ChatManager, SessionStore, ChangeTracker } = load();
+  const vscode = globalThis.__dvVscode;
+  agentPath = agentPath || writeAgent();
+
+  const dir = opts.cwd || fs.mkdtempSync(path.join(TMP, "ws-"));
+  const storage = opts.storage || fs.mkdtempSync(path.join(TMP, "store-"));
+  const agentLog = path.join(storage, `agent-requests.${++harnessSeq}.jsonl`);
+  globalThis.__dvFolders = [{ name: path.basename(dir), uri: vscode.Uri.file(dir), index: 0 }];
+  globalThis.__dvConfig = {
+    cliPath: agentPath,
+    env: { DV_LOG: agentLog },
+    "implicitContext.enabled": false,
+    useIntegratedTerminal: false,
+    idleSessionKeepAliveMinutes: 0
+  };
+
+  const state = memento(opts.state);
+  const store = new SessionStore(state, () =>
+    !!vscode.workspace.workspaceFolders?.length || !!vscode.workspace.workspaceFile);
+  const changes = new ChangeTracker();
+  const context = {
+    extensionUri: vscode.Uri.file(ROOT),
+    storageUri: vscode.Uri.file(storage),
+    globalStorageUri: vscode.Uri.file(storage),
+    subscriptions: [],
+    workspaceState: state,
+    globalState: state
+  };
+  const output = { appendLine: () => {}, dispose() {} };
+  const manager = new ChatManager(context, store, changes, undefined, output);
+
+  const api = {
+    manager,
+    store,
+    state,
+    changes,
+    cwd: dir,
+    storage,
+    // Resolve the sidebar view the way VS Code does, and keep its webview so a
+    // test can post into it and read what it was told.
+    resolveSidebar() {
+      const posted = [];
+      const view = {
+        webview: webviewDouble(posted),
+        visible: true,
+        onDidChangeVisibility: () => ({ dispose() {} })
+      };
+      manager.resolveWebviewView(view);
+      api.sidebarWebview = view.webview;
+      api.sidebarPosted = posted;
+      return api;
+    },
+    sidebarController: () => manager.sidebar,
+    // The controllers behind the manager's editor panels, in open order.
+    panelControllers: () => [...manager.panels.keys()],
+    // A panel controller's page, for posting into and reading what it was told.
+    panelWebview: (controller) => {
+      for (const [c, panel] of manager.panels) {
+        if (c === controller) {
+          return panel.webview;
+        }
+      }
+      return undefined;
+    },
+    // What a panel's page was told, oldest first.
+    panelPosted: (controller) => {
+      for (const [c, panel] of manager.panels) {
+        if (c === controller) {
+          return panel.posted;
+        }
+      }
+      return [];
+    },
+    // Deliver a webview message to a specific surface's page.
+    sendTo(webview, msg) { void webview._handler(msg); return api; },
+    // Announce the page is listening, which unblocks whenReady.
+    async ready(webview) {
+      await webview._handler({ type: "ready" });
+      return api;
+    },
+    async dispose() {
+      built.delete(api);
+      vscode.window.answer = undefined;
+      await manager.shutdown().catch(() => {});
+      changes.dispose?.();
+    }
+  };
+  built.add(api);
+  return api;
+}
+
 // Every harness built in this run. A test that fails throws before its own dispose,
 // and an agent left alive keeps the test runner's event loop alive with it, which
 // shows up as the whole suite hanging with no output rather than as a failure. So the
@@ -538,4 +709,4 @@ async function cleanup() {
   fs.rmSync(TMP, { recursive: true, force: true });
 }
 
-module.exports = { createChat, cleanup };
+module.exports = { createChat, createManager, cleanup };

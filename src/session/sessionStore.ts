@@ -1,5 +1,15 @@
+import * as path from "path";
 import * as vscode from "vscode";
 import type { DevinSession } from "./sessionList";
+
+// One submitted prompt in the journal, owned by the session that sent it. The
+// journal only ever holds what this extension itself submitted: the CLI's own
+// input history is global across directories and names no owner, so it is never
+// a source.
+interface StoredPrompt {
+  sessionId: string;
+  text: string;
+}
 
 // Tracks which Devin session ids belong to the current VS Code window.
 // `workspaceState` is automatically scoped per `.code-workspace` file and per
@@ -15,13 +25,22 @@ export class SessionStore {
   private static readonly INTERRUPTED_KEY = "devin.interrupted.v1";
   private static readonly DRAFTS_KEY = "devin.drafts.v1";
   private static readonly SESSION_LIST_KEY = "devin.sessionList.v1";
+  private static readonly PROMPTS_KEY = "devin.promptHistory.v1";
+  // Shared with the folderless picker, which applies the same ceiling to the
+  // runtime log it reads instead of this journal.
+  static readonly MAX_PROMPTS = 50;
   // The composer in the sessions list is a "new chat" box with no session of its
   // own, so its unsent text is stored under this key.
   private static readonly NEW_DRAFT = "__new__";
   // A draft is a prompt someone is writing, not a place to keep a pasted file.
-  private static readonly MAX_DRAFT = 100000;
+  // The journal uses the same ceiling: an oversized entry is skipped, never
+  // truncated into something reusable.
+  static readonly MAX_DRAFT = 100000;
 
-  constructor(private readonly state: vscode.Memento) {}
+  constructor(
+    private readonly state: vscode.Memento,
+    private readonly promptHistoryEnabled: () => boolean = () => true
+  ) {}
 
   // Sessions whose turn was still in flight when the window reloaded or the
   // extension shut down. A `devin acp` agent cannot outlive its extension host
@@ -213,6 +232,7 @@ export class SessionStore {
     this.pruneCwds(capped);
     this.pruneDrafts(capped);
     this.pruneSessionList(capped);
+    this.prunePromptHistory(capped);
     return evicted;
   }
 
@@ -258,10 +278,97 @@ export class SessionStore {
     }
   }
 
+  // Records stay newest first. Directory lookup follows the session's saved cwd.
+  rememberPrompt(sessionId: string, text: string): void {
+    if (!this.promptHistoryEnabled() || !this.has(sessionId) || !text.trim() || text.length > SessionStore.MAX_DRAFT) {
+      return;
+    }
+    const cwd = this.cwds()[sessionId];
+    if (!cwd || !path.isAbsolute(cwd)) {
+      return;
+    }
+    const records = this.promptRecords().filter(
+      (record) => !(record.sessionId === sessionId && record.text === text)
+    );
+    records.unshift({ sessionId, text });
+    void this.state.update(SessionStore.PROMPTS_KEY, records.slice(0, SessionStore.MAX_PROMPTS));
+  }
+
+  // Complete prompts submitted in `cwd`, most recent first, deduplicated by
+  // exact text. Only sessions still tracked here and still saved to this exact
+  // directory contribute: a sibling folder, a parent or child directory, and a
+  // pruned session are all different owners.
+  promptHistory(cwd: string): string[] {
+    if (!cwd || !path.isAbsolute(cwd)) {
+      return [];
+    }
+    const wanted = SessionStore.dirKey(cwd);
+    const cwds = this.cwds();
+    const tracked = new Set(this.ids());
+    const texts: string[] = [];
+    const seen = new Set<string>();
+    for (const record of this.promptRecords()) {
+      if (texts.length >= SessionStore.MAX_PROMPTS) {
+        break;
+      }
+      if (!tracked.has(record.sessionId)) {
+        continue;
+      }
+      const sessionCwd = cwds[record.sessionId];
+      if (!sessionCwd || !path.isAbsolute(sessionCwd) || SessionStore.dirKey(sessionCwd) !== wanted) {
+        continue;
+      }
+      if (seen.has(record.text)) {
+        continue;
+      }
+      seen.add(record.text);
+      texts.push(record.text);
+    }
+    return texts;
+  }
+
+  private prunePromptHistory(ids: string[]): void {
+    const keep = new Set(ids);
+    const records = this.promptRecords();
+    const next = records.filter((record) => keep.has(record.sessionId));
+    if (next.length !== records.length) {
+      void this.state.update(SessionStore.PROMPTS_KEY, next);
+    }
+  }
+
+  // The one place cached journal entries are trusted: anything that is not a
+  // well formed record, or breaks the same rules a fresh write obeys, is
+  // dropped here rather than at every reader.
+  private promptRecords(): StoredPrompt[] {
+    if (!this.promptHistoryEnabled()) {
+      return [];
+    }
+    const raw = this.state.get<unknown>(SessionStore.PROMPTS_KEY, []);
+    if (!Array.isArray(raw)) {
+      return [];
+    }
+    return raw.filter((entry): entry is StoredPrompt => {
+      const record = entry as StoredPrompt | null;
+      return !!record
+        && typeof record.sessionId === "string" && !!record.sessionId
+        && typeof record.text === "string" && !!record.text.trim()
+        && record.text.length <= SessionStore.MAX_DRAFT;
+    });
+  }
+
+  // Normalized absolute form for directory comparison: `path.resolve` answers
+  // the same for `a/../b` and `b`, and only Windows folds case. No prefix
+  // matching anywhere, because `/a` and `/a2` and `/a/sub` are different owners.
+  private static dirKey(dir: string): string {
+    const resolved = path.resolve(dir);
+    return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+  }
+
   remove(id: string): void {
     const ids = this.ids().filter((x) => x !== id);
     void this.state.update(SessionStore.IDS_KEY, ids);
     this.pruneSessionList(ids);
+    this.prunePromptHistory(ids);
     const pins = this.pinnedTitles();
     if (id in pins) {
       delete pins[id];

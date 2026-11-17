@@ -556,3 +556,19 @@ test("the pending rows carry the native pending styling contract", () => {
   assert.ok(MAIN_CSS.slice(mediaAt, reduced).includes("prefers-reduced-motion"),
     "the grip transition override lives inside the reduced motion block");
 });
+
+test("the composer has no permanent prompt history button", async () => {
+  // History is on demand through the Devin: Show Prompt History command, so the
+  // composer toolbar keeps only the context action it always had.
+  const h = mount();
+  try {
+    await h.settle(10);
+    assert.strictEqual(h.document.getElementById("prompt-history"), null,
+      "no permanent history control sits in the composer toolbar");
+    const attach = h.document.getElementById("attach");
+    assert.ok(attach, "Add Context is still there");
+    assert.strictEqual(h.errors().length, 0);
+  } finally {
+    await h.window.close();
+  }
+});

@@ -17,3 +17,4 @@ tsconfig.json
 # scratch file, and one shipped in the package for four releases before anyone
 # noticed. Only the icon is a real asset.
 /*.png
+.worktree-ports.json

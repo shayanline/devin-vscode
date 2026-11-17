@@ -96,6 +96,24 @@ import { createWorkingMark } from "./workingMark.js";
   const views = new Map();
   const dirtyViews = new Set();
   let curSessionId = null;
+  // Ephemeral authorization for background shell stop controls, keyed by
+  // toolCallId and valid only for the session the host says it belongs to. It
+  // is never rebuilt from transcript data: only the host's live publishes fill
+  // it, so a replayed tool row can never grow a stop button.
+  let bgShells = new Map();
+  let bgShellsSession = null;
+  function resetBgShells() { bgShells = new Map(); bgShellsSession = null; }
+  // Each mounted session list registers here so a search answer reaches only
+  // the controller that asked for it.
+  const sessionSearchHandlers = new Set();
+  // Search request ids must be unique across every mounted list, not just per
+  // controller, or two lists' answers would be indistinguishable.
+  let sessionSearchSeq = 0;
+  // The open prompt history request, if any: what the picker was opened for,
+  // which session it belongs to, and the draft it must not overwrite.
+  let historyRequest = null;
+  let historyOpening = false;
+  let historySeq = 0;
   let listCtrl = null; // full sessions-list controller
   let menuCtrl = null; // title-dropdown controller
   let panelCtrl = null; // embedded side-panel controller (feature 2)
@@ -2639,6 +2657,7 @@ import { createWorkingMark } from "./workingMark.js";
   function renderElsewhere(m) {
     snapshotCurrent();
     curSessionId = null;
+    resetBgShells();
     pendingModelChange = 0; pendingPrefIntent = null;
     setBody("thread");
     stopThreadLoading();
@@ -2961,6 +2980,20 @@ import { createWorkingMark } from "./workingMark.js";
     el.permissionTray.innerHTML = "";
   }
   el.attach.addEventListener("click", () => vscode.postMessage({ type: "addContext" }));
+
+  // The prompt history picker borrows the composer: whatever is in it now is
+  // remembered so a late answer can tell "still the same draft" from "the user
+  // kept typing". The host owns the picker and the journal read, reached
+  // through the Devin: Show Prompt History command.
+  function requestPromptHistory() {
+    if (historyOpening || editingTurn || editingQueuedId) return;
+    historyOpening = true;
+    updateComposerButtons();
+    const requestId = "ph" + (++historySeq);
+    const sessionId = curSessionId || null;
+    historyRequest = { requestId, sessionId, draft: el.input.value };
+    vscode.postMessage({ type: "promptHistory", requestId, sessionId });
+  }
 
   // While an IME is composing, the keys belong to the IME: Enter commits the
   // candidate and the arrows walk its list. Acting on them here sent the reading
@@ -3939,7 +3972,7 @@ import { createWorkingMark } from "./workingMark.js";
   // The surface comes from the page itself as well as from the host, so the chrome
   // is right from the first paint instead of being drawn as a side panel and then
   // corrected once a session loads.
-  let caps = { revert: false, subagentControl: false, steering: false, editRequests: "inline", checkpoints: true, showFileChanges: true, confirmRemoval: true, verbose: true, progressBorder: true, contextUsage: true, inlineReferencesStyle: "box", thinkingStyle: "fixedScrolling", streamAnim: "rise", panelSide: "right", sendWhileWorking: "steer", surface: document.body.dataset.surface === "editor" ? "editor" : "view" };
+  let caps = { revert: false, subagentControl: false, steering: false, editRequests: "inline", checkpoints: true, showFileChanges: true, confirmRemoval: true, verbose: true, progressBorder: true, contextUsage: true, inlineReferencesStyle: "box", thinkingStyle: "fixedScrolling", streamAnim: "rise", panelSide: "right", sendWhileWorking: "steer", surface: document.body.dataset.surface === "editor" ? "editor" : "view", sessionList: { contentSearch: false, orderBy: [], sortDirection: false } };
   // An editor tab holds exactly one chat: no session list, no back button and no
   // terminate control (closing the tab is how a chat in a tab is stopped).
   // Browsing sessions is the side panel's job.
@@ -6280,7 +6313,7 @@ import { createWorkingMark } from "./workingMark.js";
       } else {
         group = placeInRun(node, m.id);
       }
-      entry = { node, kindIcon, label, statEl, bodyEl, actions, data: {}, collapse: c, group, sub, railIcon };
+      entry = { node, kindIcon, label, statEl, bodyEl, actions, data: {}, collapse: c, group, sub, railIcon, toolCallId: m.id };
       toolEls.set(m.id, entry);
     }
     // Merge incrementally: updates may carry only some fields.
@@ -6293,6 +6326,9 @@ import { createWorkingMark } from "./workingMark.js";
     // so taking it at face value would erase the command the row is named after.
     if (m.rawInput !== undefined && m.rawInput !== null) d.rawInput = m.rawInput;
     if (m.terminalId) d.terminalId = m.terminalId;
+    // A stopped background shell is history, not state: once set it stays, so
+    // a later agent update cannot resurrect a spinner on a dead command.
+    if (m.stopped) d.stopped = true;
     if (Array.isArray(m.content) && m.content.length) d.content = m.content;
     if (Array.isArray(m.locations) && m.locations.length) d.locations = m.locations;
 
@@ -6366,7 +6402,7 @@ import { createWorkingMark } from "./workingMark.js";
         const verb = document.createElement("span");
         verb.className = "tool-verb";
         const running = d.status === "in_progress" || d.status === "pending";
-        verb.textContent = running ? "Running" : "Ran";
+        verb.textContent = d.stopped ? "Stopped" : running ? "Running" : "Ran";
         const code = document.createElement("code");
         // Plain text, not highlighted: on the row the command is a label, and VS
         // Code only colours it in the block you get by expanding it.
@@ -6824,6 +6860,25 @@ import { createWorkingMark } from "./workingMark.js";
     const id = entry.data.terminalId;
     if (!bar) return;
     bar.innerHTML = "";
+    // A background shell the agent reported gets a stop control of its own,
+    // authorized only by the host's live registry for the session on screen:
+    // a replayed or foreign toolCallId finds nothing here and gets no button.
+    const shell = bgShellsSession === curSessionId && entry.toolCallId ? bgShells.get(entry.toolCallId) : undefined;
+    if (shell) {
+      if (shell.error) {
+        const err = document.createElement("span");
+        err.className = "tool-bg-error";
+        err.textContent = shell.error;
+        err.title = shell.error;
+        bar.appendChild(err);
+      }
+      const stopBtn = iconBtn("codicon-debug-stop", shell.stopping ? "Stopping\u2026" : "Stop Background Command", (e) => {
+        e.stopPropagation();
+        vscode.postMessage({ type: "stopBackgroundShell", sessionId: curSessionId, toolCallId: entry.toolCallId });
+      });
+      stopBtn.disabled = !!shell.stopping;
+      bar.appendChild(stopBtn);
+    }
     if (!id) return;
     const state = terminalCache.get(id);
     // Nothing said about it yet means it has only just started.
@@ -8225,15 +8280,23 @@ import { createWorkingMark } from "./workingMark.js";
     return 2;
   }
 
-  function sortSessions(sessions, sort) {
+  function sortSessions(sessions, sort, dir) {
     const at = (s) => s.last_activity_at || 0;
+    // Sessions the CLI listed carry no created stamp, so creation order falls
+    // back to activity rather than stacking them all at zero.
+    const created = (s) => s.created_at || s.last_activity_at || 0;
+    // Direction only exists for the sorts that have a meaningful one: Name and
+    // State keep the local order they always had.
+    const sign = dir === "asc" ? -1 : 1;
     const out = sessions.slice();
     if (sort === "state") {
       out.sort((a, b) => sessionStateRank(a) - sessionStateRank(b) || at(b) - at(a));
     } else if (sort === "name") {
       out.sort((a, b) => (a.title || a.short_id || a.id || "").localeCompare(b.title || b.short_id || b.id || ""));
+    } else if (sort === "created") {
+      out.sort((a, b) => (created(b) - created(a)) * sign);
     } else {
-      out.sort((a, b) => at(b) - at(a));
+      out.sort((a, b) => (at(b) - at(a)) * sign);
     }
     return out;
   }
@@ -8347,9 +8410,16 @@ import { createWorkingMark } from "./workingMark.js";
   function mountSessionList(container, opts) {
     opts = opts || {};
     container.innerHTML = "";
-    const state = { q: "", status: new Set(), grouping: "workspace", sort: "activity" };
+    const state = { q: "", status: new Set(), grouping: "workspace", sort: "activity", dir: "desc" };
     let searchFloater = null;
     let filterFloater = null;
+    // Server side search state, local to this controller: the full list, the
+    // docked panel and the title switcher each keep their own query and must
+    // not overwrite each other's results.
+    let remote = null; // last accepted sessionSearchResults payload
+    let pendingId = null; // requestId of the latest query this list issued
+    let queryTimer = null;
+    let disposed = false;
 
     // Optional in-list toolbar, used by the side panel and the title switcher.
     // The full-screen list is driven from the header instead (controls omitted).
@@ -8393,20 +8463,155 @@ import { createWorkingMark } from "./workingMark.js";
 
     function renderBody() {
       bodyEl.innerHTML = "";
-      if (!lastSessions.length) {
-        bodyEl.innerHTML = '<div class="sessions-empty"><i class="codicon codicon-comment-discussion"></i><div>No chats yet.</div></div>';
+      const q = (state.q || "").trim();
+      // A remote answer only ever shows ids the authoritative list still
+      // knows: a session pruned while the query was in flight cannot linger
+      // as a match.
+      const knownIds = new Set(lastSessions.map((s) => s.id));
+      const remoteRows = remote && Array.isArray(remote.sessions)
+        ? remote.sessions.filter((s) => knownIds.has(s.id))
+        : null;
+      // With no text query a server sorted answer still orders the list, but
+      // only for the sorts the agent actually honoured.
+      const sortOnly = !q && !!remote && remote.serverSorted && remoteRows !== null
+        && (state.sort === "activity" || state.sort === "created");
+      const useRemote = remoteRows !== null && (!!q || sortOnly);
+      let base = lastSessions;
+      let mergedExtras = false;
+      if (useRemote) {
+        if (sortOnly) {
+          // The agent only lists persisted sessions, so live ones it has not
+          // caught up with yet are merged back in before ordering.
+          const inRemote = new Set(remoteRows.map((s) => s.id));
+          const extra = lastSessions.filter((s) => !inRemote.has(s.id));
+          mergedExtras = extra.length > 0;
+          base = mergedExtras ? remoteRows.concat(extra) : remoteRows;
+        } else {
+          base = remoteRows;
+        }
+      }
+      const note = (text, role) => {
+        const d = document.createElement("div");
+        d.className = "sessions-empty-sm";
+        if (role) d.setAttribute("role", role);
+        d.textContent = text;
+        return d;
+      };
+      if (!base.length) {
+        // "No chats yet" is reserved for an empty authoritative list with no
+        // search running: a content search with no hits says so instead.
+        if (!q && !lastSessions.length) {
+          bodyEl.innerHTML = '<div class="sessions-empty"><i class="codicon codicon-comment-discussion"></i><div>No chats yet.</div></div>';
+        } else {
+          bodyEl.appendChild(note("No matching sessions"));
+        }
         return;
       }
-      const filtered = sortSessions(filterSessions(lastSessions, state.q, state.status), state.sort);
-      if (!filtered.length) { bodyEl.innerHTML = '<div class="sessions-empty-sm">No matching sessions</div>'; return; }
+      if (queryTimer || pendingId) {
+        bodyEl.appendChild(note("Searching sessions...", "status"));
+      }
+      // A fallback answer (no live agent, unsupported content search, or a
+      // failed query) still filters by title and id locally, and says so
+      // beside the rows rather than pretending to be a content search.
+      if (q && remote && !remote.contentSearch) {
+        bodyEl.appendChild(note(remote.error
+          ? "Could not search message content. Showing title and ID matches."
+          : "Content search is unavailable. Showing title and ID matches."));
+      }
+      // Content matches are not title matches, so a real content search skips
+      // the text filter. Everything else, and every fallback, filters by title
+      // and id locally, exactly as before.
+      const textQ = useRemote && remote.contentSearch ? "" : state.q;
+      let rows = filterSessions(base, textQ, state.status);
+      // Only a server sorted activity/creation answer keeps the server's
+      // order. Name, state, unsupported sorts, and a merged sort view order
+      // locally (the merge's stable sort keeps server order for ties).
+      const serverSort = useRemote && remote.serverSorted && (state.sort === "activity" || state.sort === "created");
+      if (!serverSort || mergedExtras) rows = sortSessions(rows, state.sort, state.dir);
+      if (!rows.length) {
+        bodyEl.appendChild(note("No matching sessions"));
+        return;
+      }
       if (state.grouping === "none") {
-        filtered.forEach((s) => bodyEl.appendChild(sessionRow(s, lastActiveId)));
+        rows.forEach((s) => bodyEl.appendChild(sessionRow(s, lastActiveId)));
       } else if (state.grouping === "date") {
-        renderDateGroups(bodyEl, filtered, lastActiveId);
+        renderDateGroups(bodyEl, rows, lastActiveId);
       } else {
-        renderSessionGroups(bodyEl, filtered, lastActiveId, lastFolders);
+        renderSessionGroups(bodyEl, rows, lastActiveId, lastFolders);
       }
     }
+
+    // Debounced: each keystroke (or sort change) restarts the wait, and only
+    // the newest answer is accepted. Every change invalidates the outstanding
+    // request and its answer immediately, so a reply for the previous query
+    // can never paint under the new one. Clearing the text restores the
+    // cached list at once, though a supported sort may still re-order it when
+    // the empty-query answer lands.
+    function onQueryChanged() {
+      if (queryTimer) { clearTimeout(queryTimer); queryTimer = null; }
+      pendingId = null;
+      remote = null;
+      const wantsQuery = () => {
+        if ((state.q || "").trim()) return true;
+        // An empty box still asks the server when the chosen sort is one it
+        // advertised and can order by. Anything less capable keeps the local
+        // behaviour it always had.
+        const orderBy = state.sort === "created" ? "created_at" : "updated_at";
+        const sl = caps.sessionList || {};
+        return (state.sort === "activity" || state.sort === "created")
+          && (sl.orderBy || []).includes(orderBy) && !!sl.sortDirection;
+      };
+      if (!wantsQuery()) {
+        renderBody();
+        return;
+      }
+      queryTimer = setTimeout(() => {
+        queryTimer = null;
+        if (disposed || !wantsQuery()) { renderBody(); return; }
+        const requestId = "sq" + (++sessionSearchSeq);
+        pendingId = requestId;
+        vscode.postMessage({
+          type: "querySessions",
+          requestId,
+          query: (state.q || "").trim(),
+          orderBy: state.sort === "created" ? "created_at" : "updated_at",
+          sortDirection: state.dir === "asc" ? "asc" : "desc"
+        });
+        renderBody();
+      }, 250);
+      renderBody();
+    }
+
+    function onSearchResults(m) {
+      // Only the latest request this controller issued may land. Anything
+      // older was superseded before it arrived, and a disposed list ignores
+      // everything.
+      if (disposed || !pendingId || m.requestId !== pendingId) return;
+      pendingId = null;
+      if (m.capabilities) {
+        caps.sessionList = {
+          contentSearch: !!m.capabilities.contentSearch,
+          orderBy: Array.isArray(m.capabilities.orderBy) ? m.capabilities.orderBy.slice() : [],
+          sortDirection: !!m.capabilities.sortDirection
+        };
+        // Selections the agent can no longer serve fall back to the defaults
+        // rather than staying active behind menu options that are gone.
+        if (!(caps.sessionList.orderBy || []).includes("created_at") && state.sort === "created") {
+          state.sort = "activity";
+        }
+        if (!caps.sessionList.sortDirection) {
+          state.dir = "desc";
+        }
+      }
+      remote = {
+        sessions: Array.isArray(m.sessions) ? m.sessions : null,
+        contentSearch: !!m.contentSearch,
+        serverSorted: !!m.serverSorted,
+        error: m.error
+      };
+      renderBody();
+    }
+    sessionSearchHandlers.add(onSearchResults);
 
     function toggleSearch(anchor) {
       if (searchFloater) { searchFloater.close(); return; }
@@ -8415,7 +8620,7 @@ import { createWorkingMark } from "./workingMark.js";
       inp.type = "text";
       inp.placeholder = "Search sessions\u2026";
       inp.value = state.q;
-      inp.addEventListener("input", () => { state.q = inp.value; renderBody(); });
+      inp.addEventListener("input", () => { state.q = inp.value; onQueryChanged(); });
       inp.addEventListener("keydown", (e) => { e.stopPropagation(); if (e.key === "Escape" && searchFloater) searchFloater.close(); });
       searchFloater = makeFloater(anchor, inp, "right", () => { searchFloater = null; });
       inp.focus();
@@ -8476,7 +8681,17 @@ import { createWorkingMark } from "./workingMark.js";
         };
         multi("Status", [["all", "All"], ["running", "Running"], ["idle", "Idle"], ["terminated", "Terminated"]]);
         sep();
-        group("Sort by", [["activity", "Last activity"], ["state", "State"], ["name", "Name"]], () => state.sort, (v) => { state.sort = v; });
+        // Creation order is only offered when the agent actually advertises
+        // it, and direction only when the agent honours a sort direction.
+        const sortOptions = [["activity", "Last activity"], ["state", "State"], ["name", "Name"]];
+        if ((caps.sessionList.orderBy || []).includes("created_at")) {
+          sortOptions.splice(1, 0, ["created", "Created"]);
+        }
+        group("Sort by", sortOptions, () => state.sort, (v) => { state.sort = v; onQueryChanged(); });
+        if (caps.sessionList.sortDirection && (state.sort === "activity" || state.sort === "created")) {
+          sep();
+          group("Sort direction", [["desc", "Descending"], ["asc", "Ascending"]], () => state.dir, (v) => { state.dir = v; onQueryChanged(); });
+        }
         sep();
         group("Group by", [["workspace", "Workspace"], ["date", "Date"], ["none", "None"]], () => state.grouping, (v) => { state.grouping = v; });
       };
@@ -8488,10 +8703,20 @@ import { createWorkingMark } from "./workingMark.js";
       refresh: renderBody,
       toggleSearch,
       toggleFilter,
-      setQuery: (q) => { state.q = q; renderBody(); },
+      setQuery: (q) => { state.q = q; onQueryChanged(); },
       setStatus: (s) => { state.status = s instanceof Set ? s : new Set(s && s !== "all" ? [s] : []); renderBody(); },
-      setSort: (s) => { state.sort = s; renderBody(); },
-      setGrouping: (g) => { state.grouping = g; renderBody(); }
+      setSort: (s) => { state.sort = s; onQueryChanged(); },
+      setDir: (d) => { state.dir = d === "asc" ? "asc" : "desc"; onQueryChanged(); },
+      setGrouping: (g) => { state.grouping = g; renderBody(); },
+      // Timers and the answer handler must not outlive the list they serve:
+      // a disposed controller can never be handed a response or fire a query.
+      dispose: () => {
+        disposed = true;
+        sessionSearchHandlers.delete(onSearchResults);
+        if (queryTimer) { clearTimeout(queryTimer); queryTimer = null; }
+        if (searchFloater) searchFloater.close();
+        if (filterFloater) filterFloater.close();
+      }
     };
     renderBody();
     return api;
@@ -8514,6 +8739,7 @@ import { createWorkingMark } from "./workingMark.js";
   function closeTitleMenu() {
     const m = document.getElementById("title-menu");
     if (m) m.remove();
+    if (menuCtrl) menuCtrl.dispose();
     menuCtrl = null;
     reportListVisible();
   }
@@ -8730,6 +8956,7 @@ import { createWorkingMark } from "./workingMark.js";
     // the snapshot had just thrown away, which left the chat blank with no reload.
     const haveView = views.has(id) && !dirtyViews.has(id);
     curSessionId = id;
+    resetBgShells();
     if (running && views.has(id)) {
       // A turn is in flight. Reloading its transcript over the live channel
       // aborts the prompt ("channel closed"), so re-attach to the running
@@ -9531,6 +9758,7 @@ import { createWorkingMark } from "./workingMark.js";
           // session is not short-circuited and can restore + wake seamlessly.
           snapshotCurrent();
           curSessionId = null;
+          resetBgShells();
           pendingModelChange = 0; pendingPrefIntent = null;
           setBody("list");
         } else {
@@ -9637,7 +9865,7 @@ import { createWorkingMark } from "./workingMark.js";
         if (m.title) { currentTitle = m.title; el.chatTitle.textContent = currentTitle; }
         // The thread now shows this session; retire any retained snapshot for it.
         if (m.sessionId && curSessionId !== m.sessionId) { cancelPreviewWaiters(); if (curSessionId) { pendingModelChange = 0; pendingPrefIntent = null; reportedThoughtLevels = {}; } clearModelActivity(); }
-        if (m.sessionId) { curSessionId = m.sessionId; views.delete(m.sessionId); dirtyViews.delete(m.sessionId); }
+        if (m.sessionId) { curSessionId = m.sessionId; views.delete(m.sessionId); dirtyViews.delete(m.sessionId); resetBgShells(); }
         // Remembered so an editor tab restored after a window reload comes back to
         // the chat it was holding instead of an empty tab.
         vscode.setState({ ...(vscode.getState() || {}), sessionId: curSessionId, pinnedModels: [...pinnedModelIds] });
@@ -9662,6 +9890,7 @@ import { createWorkingMark } from "./workingMark.js";
         if (m.reset) {
           currentTitle = "Chat";
           curSessionId = null;
+          resetBgShells();
           // Nothing has been said in this chat yet, so there is nothing for Up to
           // recall and nothing for Retry to resend. Keeping the last chat's message
           // meant a brand new chat offered it, and Retry would have sent it here.
@@ -9737,9 +9966,61 @@ import { createWorkingMark } from "./workingMark.js";
         if (listShown) showLoadingBar();
         if (!lastSessions.length) {
           el.sessionsList.innerHTML = "";
+          if (listCtrl) listCtrl.dispose();
           listCtrl = null;
         }
         break;
+      case "sessionSearchResults":
+        // Effective session/list support travels with every answer because a
+        // compatibility fallback can switch it off mid connection. Each list
+        // controller applies it only when it accepts the answer as its own,
+        // so a stale reply cannot change the capability menus.
+        sessionSearchHandlers.forEach((fn) => fn(m));
+        break;
+      case "showPromptHistory":
+        requestPromptHistory();
+        break;
+      case "promptHistorySelected": {
+        const req = historyRequest;
+        // The request id decides ownership before anything is released: an
+        // unrelated or stale completion must not unlock a newer picker.
+        if (!req || m.requestId !== req.requestId) break;
+        historyOpening = false;
+        historyRequest = null;
+        updateComposerButtons();
+        // The picker may have been open while the user typed, switched chats,
+        // or started editing a message: only a still matching request for the
+        // session still on screen, over an untouched draft, gets the text.
+        if (m.sessionId !== req.sessionId || curSessionId !== req.sessionId) break;
+        if (m.error) { announce(m.error); break; }
+        if (el.input.value !== req.draft) break;
+        if (editingTurn || editingQueuedId) break;
+        if (typeof m.text === "string" && m.text) {
+          el.input.value = m.text;
+          autosize();
+          updateSendState();
+          saveDraft();
+          el.input.focus();
+        }
+        break;
+      }
+      case "backgroundShells": {
+        const sid = typeof m.sessionId === "string" ? m.sessionId : null;
+        // A publish for another session is stale transport, not an
+        // instruction to drop this session's authorizations.
+        if (sid !== curSessionId) break;
+        bgShellsSession = sid;
+        bgShells = new Map();
+        for (const it of m.items || []) {
+          if (it && typeof it.toolCallId === "string") {
+            bgShells.set(it.toolCallId, { stopping: !!it.stopping, error: it.error });
+          }
+        }
+        // Stop controls live in each tool row's action bar, so every row
+        // re-reads the authorization rather than the rows being rebuilt.
+        toolEls.forEach((entry) => renderTerminalActions(entry));
+        break;
+      }
       case "userMessage":
         if (currentTitle === "Chat") { currentTitle = m.text.slice(0, 40); el.chatTitle.textContent = currentTitle; }
         addUserMessage(m.text, m.attachments);
@@ -9848,7 +10129,12 @@ import { createWorkingMark } from "./workingMark.js";
           thinkingStyle: m.thinkingStyle || caps.thinkingStyle,
           streamAnim: m.streamAnim || caps.streamAnim,
           panelSide: m.panelSide || caps.panelSide,
-          surface: m.surface || caps.surface
+          surface: m.surface || caps.surface,
+          sessionList: m.sessionList ? {
+            contentSearch: !!m.sessionList.contentSearch,
+            orderBy: Array.isArray(m.sessionList.orderBy) ? m.sessionList.orderBy.slice() : [],
+            sortDirection: !!m.sessionList.sortDirection
+          } : caps.sessionList
         });
         applyCapPrefs();
         // A session switch can take steering away, so an open menu rebuilt

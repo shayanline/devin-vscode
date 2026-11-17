@@ -23,6 +23,8 @@ import {
   RevertStep,
   RevertStepsUpdate,
   headOf,
+  SessionListCapabilities,
+  SessionListQuery,
   SessionUpdateNotification,
   SubagentCompleted,
   SubagentStarted,
@@ -34,7 +36,7 @@ import { diagnosticItems } from "../acp/diagnostics";
 import { TerminalManager } from "../acp/terminal";
 import { VsCodeTerminalRunner } from "../acp/vscodeTerminal";
 import { userConfigDir } from "../settings/configService";
-import { DevinSession, ListResult, fromAcpRows, listSessions } from "../session/sessionList";
+import { DevinSession, ListResult, fromAcpRow, fromAcpRows, listSessions } from "../session/sessionList";
 import { SessionStore } from "../session/sessionStore";
 import { ChangeTracker } from "../diff/changeTracker";
 import { diffStat } from "../diff/diffStat";
@@ -159,6 +161,11 @@ interface Runtime {
   // model change cannot misattribute the old request's frames. Cleared when
   // the turn ends.
   modelActivity?: { model: string; role: "lead" | "sub" | null };
+  // Background shells this session's tools reported, keyed by toolCallId, with
+  // the agent-side shellId kept host only. Lives on the runtime rather than in
+  // the transcript because it authorizes an action: it is published to the webview
+  // as ephemeral state and must never be recorded for replay.
+  backgroundShells?: Map<string, { shellId: string; stopping?: boolean; error?: string }>;
 }
 
 // Cap on a backgrounded session's replay buffer (oldest dropped past this).
@@ -726,6 +733,10 @@ export class ChatController implements AcpHost {
   markClosed(): void {
     this.webviewGone = true;
     this.closed = true;
+    this.setFocused(false);
+    if (ChatController.lastFocused === this) {
+      ChatController.lastFocused = undefined;
+    }
     this.releaseReadyWaiters(new Error("Chat surface is closed"));
   }
 
@@ -778,6 +789,21 @@ export class ChatController implements AcpHost {
     }
   }
 
+  // The palette's on demand history picker: waits for the page, refuses a
+  // surface that has gone, then asks it to run the composer history flow.
+  async showPromptHistory(): Promise<void> {
+    try {
+      await this.whenReady();
+    } catch {
+      return;
+    }
+    if (this.closed) {
+      return;
+    }
+    this.focus();
+    this.post({ type: "showPromptHistory" });
+  }
+
   // Kill every live ACP process (and its terminals) so a window reload or
   // extension deactivate does not leave stranded `devin acp` agents (and their
   // MCP servers). This is item 6: stop all sessions on exit.
@@ -787,6 +813,9 @@ export class ChatController implements AcpHost {
   // will not fire once it has exited.
   dispose(): void {
     this.closed = true;
+    if (ChatController.lastFocused === this) {
+      ChatController.lastFocused = undefined;
+    }
     this.releaseReadyWaiters(new Error("Chat surface is closed"));
     this.stopLocalState();
     // A surface that has gone cannot be the one holding the keyboard.
@@ -816,6 +845,9 @@ export class ChatController implements AcpHost {
   // silently.
   async shutdown(): Promise<void> {
     this.closed = true;
+    if (ChatController.lastFocused === this) {
+      ChatController.lastFocused = undefined;
+    }
     this.releaseReadyWaiters(new Error("Chat surface is closed"));
     // Everything with a process, not just everything with a session id: a chat
     // still waiting on session/new is not in the pool yet, and it is exactly as
@@ -1098,6 +1130,9 @@ export class ChatController implements AcpHost {
       this.log(`[move] ${rt.id} arrived from ${transfer.from} idle: reloaded from the agent`);
     }
     if (this.runtimes.get(rt.id) === rt && this.activeId === rt.id) {
+      // The registry travelled with the runtime, so re-announce it for the
+      // surface that now owns the chat.
+      this.postBackgroundShells(rt);
       for (const terminal of rt.terminals.snapshots()) {
         this.postTerminal(rt.terminals, terminal.terminalId, terminal.output, terminal.exitStatus);
       }
@@ -1229,6 +1264,10 @@ export class ChatController implements AcpHost {
   // all for a chat in an editor tab), so the panel says so itself and this
   // publishes it as a context key for the `when` clauses to use.
   private static readonly focused = new Set<ChatController>();
+  // The chat that most recently held the keyboard, kept through the blur into
+  // the command palette so an on demand command still lands on the surface the
+  // user was in. Cleared when that surface closes.
+  private static lastFocused?: ChatController;
 
   // The chat the keyboard is in, for a shortcut that should act on the chat the
   // user is looking at rather than always on the side panel's.
@@ -1236,10 +1275,21 @@ export class ChatController implements AcpHost {
     return [...ChatController.focused][0];
   }
 
+  // The last chat surface to hold focus, for a command reached through the
+  // palette rather than a keybinding inside a chat. Closed surfaces are skipped.
+  static lastFocusedSurface(): ChatController | undefined {
+    const last = ChatController.lastFocused;
+    return last && !last.closed ? last : undefined;
+  }
+
   private setFocused(has: boolean): void {
+    if (this.closed) {
+      has = false;
+    }
     const before = ChatController.focused.size;
     if (has) {
       ChatController.focused.add(this);
+      ChatController.lastFocused = this;
     } else {
       ChatController.focused.delete(this);
     }
@@ -1685,6 +1735,15 @@ export class ChatController implements AcpHost {
           }
           return;
         }
+        case "querySessions":
+          await this.querySessionSearch(msg);
+          return;
+        case "promptHistory":
+          await this.answerPromptHistory(msg);
+          return;
+        case "stopBackgroundShell":
+          await this.stopBackgroundShell(msg);
+          return;
         case "muteMcpWarnings":
           this.muteMcpWarnings(String(msg.scope || "window"));
           return;
@@ -1894,6 +1953,13 @@ export class ChatController implements AcpHost {
 
   private folders(): string[] {
     return (vscode.workspace.workspaceFolders || []).map((f) => f.uri.fsPath);
+  }
+
+  // Whether this window has a workspace of its own to journal prompts into. A
+  // folderless window shares the global storage directory with every other
+  // folderless window, so its history stays in the runtime's own log instead.
+  private hasWorkspace(): boolean {
+    return this.folders().length > 0 || !!vscode.workspace.workspaceFile;
   }
 
   private cwd(): string {
@@ -2428,6 +2494,9 @@ export class ChatController implements AcpHost {
       if (this.activeId === id) {
         this.post({ type: "assistantEnd" });
         this.post({ type: "sessionReady", sessionId: id });
+        // A reload over a live runtime keeps its shell registry, so announce
+        // it again for the rebuilt transcript.
+        this.postBackgroundShells(rt);
       }
       this.ensureIdleTimer();
     } catch (err) {
@@ -2564,6 +2633,9 @@ export class ChatController implements AcpHost {
       model: rt.model,
       role: rt.modelActivity && rt.modelActivity.model === rt.model ? rt.modelActivity.role : null
     });
+    // Same for the background shell registry: ephemeral state that a surface
+    // switch or reload must re-announce, since it is never in the transcript.
+    this.postBackgroundShells(rt);
     // Replay anything the turn streamed while this session was in the background
     // (including a turn still running), so the restored transcript catches up
     // instead of showing the stale state from when the user left.
@@ -2795,6 +2867,281 @@ export class ChatController implements AcpHost {
       }
     }
     return undefined;
+  }
+
+  // What the session list surfaces can actually ask of `session/list` here: the
+  // agent that would answer, or nothing when there is none, so the filter menus
+  // know before offering a sort the agent cannot serve.
+  private sessionListCaps(): SessionListCapabilities {
+    const client = this.anyLiveClient() || this.surfaces?.sessionListClient(this);
+    return client?.sessionListCapabilities() || { contentSearch: false, orderBy: [], sortDirection: false };
+  }
+
+  // A filtered `session/list` for a list surface's search box. The answer is
+  // display data only: rows are filtered back to ids this window still tracks
+  // before they are mapped, and nothing here touches membership, the cache, or
+  // the store, so a search can never prune a session.
+  private async querySessionSearch(msg: any): Promise<void> {
+    const requestId = String(msg.requestId || "");
+    const query = String(msg.query || "").trim();
+    const orderBy: "updated_at" | "created_at" = msg.orderBy === "created_at" ? "created_at" : "updated_at";
+    const sortDirection: "asc" | "desc" = msg.sortDirection === "asc" ? "asc" : "desc";
+    const client = this.anyLiveClient() || this.surfaces?.sessionListClient(this);
+    const caps = () => client?.sessionListCapabilities() || { contentSearch: false, orderBy: [], sortDirection: false };
+    const respond = (fields: Record<string, unknown>) =>
+      this.post({ type: "sessionSearchResults", requestId, capabilities: caps(), ...fields });
+    if (!client) {
+      // No live agent to ask, and searching is not worth spawning one: the
+      // webview falls back to its cached list and title filter.
+      respond({ contentSearch: false, serverSorted: false });
+      return;
+    }
+    // Whether the query really went out as content is only known against what
+    // the agent advertised, and whether it still counts after the call is only
+    // known once a rejected `_meta` has had its say.
+    const wanted: SessionListQuery = { content: query || undefined, orderBy, sortDirection };
+    const sentContent = !!query && client.sessionListCapabilities().contentSearch;
+    const trackedAtStart = new Set(this.store.ids());
+    try {
+      const rows = await client.listSessions(SESSION_LIST_ACP_TIMEOUT_MS, wanted);
+      const trackedNow = new Set(this.store.ids());
+      const after = client.sessionListCapabilities();
+      respond({
+        sessions: rows
+          .filter((row) => row && trackedAtStart.has(row.sessionId) && trackedNow.has(row.sessionId))
+          .map(fromAcpRow),
+        contentSearch: sentContent && after.contentSearch,
+        serverSorted: after.orderBy.includes(orderBy) && after.sortDirection
+      });
+    } catch (err) {
+      // The query text never reaches the log: the failure is the protocol's,
+      // not the user's words.
+      const code = (err as { code?: number })?.code;
+      this.log(`[session-search-failed] ${typeof code === "number" ? `rpc ${code}` : "request failed"}`);
+      respond({ contentSearch: false, serverSorted: false, error: "Could not search sessions." });
+    }
+  }
+
+  // The composer's prompt history picker reads this window's own journal: only
+  // prompts this extension submitted, scoped to the exact directory the chat
+  // belongs to. The CLI's global input history names no owner, so it is never a
+  // source. Exactly one reply goes out per request.
+  private async answerPromptHistory(msg: any): Promise<void> {
+    const requestId = String(msg.requestId || "");
+    const sessionId = typeof msg.sessionId === "string" && msg.sessionId ? msg.sessionId : null;
+    const reply = (fields: Record<string, unknown>) =>
+      this.post({ type: "promptHistorySelected", requestId, sessionId, ...fields });
+    // A request that does not name the session (or the new chat box) on screen
+    // here is stale or foreign: it gets an empty answer and never opens a picker.
+    if (this.closed || sessionId !== (this.activeId || null)) {
+      reply({});
+      return;
+    }
+    const workspace = this.hasWorkspace();
+    const cwd = this.promptHistoryCwd(sessionId, workspace);
+    let texts: string[];
+    let placeHolder: string;
+    let emptyLabel: string;
+    if (workspace) {
+      if (!cwd) {
+        // An active session with no known directory has no honest owner, so it
+        // gets no text rather than another folder's history.
+        reply({});
+        return;
+      }
+      texts = this.store.promptHistory(cwd);
+      placeHolder = `Prompts from ${cwd}`;
+      emptyLabel = "No prompts have been recorded for this folder yet.";
+    } else {
+      texts = this.runtimePromptTexts(sessionId ? this.runtimes.get(sessionId) : undefined);
+      placeHolder = "Prompts from this conversation";
+      emptyLabel = "No prompts have been recorded for this conversation yet.";
+    }
+    const pick = await this.pickPromptHistory(texts, placeHolder, emptyLabel);
+    // The picker can stay open while the user moves on: a different chat, a
+    // closed surface, or a new chat retargeted to another folder all void the
+    // answer rather than insert the wrong scope's prompt.
+    if (this.closed || sessionId !== (this.activeId || null) || this.hasWorkspace() !== workspace
+      || this.promptHistoryCwd(sessionId, workspace) !== cwd) {
+      reply({});
+      return;
+    }
+    if (pick.error) {
+      reply({ error: "Could not load prompt history." });
+    } else if (pick.text !== undefined) {
+      reply({ text: pick.text });
+    } else {
+      // Cancellation and an informational row both land here: no text is the
+      // whole answer.
+      reply({});
+    }
+  }
+
+  // The directory a history request is scoped to: the live runtime's cwd wins,
+  // then the saved one for a session with no agent running, and the new chat
+  // resolver for the composer that has no session yet. Undefined means there is
+  // no honest owner for the request.
+  private promptHistoryCwd(sessionId: string | null, workspace: boolean): string | undefined {
+    if (sessionId) {
+      return this.runtimes.get(sessionId)?.cwd || this.store.cwds()[sessionId] || undefined;
+    }
+    return workspace ? this.resolveNewSessionCwd() : undefined;
+  }
+
+  // A folderless window keeps no workspace journal, so its picker can only
+  // offer what this runtime itself submitted, newest first, under the same
+  // rules and limit the store applies. Replayed chunks are a different payload
+  // type and never land in the log as userMessage.
+  private runtimePromptTexts(rt: Runtime | undefined): string[] {
+    if (!rt) {
+      return [];
+    }
+    const texts: string[] = [];
+    const seen = new Set<string>();
+    for (let i = rt.log.length - 1; i >= 0 && texts.length < SessionStore.MAX_PROMPTS; i--) {
+      const entry = rt.log[i];
+      const text = entry && entry.type === "userMessage" ? entry.text : undefined;
+      if (typeof text !== "string" || !text.trim() || text.length > SessionStore.MAX_DRAFT || seen.has(text)) {
+        continue;
+      }
+      seen.add(text);
+      texts.push(text);
+    }
+    return texts;
+  }
+
+  // The picker opens over the journal, which is local and immediate, so its
+  // items are ready at once. Informational rows carry no `text`, so they can
+  // never be handed back as a prompt, and `alwaysShow` keeps a typed query from
+  // filtering the explanation away.
+  private async pickPromptHistory(
+    texts: string[],
+    placeHolder: string,
+    emptyLabel: string
+  ): Promise<{ text?: string; error?: boolean }> {
+    type HistoryItem = vscode.QuickPickItem & { text?: string };
+    const info = (label: string, detail?: string): HistoryItem => ({
+      label,
+      ...(detail ? { detail } : {}),
+      alwaysShow: true
+    });
+    const items: HistoryItem[] = texts.length
+      ? texts.map((text) => {
+          const flat = text.replace(/\s+/g, " ").trim();
+          return {
+            label: flat.length > 80 ? `${flat.slice(0, 80)}...` : flat,
+            detail: text,
+            text
+          };
+        })
+      : [info(emptyLabel, "History records prompts sent through this extension.")];
+    try {
+      const picked = await vscode.window.showQuickPick(items, {
+        placeHolder,
+        matchOnDetail: true
+      });
+      return picked && typeof picked.text === "string" ? { text: picked.text } : {};
+    } catch {
+      return { error: true };
+    }
+  }
+
+  // Record what a live tool update says about background shells, then publish
+  // the change as ephemeral state. Replays and silent wakes are excluded: the
+  // registry authorizes an action, so it must reflect what is running now, not
+  // what the transcript once showed.
+  private trackBackgroundShell(rt: Runtime | undefined, u: any): void {
+    if (!rt || rt.replaying || rt.silentReplay || !rt.client.supportsBackgroundShellControl()
+      || !u || typeof u.toolCallId !== "string") {
+      return;
+    }
+    const meta = u._meta;
+    const bg = meta?.["cognition.ai/background"];
+    const shellId = meta?.["cognition.ai/backgroundShellId"];
+    const status = u.status;
+    // A finished tool or an explicit background:false retires the entry before
+    // any add is considered, so a completed command never keeps a stop control.
+    if (status === "completed" || status === "failed" || bg === false) {
+      if (rt.backgroundShells?.delete(u.toolCallId)) {
+        this.publishShellState(rt);
+      }
+      return;
+    }
+    if (bg === true && typeof shellId === "string" && shellId) {
+      const shells = rt.backgroundShells || (rt.backgroundShells = new Map());
+      const prev = shells.get(u.toolCallId);
+      if (!prev || prev.shellId !== shellId) {
+        shells.set(u.toolCallId, { shellId });
+        this.publishShellState(rt);
+      }
+    }
+  }
+
+  // Publish the registry to the webview, but only while this surface actually
+  // owns and is showing the runtime: during a transfer the old owner no longer
+  // holds it and the new one republishes on import.
+  private postBackgroundShells(rt: Runtime): void {
+    if (this.closed || this.runtimes.get(rt.id) !== rt || this.activeId !== rt.id) {
+      return;
+    }
+    const shells = rt.backgroundShells;
+    const items = shells?.size
+      ? [...shells.entries()].map(([toolCallId, e]) => ({
+          toolCallId,
+          stopping: e.stopping === true,
+          ...(e.error ? { error: e.error } : {})
+        }))
+      : [];
+    this.post({ type: "backgroundShells", sessionId: rt.id, items });
+  }
+
+  // A late result goes to whoever owns the runtime when it lands, never to the
+  // surface that asked.
+  private publishShellState(rt: Runtime): void {
+    rt.owner.postBackgroundShells(rt);
+  }
+
+  // Stop one background shell the agent reported. The request must name the
+  // session this surface is showing and a toolCallId its registry still holds.
+  // Anything else is stale and ignored rather than queued across a transfer.
+  private async stopBackgroundShell(msg: any): Promise<void> {
+    const sessionId = String(msg.sessionId || "");
+    const toolCallId = String(msg.toolCallId || "");
+    const rt = sessionId && this.activeId === sessionId ? this.runtimes.get(sessionId) : undefined;
+    const entry = rt?.backgroundShells?.get(toolCallId);
+    if (!rt || !entry || entry.stopping) {
+      return;
+    }
+    entry.stopping = true;
+    entry.error = undefined;
+    this.publishShellState(rt);
+    try {
+      const killed = await rt.client.killBackgroundShell(rt.id, entry.shellId);
+      const current = rt.backgroundShells?.get(toolCallId);
+      if (killed) {
+        // The entry may have been replaced by newer metadata mid flight, so
+        // only retire the shell this request actually stopped.
+        if (current === entry) {
+          rt.backgroundShells!.delete(toolCallId);
+          // Historical and non actionable: it replays as a stopped row but
+          // carries no shell id, so it can never authorize another stop.
+          rt.owner.emit(rt, { type: "toolCallUpdate", id: toolCallId, status: "cancelled", stopped: true });
+        }
+      } else {
+        // -32601: the agent does not serve the kill at all, so every control
+        // on this connection goes away rather than erroring per click.
+        rt.backgroundShells?.clear();
+      }
+    } catch (err) {
+      const current = rt.backgroundShells?.get(toolCallId);
+      if (current === entry) {
+        entry.stopping = false;
+        entry.error = "Could not stop the background command.";
+      }
+      const code = (err as { code?: number })?.code;
+      this.log(`[stop-background-shell-failed] ${typeof code === "number" ? `rpc ${code}` : "request failed"}`);
+    }
+    this.publishShellState(rt);
   }
 
   async refreshSessions(force = false, staleOk = false): Promise<void> {
@@ -4673,6 +5020,11 @@ export class ChatController implements AcpHost {
     if (recordPainted(rt.log, payload)) {
       rt.logFull = false;
     }
+    // Only what this extension submitted is journaled, once per send: queued
+    // rows and replayed chunks are different payload types and never reach here.
+    if (payload.type === "userMessage" && typeof payload.text === "string" && this.hasWorkspace()) {
+      this.store.rememberPrompt(rt.id, payload.text);
+    }
   }
 
   private postReplay(items: Record<string, unknown>[]): void {
@@ -5171,7 +5523,8 @@ export class ChatController implements AcpHost {
       streamAnim: this.cfg().get<string>("incrementalRendering.animationStyle", "rise"),
       panelSide: this.cfg().get<string>("sessionsPanel.side", "right"),
       sendWhileWorking: this.cfg().get<string>("sendWhileWorking", "steer"),
-      surface: this.kind
+      surface: this.kind,
+      sessionList: this.sessionListCaps()
     });
   }
 
@@ -5363,6 +5716,7 @@ export class ChatController implements AcpHost {
         this.emit(rt, { type: "plan", entries: u.entries });
         return;
       case "tool_call":
+        this.trackBackgroundShell(rt, u);
         this.emit(rt, {
           type: "toolCall",
           id: u.toolCallId,
@@ -5379,6 +5733,7 @@ export class ChatController implements AcpHost {
         this.recordDiffs(u, rt);
         return;
       case "tool_call_update":
+        this.trackBackgroundShell(rt, u);
         this.emit(rt, {
           type: "toolCallUpdate",
           id: u.toolCallId,

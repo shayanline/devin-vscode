@@ -3042,6 +3042,23 @@ body.vscode-high-contrast-light .queued-bubble { border: 1px dotted var(--vscode
   display: none;
 }
 
+/* A failed background shell stop says so beside its retry, in the row's own
+   action bar rather than as a transcript event. */
+.tool-bg-error {
+  align-self: center;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--vscode-errorForeground, #f14c4c);
+}
+
+.tool-actions .icon-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 /* The icon carries the action, so it is drawn as an icon is (VS Code leaves
    these at the icon foreground rather than dimming them with the row). */
 .tool-actions .msg-action .codicon {
