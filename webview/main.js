@@ -2743,6 +2743,10 @@ import { createWorkingMark } from "./workingMark.js";
     }
     // Keep the welcome down across the gap until the host echoes the message.
     pendingSend = true;
+    // The send makes every open checkpoint question stale before the host even
+    // hears about it, so drop them now rather than when the echo lands.
+    cancelCheckpointPreviews();
+    refreshTurnChrome();
     hideWelcome();
     vscode.postMessage({ type: "send", text, newSession: startNew, preserveTranscript: !startNew && threadHasContent() });
     el.input.value = "";
@@ -3970,13 +3974,15 @@ import { createWorkingMark } from "./workingMark.js";
   let turns = [];
   let currentTurn = null;
   let turnSeq = 0;
-  // The head node id after the most recently completed turn. A turn's revert
-  // target ("checkpoint") is the head captured before it ran (headBefore).
-  let lastHead = null;
-  // Whether `lastHead` is a valid revert target on the current conversation
-  // expansion. False right after a reload (the next prompt re-expands and
-  // orphans it); true after a live turn completion or an instant restore.
-  let lastHeadReliable = false;
+  // Checkpoint bindings the host publishes from the agent's step list:
+  // userMessageId -> { userMessageId, canFork }. A turn is revertable only while
+  // its prompt id is in this map, which covers live sends and replayed history
+  // alike because both carry the same stable id.
+  let checkpointBindings = new Map();
+  // True while the bindings are not yet authoritative for this view (a wake
+  // cleared them, or the host reports a rewind in flight). Controls stay off
+  // until the host's next checkpoint frame settles it.
+  let checkpointBusy = false;
   // Feature gates from the host (revert capability + settings).
   // The surface comes from the page itself as well as from the host, so the chrome
   // is right from the first paint instead of being drawn as a side panel and then
@@ -3992,10 +3998,21 @@ import { createWorkingMark } from "./workingMark.js";
   function cancelPreviewWaiters() {
     for (const waiter of [...previewWaiters.values()]) waiter(null);
   }
+  // A send, a busy turn or a changed checkpoint map invalidates every open
+  // checkpoint question: a preview answer landing afterwards belongs to a
+  // conversation that has already moved on, and an armed confirmation could
+  // discard a response that did not exist when it was raised. pendingRevert is
+  // deliberately untouched: an accepted execute still needs its scoped reply.
+  function cancelCheckpointPreviews() {
+    cancelPreviewWaiters();
+    turns.forEach((turn) => {
+      if (turn.checkpoint && turn.checkpoint._dvCancelConfirm) turn.checkpoint._dvCancelConfirm();
+    });
+  }
   // A revert we asked the host to perform but has not yet confirmed. We only
   // trim the transcript once the host replies "reverted", so a failed revert
   // (which leaves the conversation unchanged) does not desync the UI.
-  let pendingRevert = null; // { head, showRestored } | null
+  let pendingRevert = null; // { userMessageId, showRestored } | null
 
   function respTarget() {
     return currentTurn ? currentTurn.resp : el.thread;
@@ -4132,8 +4149,7 @@ import { createWorkingMark } from "./workingMark.js";
     el.thread.appendChild(container);
     const turn = {
       id: "t" + (++turnSeq), mid, container, req, reqBody, reqText, resp, checkpoint,
-      text: text || "", headBefore: lastHead, headBeforeReliable: lastHeadReliable,
-      headAfter: null, editing: false,
+      text: text || "", editing: false,
       createdAt: Date.now(), completedAt: null, model: currentModelLabel
     };
     turns.push(turn);
@@ -4329,16 +4345,47 @@ import { createWorkingMark } from "./workingMark.js";
     // Rebuilding a turn's controls replaces the elements, so a keyboard user standing
     // on a Copy, a Retry or a Restore Checkpoint would be dropped back to the top of
     // the panel every time a turn started or finished. The turn holding focus keeps
-    // its controls, and gets them rebuilt when focus moves on.
+    // its controls, and gets them rebuilt when focus moves on. Its checkpoint row
+    // is still brought up to date in place, so a stale Restore cannot stay armed.
     turns.forEach((t) => {
-      if (t.editing) return;
+      if (t.editing) {
+        // The open editor keeps its controls, but the checkpoint row still
+        // follows eligibility: an edit in progress must not leave a Restore
+        // armed behind it (canRestoreTurn already excludes editing turns).
+        syncCheckpointRow(t);
+        return;
+      }
       if (t.container && t.container.contains(document.activeElement)) {
+        syncCheckpointRow(t);
         t.chromeStale = true;
         return;
       }
       t.chromeStale = false;
       buildTurnChrome(t);
     });
+  }
+  // Update only the checkpoint row of a focused turn: hide it the moment it stops
+  // being eligible, draw it when it becomes eligible (without touching the
+  // request/editor/copy controls focus may be on), and leave an already rendered
+  // row alone while the focus stays inside it.
+  function syncCheckpointRow(turn) {
+    const row = turn.checkpoint;
+    if (!canRestoreTurn(turn)) {
+      // An armed confirmation must not outlive the state it was raised for.
+      if (row._dvCancelConfirm) row._dvCancelConfirm();
+      row.querySelectorAll("button").forEach((b) => { b.disabled = true; });
+      row.classList.add("hidden");
+      return;
+    }
+    const focusInRow = row.contains(document.activeElement);
+    if (!row.childElementCount || !focusInRow) {
+      renderCheckpointRow(turn);
+      return;
+    }
+    // The retained row keeps its elements and focus, but buttons disabled while
+    // it was ineligible must come back with it.
+    row.querySelectorAll("button").forEach((b) => { b.disabled = false; });
+    row.classList.remove("hidden");
   }
   // The deferred half of the above: whatever was left alone is brought up to date
   // once the user is no longer inside it.
@@ -4351,40 +4398,26 @@ import { createWorkingMark } from "./workingMark.js";
     }, 0);
   }, true);
 
-  // A turn is revertable only when we hold a node id that is valid on the CURRENT
-  // conversation expansion. The agent re-expands the conversation on session
-  // load and assigns fresh node ids, orphaning any id captured before the load
-  // (verified: reverting to a pre-load head fails with "Invalid params"). So:
-  //  - the first live turn of a fresh session (headBefore null) resolves its
-  //    checkpoint from the agent's step list;
-  //  - any later turn is revertable only if its head-before was captured live
-  //    from a completed turn on this expansion (headBeforeReliable);
-  //  - replayed/historical turns and the first turn after a reload are NOT
-  //    revertable, because their "before" node is orphaned by re-expansion.
+  // A turn is revertable only while the host's checkpoint bindings name its
+  // prompt id. The bindings come from the agent's step list, which survives the
+  // re-expansion a reload or wake performs, so replayed history binds the same
+  // way live sends do.
   function turnRevertable(turn) {
-    if (turn.headBefore == null) {
-      return !turn.replayed;
-    }
-    return !!turn.headBeforeReliable;
-  }
-  // After a wake/reload the agent re-expands the conversation with fresh node
-  // ids, so every revert target captured for the (restored) turns is orphaned.
-  // Downgrade them to non-revertable, exactly like a freshly replayed reload.
-  function invalidateRevertHeads() {
-    lastHeadReliable = false;
-    turns.forEach((t) => { t.headBeforeReliable = false; t.headAfterReliable = false; });
-    refreshTurnChrome();
+    return typeof turn.mid === "string" && checkpointBindings.has(turn.mid);
   }
   function canEditTurn(turn) {
-    return caps.revert && caps.editRequests !== "none" && !busy && turnRevertable(turn);
+    return caps.revert && caps.editRequests !== "none" && !busy && !loadingSession && !checkpointBusy && !pendingSend && turnRevertable(turn);
   }
   function canRestoreTurn(turn) {
-    return caps.revert && caps.checkpoints && !busy && turnRevertable(turn);
+    return caps.revert && caps.checkpoints && !busy && !loadingSession && !checkpointBusy && !pendingSend && !turn.editing && turnRevertable(turn);
   }
 
   function renderCheckpointRow(turn) {
     const row = turn.checkpoint;
     row.innerHTML = "";
+    // The row is about to be rebuilt: any cancel hook the old contents armed
+    // goes with them, and is re-armed below once the new confirm exists.
+    row._dvCancelConfirm = null;
     if (!canRestoreTurn(turn)) { row.classList.add("hidden"); return; }
     row.classList.remove("hidden");
     const left = document.createElement("span");
@@ -4421,6 +4454,9 @@ import { createWorkingMark } from "./workingMark.js";
           : "Confirm restoring this checkpoint and discarding later edits")
         : "Restores this chat to this point";
     };
+    // Lets an invalidation (send, busy, changed bindings) stand the armed
+    // confirmation back down without rebuilding the row under focus.
+    row._dvCancelConfirm = () => setConfirming(false);
     cancel.addEventListener("click", (e) => { e.stopPropagation(); setConfirming(false); });
     btn.addEventListener("click", async (e) => {
       e.stopPropagation();
@@ -4435,7 +4471,8 @@ import { createWorkingMark } from "./workingMark.js";
     // Fork: carry on from here in a new chat. The agent copies the conversation up
     // to this point into a session of its own, so unlike a restore this discards
     // nothing and touches no file, and needs no confirmation.
-    if (caps.revert && turn.headBefore != null) {
+    const binding = checkpointBindings.get(turn.mid);
+    if (caps.revert && binding && binding.canFork) {
       const fork = document.createElement("button");
       fork.className = "checkpoint-fork";
       fork.innerHTML = '<i class="codicon codicon-git-branch"></i>';
@@ -4444,7 +4481,7 @@ import { createWorkingMark } from "./workingMark.js";
       fork.addEventListener("click", (e) => {
         e.stopPropagation();
         setConfirming(false);
-        vscode.postMessage({ type: "revertFork", target: turn.headBefore });
+        vscode.postMessage({ type: "revertFork", sessionId: curSessionId, userMessageId: turn.mid });
       });
       row.appendChild(fork);
     }
@@ -4455,23 +4492,15 @@ import { createWorkingMark } from "./workingMark.js";
   // Restore: rewind to before this turn and drop the prompt text back into the
   // composer (do not auto-run), matching VS Code.
   function doRestore(turn) {
-    // A rewind during a running turn fights the prompt for the channel, and the
-    // keyboard path already refuses it. The mouse path can still reach a stale
-    // button: the controls of a turn holding focus are left alone until focus moves,
-    // so its row can outlive the state it was drawn for.
-    if (busy || !turnRevertable(turn)) {
+    // canRestoreTurn carries every gate: busy/loading states, the pending send
+    // and checkpoint mutation windows, an open edit, and a named binding. The mouse
+    // path can still reach a stale button, so nothing narrower is safe here.
+    if (!canRestoreTurn(turn)) {
       return;
     }
-    if (turn.headBefore == null) {
-      // The first turn has no prior node: the host rewinds to the checkpoint
-      // before it inside THIS session (firstTurn), it does not open a new one.
-      pendingRevert = { firstTurn: true, showRestored: true };
-      vscode.postMessage({ type: "revertExecute", firstTurn: true });
-    } else {
-      // Defer trimming + the "restored" divider until the host confirms.
-      pendingRevert = { head: turn.headBefore, showRestored: true };
-      vscode.postMessage({ type: "revertExecute", head: turn.headBefore });
-    }
+    // Defer trimming + the "restored" divider until the host confirms.
+    pendingRevert = { userMessageId: turn.mid, showRestored: true };
+    vscode.postMessage({ type: "revertExecute", sessionId: curSessionId, userMessageId: turn.mid });
     el.input.value = turn.text;
     el.input.focus();
     autosize();
@@ -4616,6 +4645,9 @@ import { createWorkingMark } from "./workingMark.js";
       };
       previewWaiters.set(token, (msg) => {
         if (!msg) { finish(null); return; }
+        // The reply must answer this request for this turn of this session:
+        // anything else is transport for another page and is ignored.
+        if (msg.sessionId !== sessionId || msg.userMessageId !== turn.mid) return;
         // Files this chat has changed that the agent's plan does not cover. They
         // stay on disk through the rewind, so this is the case most worth stopping
         // for, and it is the one the agent reports nothing about.
@@ -4641,9 +4673,7 @@ import { createWorkingMark } from "./workingMark.js";
           renderError("The checkpoint check timed out. Your message is still in the editor.");
         }
       }, 4000);
-      // The first turn carries no head: the host resolves the checkpoint before
-      // it from the agent's step list (firstTurn).
-      vscode.postMessage({ type: "revertPreview", head: turn.headBefore, firstTurn: turn.headBefore == null || undefined, token });
+      vscode.postMessage({ type: "revertPreview", sessionId: curSessionId, userMessageId: turn.mid, token });
     });
   }
 
@@ -4652,18 +4682,13 @@ import { createWorkingMark } from "./workingMark.js";
     const idx = turns.indexOf(turn);
     if (idx < 0) return;
     for (let i = turns.length - 1; i >= idx; i--) {
+      if (turns[i].mid) checkpointBindings.delete(turns[i].mid);
       turns[i].container.remove();
       turns.splice(i, 1);
     }
     currentTurn = turns[turns.length - 1] || null;
-    if (currentTurn) {
-      lastHead = currentTurn.headAfter;
-      lastHeadReliable = !!currentTurn.headAfterReliable;
-    } else {
-      lastHead = null;
-      lastHeadReliable = false;
-    }
     refreshRetryButtons();
+    refreshTurnChrome();
   }
 
   // --- Edit a request in place --------------------------------------------
@@ -4735,17 +4760,15 @@ import { createWorkingMark } from "./workingMark.js";
   // Trimming is deferred to the host's "reverted" confirmation so a failed
   // revert does not remove turns that are, in fact, still there.
   function revertAndResend(turn, text) {
-    if (turn.headBefore == null) {
-      // The first turn rewinds inside this session and resends here: keep the
-      // welcome down across the gap like any pending send.
-      pendingSend = true;
-      hideWelcome();
-      pendingRevert = { firstTurn: true, showRestored: false };
-      vscode.postMessage({ type: "revertExecute", firstTurn: true, resendText: text });
-    } else {
-      pendingRevert = { head: turn.headBefore, showRestored: false };
-      vscode.postMessage({ type: "revertExecute", head: turn.headBefore, resendText: text });
-    }
+    // The edited prompt is imminent, so keep the welcome down across the gap
+    // like any pending send.
+    pendingSend = true;
+    cancelCheckpointPreviews();
+    refreshTurnChrome();
+    hideWelcome();
+    // Defer trimming until the host confirms; the resend streams in after.
+    pendingRevert = { userMessageId: turn.mid, showRestored: false };
+    vscode.postMessage({ type: "revertExecute", sessionId: curSessionId, userMessageId: turn.mid, resendText: text });
   }
 
   // Nothing about the editor changes while the host is asked what the rewind would
@@ -5404,12 +5427,19 @@ import { createWorkingMark } from "./workingMark.js";
   // A user turn streamed during history replay (user_message_chunk): starts a
   // new turn and streams the request text into it.
   function appendUserChunk(text, mid, attachments) {
+    // A canonical echo or a replayed chunk can arrive for a prompt whose turn
+    // already exists (the live userMessage painted it first, or an earlier
+    // chunk of the same replay did). Only the open user block may continue;
+    // anything else would paint the same request twice.
+    if (mid && turns.some((t) => t.mid === mid) && !(block && block.kind === "user" && sameMid(block.mid, mid))) {
+      return;
+    }
     if (!(block && block.kind === "user" && sameMid(block.mid, mid))) {
       finalizeBlock();
       hideWelcome();
       const turn = newTurn(mid, "");
-      turn.replayed = true; // from a loaded session; node id unknown
-      buildTurnChrome(turn); // hide edit/restore until (if) a head is known
+      turn.replayed = true; // from a loaded session
+      buildTurnChrome(turn); // checkpoint row stays hidden until a binding names it
       block = { kind: "user", mid, turn, buffer: "" };
     }
     if (attachments && attachments.length) setTurnAttachments(block.turn, attachments);
@@ -5424,8 +5454,9 @@ import { createWorkingMark } from "./workingMark.js";
     scrollToBottom();
   }
 
-  // A user turn we already have in full (live echo from the host).
-  function addUserMessage(text, attachments) {
+  // A user turn we already have in full (live echo from the host). `mid` is the
+  // stable prompt id the checkpoint bindings are keyed on.
+  function addUserMessage(text, attachments, mid) {
     finalizeBlock();
     hideWelcome();
     // A response is imminent, so enter the busy state BEFORE building the turn:
@@ -5433,7 +5464,7 @@ import { createWorkingMark } from "./workingMark.js";
     // Copy/Retry footer until the host's busy=true arrives. The host confirms
     // busy shortly, and clears it on completion/error.
     setBusy(true);
-    const turn = newTurn(undefined, text);
+    const turn = newTurn(mid, text);
     setTurnAttachments(turn, attachments);
     // A send is an explicit action: snap back to the bottom even if the user
     // had scrolled up while reading.
@@ -8862,7 +8893,8 @@ import { createWorkingMark } from "./workingMark.js";
     const frag = document.createDocumentFragment();
     while (el.thread.firstChild) frag.appendChild(el.thread.firstChild);
     views.set(curSessionId, {
-      frag, turns, currentTurn, turnSeq, lastHead, lastHeadReliable,
+      frag, turns, currentTurn, turnSeq,
+      checkpoints: new Map(checkpointBindings), checkpointBusy,
       toolEls: new Map(toolEls), subagentEls: new Map(subagentEls), terminalCache: new Map(terminalCache),
       commands: commands.slice(), title: currentTitle, lastUserText, draft: el.input.value,
       // The composer widgets live outside the thread, so they are kept here by
@@ -8892,7 +8924,7 @@ import { createWorkingMark } from "./workingMark.js";
     const leaving = sessionStatuses[curSessionId];
     // The page's own flags catch what the host status may not have reported yet:
     // a turn still streaming, or a replay still filling the transcript in.
-    if (leaving === "running" || leaving === "starting" || loadingSession || busy) {
+    if (leaving === "running" || leaving === "starting" || loadingSession || busy || checkpointBusy) {
       dirtyViews.add(curSessionId);
     }
     // Cap retained transcripts to bound DOM retention. Never the one being left, and
@@ -8950,8 +8982,8 @@ import { createWorkingMark } from "./workingMark.js";
     turns = v.turns;
     currentTurn = v.currentTurn;
     turnSeq = v.turnSeq;
-    lastHead = v.lastHead;
-    lastHeadReliable = !!v.lastHeadReliable;
+    checkpointBindings = new Map(v.checkpoints || []);
+    checkpointBusy = !!v.checkpointBusy;
     toolEls.clear();
     v.toolEls.forEach((val, k) => toolEls.set(k, val));
     subagentEls.clear();
@@ -9032,10 +9064,12 @@ import { createWorkingMark } from "./workingMark.js";
       if (alive) {
         vscode.postMessage({ type: "activateSession", id });
       } else {
-        // A wake spawns a fresh acp, which re-expands the conversation and
-        // orphans the cached revert node ids, so the restored turns are no
-        // longer safe revert targets (same as a reload).
-        invalidateRevertHeads();
+        // A wake replays the conversation, so the bindings captured for the
+        // cached turns are stale until the host republishes the step list.
+        // Clear them and hold checkpoint controls off until that frame lands.
+        checkpointBindings = new Map();
+        checkpointBusy = true;
+        refreshTurnChrome();
         vscode.postMessage({ type: "wakeSession", id });
       }
     } else {
@@ -9250,6 +9284,9 @@ import { createWorkingMark } from "./workingMark.js";
   function setBusy(value) {
     const wasBusy = busy;
     busy = value;
+    // A turn starting invalidates every open checkpoint question and armed
+    // confirmation: what they asked about is no longer the transcript's end.
+    if (!wasBusy && value) cancelCheckpointPreviews();
     // A turn boundary drops the role marker. The host re-derives it live.
     if (value !== wasBusy) clearModelActivity();
     updateComposerButtons();
@@ -9369,6 +9406,7 @@ import { createWorkingMark } from "./workingMark.js";
   // Reveal the transcript and re-enable auto-scroll after a load settles (or is
   // abandoned). Safe to call when no load is in progress.
   function stopThreadLoading() {
+    const wasLoading = loadingSession;
     loadingSession = false;
     el.thread.classList.remove("loading-replay");
     // The spinner row goes when the load ends, and not before. Every renderer
@@ -9378,6 +9416,10 @@ import { createWorkingMark } from "./workingMark.js";
     const l = el.thread.querySelector(".thread-loading");
     if (l) l.remove();
     hideLoadingBar();
+    // Bindings that arrived during the replay were gated off by loadingSession:
+    // without this refresh their rows would stay hidden until some unrelated
+    // state change rebuilt the chrome.
+    if (wasLoading) refreshTurnChrome();
   }
 
   function threadHasContent() {
@@ -9991,8 +10033,8 @@ import { createWorkingMark } from "./workingMark.js";
         el.thread.innerHTML = "";
         turns = [];
         currentTurn = null;
-        lastHead = null;
-        lastHeadReliable = false;
+        checkpointBindings = new Map();
+        checkpointBusy = false;
         pendingRevert = null;
         cancelPreviewWaiters();
         // Not the two trays by hand: the permission scope menu is anchored to a
@@ -10107,11 +10149,11 @@ import { createWorkingMark } from "./workingMark.js";
         pendingSend = false;
         // The host echoes a send twice for a new chat: once optimistically and
         // once canonically once the session exists. The id tells them apart from
-        // an intentional repeat of the same text.
-        if (m.clientMessageId && turns.some((t) => t.clientMessageId === m.clientMessageId)) break;
+        // an intentional repeat of the same text, and it is the id the checkpoint
+        // bindings are keyed on.
+        if (m.clientMessageId && turns.some((t) => t.mid === m.clientMessageId)) break;
         if (currentTitle === "Chat") { currentTitle = m.text.slice(0, 40); el.chatTitle.textContent = currentTitle; }
-        addUserMessage(m.text, m.attachments);
-        if (currentTurn && m.clientMessageId) currentTurn.clientMessageId = m.clientMessageId;
+        addUserMessage(m.text, m.attachments, m.clientMessageId);
         break;
       case "userChunk": appendUserChunk(m.text, m.messageId, m.attachments); break;
       case "assistantStart": finalizeBlock(); announce("Devin is working."); break;
@@ -10233,35 +10275,46 @@ import { createWorkingMark } from "./workingMark.js";
         refreshTurnChrome();
         updateComposerButtons();
         break;
-      case "turnHead":
-        if (typeof m.head === "number") {
-          lastHead = m.head;
-          // `reliable` heads are captured on the current expansion (a live turn
-          // completion or an instant restore) and are safe revert targets. The
-          // head read right after a reload is NOT reliable: the next prompt
-          // re-expands the conversation and orphans it.
-          lastHeadReliable = !!m.reliable;
-          if (currentTurn) {
-            currentTurn.headAfter = m.head;
-            currentTurn.headAfterReliable = lastHeadReliable;
+      case "checkpoints": {
+        // Authoritative bindings for this session only; a frame for another
+        // chat is stale transport and must not touch this one's controls.
+        if (m.sessionId !== curSessionId) break;
+        const next = new Map();
+        for (const c of m.checkpoints || []) {
+          if (c && typeof c.userMessageId === "string") {
+            next.set(c.userMessageId, { userMessageId: c.userMessageId, canFork: !!c.canFork });
           }
         }
+        const busy = !!m.busy;
+        const bindingsSame = next.size === checkpointBindings.size
+          && [...next].every(([k, v]) => checkpointBindings.get(k)?.canFork === v.canFork);
+        // Identical pushes must not rebuild a large transcript's chrome, but a
+        // real change to the bindings or a rise into busy invalidates every
+        // open checkpoint question and armed confirmation.
+        const same = busy === checkpointBusy && bindingsSame;
+        const busyRose = !checkpointBusy && busy;
+        checkpointBindings = next;
+        checkpointBusy = busy;
+        if (!bindingsSame || busyRose) cancelCheckpointPreviews();
+        if (!same) refreshTurnChrome();
         break;
+      }
 
       case "reverted": {
         // The host has performed the rewind; now it is safe to trim the turns
         // from the reverted point onward (and drop the "restored" divider for a
         // checkpoint restore). A resend, if any, streams in as new turns after.
-        // A first turn rewind targets the checkpoint before it, so the turn to
-        // trim from is the first one rather than a head lookup.
-        const turn = m.firstTurn
-          ? turns.find((t) => t.headBefore == null)
-          : turns.find((t) => t.headBefore === (typeof m.head === "number" ? m.head : pendingRevert && pendingRevert.head));
+        // The frame must name THIS session: an unscoped or foreign one cannot
+        // trim a different chat's transcript.
+        if (m.sessionId !== curSessionId) break;
+        const turn = typeof m.userMessageId === "string" ? turns.find((t) => t.mid === m.userMessageId) : null;
         if (turn) trimTurnsFrom(turn);
-        if (pendingRevert && pendingRevert.showRestored) renderRestoredRow();
-        pendingRevert = null;
-        // A restore that emptied the thread (the first turn's checkpoint) leaves
-        // this same session welcome again, unless a resend is on its way.
+        if (pendingRevert && pendingRevert.userMessageId === m.userMessageId) {
+          if (pendingRevert.showRestored) renderRestoredRow();
+          pendingRevert = null;
+        }
+        // A restore that emptied the thread leaves this same session welcome
+        // again, unless a resend is on its way.
         if (!m.resending && body === "thread" && !threadHasContent()) renderWelcome();
         break;
       }

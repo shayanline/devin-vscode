@@ -3,6 +3,9 @@
 
 const test = require("node:test");
 const assert = require("node:assert");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 const { createChat, cleanup } = require("./chat-harness");
 const { createHarness } = require("./webview-harness");
 
@@ -295,6 +298,98 @@ test("reported regressions: a chat sent from the list keeps its first bubble whe
     releaseDefaults?.();
     page.window.close();
     await host.dispose();
+  }
+});
+
+test("checkpoint identity: editing the middle message keeps the first turn end to end", posixOnly, async () => {
+  // The whole path a user takes: three sends through the real page, the step
+  // list binding their stable ids, an inline edit of the middle one, and the
+  // rewind plus resend the host performs. The prompt gate holds each turn so
+  // the ids, the trim and the in flight resend are all exact.
+  const gateDir = fs.mkdtempSync(path.join(os.tmpdir(), "dv-prompt-gate-"));
+  const host = createChat({ promptGate: gateDir, config: { idleSessionKeepAliveMinutes: 60 } });
+  const page = createHarness();
+  bridge(host, page);
+  try {
+    await host.ready();
+    page.post({ type: "ready" });
+    const lastText = (m) => (m.params.prompt || []).filter((b) => b.type === "text").map((b) => b.text).at(-1) || "";
+    const promptsFor = (id) => host.agentSaw("session/prompt").filter((m) => m.params.sessionId === id);
+    const sendAndRelease = async (text, seq) => {
+      send(page, text);
+      assert.ok(await host.until(() => !!host.activeId(), 15000), "no session opened for " + text);
+      const id = host.activeId();
+      assert.ok(await host.until(() => promptsFor(id).some((m) => lastText(m) === text), 15000), text + " never reached the agent");
+      host.releasePrompt(id, seq);
+      assert.ok(await host.until(() => !host.controller.runtimes.get(id)?.busy, 20000), text + " never settled");
+      return id;
+    };
+
+    const id = await sendAndRelease("FIRST", 1);
+    await sendAndRelease("SECOND", 2);
+    await sendAndRelease("THIRD", 3);
+    assert.deepStrictEqual(page.reqTexts(), ["FIRST", "SECOND", "THIRD"], "the three requests rendered");
+
+    // The stable ids the prompts declared, published as the step list the way
+    // the agent's push would, so the page's controls can bind to them.
+    const mids = promptsFor(id).map((m) => m.params._meta?.["cognition.ai/clientMessageId"]);
+    assert.ok(mids.length === 3 && mids.every((x) => typeof x === "string"), "a prompt went out without a stable id");
+    const rt = host.controller.runtimes.get(id);
+    rt.client.emit("revertSteps", {
+      sessionId: id,
+      steps: mids.map((userMessageId, i) => ({
+        stepNumber: i + 1, kind: "prompt", userMessageId,
+        revertTargetNodeId: i * 10 + 1, forkTargetNodeId: i * 10 + 2
+      }))
+    });
+    assert.ok(await page.until(() => page.document.querySelectorAll("#thread .checkpoint-row:not(.hidden)").length === 3, 10000),
+      "the checkpoint rows never appeared");
+
+    // Edit SECOND through the real inline editor. The preview answers empty,
+    // so the rewind goes straight through and the resend waits at the gate.
+    const reqBodies = [...page.document.querySelectorAll("#thread .turn-request .req-body")];
+    assert.strictEqual(reqBodies.length, 3, "the three requests rendered");
+    reqBodies[1].click();
+    assert.ok(await page.until(() => !!page.document.querySelector(".req-editor-input"), 5000), "the editor never opened");
+    const ta = page.document.querySelector(".req-editor-input");
+    ta.value = "edited SECOND";
+    ta.dispatchEvent(new page.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    assert.ok(await host.until(() => host.agentSaw("_cognition.ai/revert/execute").length === 1, 15000), "the rewind never reached the agent");
+    assert.ok(await host.until(() => promptsFor(id).length === 4, 15000), "the resend never went out");
+    const resendReq = promptsFor(id).at(-1);
+    assert.strictEqual(lastText(resendReq), "edited SECOND", "the resend carried the wrong text");
+    const resendId = resendReq.params._meta?.["cognition.ai/clientMessageId"];
+    assert.ok(typeof resendId === "string" && !mids.includes(resendId), "the resend did not declare a fresh stable id");
+
+    // While the resend turn is held open, leaving and reopening must still
+    // show FIRST: the retained prefix survives the rewind and the resend.
+    await leaveToList(host, page);
+    await openSessionRow(host, page, id, "running");
+    assert.ok(await page.until(() => settled(page) && page.reqTexts().includes("FIRST"), 15000), "FIRST did not survive the reopen");
+    assert.deepStrictEqual(page.reqTexts(), ["FIRST", "edited SECOND"], "the transcript did not trim to the prefix plus resend");
+
+    host.releasePrompt(id, 4);
+    assert.ok(await host.until(() => !host.controller.runtimes.get(id)?.busy, 20000), "the resend never finished");
+    await page.settle(200);
+
+    const executeReq = host.agentSaw("_cognition.ai/revert/execute").at(-1);
+    assert.deepStrictEqual(executeReq.params, { sessionId: id, userMessageId: mids[1], force: true, skipFileUndo: false },
+      "the rewind did not carry exactly the scoped prompt id and execute flags");
+    assert.strictEqual(promptsFor(id).filter((m) => lastText(m) === "edited SECOND").length, 1, "the resend went out twice");
+    assert.strictEqual(promptsFor(id).filter((m) => lastText(m) === "THIRD").length, 1, "the discarded turn was prompted again");
+
+    // The painted record kept FIRST and dropped SECOND and THIRD, still whole.
+    const finished = host.controller.runtimes.get(id);
+    assert.ok(finished.log.some((p) => p.type === "userMessage" && p.clientMessageId === mids[0]), "FIRST left the record");
+    assert.ok(!finished.log.some((p) => p.clientMessageId === mids[1] || p.clientMessageId === mids[2]), "SECOND or THIRD stayed painted");
+    assert.strictEqual(finished.logFull, true, "the retained prefix was marked partial");
+
+    assert.deepStrictEqual(page.reqTexts(), ["FIRST", "edited SECOND"], "the final transcript is wrong");
+    assert.strictEqual(page.errors().length, 0, "the page reported handler errors");
+  } finally {
+    page.window.close();
+    await host.dispose();
+    fs.rmSync(gateDir, { recursive: true, force: true });
   }
 });
 

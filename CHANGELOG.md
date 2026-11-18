@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.16.3] - 2026-11-18
+
+### Highlights
+- Edit earlier messages without checkpoint parameter errors.
+- Show checkpoint controls for messages with verified checkpoints.
+- Keep checkpoint controls available after reopening a chat.
+- Preserve earlier messages when editing or restoring a checkpoint.
+
+### Under the hood
+- Match checkpoints using stable message identifiers.
+- Keep new sends queued while a checkpoint rewind is running.
+
 ## [0.16.2] - 2026-11-18
 
 ### Highlights

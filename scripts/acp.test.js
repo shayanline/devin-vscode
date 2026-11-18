@@ -475,6 +475,89 @@ test("forking asks for the fork target and reports the new session", async () =>
   await client.shutdown();
 });
 
+test("checkpoint identity: preview carries exactly the session and prompt id", async () => {
+  // Enforce the chosen stable prompt target and the native preview restriction
+  // that excludes execute flags.
+  const { cli, log } = fakeAgent("preview-strict", { "cognition.ai/revert": true, "cognition.ai/revertByUserMessageId": true }, {
+    onMessage: `if (msg.method === "_cognition.ai/revert/preview") {
+      const keys = Object.keys(msg.params || {}).sort();
+      if (JSON.stringify(keys) !== JSON.stringify(["sessionId", "userMessageId"])
+        || typeof msg.params.userMessageId !== "string") {
+        send({ jsonrpc: "2.0", id: msg.id, error: { code: -32602, message: "Invalid params" } });
+      } else {
+        send({ jsonrpc: "2.0", id: msg.id, result: { fileActions: [], irreversibleWarnings: [] } });
+      }
+      continue;
+    }`
+  });
+  const client = start(cli);
+  try {
+    await client.initialize();
+    const preview = await client.revertPreview("s1", "m-123");
+    assert.deepStrictEqual(preview.fileActions, [], "the preview result reaches the caller");
+    const call = seen(log).find((m) => m.method === "_cognition.ai/revert/preview");
+    assert.deepStrictEqual(call.params, { sessionId: "s1", userMessageId: "m-123" },
+      "the preview names the stable prompt id and nothing else");
+  } finally {
+    await client.shutdown();
+  }
+});
+
+test("checkpoint identity: execute carries the prompt id and its flags", async () => {
+  const { cli, log } = fakeAgent("execute-flags", { "cognition.ai/revert": true }, {});
+  const client = start(cli);
+  await client.initialize();
+
+  await client.revertExecute("s1", "m-9");
+  await client.revertExecute("s1", "m-9", { force: false, skipFileUndo: true });
+
+  const calls = seen(log).filter((m) => m.method === "_cognition.ai/revert/execute");
+  assert.strictEqual(calls.length, 2);
+  assert.deepStrictEqual(calls[0].params, { sessionId: "s1", userMessageId: "m-9", force: true, skipFileUndo: false },
+    "defaults ask for the forced rewind with file undo");
+  assert.deepStrictEqual(calls[1].params, { sessionId: "s1", userMessageId: "m-9", force: false, skipFileUndo: true },
+    "explicit options override the defaults");
+  await client.shutdown();
+});
+
+test("checkpoint identity: a prompt's client id reaches the wire as metadata", async () => {
+  const { cli, log } = fakeAgent("prompt-meta", {}, {
+    onMessage: `if (msg.method === "session/prompt") {
+      send({ jsonrpc: "2.0", id: msg.id, result: { stopReason: "end_turn" } });
+      continue;
+    }`
+  });
+  const client = start(cli);
+  await client.initialize();
+
+  await client.prompt("s1", [{ type: "text", text: "with id" }], "uuid-1");
+  await client.prompt("s1", [{ type: "text", text: "without id" }]);
+
+  const prompts = seen(log).filter((m) => m.method === "session/prompt");
+  assert.strictEqual(prompts.length, 2);
+  assert.strictEqual(prompts[0].params._meta["cognition.ai/clientMessageId"], "uuid-1",
+    "the stable id travels as prompt metadata, which is what replay echoes back");
+  assert.ok(!("_meta" in prompts[1].params), "a prompt without an id carries no metadata");
+  await client.shutdown();
+});
+
+test("checkpoint identity: revert by prompt id is advertised, not assumed", async () => {
+  const on = fakeAgent("cap-on", { "cognition.ai/revert": true, "cognition.ai/revertByUserMessageId": true });
+  const client = start(on.cli);
+  await client.initialize();
+  assert.strictEqual(client.supportsRevertByUserMessageId(), true);
+  await client.shutdown();
+
+  // An agent that can rewind by node id but not by prompt id must not offer
+  // checkpoint controls the stable id requests cannot serve.
+  const off = fakeAgent("cap-off", { "cognition.ai/revert": true });
+  const client2 = start(off.cli);
+  await client2.initialize();
+  assert.strictEqual(client2.supportsRevert(), true);
+  assert.strictEqual(client2.supportsRevertByUserMessageId(), false);
+  await client2.shutdown();
+});
+
 test("pushed notifications become events, and MCP churn is noted once", async () => {
   // Both of these arrive unasked from the real agent. The MCP one fires dozens of
   // times per turn with an empty payload, which used to flood the output channel.

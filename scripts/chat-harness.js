@@ -183,7 +183,7 @@ async function handleRequest(msg) {
         agentCapabilities: {
           loadSession: true,
           promptCapabilities: { image: true, embeddedContext: true },
-          _meta: { "cognition.ai/revert": true, "cognition.ai/sessionShare": true, ...(process.env.DV_DOCUMENT_LIFECYCLE === "1" ? { "cognition.ai/documentLifecycle": true } : {}), ...(process.env.DV_MID_TURN === "1" ? { "cognition.ai/midTurnPrompts": true } : {}), ...(process.env.DV_TERMINAL_LIFECYCLE === "1" ? { "cognition.ai/terminalLifecycle": true } : {}), ...(process.env.DV_LIST_CAPS ? JSON.parse(process.env.DV_LIST_CAPS) : {}) }
+          _meta: { "cognition.ai/revert": true, "cognition.ai/sessionShare": true, ...(process.env.DV_NO_REVERT_BY_ID ? {} : { "cognition.ai/revertByUserMessageId": true }), ...(process.env.DV_DOCUMENT_LIFECYCLE === "1" ? { "cognition.ai/documentLifecycle": true } : {}), ...(process.env.DV_MID_TURN === "1" ? { "cognition.ai/midTurnPrompts": true } : {}), ...(process.env.DV_TERMINAL_LIFECYCLE === "1" ? { "cognition.ai/terminalLifecycle": true } : {}), ...(process.env.DV_LIST_CAPS ? JSON.parse(process.env.DV_LIST_CAPS) : {}) }
         }
       });
       break;
@@ -306,6 +306,47 @@ async function handleRequest(msg) {
       }
       await delay(num("DV_PROMPT_DELAY") || 60000);
       failNow();
+      break;
+    }
+    case "_cognition.ai/revert/preview": {
+      // The fake enforces the extension's chosen stable-ID request contract:
+      // exactly {sessionId,userMessageId}, with no execute flags. Anything
+      // else is an invalid-params error, which is what the strict regression
+      // tests assert against.
+      const p = msg.params || {};
+      const keys = Object.keys(p).sort();
+      if (JSON.stringify(keys) !== JSON.stringify(["sessionId", "userMessageId"])
+        || typeof p.sessionId !== "string" || typeof p.userMessageId !== "string") {
+        send({ jsonrpc: "2.0", id: msg.id, error: { code: -32602, message: "Invalid params" } });
+        break;
+      }
+      if (process.env.DV_PREVIEW_FAIL === "1") {
+        send({ jsonrpc: "2.0", id: msg.id, error: { code: -32603, message: "preview failed" } });
+        break;
+      }
+      reply(JSON.parse(process.env.DV_PREVIEW || '{"fileActions":[],"irreversibleWarnings":[],"conflicts":[]}'));
+      break;
+    }
+    case "_cognition.ai/revert/execute": {
+      const p = msg.params || {};
+      if (typeof p.sessionId !== "string" || typeof p.userMessageId !== "string") {
+        send({ jsonrpc: "2.0", id: msg.id, error: { code: -32602, message: "Invalid params" } });
+        break;
+      }
+      if (process.env.DV_EXECUTE_FAIL === "1") {
+        send({ jsonrpc: "2.0", id: msg.id, error: { code: -32603, message: "execute failed" } });
+        break;
+      }
+      reply({});
+      break;
+    }
+    case "_cognition.ai/revert/forkFromStep": {
+      const p = msg.params || {};
+      if (typeof p.sessionId !== "string" || typeof p.targetNodeId !== "number") {
+        send({ jsonrpc: "2.0", id: msg.id, error: { code: -32602, message: "Invalid params" } });
+        break;
+      }
+      reply({ forkedSessionId: process.env.DV_FORK_ID || (idBase + "-fork" + ++seq) });
       break;
     }
     case "_cognition.ai/revert/listSteps": {
@@ -436,6 +477,13 @@ function createChat(opts = {}) {
     DV_PROMPT_FAIL: opts.promptFail ? JSON.stringify(opts.promptFail) : "",
     DV_STEPS_DELAY: String(opts.stepsDelay || 0),
     DV_STEPS: opts.steps ? JSON.stringify(opts.steps) : "",
+    // Checkpoint action scripting: the preview answer, forced preview/execute
+    // failures, a forked session id, and opting out of the stable id capability.
+    DV_NO_REVERT_BY_ID: opts.noRevertByUserMessageId ? "1" : "",
+    DV_PREVIEW: opts.preview ? JSON.stringify(opts.preview) : "",
+    DV_PREVIEW_FAIL: opts.previewFail ? "1" : "",
+    DV_EXECUTE_FAIL: opts.executeFail ? "1" : "",
+    DV_FORK_ID: opts.forkId || "",
     DV_DOCUMENT_LIFECYCLE: opts.documentLifecycle ? "1" : "",
     // The instant usage reads the host may send: advertised only when the test
     // supplies reports for them to answer with.

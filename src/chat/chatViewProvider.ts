@@ -22,7 +22,6 @@ import {
   RevertPreviewResult,
   RevertStep,
   RevertStepsUpdate,
-  headOf,
   SessionListCapabilities,
   SessionListQuery,
   SessionUpdateNotification,
@@ -40,7 +39,7 @@ import { DevinSession, ListResult, fromAcpRow, fromAcpRows, listSessions } from 
 import { SessionStore } from "../session/sessionStore";
 import { ChangeTracker } from "../diff/changeTracker";
 import { diffStat } from "../diff/diffStat";
-import { paintedReplay, recordPainted } from "./transcriptLog";
+import { paintedReplay, recordPainted, rewindPainted } from "./transcriptLog";
 import { StatusBar } from "../ui/statusBar";
 import { checkHealth, CliHealth, loginShellEnv } from "../cli/locate";
 import { cachedFamilies, familyOf, listModelFamilies, ModelFamily } from "../cli/models";
@@ -144,10 +143,16 @@ interface Runtime {
   subagentSpawns: { id: string; title: string }[];
   subagentIds: Map<string, string>;
   // Every revertible point in this conversation, as the agent last reported it.
-  // Pushed after each turn, so this is the authoritative source of the node ids
-  // checkpoints and edit-and-resubmit rewind to.
+  // Pushed after each turn, so this is the authoritative source of the prompt
+  // ids checkpoints and edit-and-resubmit rewind to.
   steps: RevertStep[];
   stepsKnown: boolean;
+  // Bumped every time the step list is replaced or invalidated, so a list read
+  // started before a newer push or a new turn cannot overwrite it when it lands.
+  stepsRevision: number;
+  // A rewind in flight for this runtime. Sends and steers queue behind it so a
+  // prompt cannot overtake the mutation or the edited resend it prepares.
+  rewinding?: { userMessageId: string; resendText?: string };
   openDocuments: Map<string, { uri: string; languageId: string; isDirty: boolean }>;
   // A usage read in flight for this session, so overlapping triggers coalesce
   // into one /context + /session-stats pair.
@@ -1240,6 +1245,7 @@ export class ChatController implements AcpHost {
       mcpProblems: new Map(),
       steps: [],
       stepsKnown: false,
+      stepsRevision: 0,
       openDocuments: new Map(),
       pendingTerminals: [],
       subagentSpawns: [],
@@ -1496,7 +1502,7 @@ export class ChatController implements AcpHost {
     const minutes = this.cfg().get<number>("idleSessionKeepAliveMinutes", 60);
     const limit = Math.floor(this.cfg().get<number>("maxIdleSessions", 3));
     const now = Date.now();
-    const idle = [...this.runtimes.values()].filter((rt) => !rt.replaying && !rt.waking && !rt.busy && rt.awaiting === 0 && !rt.terminals.hasRunning());
+    const idle = [...this.runtimes.values()].filter((rt) => !rt.replaying && !rt.waking && !rt.busy && !rt.rewinding && rt.awaiting === 0 && !rt.terminals.hasRunning());
     const reaped = new Set<Runtime>();
     if (minutes > 0) {
       const maxIdleMs = minutes * 60000;
@@ -1618,16 +1624,22 @@ export class ChatController implements AcpHost {
           this.log(`[webview-error] in "${msg.where}": ${msg.message}`);
           return;
         case "revertPreview":
-          await this.handleRevertPreview(Number(msg.head), msg.token, !!msg.firstTurn);
+          if (typeof msg.sessionId === "string" && typeof msg.userMessageId === "string") {
+            await this.handleRevertPreview(msg.sessionId, msg.userMessageId, msg.token);
+          }
           return;
         case "revertFork":
-          await this.handleRevertFork(msg.target);
+          if (typeof msg.sessionId === "string" && typeof msg.userMessageId === "string") {
+            await this.handleRevertFork(msg.sessionId, msg.userMessageId);
+          }
           return;
         case "shareSession":
           await this.shareSession();
           return;
         case "revertExecute":
-          await this.handleRevertExecute(Number(msg.head), msg.resendText, !!msg.firstTurn);
+          if (typeof msg.sessionId === "string" && typeof msg.userMessageId === "string") {
+            await this.handleRevertExecute(msg.sessionId, msg.userMessageId, msg.resendText);
+          }
           return;
         case "newSession":
           await this.newSession();
@@ -2508,7 +2520,7 @@ export class ChatController implements AcpHost {
     // a second ACP load of history the runtime already proved it has. A runtime
     // still being created joins them: session/load over it would race the
     // creation, so activateSession waits on its readiness instead.
-    if (already && (already.busy || already.initializing || (already.logFull && !already.replaying && !already.waking))) {
+    if (already && (already.busy || already.rewinding || already.initializing || (already.logFull && !already.replaying && !already.waking))) {
       await this.activateSession(id, true);
       return;
     }
@@ -2526,6 +2538,7 @@ export class ChatController implements AcpHost {
       already.logFull = true;
       already.steps = [];
       already.stepsKnown = false;
+      already.stepsRevision++;
     }
     // "Waking session…" while a fresh acp spins up; a live one loads instantly.
     this.post({ type: "clear", loading: true, waking: !already });
@@ -2651,10 +2664,8 @@ export class ChatController implements AcpHost {
         if (opened) {
           this.flushQueue(opened);
         }
-        if (updateHead && !opened?.busy) {
-          // The head read right after a reload is NOT a reliable revert target: the
-          // next prompt re-expands the conversation and orphans it.
-          void this.postTurnHead(false);
+        if (updateHead && opened && !opened.busy && !opened.rewinding) {
+          void this.refreshCheckpoints(opened);
         }
         if (opened) {
           this.refreshUsage(opened);
@@ -2750,14 +2761,17 @@ export class ChatController implements AcpHost {
     // instead of showing the stale state from when the user left.
     this.flushBgBuffer(rt);
     this.broadcastStatuses();
-    // An instant restore does not reload, so the current head stays valid. Skip
-    // the head read while a turn is in flight so it never contends with the
-    // running prompt on the channel; the next completion refreshes it.
-    if (!rt.busy) {
-      await this.postTurnHead(true);
+    // An instant restore does not reload, so the step list stays valid. While a
+    // turn or a rewind is in flight the read is skipped so it never contends with
+    // the running prompt, but the bindings still publish: a rewind in progress
+    // is exactly the state the checkpoint controls must show as busy.
+    if (!rt.busy && !rt.rewinding) {
+      await this.refreshCheckpoints(rt);
+    } else {
+      rt.owner.postCheckpoints(rt);
     }
-    // postTurnHead awaited too: the same activation may have been superseded
-    // while the head was read, so check again before showing its pending widgets.
+    // refreshCheckpoints awaited too: the same activation may have been superseded
+    // while the steps were read, so check again before showing its pending widgets.
     if (this.closed || this.navigationVersion !== navigationVersion || this.activeId !== id || this.runtimes.get(id) !== rt) {
       return;
     }
@@ -2938,8 +2952,8 @@ export class ChatController implements AcpHost {
       }
       const updateHead = !wakeFailed && this.activeId === id;
       done();
-      if (updateHead) {
-        void this.postTurnHead(false);
+      if (updateHead && !rt.busy && !rt.rewinding) {
+        void this.refreshCheckpoints(rt);
       }
       if (!wakeFailed) {
         this.refreshUsage(rt);
@@ -4757,9 +4771,9 @@ export class ChatController implements AcpHost {
     let rt = startNew || !target ? undefined : this.runtimes.get(target);
     // One turn at a time within a session, except a steering message the agent
     // takes mid turn: anything else sent while the visible session is mid turn
-    // is queued (and shown as a pending row) rather than dropped, then
-    // sent when the turn finishes.
-    if (rt && rt.busy) {
+    // or mid rewind is queued (and shown as a pending row) rather than dropped,
+    // then sent when it finishes.
+    if (rt && (rt.busy || rt.rewinding)) {
       this.enqueueMessage(rt, message);
       this.flushQueue(rt);
       return;
@@ -4790,12 +4804,12 @@ export class ChatController implements AcpHost {
       giveBack("Couldn't open a session to send that to. Your message is back in the box.");
       return;
     }
-    // A turn can have started while the wake or the create was running: opening a
-    // chat drains whatever was typed while it opened, and two sends from the new chat
-    // box share one session/new and so arrive at one runtime. The busy check above
-    // ran before all of that. What does not fit goes to the queue, which is where
-    // a message sent during a turn goes.
-    if (rt.busy) {
+    // A turn or a rewind can have started while the wake or the create was
+    // running: opening a chat drains whatever was typed while it opened, and two
+    // sends from the new chat box share one session/new and so arrive at one
+    // runtime. The busy check above ran before all of that. What does not fit
+    // goes to the queue, which is where a message sent during a turn goes.
+    if (rt.busy || rt.rewinding) {
       this.enqueueMessage(rt, message);
       this.flushQueue(rt);
       return;
@@ -4834,13 +4848,14 @@ export class ChatController implements AcpHost {
       // counts: a steer joining the running one repeats none of that.
       rt.steps = [];
       rt.stepsKnown = false;
+      rt.stepsRevision++;
       this.setRuntimeBusy(rt, true);
       if (this.activeId === rt.id) {
         this.post({ type: "assistantStart" });
       }
       rt.turnCount++;
     }
-    const prompt = rt.client.prompt(rt.id, blocks).catch(async (error: unknown) => {
+    const prompt = rt.client.prompt(rt.id, blocks, message.id).catch(async (error: unknown) => {
       if (error instanceof AcpRequestNotSentError) {
         // The request provably never reached the agent, so the message is safe
         // to hand back. The store write is workspace state and always lands.
@@ -4892,11 +4907,11 @@ export class ChatController implements AcpHost {
       void this.loadSession(rt.id);
       return;
     }
-    // A live completion's head is on the current expansion: a reliable revert
-    // target. Only read it when the session actually went idle, so it never
-    // contends with a queued turn we just started.
-    if (!rt.busy && this.activeId === rt.id) {
-      void this.postTurnHead(true);
+    // Publish the checkpoint list once the session is idle again. Only read it
+    // when the session actually went idle, so it never contends with a queued
+    // turn we just started.
+    if (!rt.busy && !rt.rewinding && this.activeId === rt.id) {
+      void this.refreshCheckpoints(rt);
     }
   }
 
@@ -4926,7 +4941,7 @@ export class ChatController implements AcpHost {
   // staged attachments it was written with, its text, and what it is (a queue
   // entry, or a steer into the running turn).
   private pendingMessage(text: string, attachments: Staged[], kind: PendingKind = "queue"): PendingMessage {
-    return { id: `q-${crypto.randomUUID()}`, kind, text, implicit: this.buildImplicitBlocks(), attachments };
+    return { id: crypto.randomUUID(), kind, text, implicit: this.buildImplicitBlocks(), attachments };
   }
   // The queued message currently being edited in the composer, if any. The queue
   // still drains past it: only that one message is held back when it is chosen,
@@ -4997,7 +5012,7 @@ export class ChatController implements AcpHost {
     // too: supportsMidTurnPrompts cannot answer before initialize has, and a
     // steer kept chronological through that window is normalized below once
     // the real answer exists.
-    if (rt.replaying || rt.waking || !rt.initialized || this.loading.has(rt.id)) {
+    if (rt.replaying || rt.waking || rt.rewinding || !rt.initialized || this.loading.has(rt.id)) {
       return;
     }
     const supportsSteering = rt.client.supportsMidTurnPrompts();
@@ -5046,7 +5061,7 @@ export class ChatController implements AcpHost {
       // is backgrounded is buffered and replays (its user bubble shows on
       // return), instead of being dropped like the old active only post. What
       // was attached goes with it, as it does for a message sent straight away.
-      this.emit(rt, { type: "userMessage", text: message.text, attachments: this.shownAttachments(message.attachments) });
+      this.emit(rt, { type: "userMessage", text: message.text, attachments: this.shownAttachments(message.attachments), clientMessageId: message.id });
       void this.runPrompt(rt, message);
     }
   }
@@ -5303,20 +5318,22 @@ export class ChatController implements AcpHost {
   }
 
   // The agent pushes the whole revertible step list after every turn, so the
-  // checkpoint target is handed to us rather than asked for. Recorded on the
-  // runtime so a session switch can restore it without a round trip.
+  // checkpoint targets are handed to us rather than asked for. Recorded on the
+  // runtime so a session switch can restore them without a round trip.
   private onRevertSteps(rt: Runtime, update: RevertStepsUpdate): void {
-    rt.steps = Array.isArray(update.steps) ? update.steps : [];
-    rt.stepsKnown = true;
-    if (this.activeId !== rt.id || rt.silentReplay) {
+    // The push arrives on this client's transport, so the runtime may already
+    // have moved to another surface: ask its CURRENT owner whether it still
+    // holds this runtime rather than this controller's own map.
+    if (rt.owner.runtimes.get(rt.id) !== rt) {
       return;
     }
-    const head = headOf(rt.steps);
-    if (head != null) {
-      // Pushed after the turn it belongs to, on the expansion it belongs to, so
-      // unlike a head we read ourselves this is always a valid target.
-      this.post({ type: "turnHead", head, reliable: true });
+    if (update.sessionId && update.sessionId !== rt.id) {
+      return;
     }
+    rt.steps = Array.isArray(update.steps) ? update.steps : [];
+    rt.stepsKnown = true;
+    rt.stepsRevision++;
+    rt.owner.postCheckpoints(rt);
   }
 
   // Publish this chat and put the link on the clipboard. The agent refuses until
@@ -5345,191 +5362,282 @@ export class ChatController implements AcpHost {
     }
   }
 
+  // The runtime a scoped checkpoint action belongs to, wherever it lives now.
+  // Actions name their session, so a navigation while the request was in flight
+  // cannot retarget them onto a different chat.
+  private checkpointRuntime(sessionId: string): Runtime | undefined {
+    const owner = this.runtimes.has(sessionId) ? this : this.surfaces?.owner(sessionId, this);
+    return owner?.runtimes.get(sessionId);
+  }
+
+  // Publish this chat's checkpoint bindings: one entry per prompt step the agent
+  // reported, keyed by the stable userMessageId every send now carries. The
+  // webview turns these into Restore/Fork controls; a step list that has not
+  // arrived yet simply leaves the controls hidden.
+  private postCheckpoints(rt: Runtime): void {
+    const owner = rt.owner;
+    if (owner.closed || owner.runtimes.get(rt.id) !== rt || owner.activeId !== rt.id || rt.silentReplay) {
+      return;
+    }
+    const prompts = rt.steps.filter((step) => step.kind === "prompt" && typeof step.userMessageId === "string");
+    owner.post({
+      type: "checkpoints",
+      sessionId: rt.id,
+      checkpoints: prompts.map((step, index) => ({ userMessageId: step.userMessageId, canFork: index > 0 })),
+      busy: !!rt.rewinding
+    });
+  }
+
+  // Make sure the step list behind the checkpoint bindings is current, then
+  // publish it. A push that landed while a list read was in flight wins: the
+  // revision captured before the read decides whether the answer is still the
+  // newest word on the conversation.
+  private async refreshCheckpoints(rt: Runtime, force = false): Promise<void> {
+    if (!rt.client.supportsRevert() || !rt.client.supportsRevertByUserMessageId()) {
+      this.postCheckpoints(rt);
+      return;
+    }
+    if (!rt.stepsKnown || force) {
+      const revision = rt.stepsRevision;
+      try {
+        const steps = await rt.client.listRevertSteps(rt.id);
+        if (rt.owner.runtimes.get(rt.id) !== rt) {
+          return;
+        }
+        if (rt.stepsRevision === revision) {
+          rt.steps = steps;
+          rt.stepsKnown = true;
+          rt.stepsRevision++;
+        }
+      } catch (err) {
+        rt.owner.log(`[checkpoint-list-failed] ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    this.postCheckpoints(rt);
+  }
+
   // Fork: continue from an earlier turn in a new chat, leaving this one untouched.
   // The agent copies the conversation into a new session and hands back its id,
   // which is the chat to open. Nothing is rewound and no file is undone, so unlike
-  // a restore there is nothing to confirm.
-  private async handleRevertFork(target: unknown): Promise<void> {
-    const rt = this.active();
-    if (!rt || typeof target !== "number" || !Number.isFinite(target)) {
+  // a restore there is nothing to confirm. The fork point is resolved fresh from
+  // the step list: the prompt step's revert target is the node before that
+  // request ran, which is where the copy stops.
+  private async handleRevertFork(sessionId: string, userMessageId: string): Promise<void> {
+    const rt = this.checkpointRuntime(sessionId);
+    const navigationVersion = this.navigationVersion;
+    const report = (text: string) => {
+      const owner = rt?.owner ?? this;
+      if (owner.activeId === sessionId) {
+        owner.post({ type: "error", text });
+      } else {
+        owner.log(`[fork-failed] ${sessionId}: ${text}`);
+      }
+    };
+    if (!rt || rt.busy || rt.rewinding || rt.replaying || rt.waking || rt.initializing || rt.client.hasExited()) {
+      report("This chat is not ready for checkpoint actions. Reopen it and try again.");
       return;
     }
     try {
-      const forked = await rt.client.revertForkFromStep(rt.id, target);
+      const revision = rt.stepsRevision;
+      const steps = await rt.client.listRevertSteps(rt.id);
+      // The read raced a turn, a steps push or a rewind: forking from the node
+      // it found would copy a conversation that has already moved on. Recheck
+      // everything the entry gate checked before using that raw node.
+      if (this.checkpointRuntime(sessionId) !== rt
+        || rt.stepsRevision !== revision
+        || rt.client.hasExited()
+        || rt.busy || rt.rewinding || rt.replaying || rt.waking || rt.initializing) {
+        report("This chat changed while the fork was being prepared. Try again.");
+        return;
+      }
+      const step = steps.find((s) => s.kind === "prompt" && s.userMessageId === userMessageId);
+      if (!step || !Number.isFinite(step.revertTargetNodeId)) {
+        report("This message has no valid checkpoint.");
+        return;
+      }
+      const forked = await rt.client.revertForkFromStep(rt.id, step.revertTargetNodeId);
       if (!forked) {
-        this.post({ type: "error", text: "Couldn't fork this chat: the agent did not return a new session." });
+        report("Couldn't fork this chat: the agent did not return a new session.");
         return;
       }
       // The fork is a separate session with its own agent, so it is opened the way
-      // any other existing chat is.
+      // any other existing chat is. It only takes the selection when the chat it
+      // came from is still the one on screen and nothing navigated meanwhile: an
+      // offscreen result is remembered for the session list instead of pulling
+      // the user away from what they are reading.
       this.rememberSession(forked, rt.cwd);
-      await this.loadSession(forked);
-      await this.refreshSessionsIfVisible(true);
-    } catch (err) {
-      this.post({ type: "error", text: err instanceof Error ? err.message : String(err) });
-    }
-  }
-
-  // After a turn completes, hand the webview the node id to pin a revert target
-  // ("checkpoint") to the finished turn. The agent pushes this itself
-  // (`onRevertSteps`), so this only covers the state a session starts in: a
-  // freshly loaded conversation has steps but has had no push yet.
-  private async postTurnHead(reliable = false): Promise<void> {
-    const rt = this.active();
-    if (!rt || !rt.client.supportsRevert()) {
-      return;
-    }
-    const post = (steps: RevertStep[]): void => {
-      const head = headOf(steps);
-      if (head != null && this.activeId === rt.id) {
-        this.post({ type: "turnHead", head, reliable });
+      if (this.activeId === rt.id && this.navigationVersion === navigationVersion) {
+        await this.loadSession(forked);
+        await this.refreshSessionsIfVisible(true);
       }
-    };
-    if (rt.stepsKnown) {
-      post(rt.steps);
-      return;
-    }
-    try {
-      const steps = await rt.client.listRevertSteps(rt.id);
-      rt.steps = steps;
-      rt.stepsKnown = true;
-      post(steps);
     } catch (err) {
-      this.log(`[turn-head-failed] ${err instanceof Error ? err.message : String(err)}`);
+      report(err instanceof Error ? err.message : String(err));
     }
   }
 
-  // The node a revert rewinds to. A later turn's head is the id the webview
-  // captured; the first turn has none, so the checkpoint before it comes from
-  // the agent's own step list. No step means no safe rewind: fail rather than
-  // guess a node or fall back to another session.
-  private async revertTarget(rt: Runtime, head: number, firstTurn: boolean): Promise<number> {
-    if (!firstTurn) {
-      if (!Number.isFinite(head)) {
-        throw new Error("This message has no valid checkpoint.");
-      }
-      return head;
-    }
-    const steps = await rt.client.listRevertSteps(rt.id);
-    const first = steps.find((step) => step.kind === "prompt");
-    if (!first || !Number.isFinite(first.revertTargetNodeId)) {
-      throw new Error("Devin did not provide a checkpoint before the first message. The conversation has been kept.");
-    }
-    return first.revertTargetNodeId;
-  }
-
-  // Preview what reverting to a node would undo (files + irreversible actions),
-  // so the webview can render an inline confirmation before executing.
-  private async handleRevertPreview(head: number, token?: unknown, firstTurn = false): Promise<void> {
-    const rt = this.active();
-    if (!rt || (!firstTurn && !Number.isFinite(head))) {
-      return;
-    }
+  // Preview what rewinding to a prompt would undo (files + irreversible actions),
+  // so the webview can render an inline confirmation before executing. The reply
+  // goes back to the controller that asked: its token belongs to that page.
+  private async handleRevertPreview(sessionId: string, userMessageId: string, token?: unknown): Promise<void> {
+    const rt = this.checkpointRuntime(sessionId);
     // The agent's plan is only half the answer: it reports no file actions for the
     // edits it made through us, so the count of this chat's unreviewed files is
     // what tells the user their edits are staying on disk.
-    const pendingFiles = this.changes.changesFor(rt.id).length;
+    const pendingFiles = rt ? rt.owner.changes.changesFor(rt.id).length : 0;
+    if (!rt) {
+      this.post({ type: "revertPreview", sessionId, userMessageId, token, pendingFiles, error: "This chat is not ready for checkpoint actions. Reopen it and try again." });
+      return;
+    }
     try {
-      const target = await this.revertTarget(rt, head, firstTurn);
-      const result = await rt.client.revertPreview(rt.id, target);
-      this.post({ type: "revertPreview", head: target, token, result, pendingFiles });
+      const result = await rt.client.revertPreview(rt.id, userMessageId);
+      this.post({ type: "revertPreview", sessionId: rt.id, userMessageId, token, result, pendingFiles });
     } catch (err) {
-      this.post({ type: "revertPreview", head, token, pendingFiles, error: err instanceof Error ? err.message : String(err) });
+      this.post({ type: "revertPreview", sessionId: rt.id, userMessageId, token, pendingFiles, error: err instanceof Error ? err.message : String(err) });
     }
   }
 
   // Execute a revert (edit-in-place submit, restore checkpoint, or undo). When
   // `resendText` is given, resend it as the next prompt after the rewind, on the
-  // same session the rewind happened in.
-  private async handleRevertExecute(head: number, resendText: unknown, firstTurn: boolean): Promise<void> {
-    // Captured before the first await: the rewind belongs to the session that was
-    // on screen when the request arrived, not to whatever a later navigation
-    // selects while readiness or the agent is still answering.
-    const rt = this.active();
-    if (!rt) {
+  // same session the rewind happened in. The whole operation is scoped to the
+  // sessionId the webview named: a navigation while it runs cannot retarget the
+  // mutation, the transcript trim, or the recovered draft onto another chat.
+  private async handleRevertExecute(sessionId: string, userMessageId: string, resendText: unknown): Promise<void> {
+    const rt = this.checkpointRuntime(sessionId);
+    const text = typeof resendText === "string" ? resendText.trim() : undefined;
+    // A repeat of the request already in flight is the same operation, not a
+    // second one: answering it again would double the draft recovery and put a
+    // second revert on the wire.
+    if (rt?.rewinding && rt.rewinding.userMessageId === userMessageId && rt.rewinding.resendText === text) {
       return;
     }
     // The resend is captured against THIS session before the rewind's awaits: it
     // belongs to the chat being rewound, not to whatever is selected when the
-    // agent answers, and a failure hands the text and its files back to it.
-    const resend = typeof resendText === "string" && resendText.trim()
-      ? rt.owner.pendingMessage(resendText.trim(), rt.owner.takeStaged(rt.id))
+    // agent answers, and a failure hands the text and its files back to it. The
+    // owner is read again inside giveBack/fail because a surface move in between
+    // retargets where the recovered draft and files land.
+    const owner0 = rt?.owner ?? this;
+    const resend = text
+      ? owner0.pendingMessage(text, owner0.takeStaged(sessionId))
       : undefined;
+    const ownerNow = () => this.checkpointRuntime(sessionId)?.owner ?? rt?.owner ?? this;
     const giveBack = () => {
       if (!resend) {
         return;
       }
-      // Read the owner at call time: a surface move while the rewind was in
-      // flight retargets where the recovered draft and files land.
-      const owner = rt.owner;
-      const held = owner.store.draft(rt.id);
+      const owner = ownerNow();
+      const held = owner.store.draft(sessionId);
       const recovered = held && held !== resend.text ? `${resend.text}\n\n${held}` : resend.text;
-      owner.store.setDraft(rt.id, recovered);
-      owner.restoreStaged(rt.id, resend.attachments);
+      owner.store.setDraft(sessionId, recovered);
+      owner.restoreStaged(sessionId, resend.attachments);
       // Only paint the recovered draft into the composer this rewind still owns.
-      if (owner.activeId === rt.id) {
+      if (owner.activeId === sessionId) {
         owner.postDraft();
       }
     };
     const fail = (err: unknown) => {
       const message = err instanceof Error ? err.message : String(err);
       giveBack();
-      const owner = rt.owner;
-      if (owner.activeId === rt.id) {
+      const owner = ownerNow();
+      if (owner.activeId === sessionId) {
         owner.post({ type: "error", text: message });
       } else {
-        owner.log(`[revert-failed] ${rt.id}: ${message}`);
+        owner.log(`[revert-failed] ${sessionId}: ${message}`);
       }
     };
-    if (!(await this.ensureReady())) {
-      giveBack();
+    if (!rt) {
+      fail(new Error("This chat is not ready for checkpoint actions. Reopen it and try again."));
       return;
     }
-    let target: number;
-    try {
-      target = await this.revertTarget(rt, head, firstTurn);
-    } catch (err) {
-      fail(err);
+    if (rt.rewinding) {
+      fail(new Error("Wait for the current checkpoint action to finish."));
       return;
     }
+    if (rt.busy || rt.replaying || rt.waking || rt.initializing || rt.client.hasExited()) {
+      fail(new Error("Wait for the current response to finish before restoring a checkpoint."));
+      return;
+    }
+    const operation = { userMessageId, resendText: text };
+    rt.rewinding = operation;
+    rt.owner.postCheckpoints(rt);
+    let resendReady = false;
     try {
+      if (!(await this.ensureReady())) {
+        giveBack();
+        return;
+      }
       // The agent truncates the conversation but does NOT touch the client's disk,
       // and it does not tell us what to put back either: probing a real agent, the
       // file plan is empty even for files it edited through us. So read the plan,
-      // rewind, apply whatever it did ask for, and keep everything it did not.
-      const preview = await rt.client.revertPreview(rt.id, target).catch(() => undefined);
-      await rt.client.revertExecute(rt.id, target);
-      // The conversation was rewound, so the local transcript no longer proves a
-      // complete history: the next full restore has to ask the agent again.
-      rt.log = [];
-      rt.logFull = false;
+      // rewind, apply whatever it did ask for, and keep everything it did not. A
+      // preview that fails or is refused stops the whole operation: executing
+      // without it would discard edits with no warning and no way back.
+      const preview = await rt.client.revertPreview(rt.id, userMessageId);
+      await rt.client.revertExecute(rt.id, userMessageId);
+      // The conversation was rewound, so the painted record no longer matches it:
+      // drop the target prompt and everything after it, keeping the earlier
+      // history. When the local record cannot place the prompt (it was already
+      // partial), the safe answer is an empty record that forces a fresh replay
+      // rather than a guessed prefix.
+      if (!rewindPainted(rt.log, userMessageId)) {
+        rt.log = [];
+        rt.logFull = false;
+      }
       rt.bgBuffer = [];
-      const restored = await rt.owner.applyRevertFileUndo(preview, rt);
+      rt.steps = [];
+      rt.stepsKnown = false;
+      rt.stepsRevision++;
+      // The rewind is authoritative the moment execute returns, so the history
+      // change is committed before the file undo's awaits: a later failure there
+      // must not leave the UI showing a transcript the agent already discarded.
+      // Both controllers can hold a cached copy of this chat, so each is told;
+      // the trimmed transcript itself only goes to the surface showing it now.
+      this.post({ type: "sessionHistoryChanged", sessionId: rt.id });
+      const owner = rt.owner;
+      if (owner !== this) {
+        owner.post({ type: "sessionHistoryChanged", sessionId: rt.id });
+      }
+      if (owner.activeId === rt.id) {
+        owner.post({ type: "reverted", sessionId: rt.id, userMessageId, resending: !!resend });
+      }
+      const restored = await owner.applyRevertFileUndo(preview, rt);
       // Only the files that were really put back leave the working set. The rest
       // still hold the agent's edits, so they stay listed and undoable rather than
-      // being silently abandoned on disk with no way back.
+      // being silently abandoned on disk with no way back. The owner is read
+      // again after the await: a surface move in between retargets both.
       rt.owner.changes.clearFor(rt.id, restored);
-      // A cached browser copy of this chat still shows the superseded history:
-      // mark it so reopening reloads instead of resurrecting it.
-      const owner = rt.owner;
-      owner.post({ type: "sessionHistoryChanged", sessionId: rt.id });
-      // `reverted` carries no session id and the page trims by turn position, so
-      // it only goes out while this chat is the one mounted: posted into another
-      // session's transcript it would cut that chat's turns instead.
-      if (owner.activeId === rt.id) {
-        owner.post({ type: "reverted", head: target, firstTurn, resending: !!resend, filesLeft: owner.changes.changesFor(rt.id).length });
-      }
+      // A mutation can remove checkpoints as well as add them, so the bindings
+      // are re-read rather than trusted from before the rewind.
+      await rt.owner.refreshCheckpoints(rt, true);
+      resendReady = true;
     } catch (err) {
       fail(err);
       return;
+    } finally {
+      if (rt.rewinding === operation) {
+        rt.rewinding = undefined;
+        rt.owner.postCheckpoints(rt);
+      }
+      // A failed rewind still owes the queue its turn: sends that queued behind
+      // the lock must not wait for a resend that will never come. The success
+      // paths drain below once the resend (if any) is underway.
+      if (!resendReady && rt.owner.runtimes.get(rt.id) === rt) {
+        rt.owner.flushQueue(rt);
+      }
     }
-    if (resend) {
+    if (resendReady && resend) {
       // The resend goes out on the runtime the rewind happened in, through the
       // same emit/runPrompt a queued message takes, so its echo records once and
-      // buffers for a view that is not watching.
+      // buffers for a view that is not watching. The owner is captured
+      // synchronously: whatever holds the runtime now is who paints it.
       const owner = rt.owner;
       owner.emit(rt, { type: "userMessage", text: resend.text, attachments: owner.shownAttachments(resend.attachments), clientMessageId: resend.id });
-      await owner.runPrompt(rt, resend);
+      const prompting = owner.runPrompt(rt, resend);
+      owner.flushQueue(rt);
+      await prompting;
+    } else {
+      // The lock is released, so whatever queued behind the rewind can go. With a
+      // resend the drain already ran above, once its prompt was underway.
+      rt.owner.flushQueue(rt);
     }
   }
 
@@ -5781,7 +5889,7 @@ export class ChatController implements AcpHost {
       // So a list of results can name the folder each one is in without repeating
       // the whole absolute path on every row.
       root: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
-      revert: !!this.active()?.client.supportsRevert(),
+      revert: !!this.active()?.client.supportsRevert() && !!this.active()?.client.supportsRevertByUserMessageId(),
       subagentControl: !!this.active()?.client.supportsSubagentControl(),
       sessionShare: !!this.active()?.client.supportsSessionShare(),
       steering: !!this.active()?.client.supportsMidTurnPrompts(),
@@ -5813,7 +5921,7 @@ export class ChatController implements AcpHost {
       // resolves, so a transfer mid read does not drop it.
       rt.owner = this;
     }
-    if (!rt || !rt.id || !rt.initialized || rt.busy || rt.replaying || rt.silentReplay || rt.client.hasExited()) {
+    if (!rt || !rt.id || !rt.initialized || rt.busy || rt.rewinding || rt.replaying || rt.silentReplay || rt.client.hasExited()) {
       return;
     }
     if (!this.cfg().get<boolean>("contextUsage.enabled", true)) {
@@ -5957,17 +6065,21 @@ export class ChatController implements AcpHost {
         }
         return;
       }
-      case "user_message_chunk":
+      case "user_message_chunk": {
         // A replayed request carries what was attached to it as its own content
         // blocks. Reading only the text out of them lost the attachments on every
         // reload, so a request that had asked about a screenshot came back bare.
+        // The stable prompt id the send declared arrives in _meta, not the
+        // standard messageId; that id is what checkpoint bindings match on.
+        const metaId = u._meta?.["cognition.ai/clientMessageId"];
         this.emit(rt, {
           type: "userChunk",
           text: textOf(u.content),
-          messageId: u.messageId,
+          messageId: typeof metaId === "string" ? metaId : u.messageId,
           attachments: replayedAttachments(u.content)
         });
         return;
+      }
       case "agent_thought_chunk":
         if (this.cfg().get<boolean>("showThinking", true)) {
           if (parentId) this.emit(rt, { type: "subagentChunk", parentId, stream: "thought", text: textOf(u.content) });

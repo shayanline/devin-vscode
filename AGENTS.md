@@ -131,6 +131,8 @@ where the head is wanted rewinds every checkpoint one turn too far, and nothing
 errors. With two turns the agent reports `rev=27/31` and `fork=31/34`, with the
 head at 31 then 34.
 
+Checkpoint previews take only a `sessionId` and one target, such as `userMessageId`. Do not send `force` or `skipFileUndo` to preview because the current CLI rejects those extra fields. Execute accepts those flags. Edit and restore requests use the stable `userMessageId` instead of a cached node id. A prompt can provide its UUID through `_meta["cognition.ai/clientMessageId"]`, and replay reports the same id through that metadata field. Checkpoint controls bind to the prompt records in `revert/listSteps` and `revert/stepsUpdated`, including for replayed messages. These request shapes and the middle message rewind were verified against CLI 3000.14.30821.
+
 **Permission requests already offer scoped grants.** One shell command comes back
 with up to six options: `allow_once`, `allow_session`, `allow_always` (this
 project), `allow_always_global`, `switch_bypass`, and `reject_once`. The last four

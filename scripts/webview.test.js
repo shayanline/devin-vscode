@@ -893,21 +893,32 @@ test("mermaid is told to keep its errors to itself", async () => {
   );
 });
 
-// Helper: two completed live turns with known heads.
+// Publish the authoritative checkpoint bindings the host sends after the agent's
+// step list: one entry per prompt id, in order, with canFork on every prompt but
+// the first. Tests name their prompt ids so turns and bindings line up.
+function bindCheckpoints(h, sessionId, ids, busy = false) {
+  h.post({
+    type: "checkpoints",
+    sessionId,
+    checkpoints: ids.map((userMessageId, i) => ({ userMessageId, canFork: i > 0 })),
+    busy
+  });
+}
+
+// Helper: two completed live turns with stable prompt ids and bindings.
 function twoLiveTurns(h) {
   h.post({ type: "ready" });
   h.post({ type: "body", body: "thread" });
   h.post({ type: "clear" });
   h.post({ type: "capabilities", revert: true, editRequests: "inline", checkpoints: true });
   h.post({ type: "sessionReady", sessionId: "S" });
-  h.post({ type: "userMessage", text: "first" });
+  h.post({ type: "userMessage", text: "first", clientMessageId: "m1" });
   h.post({ type: "assistantStart" }); h.post({ type: "assistantChunk", text: "a1" }); h.post({ type: "assistantEnd" });
-  h.post({ type: "turnHead", head: 10, reliable: true });
   h.post({ type: "busy", value: false });
-  h.post({ type: "userMessage", text: "second" });
+  h.post({ type: "userMessage", text: "second", clientMessageId: "m2" });
   h.post({ type: "assistantStart" }); h.post({ type: "assistantChunk", text: "a2" }); h.post({ type: "assistantEnd" });
-  h.post({ type: "turnHead", head: 20, reliable: true });
   h.post({ type: "busy", value: false });
+  bindCheckpoints(h, "S", ["m1", "m2"]);
 }
 
 test("a second Enter while an edit is being checked does not send it twice", async () => {
@@ -917,14 +928,13 @@ test("a second Enter while an edit is being checked does not send it twice", asy
   h.post({ type: "clear" });
   h.post({ type: "capabilities", revert: true, editRequests: "inline", checkpoints: true, confirmRemoval: true });
   h.post({ type: "sessionReady", sessionId: "S" });
-  h.post({ type: "userMessage", text: "first" });
+  h.post({ type: "userMessage", text: "first", clientMessageId: "m1" });
   h.post({ type: "assistantStart" }); h.post({ type: "assistantChunk", text: "a1" }); h.post({ type: "assistantEnd" });
-  h.post({ type: "turnHead", head: 10, reliable: true });
   h.post({ type: "busy", value: false });
-  h.post({ type: "userMessage", text: "second" });
+  h.post({ type: "userMessage", text: "second", clientMessageId: "m2" });
   h.post({ type: "assistantStart" }); h.post({ type: "assistantChunk", text: "a2" }); h.post({ type: "assistantEnd" });
-  h.post({ type: "turnHead", head: 20, reliable: true });
   h.post({ type: "busy", value: false });
+  bindCheckpoints(h, "S", ["m1", "m2"]);
   await h.settle(20);
 
   const reqBodies = [...h.document.querySelectorAll("#thread .turn-request .req-body")];
@@ -946,7 +956,8 @@ test("a second Enter while an edit is being checked does not send it twice", asy
     h.post({
       type: "revertPreview",
       token: asked.token,
-      head: asked.head,
+      sessionId: asked.sessionId,
+      userMessageId: asked.userMessageId,
       result: { fileActions: [], irreversibleWarnings: [], conflicts: [] },
       pendingFiles: 0
     });
@@ -980,14 +991,13 @@ test("clearing a transcript cancels its pending revert preview timer", async () 
     h.post({ type: "clear" });
     h.post({ type: "capabilities", revert: true, editRequests: "inline", checkpoints: true, confirmRemoval: true });
     h.post({ type: "sessionReady", sessionId: "S" });
-    h.post({ type: "userMessage", text: "first" });
+    h.post({ type: "userMessage", text: "first", clientMessageId: "m1" });
     h.post({ type: "assistantStart" }); h.post({ type: "assistantEnd" });
-    h.post({ type: "turnHead", head: 10, reliable: true });
     h.post({ type: "busy", value: false });
-    h.post({ type: "userMessage", text: "second" });
+    h.post({ type: "userMessage", text: "second", clientMessageId: "m2" });
     h.post({ type: "assistantStart" }); h.post({ type: "assistantEnd" });
-    h.post({ type: "turnHead", head: 20, reliable: true });
     h.post({ type: "busy", value: false });
+    bindCheckpoints(h, "S", ["m1", "m2"]);
     await h.settle(10);
     h.document.querySelectorAll("#thread .turn-request .req-body")[1].click();
     await h.settle(5);
@@ -1020,7 +1030,7 @@ test("a delayed revert preview cannot execute against a newly selected session",
   assert.ok(preview);
 
   h.post({ type: "sessionReady", sessionId: "other" });
-  h.post({ type: "revertPreview", token: preview.token, head: preview.head, result: { fileActions: [], irreversibleWarnings: [] }, pendingFiles: 0 });
+  h.post({ type: "revertPreview", token: preview.token, sessionId: preview.sessionId, userMessageId: preview.userMessageId, result: { fileActions: [], irreversibleWarnings: [] }, pendingFiles: 0 });
   await h.settle(20);
 
   assert.strictEqual(h.posted.filter((message) => message.type === "revertExecute").length, 0);
@@ -1065,45 +1075,52 @@ test("Retry shows only on the last response", async () => {
   assert.strictEqual(h.errors().length, 0);
 });
 
-test("reloaded turns are only revertable once a reliable (on-expansion) head is known", async () => {
-  // The agent re-expands the conversation on load, orphaning any pre-load node
-  // id. So historical turns and the FIRST new turn after a reload must NOT be
-  // revertable (reverting would hit an orphaned node -> "Invalid params"); a
-  // later turn, whose head-before was captured live, is revertable.
+test("checkpoint identity: replayed turns bind only when the step list names them", async () => {
+  // Checkpoint controls come from the agent's step list, not from anything the
+  // page captured: a replayed turn whose prompt id the list does not name has
+  // no safe target, and one it does name is revertable like a live send.
   const editableTexts = () =>
     [...h.document.querySelectorAll("#thread .turn-request.editable-inline .req-text")].map((e) => e.textContent.trim());
+  const restoreRows = () =>
+    [...h.document.querySelectorAll("#thread .checkpoint-row:not(.hidden)")].length;
 
   const h = createHarness();
   h.post({ type: "ready" });
   h.post({ type: "body", body: "thread" });
   h.post({ type: "clear" });
   h.post({ type: "capabilities", revert: true, editRequests: "inline", checkpoints: true });
-  // Replay history, then the host reports the load head as NOT reliable.
-  h.post({ type: "userChunk", text: "old q" });
+  // Replay history carrying the stable prompt ids, then loaded with no bindings
+  // yet: nothing is revertable.
+  h.post({ type: "userChunk", text: "old q", messageId: "old1" });
   h.post({ type: "assistantChunk", text: "old a" });
   h.post({ type: "loaded" });
-  h.post({ type: "turnHead", head: 27, reliable: false });
+  h.post({ type: "sessionReady", sessionId: "S" });
   await h.settle(20);
-  assert.deepStrictEqual(editableTexts(), [], "historical turn is not editable");
-  assert.strictEqual(h.document.querySelectorAll("#thread .footer-retry").length, 0, "no Retry on history");
+  assert.deepStrictEqual(editableTexts(), [], "unbound replayed turn is not editable");
+  assert.strictEqual(restoreRows(), 0, "no restore rows without bindings");
 
-  // First new turn: head-before is the unreliable load head -> not revertable.
-  h.post({ type: "userMessage", text: "new q1" });
+  // The step list names only the first replayed prompt: it alone binds.
+  bindCheckpoints(h, "S", ["old1"]);
+  await h.settle(20);
+  assert.deepStrictEqual(editableTexts(), ["old q"], "the bound replayed turn is editable");
+  assert.strictEqual(restoreRows(), 1, "one restore row for the bound prompt");
+
+  // A live send and a second replayed prompt join the list: every named prompt
+  // binds, the unnamed one still does not.
+  h.post({ type: "userMessage", text: "new q", clientMessageId: "new1" });
   h.post({ type: "assistantStart" }); h.post({ type: "assistantChunk", text: "a1" }); h.post({ type: "assistantEnd" });
-  h.post({ type: "turnHead", head: 64, reliable: true });
   h.post({ type: "busy", value: false });
+  h.post({ type: "userChunk", text: "older q", messageId: "old2" });
+  h.post({ type: "assistantChunk", text: "older a" });
+  bindCheckpoints(h, "S", ["old1", "old2", "new1"]);
   await h.settle(20);
-  assert.deepStrictEqual(editableTexts(), [], "the first turn after a reload is not revertable");
-
-  // Second new turn: head-before (64) was captured live -> revertable.
-  h.post({ type: "userMessage", text: "new q2" });
-  h.post({ type: "assistantStart" }); h.post({ type: "assistantChunk", text: "a2" }); h.post({ type: "assistantEnd" });
-  h.post({ type: "turnHead", head: 67, reliable: true });
-  h.post({ type: "busy", value: false });
-  await h.settle(20);
-  assert.deepStrictEqual(editableTexts(), ["new q2"], "only the second new turn (reliable head) is editable");
-  assert.strictEqual(h.document.querySelectorAll("#thread .footer-retry").length, 1, "Retry only on the revertable last turn");
-  assert.strictEqual(h.errors().length, 0, "reliability handling threw: " + JSON.stringify(h.errors()));
+  assert.deepStrictEqual(
+    editableTexts().sort(),
+    ["new q", "old q", "older q"].sort(),
+    "every prompt the step list names is editable"
+  );
+  assert.strictEqual(restoreRows(), 3, "one restore row per bound prompt");
+  assert.strictEqual(h.errors().length, 0, "binding handling threw: " + JSON.stringify(h.errors()));
 });
 
 test("starting a new chat from the list does not flash the welcome screen", async () => {
@@ -5494,13 +5511,15 @@ test("a plain allow or reject still records what happened", async () => {
 
 test("a turn can be forked into a new chat without discarding anything", async () => {
   const h = createHarness();
-  h.replay([{ role: "user", text: "first" }, { role: "assistant", text: "answer" }]);
+  h.replay([{ role: "user", text: "first", mid: "m1" }, { role: "assistant", text: "answer" }]);
   await h.settle(20);
-  // A head arrives after each turn, and becomes the next turn's rewind point.
-  h.post({ type: "turnHead", head: 31, reliable: true });
-  h.post({ type: "userChunk", text: "second" });
+  h.post({ type: "sessionReady", sessionId: "S" });
+  // The step list binds both prompts; the second may fork (the first has no
+  // earlier point to copy from).
+  h.post({ type: "userChunk", text: "second", messageId: "m2" });
   h.post({ type: "assistantChunk", text: "answer 2" });
   h.post({ type: "assistantEnd", stopReason: "end_turn" });
+  bindCheckpoints(h, "S", ["m1", "m2"]);
   await h.settle(20);
 
   const fork = h.document.querySelector(".checkpoint-fork");
@@ -5510,9 +5529,8 @@ test("a turn can be forked into a new chat without discarding anything", async (
   await h.settle(10);
 
   const msg = h.posted.filter((m) => m.type === "revertFork").pop();
-  // The same node a restore would rewind to, which is a valid fork point: the
-  // agent branches there into a session of its own.
-  assert.deepStrictEqual(msg, { type: "revertFork", target: 31 });
+  // The stable prompt id the binding named, scoped to this session.
+  assert.deepStrictEqual(msg, { type: "revertFork", sessionId: "S", userMessageId: "m2" });
   // Forking discards nothing, so it must not ask about discarding edits.
   assert.strictEqual(h.posted.filter((m) => m.type === "revertPreview").length, 0);
   assert.strictEqual(h.errors().length, 0);
@@ -5553,15 +5571,19 @@ test("a turn starting does not take the keyboard away from a control", async () 
   // elements. A keyboard user standing on one was dropped back to the top of the
   // panel each time a turn started or ended.
   const h = createHarness();
-  h.replay([{ role: "user", text: "first" }, { role: "assistant", text: "answer" }]);
+  h.replay([{ role: "user", text: "first", mid: "m1" }, { role: "assistant", text: "answer" }]);
   await h.settle(20);
-  h.post({ type: "turnHead", head: 31, reliable: true });
-  h.post({ type: "userChunk", text: "second" });
+  h.post({ type: "sessionReady", sessionId: "S" });
+  h.post({ type: "userChunk", text: "second", messageId: "m2" });
   h.post({ type: "assistantChunk", text: "answer 2" });
   h.post({ type: "assistantEnd", stopReason: "end_turn" });
+  bindCheckpoints(h, "S", ["m1", "m2"]);
   await h.settle(20);
 
-  const btn = h.document.querySelector("#thread .checkpoint-restore, #thread .footer-copy, #thread .msg-copy");
+  // A Copy control on the request, not a checkpoint button: an ineligible
+  // checkpoint row is hidden on the spot even while it holds focus, so it
+  // cannot stand in for the chrome this test is about.
+  const btn = h.document.querySelector("#thread .turn-request .msg-action");
   assert.ok(btn, "there is a control in the transcript to stand on");
   btn.focus();
   assert.strictEqual(h.document.activeElement, btn, "focus is on it");
@@ -5731,15 +5753,18 @@ test("a rewind says the file edits it cannot undo are staying", async () => {
   // through us, and its own rewind leaves the disk alone. So "Discard Edits" would
   // be a promise the rewind does not keep.
   const h = createHarness();
-  h.replay([{ role: "user", text: "first" }, { role: "assistant", text: "answer" }]);
+  h.replay([{ role: "user", text: "first", mid: "m1" }, { role: "assistant", text: "answer" }]);
   await h.settle(20);
-  h.post({ type: "turnHead", head: 31, reliable: true });
-  h.post({ type: "userChunk", text: "second" });
+  h.post({ type: "sessionReady", sessionId: "S" });
+  h.post({ type: "userChunk", text: "second", messageId: "m2" });
   h.post({ type: "assistantChunk", text: "answer 2" });
   h.post({ type: "assistantEnd", stopReason: "end_turn" });
+  bindCheckpoints(h, "S", ["m1", "m2"]);
   await h.settle(20);
 
-  const btn = h.document.querySelector(".checkpoint-restore");
+  // Every bound turn now offers a restore, so take the last one: it is the
+  // second prompt's row, the turn this test rewinds.
+  const btn = [...h.document.querySelectorAll(".checkpoint-restore")].pop();
   assert.ok(btn, "the turn offers a restore");
   btn.dispatchEvent(new h.window.MouseEvent("click", { bubbles: true }));
   await h.settle(10);
@@ -5750,7 +5775,8 @@ test("a rewind says the file edits it cannot undo are staying", async () => {
   h.post({
     type: "revertPreview",
     token: asked.token,
-    head: asked.head,
+    sessionId: asked.sessionId,
+    userMessageId: asked.userMessageId,
     result: { fileActions: [], irreversibleWarnings: [], conflicts: [] },
     pendingFiles: 2
   });
@@ -5764,7 +5790,7 @@ test("a rewind says the file edits it cannot undo are staying", async () => {
 
   btn.dispatchEvent(new h.window.MouseEvent("click", { bubbles: true }));
   await h.settle(10);
-  assert.ok(h.posted.some((m) => m.type === "revertExecute" && m.head === 31), "confirming rewinds");
+  assert.ok(h.posted.some((m) => m.type === "revertExecute" && m.userMessageId === "m2"), "confirming rewinds");
   assert.strictEqual(h.errors().length, 0);
 });
 
@@ -7152,15 +7178,15 @@ test("session lifecycle: a first turn resend keeps the welcome down until its ec
   h.post({ type: "clear" });
   h.post({ type: "capabilities", revert: true, editRequests: "inline", checkpoints: true });
   h.post({ type: "sessionReady", sessionId: "S" });
-  h.post({ type: "userMessage", text: "original" });
+  h.post({ type: "userMessage", text: "original", clientMessageId: "m1" });
   h.post({ type: "assistantStart" }); h.post({ type: "assistantChunk", text: "a1" }); h.post({ type: "assistantEnd" });
-  h.post({ type: "turnHead", head: 10, reliable: true });
   h.post({ type: "busy", value: false });
+  bindCheckpoints(h, "S", ["m1"]);
   await h.settle(10);
 
-  // The first turn's headBefore is null, so editing it rewinds to the checkpoint
-  // before it inside THIS session: the page must hold the welcome down across
-  // the rewind and the resend's echo.
+  // Editing the only turn rewinds to the checkpoint before it inside THIS
+  // session: the page must hold the welcome down across the rewind and the
+  // resend's echo.
   h.document.querySelector("#thread .turn-request .req-body").click();
   await h.settle(5);
   const ta = h.document.querySelector(".req-editor-input");
@@ -7168,29 +7194,30 @@ test("session lifecycle: a first turn resend keeps the welcome down until its ec
   ta.value = "edited first turn";
   ta.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
   await h.settle(10);
-  // The first turn's preview asks the host for the checkpoint before it.
   const preview = h.posted.filter((m) => m.type === "revertPreview").pop();
-  assert.ok(preview && preview.firstTurn === true, "the first turn edit previews its checkpoint");
+  assert.ok(preview && preview.userMessageId === "m1" && preview.sessionId === "S", "the edit previews its checkpoint by prompt id");
   h.post({
     type: "revertPreview",
     token: preview.token,
+    sessionId: preview.sessionId,
+    userMessageId: preview.userMessageId,
     result: { fileActions: [], irreversibleWarnings: [], conflicts: [] },
     pendingFiles: 0
   });
   await h.settle(10);
   assert.deepStrictEqual(
     h.posted.filter((m) => m.type === "revertExecute").pop(),
-    { type: "revertExecute", firstTurn: true, resendText: "edited first turn" },
+    { type: "revertExecute", sessionId: "S", userMessageId: "m1", resendText: "edited first turn" },
     "the first turn resend rewinds inside the same session"
   );
 
   // The host confirms the rewind and the resend is on its way: no clear, no new
   // session, and nothing may flash the welcome in the gap before the echo.
-  h.post({ type: "reverted", head: 3, firstTurn: true, resending: true });
+  h.post({ type: "reverted", sessionId: "S", userMessageId: "m1", resending: true });
   await h.settle(10);
   assert.strictEqual(h.document.querySelectorAll("#thread .welcome").length, 0, "no welcome flash while the resend is on its way");
   assert.strictEqual(h.reqTexts().length, 0, "the rewound turn is gone before the echo");
-  h.post({ type: "userMessage", text: "edited first turn" });
+  h.post({ type: "userMessage", text: "edited first turn", clientMessageId: "m2" });
   await h.settle(10);
   assert.deepStrictEqual(h.reqTexts(), ["edited first turn"], "the resend is the only request");
   assert.strictEqual(h.errors().length, 0);
@@ -7203,38 +7230,39 @@ test("session lifecycle: restoring the first turn shows the welcome on the same 
   h.post({ type: "clear" });
   h.post({ type: "capabilities", revert: true, editRequests: "inline", checkpoints: true });
   h.post({ type: "sessionReady", sessionId: "S" });
-  h.post({ type: "userMessage", text: "original" });
+  h.post({ type: "userMessage", text: "original", clientMessageId: "m1" });
   h.post({ type: "assistantStart" }); h.post({ type: "assistantChunk", text: "a1" }); h.post({ type: "assistantEnd" });
-  h.post({ type: "turnHead", head: 10, reliable: true });
   h.post({ type: "busy", value: false });
+  bindCheckpoints(h, "S", ["m1"]);
   await h.settle(10);
 
-  // Restoring the first turn rewinds to the checkpoint before it in THIS
+  // Restoring the only turn rewinds to the checkpoint before it in THIS
   // session: the prompt text goes back to the composer and the emptied chat
   // shows its starter prompts like any other empty session.
   const btn = h.document.querySelector("#thread .checkpoint-restore");
   assert.ok(btn, "the first turn offers a restore");
   btn.dispatchEvent(new h.window.MouseEvent("click", { bubbles: true }));
   await h.settle(10);
-  // The first turn's preview asks the host for the checkpoint before it.
   const preview = h.posted.filter((m) => m.type === "revertPreview").pop();
-  assert.ok(preview && preview.firstTurn === true, "the first turn restore previews its checkpoint");
+  assert.ok(preview && preview.userMessageId === "m1" && preview.sessionId === "S", "the restore previews its checkpoint by prompt id");
   h.post({
     type: "revertPreview",
     token: preview.token,
+    sessionId: preview.sessionId,
+    userMessageId: preview.userMessageId,
     result: { fileActions: [], irreversibleWarnings: [], conflicts: [] },
     pendingFiles: 0
   });
   await h.settle(10);
   assert.deepStrictEqual(
     h.posted.filter((m) => m.type === "revertExecute").pop(),
-    { type: "revertExecute", firstTurn: true },
+    { type: "revertExecute", sessionId: "S", userMessageId: "m1" },
     "the first turn restore rewinds inside the same session without a resend"
   );
 
   // The host confirms on the same session: the turn is trimmed, the restored
   // divider shows, and the emptied thread gets its welcome back.
-  h.post({ type: "reverted", head: 3, firstTurn: true, resending: false });
+  h.post({ type: "reverted", sessionId: "S", userMessageId: "m1", resending: false });
   await h.settle(10);
   assert.strictEqual(h.reqTexts().length, 0, "the rewound turn is gone");
   assert.strictEqual(h.document.querySelectorAll("#thread .welcome-chip").length, 4, "the emptied session shows its starter prompts");
@@ -7249,10 +7277,10 @@ test("reported regressions: keys typed inside the inline editor do not fire the 
   h.post({ type: "clear" });
   h.post({ type: "capabilities", revert: true, editRequests: "inline", checkpoints: true });
   h.post({ type: "sessionReady", sessionId: "S" });
-  h.post({ type: "userMessage", text: "first" });
+  h.post({ type: "userMessage", text: "first", clientMessageId: "m1" });
   h.post({ type: "assistantStart" }); h.post({ type: "assistantChunk", text: "a1" }); h.post({ type: "assistantEnd" });
-  h.post({ type: "turnHead", head: 10, reliable: true });
   h.post({ type: "busy", value: false });
+  bindCheckpoints(h, "S", ["m1"]);
   await h.settle(10);
 
   h.document.querySelector("#thread .turn-request .req-body").click();
@@ -7293,10 +7321,10 @@ test("reported regressions: submitting an unchanged inline edit is a no op", asy
   h.post({ type: "clear" });
   h.post({ type: "capabilities", revert: true, editRequests: "inline", checkpoints: true });
   h.post({ type: "sessionReady", sessionId: "S" });
-  h.post({ type: "userMessage", text: "first" });
+  h.post({ type: "userMessage", text: "first", clientMessageId: "m1" });
   h.post({ type: "assistantStart" }); h.post({ type: "assistantChunk", text: "a1" }); h.post({ type: "assistantEnd" });
-  h.post({ type: "turnHead", head: 10, reliable: true });
   h.post({ type: "busy", value: false });
+  bindCheckpoints(h, "S", ["m1"]);
   await h.settle(10);
 
   h.document.querySelector("#thread .turn-request .req-body").click();
@@ -7322,10 +7350,10 @@ test("reported regressions: submitting unchanged text while editing in the compo
   h.post({ type: "clear" });
   h.post({ type: "capabilities", revert: true, editRequests: "input", checkpoints: true });
   h.post({ type: "sessionReady", sessionId: "S" });
-  h.post({ type: "userMessage", text: "first" });
+  h.post({ type: "userMessage", text: "first", clientMessageId: "m1" });
   h.post({ type: "assistantStart" }); h.post({ type: "assistantChunk", text: "a1" }); h.post({ type: "assistantEnd" });
-  h.post({ type: "turnHead", head: 10, reliable: true });
   h.post({ type: "busy", value: false });
+  bindCheckpoints(h, "S", ["m1"]);
   await h.settle(10);
 
   // editRequests:"input" loads the request into the composer with a banner.
@@ -7429,10 +7457,10 @@ test("review regressions: a failed checkpoint check keeps the edited message in 
   h.post({ type: "clear" });
   h.post({ type: "capabilities", revert: true, editRequests: "inline", checkpoints: true });
   h.post({ type: "sessionReady", sessionId: "S" });
-  h.post({ type: "userMessage", text: "original" });
+  h.post({ type: "userMessage", text: "original", clientMessageId: "m1" });
   h.post({ type: "assistantStart" }); h.post({ type: "assistantChunk", text: "a1" }); h.post({ type: "assistantEnd" });
-  h.post({ type: "turnHead", head: 10, reliable: true });
   h.post({ type: "busy", value: false });
+  bindCheckpoints(h, "S", ["m1"]);
   await h.settle(10);
 
   h.document.querySelector("#thread .turn-request .req-body").click();
@@ -7443,11 +7471,11 @@ test("review regressions: a failed checkpoint check keeps the edited message in 
   ta.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
   await h.settle(10);
   const preview = h.posted.filter((m) => m.type === "revertPreview").pop();
-  assert.ok(preview && preview.firstTurn === true, "the edit asked for its checkpoint");
+  assert.ok(preview && preview.userMessageId === "m1" && preview.sessionId === "S", "the edit asked for its checkpoint");
 
   // The host cannot answer the checkpoint check: the edit must not proceed as
   // if the rewind were safe, and the editor keeps the typed text.
-  h.post({ type: "revertPreview", token: preview.token, error: "checkpoint unavailable" });
+  h.post({ type: "revertPreview", token: preview.token, sessionId: preview.sessionId, userMessageId: preview.userMessageId, error: "checkpoint unavailable" });
   await h.settle(10);
 
   const still = h.document.querySelector(".req-editor-input");
@@ -7467,10 +7495,10 @@ test("review regressions: a timed out checkpoint check keeps the composer edit a
   h.post({ type: "clear" });
   h.post({ type: "capabilities", revert: true, editRequests: "input", checkpoints: true });
   h.post({ type: "sessionReady", sessionId: "S" });
-  h.post({ type: "userMessage", text: "original" });
+  h.post({ type: "userMessage", text: "original", clientMessageId: "m1" });
   h.post({ type: "assistantStart" }); h.post({ type: "assistantChunk", text: "a1" }); h.post({ type: "assistantEnd" });
-  h.post({ type: "turnHead", head: 10, reliable: true });
   h.post({ type: "busy", value: false });
+  bindCheckpoints(h, "S", ["m1"]);
   await h.settle(10);
 
   // editRequests:"input" loads the request into the composer with a banner.
@@ -7482,7 +7510,7 @@ test("review regressions: a timed out checkpoint check keeps the composer edit a
   input.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
   await h.settle(10);
   const preview = h.posted.filter((m) => m.type === "revertPreview").pop();
-  assert.ok(preview && preview.firstTurn === true, "the edit asked for its checkpoint");
+  assert.ok(preview && preview.userMessageId === "m1" && preview.sessionId === "S", "the edit asked for its checkpoint");
 
   // No answer ever arrives: the check must time out into a visible error, not
   // into a rewind.
@@ -7493,5 +7521,397 @@ test("review regressions: a timed out checkpoint check keeps the composer edit a
   assert.strictEqual(h.posted.filter((m) => m.type === "revertExecute" || m.type === "send" || m.type === "newSession").length, 0,
     "the timed out check still rewound or sent");
   assert.strictEqual(h.errors().length, 0);
+});
+
+test("checkpoint identity: bindings that land before the replay chunks still bind every turn", async () => {
+  // The agent's step list can reach the page while the replay is still
+  // streaming. It must be stored rather than dropped, and the chrome built
+  // once loading ends has to pick it up without a second identical frame.
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear", loading: true });
+  h.post({ type: "capabilities", revert: true, editRequests: "inline", checkpoints: true });
+  h.post({ type: "sessionReady", sessionId: "S" });
+  bindCheckpoints(h, "S", ["m1", "m2", "m3"]);
+  h.post({ type: "userChunk", text: "one", messageId: "m1" });
+  h.post({ type: "assistantChunk", text: "a1" });
+  h.post({ type: "userChunk", text: "two", messageId: "m2" });
+  h.post({ type: "assistantChunk", text: "a2" });
+  h.post({ type: "userChunk", text: "three", messageId: "m3" });
+  h.post({ type: "assistantChunk", text: "a3" });
+  h.post({ type: "loaded" });
+  await h.settle(20);
+
+  const rows = () => [...h.document.querySelectorAll("#thread .checkpoint-row:not(.hidden)")];
+  assert.strictEqual(rows().length, 3, "bindings stored during loading still produce rows");
+  // The host republishes the same list once the load settles: an identical
+  // frame must leave the correct rows alone.
+  bindCheckpoints(h, "S", ["m1", "m2", "m3"]);
+  await h.settle(20);
+  assert.strictEqual(rows().length, 3, "an identical post-loaded frame keeps the rows");
+  assert.strictEqual(rows()[0].querySelector(".checkpoint-fork"), null, "the first prompt has no fork");
+  assert.ok(rows()[1].querySelector(".checkpoint-fork") && rows()[2].querySelector(".checkpoint-fork"),
+    "later prompts offer fork");
+  assert.strictEqual(h.errors().length, 0, "binding handling threw: " + JSON.stringify(h.errors()));
+});
+
+test("checkpoint identity: three turns show no controls until the step list names them", async () => {
+  // Two replayed prompts and one live send, none bound: the page must not
+  // invent checkpoint targets from the transcript it happens to hold.
+  const h = createHarness();
+  h.replay([
+    { role: "user", text: "one", mid: "m1" },
+    { role: "assistant", text: "a1" },
+    { role: "user", text: "two", mid: "m2" },
+    { role: "assistant", text: "a2" }
+  ]);
+  h.post({ type: "sessionReady", sessionId: "S" });
+  h.post({ type: "userMessage", text: "three", clientMessageId: "m3" });
+  h.post({ type: "assistantStart" }); h.post({ type: "assistantChunk", text: "a3" }); h.post({ type: "assistantEnd" });
+  h.post({ type: "busy", value: false });
+  await h.settle(20);
+
+  const rows = () => [...h.document.querySelectorAll("#thread .checkpoint-row:not(.hidden)")];
+  const editable = () => [...h.document.querySelectorAll("#thread .turn-request.editable-inline .req-text")]
+    .map((e) => e.textContent.trim());
+  assert.strictEqual(rows().length, 0, "no restore rows before bindings arrive");
+  assert.deepStrictEqual(editable(), [], "nothing is editable either");
+
+  bindCheckpoints(h, "S", ["m1", "m2", "m3"]);
+  await h.settle(20);
+  assert.strictEqual(rows().length, 3, "all three named prompts bind");
+  assert.deepStrictEqual(editable().sort(), ["one", "three", "two"], "every bound turn is editable");
+  assert.strictEqual(rows()[0].querySelector(".checkpoint-fork"), null, "the first prompt cannot fork");
+  assert.ok(rows()[1].querySelector(".checkpoint-fork") && rows()[2].querySelector(".checkpoint-fork"),
+    "the later prompts fork");
+  assert.strictEqual(h.errors().length, 0, "binding handling threw: " + JSON.stringify(h.errors()));
+});
+
+test("checkpoint identity: busy, checkpointBusy and a pending send each hold the controls off", async () => {
+  const h = createHarness();
+  twoLiveTurns(h);
+  await h.settle(20);
+  const rows = () => [...h.document.querySelectorAll("#thread .checkpoint-row:not(.hidden)")];
+  assert.strictEqual(rows().length, 2, "bound turns show their rows");
+
+  // A turn running on the agent.
+  h.post({ type: "busy", value: true });
+  await h.settle(10);
+  assert.strictEqual(rows().length, 0, "busy hides the rows");
+  h.post({ type: "busy", value: false });
+  await h.settle(10);
+  assert.strictEqual(rows().length, 2, "the rows return when the turn ends");
+
+  // A rewind in flight: same bindings, busy flag raised.
+  bindCheckpoints(h, "S", ["m1", "m2"], true);
+  await h.settle(10);
+  assert.strictEqual(rows().length, 0, "a checkpoint rewind holds the rows off");
+  bindCheckpoints(h, "S", ["m1", "m2"], false);
+  await h.settle(10);
+  assert.strictEqual(rows().length, 2, "the rows return when the rewind ends");
+
+  // A message on its way to the agent.
+  const input = h.document.getElementById("input");
+  input.value = "next";
+  input.dispatchEvent(new h.window.Event("input", { bubbles: true }));
+  h.document.getElementById("send").click();
+  await h.settle(10);
+  assert.strictEqual(rows().length, 0, "a pending send holds the rows off");
+  h.post({ type: "userMessage", text: "next", clientMessageId: "m3" });
+  h.post({ type: "assistantStart" }); h.post({ type: "assistantChunk", text: "a3" }); h.post({ type: "assistantEnd" });
+  h.post({ type: "busy", value: false });
+  await h.settle(10);
+  assert.strictEqual(rows().length, 2, "only the named turns bind; the new one waits for the list");
+  assert.strictEqual(h.errors().length, 0, "gate handling threw: " + JSON.stringify(h.errors()));
+});
+
+test("checkpoint identity: a focused turn's stale row disables and re-enables in place", async () => {
+  // Focus inside a turn defers its chrome rebuild, but the checkpoint row must
+  // still follow eligibility: a Restore that went stale while focused cannot
+  // stay armed, and a button that came back must be the same element. The
+  // checkpointBusy flag is used rather than a turn boundary because ending a
+  // turn legitimately hands focus back to the composer.
+  const h = createHarness();
+  twoLiveTurns(h);
+  await h.settle(20);
+  const turnEls = () => [...h.document.querySelectorAll("#thread .turn")];
+  const rowOf = (i) => turnEls()[i].querySelector(".checkpoint-row");
+  const btnOf = (i) => rowOf(i).querySelector(".checkpoint-restore");
+
+  const restoreBtn = btnOf(1);
+  restoreBtn.focus();
+  assert.strictEqual(h.document.activeElement, restoreBtn, "the restore button holds focus");
+
+  bindCheckpoints(h, "S", ["m1", "m2"], true);
+  await h.settle(10);
+  assert.ok(restoreBtn.disabled, "the focused row's button disabled in place");
+  assert.ok(rowOf(1).classList.contains("hidden"), "the focused row hid in place");
+  assert.strictEqual(h.document.activeElement, restoreBtn, "focus was not dropped");
+
+  bindCheckpoints(h, "S", ["m1", "m2"], false);
+  await h.settle(10);
+  assert.strictEqual(btnOf(1), restoreBtn, "the retained row kept its button element");
+  assert.ok(!restoreBtn.disabled, "the button re-enabled in place");
+  assert.ok(!rowOf(1).classList.contains("hidden"), "the row is visible again");
+  assert.strictEqual(h.document.activeElement, restoreBtn, "focus stayed on the button");
+
+  // Copy focus is preserved the same way: the deferred chrome rebuild never
+  // replaces the button the keyboard user is standing on.
+  const copyBtn = turnEls()[0].querySelector(".chat-footer .dv-copy");
+  assert.ok(copyBtn, "the first turn has a Copy button");
+  copyBtn.focus();
+  bindCheckpoints(h, "S", ["m1", "m2"], true);
+  await h.settle(10);
+  bindCheckpoints(h, "S", ["m1", "m2"], false);
+  await h.settle(10);
+  assert.strictEqual(h.document.activeElement, copyBtn, "Copy kept focus through the toggle");
+  assert.strictEqual(turnEls()[0].querySelector(".chat-footer .dv-copy"), copyBtn,
+    "the deferred rebuild never replaced it");
+  assert.strictEqual(h.errors().length, 0, "focused chrome handling threw: " + JSON.stringify(h.errors()));
+});
+
+test("checkpoint identity: foreign and unscoped frames never touch the open chat", async () => {
+  const h = createHarness();
+  twoLiveTurns(h);
+  await h.settle(20);
+  const rows = () => [...h.document.querySelectorAll("#thread .checkpoint-row:not(.hidden)")];
+  assert.strictEqual(rows().length, 2);
+
+  // A frame for another session is stale transport: bindings, busy and trims
+  // all belong to the session they name.
+  h.post({ type: "checkpoints", sessionId: "OTHER", checkpoints: [{ userMessageId: "x9", canFork: true }], busy: true });
+  await h.settle(10);
+  assert.strictEqual(rows().length, 2, "a foreign checkpoints frame changed nothing");
+  assert.deepStrictEqual(h.reqTexts(), ["first", "second"], "the transcript is untouched");
+
+  h.post({ type: "reverted", sessionId: "OTHER", userMessageId: "m2" });
+  await h.settle(10);
+  assert.deepStrictEqual(h.reqTexts(), ["first", "second"], "a foreign reverted frame trimmed nothing");
+
+  // A reverted frame with no session at all cannot prove it means this chat.
+  h.post({ type: "reverted", userMessageId: "m2" });
+  await h.settle(10);
+  assert.deepStrictEqual(h.reqTexts(), ["first", "second"], "an unscoped reverted frame trimmed nothing");
+  assert.strictEqual(rows().length, 2, "and no binding was dropped");
+
+  // The scoped frame for this session works, and removes only that turn.
+  h.post({ type: "reverted", sessionId: "S", userMessageId: "m2" });
+  await h.settle(10);
+  assert.deepStrictEqual(h.reqTexts(), ["first"], "the scoped reverted frame trimmed from m2");
+  assert.strictEqual(rows().length, 1, "only the surviving turn keeps a row");
+  assert.strictEqual(h.errors().length, 0, "scoped frame handling threw: " + JSON.stringify(h.errors()));
+});
+
+test("checkpoint identity: a cached return keeps bindings while a wake clears them until ready", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "capabilities", revert: true, editRequests: "inline", checkpoints: true });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "userMessage", text: "first", clientMessageId: "m1" });
+  h.post({ type: "assistantStart" }); h.post({ type: "assistantChunk", text: "a1" }); h.post({ type: "assistantEnd" });
+  h.post({ type: "busy", value: false });
+  h.post({ type: "userMessage", text: "second", clientMessageId: "m2" });
+  h.post({ type: "assistantStart" }); h.post({ type: "assistantChunk", text: "a2" }); h.post({ type: "assistantEnd" });
+  h.post({ type: "busy", value: false });
+  bindCheckpoints(h, "A", ["m1", "m2"]);
+  h.post({ type: "sessionStatuses", statuses: { A: "idle", B: "idle" }, activeId: "A" });
+  await h.settle(20);
+  const rows = () => [...h.document.querySelectorAll("#thread .checkpoint-row:not(.hidden)")];
+  assert.strictEqual(rows().length, 2, "the live session's rows are up");
+
+  const open = (id) => h.post({ type: "openSession", id });
+  // Leave for another chat and come back while A is still alive: the cached
+  // bindings come back with the transcript, no fresh frame needed.
+  open("B");
+  await h.settle(10);
+  const framesBefore = h.posted.filter((m) => m.type === "checkpoints" && m.sessionId === "A").length;
+  open("A");
+  await h.settle(10);
+  assert.strictEqual(rows().length, 2, "the cached bindings restored the rows");
+  assert.ok(h.posted.some((m) => m.type === "activateSession" && m.id === "A"), "the live session re-attached");
+  assert.strictEqual(
+    h.posted.filter((m) => m.type === "checkpoints" && m.sessionId === "A").length,
+    framesBefore,
+    "no new binding frame was needed"
+  );
+
+  // A goes dead: the cached copy still restores, but its bindings are stale
+  // until the wake's step list lands, so the controls stay off meanwhile.
+  h.post({ type: "sessionStatuses", statuses: {}, activeId: null });
+  open("B");
+  await h.settle(10);
+  open("A");
+  await h.settle(10);
+  assert.ok(h.posted.some((m) => m.type === "wakeSession" && m.id === "A"), "the dead session woke in the background");
+  assert.strictEqual(rows().length, 0, "stale bindings do not survive the wake");
+  assert.deepStrictEqual(h.reqTexts(), ["first", "second"], "the transcript itself stayed");
+
+  // The host's authoritative frame after the wake republishes the controls.
+  bindCheckpoints(h, "A", ["m1", "m2"]);
+  await h.settle(10);
+  assert.strictEqual(rows().length, 2, "the republished bindings restore the rows");
+  assert.strictEqual(h.errors().length, 0, "cached/wake handling threw: " + JSON.stringify(h.errors()));
+});
+
+test("checkpoint identity: an armed restore confirmation stands down when the state changes", async () => {
+  // The two step restore: the preview reports files the rewind leaves behind,
+  // so the button morphs into a confirmation. Anything that invalidates the
+  // state it was raised for must stand it back down, even while the row holds
+  // focus and keeps its elements.
+  const h = createHarness();
+  twoLiveTurns(h);
+  h.post({ type: "capabilities", revert: true, editRequests: "inline", checkpoints: true, confirmRemoval: true });
+  await h.settle(20);
+  const rowOf = () => h.document.querySelectorAll("#thread .turn")[1].querySelector(".checkpoint-row");
+  const btnOf = () => rowOf().querySelector(".checkpoint-restore");
+  const label = () => btnOf().querySelector("span").textContent;
+
+  const restoreBtn = btnOf();
+  restoreBtn.focus();
+  restoreBtn.click();
+  await h.settle(5);
+  const asked = h.posted.filter((m) => m.type === "revertPreview");
+  assert.strictEqual(asked.length, 1, "one preview request went out");
+  assert.deepStrictEqual(
+    { sessionId: asked[0].sessionId, userMessageId: asked[0].userMessageId },
+    { sessionId: "S", userMessageId: "m2" },
+    "the preview is scoped to the restored turn"
+  );
+  h.post({
+    type: "revertPreview", token: asked[0].token,
+    sessionId: asked[0].sessionId, userMessageId: asked[0].userMessageId,
+    result: { fileActions: [], irreversibleWarnings: [] }, pendingFiles: 2
+  });
+  await h.settle(10);
+  assert.strictEqual(label(), "Rewind Chat", "the confirmation is armed");
+  assert.ok(rowOf().classList.contains("confirming"), "the row shows the armed state");
+
+  // A rewind starting elsewhere invalidates it while the focused row keeps its
+  // elements: the confirmation stands down in place rather than surviving. The
+  // checkpointBusy flag stands in for the rewind so the composer keeps focus.
+  bindCheckpoints(h, "S", ["m1", "m2"], true);
+  await h.settle(10);
+  assert.strictEqual(label(), "Restore Checkpoint", "checkpointBusy stood the confirmation down");
+  assert.ok(!rowOf().classList.contains("confirming"), "the armed class is gone");
+  bindCheckpoints(h, "S", ["m1", "m2"], false);
+  await h.settle(10);
+  assert.strictEqual(btnOf(), restoreBtn, "the focused row kept its button element");
+  assert.strictEqual(label(), "Restore Checkpoint", "the button did not stay armed");
+  assert.ok(!restoreBtn.disabled, "the retained button re-enabled");
+
+  // A fresh click asks the host again instead of reusing the stale answer.
+  restoreBtn.click();
+  await h.settle(5);
+  assert.strictEqual(h.posted.filter((m) => m.type === "revertPreview").length, 2,
+    "a fresh preview was requested");
+  assert.strictEqual(h.errors().length, 0, "confirmation handling threw: " + JSON.stringify(h.errors()));
+});
+
+test("checkpoint identity: a send while a preview is in flight voids the late answer", async () => {
+  // Submitting an edit asks the host what the rewind would discard. A normal
+  // send before that answer lands makes the question stale: the late reply
+  // must not rewind, resend, or touch the editor's text.
+  const h = createHarness();
+  twoLiveTurns(h);
+  h.post({ type: "capabilities", revert: true, editRequests: "inline", checkpoints: true, confirmRemoval: true });
+  await h.settle(20);
+  h.document.querySelectorAll("#thread .turn-request .req-body")[1].click();
+  await h.settle(5);
+  const ta = h.document.querySelector(".req-editor-input");
+  ta.value = "second, revised";
+  ta.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  await h.settle(5);
+  const asked = h.posted.filter((m) => m.type === "revertPreview");
+  assert.strictEqual(asked.length, 1, "one preview request went out");
+  assert.deepStrictEqual(
+    { sessionId: asked[0].sessionId, userMessageId: asked[0].userMessageId },
+    { sessionId: "S", userMessageId: "m2" },
+    "the preview is scoped to the edited turn"
+  );
+
+  const input = h.document.getElementById("input");
+  input.value = "a newer message";
+  input.dispatchEvent(new h.window.Event("input", { bubbles: true }));
+  h.document.getElementById("send").click();
+  await h.settle(10);
+
+  h.post({
+    type: "revertPreview", token: asked[0].token,
+    sessionId: asked[0].sessionId, userMessageId: asked[0].userMessageId,
+    result: { fileActions: [], irreversibleWarnings: [] }, pendingFiles: 0
+  });
+  await h.settle(20);
+  assert.strictEqual(h.posted.filter((m) => m.type === "revertExecute").length, 0,
+    "the stale preview still rewound");
+  const editor = h.document.querySelector(".req-editor-input");
+  assert.ok(editor, "the editor stayed open");
+  assert.strictEqual(editor.value, "second, revised", "the edited text was kept");
+  assert.strictEqual(h.errors().length, 0, "stale preview handling threw: " + JSON.stringify(h.errors()));
+});
+
+test("checkpoint identity: changed bindings cancel an armed confirmation and pending previews", async () => {
+  // A bindings frame that actually changes the list invalidates every open
+  // checkpoint question: an armed Restore stands down and a preview still in
+  // flight is dropped, so neither can act on a transcript that moved.
+  const h = createHarness();
+  twoLiveTurns(h);
+  h.post({ type: "capabilities", revert: true, editRequests: "inline", checkpoints: true, confirmRemoval: true });
+  await h.settle(20);
+  const rowOf = () => h.document.querySelectorAll("#thread .turn")[1].querySelector(".checkpoint-row");
+  const btnOf = () => rowOf().querySelector(".checkpoint-restore");
+  const label = () => btnOf().querySelector("span").textContent;
+
+  btnOf().click();
+  await h.settle(5);
+  const asked = h.posted.filter((m) => m.type === "revertPreview");
+  assert.strictEqual(asked.length, 1);
+  h.post({
+    type: "revertPreview", token: asked[0].token,
+    sessionId: asked[0].sessionId, userMessageId: asked[0].userMessageId,
+    result: { fileActions: [], irreversibleWarnings: [] }, pendingFiles: 2
+  });
+  await h.settle(10);
+  assert.strictEqual(label(), "Rewind Chat", "the confirmation is armed");
+
+  // The step list drops m2 (a rewind elsewhere, or the prompt was never a
+  // checkpoint after all): the armed confirmation cannot outlive its target.
+  bindCheckpoints(h, "S", ["m1"]);
+  await h.settle(10);
+  assert.ok(rowOf().classList.contains("hidden"), "the unbound turn's row hid");
+  assert.ok(!rowOf().classList.contains("confirming"), "the armed state is gone");
+  assert.strictEqual(rowOf().querySelector(".checkpoint-restore"), null,
+    "no stale button survived the rebuild");
+
+  // A preview asked before the change, answered after it, does nothing.
+  h.post({ type: "userMessage", text: "third", clientMessageId: "m3" });
+  h.post({ type: "assistantStart" }); h.post({ type: "assistantChunk", text: "a3" }); h.post({ type: "assistantEnd" });
+  h.post({ type: "busy", value: false });
+  bindCheckpoints(h, "S", ["m1", "m3"]);
+  await h.settle(10);
+  const turn3 = h.document.querySelectorAll("#thread .turn")[2];
+  turn3.querySelector(".turn-request .req-body").click();
+  await h.settle(5);
+  const ta = h.document.querySelector(".req-editor-input");
+  ta.value = "third, revised";
+  ta.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  await h.settle(5);
+  const pending = h.posted.filter((m) => m.type === "revertPreview").at(-1);
+  assert.ok(pending, "a fresh preview went out for the new edit");
+  // The bindings move again while the answer is in flight.
+  bindCheckpoints(h, "S", ["m1"]);
+  await h.settle(10);
+  h.post({
+    type: "revertPreview", token: pending.token,
+    sessionId: pending.sessionId, userMessageId: pending.userMessageId,
+    result: { fileActions: [], irreversibleWarnings: [] }, pendingFiles: 0
+  });
+  await h.settle(20);
+  assert.strictEqual(h.posted.filter((m) => m.type === "revertExecute").length, 0,
+    "the preview answered after the bindings changed still executed");
+  assert.ok(h.document.querySelector(".req-editor-input"), "the editor kept the text");
+  assert.strictEqual(h.errors().length, 0, "binding-change handling threw: " + JSON.stringify(h.errors()));
 });
 });
