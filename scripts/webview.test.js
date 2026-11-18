@@ -6547,4 +6547,464 @@ test("turning the changed files summary off turns it off", async () => {
   assert.ok(ws.classList.contains("hidden"), "and turning it off takes it away now, not next turn");
   assert.strictEqual(h.errors().length, 0);
 });
+
+// --- ACP next integrations: prompt history, session search, shell stop --------
+
+test("the showPromptHistory message asks the host once and a pick fills the draft", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "sessionReady", sessionId: "s1" });
+  await h.settle(20);
+
+  // History is on demand through the command, so no permanent control sits in
+  // the composer toolbar.
+  assert.strictEqual(h.document.getElementById("prompt-history"), null,
+    "no permanent history button sits in the composer");
+
+  const input = h.document.getElementById("input");
+  input.value = "half typed";
+  h.post({ type: "showPromptHistory" });
+  await h.settle(10);
+  const req = h.posted.filter((m) => m.type === "promptHistory").pop();
+  assert.ok(req, "the command asked the host for history");
+  assert.strictEqual(req.sessionId, "s1");
+  assert.ok(req.requestId, "and carried a request id");
+
+  // A second invocation while the picker is open does not duplicate the ask.
+  h.post({ type: "showPromptHistory" });
+  await h.settle(10);
+  assert.strictEqual(h.posted.filter((m) => m.type === "promptHistory").length, 1,
+    "the open picker is not asked twice");
+
+  h.post({ type: "promptHistorySelected", requestId: req.requestId, sessionId: "s1", text: "earlier prompt" });
+  await h.settle(20);
+  assert.strictEqual(input.value, "earlier prompt", "the pick became the draft");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a prompt history answer is dropped when the draft or session moved on", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "sessionReady", sessionId: "s1" });
+  await h.settle(20);
+
+  const input = h.document.getElementById("input");
+  input.value = "draft at click";
+  h.post({ type: "showPromptHistory" });
+  await h.settle(10);
+  const req = h.posted.filter((m) => m.type === "promptHistory").pop();
+
+  // The user kept typing while the picker was open: the answer is stale.
+  input.value = "user kept typing";
+  h.post({ type: "promptHistorySelected", requestId: req.requestId, sessionId: "s1", text: "old prompt" });
+  await h.settle(20);
+  assert.strictEqual(input.value, "user kept typing", "a moved draft is never overwritten");
+
+  // A completion that names no open request is ignored entirely.
+  h.post({ type: "promptHistorySelected", requestId: "ph-again", sessionId: "s1" });
+  await h.settle(10);
+
+  // The completed request released the composer, so a fresh invocation asks again.
+  input.value = "draft at click";
+  h.post({ type: "showPromptHistory" });
+  await h.settle(10);
+  const req2 = h.posted.filter((m) => m.type === "promptHistory").pop();
+  assert.notStrictEqual(req2.requestId, req.requestId, "a fresh request got a fresh id");
+  h.post({ type: "promptHistorySelected", requestId: req2.requestId, sessionId: "other", text: "old prompt" });
+  await h.settle(20);
+  assert.strictEqual(input.value, "draft at click", "a foreign session's pick is ignored");
+
+  h.post({ type: "promptHistorySelected", requestId: req2.requestId, sessionId: "s1" });
+  await h.settle(20);
+  assert.strictEqual(input.value, "draft at click", "an empty answer changes nothing");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("session search sends a query and renders server matches without title filtering", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "list" });
+  h.post({ type: "sessions", sessions: [
+    { id: "a", short_id: "a", title: "Alpha chat", working_directory: "/w", last_activity_at: 100 },
+    { id: "b", short_id: "b", title: "Beta chat", working_directory: "/w", last_activity_at: 200 }
+  ], activeId: null, folders: [{ path: "/w", name: "w" }] });
+  await h.settle(30);
+
+  h.document.getElementById("list-search-btn").click();
+  await h.settle(10);
+  const inp = h.document.querySelector(".dv-floater input");
+  assert.ok(inp, "the search box opened");
+  inp.value = "needle";
+  inp.dispatchEvent(new h.window.Event("input", { bubbles: true }));
+
+  assert.ok(await h.until(() => h.posted.some((m) => m.type === "querySessions"), 2000),
+    "the query reached the host");
+  const req = h.posted.filter((m) => m.type === "querySessions").pop();
+  assert.strictEqual(req.query, "needle");
+  assert.strictEqual(req.orderBy, "updated_at");
+  assert.strictEqual(req.sortDirection, "desc");
+
+  // A content match whose title does not contain the query must still render:
+  // the server already decided what matches.
+  h.post({ type: "sessionSearchResults", requestId: req.requestId,
+    sessions: [{ id: "b", short_id: "b", title: "Beta chat", working_directory: "/w",
+      last_activity_at: 200, created_at: 50 }],
+    capabilities: { contentSearch: true, orderBy: ["updated_at", "created_at"], sortDirection: true },
+    contentSearch: true, serverSorted: true });
+  await h.settle(30);
+  const titles = () => [...h.document.querySelectorAll("#sessions-list .session-title")].map((e) => e.textContent);
+  assert.deepStrictEqual(titles(), ["Beta chat"], "the server match rendered without a title filter");
+
+  // Clearing the query restores the cached list immediately.
+  inp.value = "";
+  inp.dispatchEvent(new h.window.Event("input", { bubbles: true }));
+  await h.settle(30);
+  assert.deepStrictEqual(titles().sort(), ["Alpha chat", "Beta chat"], "the base list is back");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a superseded search answer never paints under the new query", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "list" });
+  h.post({ type: "sessions", sessions: [
+    { id: "a", short_id: "a", title: "Alpha chat", working_directory: "/w", last_activity_at: 100 },
+    { id: "b", short_id: "b", title: "Beta chat", working_directory: "/w", last_activity_at: 200 },
+    { id: "c", short_id: "c", title: "Gamma chat", working_directory: "/w", last_activity_at: 300 }
+  ], activeId: null, folders: [{ path: "/w", name: "w" }] });
+  await h.settle(30);
+  const titles = () => [...h.document.querySelectorAll("#sessions-list .session-title")].map((e) => e.textContent);
+
+  h.document.getElementById("list-search-btn").click();
+  await h.settle(10);
+  const inp = h.document.querySelector(".dv-floater input");
+  inp.value = "alpha";
+  inp.dispatchEvent(new h.window.Event("input", { bubbles: true }));
+  assert.ok(await h.until(() => h.posted.filter((m) => m.type === "querySessions").length === 1, 2000),
+    "the first query reached the host");
+  const reqA = h.posted.filter((m) => m.type === "querySessions").pop();
+
+  // The user changes the query while A's answer is still in flight. A's reply
+  // lands inside the new debounce window and must be ignored outright: the
+  // list keeps filtering the cached rows by the new text until B answers.
+  inp.value = "beta";
+  inp.dispatchEvent(new h.window.Event("input", { bubbles: true }));
+  h.post({ type: "sessionSearchResults", requestId: reqA.requestId,
+    sessions: [{ id: "a", short_id: "a", title: "Alpha chat", working_directory: "/w", last_activity_at: 100 }],
+    capabilities: { contentSearch: true, orderBy: ["updated_at"], sortDirection: true },
+    contentSearch: true, serverSorted: false });
+  await h.settle(30);
+  assert.deepStrictEqual(titles(), ["Beta chat"], "the stale answer painted nothing");
+  const searching = h.document.querySelector("#sessions-list [role=status]");
+  assert.ok(searching && searching.textContent === "Searching sessions...",
+    "the pending query says it is searching");
+
+  assert.ok(await h.until(() => h.posted.filter((m) => m.type === "querySessions").length === 2, 3000),
+    "the second query went out after the debounce");
+  const reqB = h.posted.filter((m) => m.type === "querySessions").pop();
+  assert.strictEqual(reqB.query, "beta");
+  h.post({ type: "sessionSearchResults", requestId: reqB.requestId,
+    sessions: [{ id: "c", short_id: "c", title: "Gamma chat", working_directory: "/w",
+      last_activity_at: 300, created_at: 10, tracked: true }],
+    capabilities: { contentSearch: true, orderBy: ["updated_at"], sortDirection: true },
+    contentSearch: true, serverSorted: false });
+  await h.settle(30);
+  assert.deepStrictEqual(titles(), ["Gamma chat"], "the latest answer rendered, unfiltered by title");
+
+  // A routine sessions push keeps the accepted matches: the base list is
+  // refreshed underneath without discarding them.
+  h.post({ type: "sessions", sessions: [
+    { id: "a", short_id: "a", title: "Alpha chat", working_directory: "/w", last_activity_at: 100 },
+    { id: "b", short_id: "b", title: "Beta chat", working_directory: "/w", last_activity_at: 200 },
+    { id: "c", short_id: "c", title: "Gamma chat", working_directory: "/w", last_activity_at: 350 }
+  ], activeId: null, folders: [{ path: "/w", name: "w" }] });
+  await h.settle(30);
+  assert.deepStrictEqual(titles(), ["Gamma chat"], "the refresh kept the valid match");
+
+  // When the authoritative list drops the matched id, the remote row goes
+  // with it: membership stays the host's call, not the search answer's.
+  h.post({ type: "sessions", sessions: [
+    { id: "a", short_id: "a", title: "Alpha chat", working_directory: "/w", last_activity_at: 100 },
+    { id: "b", short_id: "b", title: "Beta chat", working_directory: "/w", last_activity_at: 200 }
+  ], activeId: null, folders: [{ path: "/w", name: "w" }] });
+  await h.settle(30);
+  const empty = h.document.querySelector("#sessions-list .sessions-empty-sm");
+  assert.ok(empty && empty.textContent === "No matching sessions",
+    "a pruned match leaves an honest empty state, not 'No chats yet'");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a failed session search falls back to the local list and shows the error", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "list" });
+  h.post({ type: "sessions", sessions: [
+    { id: "a", short_id: "a", title: "Alpha chat", working_directory: "/w", last_activity_at: 100 }
+  ], activeId: null, folders: [{ path: "/w", name: "w" }] });
+  await h.settle(30);
+
+  h.document.getElementById("list-search-btn").click();
+  await h.settle(10);
+  const inp = h.document.querySelector(".dv-floater input");
+  inp.value = "zzz-no-title-match";
+  inp.dispatchEvent(new h.window.Event("input", { bubbles: true }));
+  assert.ok(await h.until(() => h.posted.some((m) => m.type === "querySessions"), 2000));
+  const req = h.posted.filter((m) => m.type === "querySessions").pop();
+
+  h.post({ type: "sessionSearchResults", requestId: req.requestId,
+    capabilities: { contentSearch: false, orderBy: [], sortDirection: false },
+    contentSearch: false, serverSorted: false, error: "Could not search sessions." });
+  await h.settle(30);
+  const notes = [...h.document.querySelectorAll("#sessions-list .sessions-empty-sm")].map((e) => e.textContent);
+  assert.ok(notes.includes("No matching sessions"), "no title match is an honest empty state");
+  assert.ok(notes.includes("Could not search message content. Showing title and ID matches."),
+    "the fallback is explained even when nothing matched");
+  assert.ok(!h.document.getElementById("sessions-list").textContent.includes("zzz-no-title-match"),
+    "the query text is never echoed into the list");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("an empty query can still ask the server for created order", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "list" });
+  h.post({ type: "capabilities", sessionList: { contentSearch: true, orderBy: ["updated_at", "created_at"], sortDirection: true } });
+  h.post({ type: "sessions", sessions: [
+    { id: "a", short_id: "a", title: "Alpha chat", working_directory: "/w", last_activity_at: 100, created_at: 300 },
+    { id: "b", short_id: "b", title: "Beta chat", working_directory: "/w", last_activity_at: 200, created_at: 100 },
+    // "live" is a session the agent has not persisted yet: the sorted view
+    // must keep it even though no server row will ever name it.
+    { id: "live", short_id: "live", title: "Live chat", working_directory: "/w", last_activity_at: 50, created_at: 200 }
+  ], activeId: null, folders: [{ path: "/w", name: "w" }] });
+  await h.settle(30);
+
+  h.document.getElementById("list-filter-btn").click();
+  await h.settle(10);
+  const click = (text) => [...h.document.querySelectorAll(".session-filter-menu .dv-menu-item")]
+    .find((r) => r.textContent.trim() === text).click();
+  click("Created");
+  await h.settle(10);
+  click("Ascending");
+  await h.settle(10);
+
+  assert.ok(await h.until(() => h.posted.some((m) => m.type === "querySessions"), 2000),
+    "an empty query still reached the host for the sort");
+  const req = h.posted.filter((m) => m.type === "querySessions").pop();
+  assert.strictEqual(req.query, "");
+  assert.strictEqual(req.orderBy, "created_at");
+  assert.strictEqual(req.sortDirection, "asc");
+
+  // The agent only persisted a and b. live stays because the authoritative
+  // list still knows it, and the merged rows order by creation ascending:
+  // b(100), live(200), a(300).
+  h.post({ type: "sessionSearchResults", requestId: req.requestId,
+    sessions: [
+      { id: "b", short_id: "b", title: "Beta chat", working_directory: "/w", last_activity_at: 200, created_at: 100, tracked: true },
+      { id: "a", short_id: "a", title: "Alpha chat", working_directory: "/w", last_activity_at: 100, created_at: 300, tracked: true }
+    ],
+    capabilities: { contentSearch: true, orderBy: ["updated_at", "created_at"], sortDirection: true },
+    contentSearch: false, serverSorted: true });
+  await h.settle(30);
+  const titles = () => [...h.document.querySelectorAll("#sessions-list .session-title")].map((e) => e.textContent);
+  assert.deepStrictEqual(titles(), ["Beta chat", "Live chat", "Alpha chat"],
+    "merged rows sort by creation ascending and the live session is retained");
+
+  // A later answer reporting reduced support resets the selections the menus
+  // can no longer offer. The menu is still open from the picks above.
+  click("Descending");
+  await h.settle(10);
+  assert.ok(await h.until(() => h.posted.filter((m) => m.type === "querySessions").length === 2, 2000),
+    "the direction change asked again");
+  const req2 = h.posted.filter((m) => m.type === "querySessions").pop();
+  h.post({ type: "sessionSearchResults", requestId: req2.requestId,
+    sessions: [
+      { id: "a", short_id: "a", title: "Alpha chat", working_directory: "/w", last_activity_at: 100, created_at: 300, tracked: true },
+      { id: "b", short_id: "b", title: "Beta chat", working_directory: "/w", last_activity_at: 200, created_at: 100, tracked: true }
+    ],
+    capabilities: { contentSearch: true, orderBy: ["updated_at"], sortDirection: false },
+    contentSearch: false, serverSorted: false });
+  await h.settle(30);
+  // Reopen the menu so it rebuilds against the reduced capabilities.
+  h.document.getElementById("list-filter-btn").click();
+  await h.settle(10);
+  h.document.getElementById("list-filter-btn").click();
+  await h.settle(10);
+  const menuLabels = () => [...h.document.querySelectorAll(".session-filter-menu .dv-menu-item span")].map((s) => s.textContent);
+  assert.ok(!menuLabels().includes("Created"), "Created is gone once unadvertised");
+  assert.ok(!menuLabels().includes("Ascending") && !menuLabels().includes("Descending"),
+    "and so is the direction group");
+  const checked = [...h.document.querySelectorAll(".session-filter-menu .dv-menu-item.checked span")].map((s) => s.textContent);
+  assert.ok(checked.includes("Last activity"), "the sort fell back to activity");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a failed search with title matches still says it fell back", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "list" });
+  h.post({ type: "sessions", sessions: [
+    { id: "a", short_id: "a", title: "Alpha chat", working_directory: "/w", last_activity_at: 100 },
+    { id: "b", short_id: "b", title: "Beta chat", working_directory: "/w", last_activity_at: 200 }
+  ], activeId: null, folders: [{ path: "/w", name: "w" }] });
+  await h.settle(30);
+
+  h.document.getElementById("list-search-btn").click();
+  await h.settle(10);
+  const inp = h.document.querySelector(".dv-floater input");
+  inp.value = "alpha";
+  inp.dispatchEvent(new h.window.Event("input", { bubbles: true }));
+  assert.ok(await h.until(() => h.posted.some((m) => m.type === "querySessions"), 2000));
+  const req = h.posted.filter((m) => m.type === "querySessions").pop();
+
+  h.post({ type: "sessionSearchResults", requestId: req.requestId,
+    capabilities: { contentSearch: false, orderBy: [], sortDirection: false },
+    contentSearch: false, serverSorted: false, error: "Could not search sessions." });
+  await h.settle(30);
+  const titles = () => [...h.document.querySelectorAll("#sessions-list .session-title")].map((e) => e.textContent);
+  assert.deepStrictEqual(titles(), ["Alpha chat"], "the title match still rendered");
+  const notes = [...h.document.querySelectorAll("#sessions-list .sessions-empty-sm")].map((e) => e.textContent);
+  assert.ok(notes.includes("Could not search message content. Showing title and ID matches."),
+    "the fallback is explained beside the rows, not hidden by them");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a content search with zero server hits says no matching sessions", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "list" });
+  h.post({ type: "sessions", sessions: [
+    { id: "a", short_id: "a", title: "Alpha chat", working_directory: "/w", last_activity_at: 100 }
+  ], activeId: null, folders: [{ path: "/w", name: "w" }] });
+  await h.settle(30);
+
+  h.document.getElementById("list-search-btn").click();
+  await h.settle(10);
+  const inp = h.document.querySelector(".dv-floater input");
+  inp.value = "nothing-matches-this";
+  inp.dispatchEvent(new h.window.Event("input", { bubbles: true }));
+  assert.ok(await h.until(() => h.posted.some((m) => m.type === "querySessions"), 2000));
+  const req = h.posted.filter((m) => m.type === "querySessions").pop();
+
+  h.post({ type: "sessionSearchResults", requestId: req.requestId,
+    sessions: [],
+    capabilities: { contentSearch: true, orderBy: ["updated_at"], sortDirection: true },
+    contentSearch: true, serverSorted: false });
+  await h.settle(30);
+  const empty = h.document.querySelector("#sessions-list .sessions-empty-sm");
+  assert.ok(empty && empty.textContent === "No matching sessions",
+    "zero content hits is not 'No chats yet' while the base list is nonempty");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("only the matching prompt history reply releases the composer", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "sessionReady", sessionId: "s1" });
+  await h.settle(20);
+
+  h.post({ type: "showPromptHistory" });
+  await h.settle(10);
+  const req = h.posted.filter((m) => m.type === "promptHistory").pop();
+  assert.ok(req, "the command asked the host for history");
+
+  // An unrelated completion must not unlock the picker that is still open.
+  h.post({ type: "promptHistorySelected", requestId: "ph-unrelated", sessionId: "s1" });
+  await h.settle(10);
+  h.post({ type: "showPromptHistory" });
+  await h.settle(10);
+  assert.strictEqual(h.posted.filter((m) => m.type === "promptHistory").length, 1,
+    "a stale reply leaves the picker locked");
+
+  h.post({ type: "promptHistorySelected", requestId: req.requestId, sessionId: "s1" });
+  await h.settle(10);
+  h.post({ type: "showPromptHistory" });
+  await h.settle(10);
+  assert.strictEqual(h.posted.filter((m) => m.type === "promptHistory").length, 2,
+    "the matching reply released it");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a prompt history failure is announced, never auto-sent", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "sessionReady", sessionId: "s1" });
+  await h.settle(20);
+
+  const input = h.document.getElementById("input");
+  input.value = "keep me";
+  h.post({ type: "showPromptHistory" });
+  await h.settle(10);
+  const req = h.posted.filter((m) => m.type === "promptHistory").pop();
+
+  h.post({ type: "promptHistorySelected", requestId: req.requestId, sessionId: "s1",
+    error: "Could not load prompt history." });
+  await h.settle(20);
+  const said = h.document.querySelector("#announcer").textContent.replace(/\u200b/g, "");
+  assert.strictEqual(said, "Could not load prompt history.", "the safe error was announced");
+  assert.strictEqual(input.value, "keep me", "and the draft was untouched");
+  assert.strictEqual(h.posted.filter((m) => m.type === "send" || m.type === "sendQueuedNow").length, 0,
+    "a failed picker never sends anything by itself");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a reported background shell gets a stop control only for the session on screen", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "sessionReady", sessionId: "s1" });
+  h.post({ type: "toolCall", id: "tc1", title: "sleep 90", kind: "execute", status: "in_progress",
+    rawInput: { command: "sleep 90" } });
+  h.post({ type: "toolCallUpdate", id: "tc1", status: "in_progress" });
+  await h.settle(30);
+
+  // No authorization yet: transcript data alone never grows a stop button.
+  assert.strictEqual(h.document.querySelector('button[title="Stop Background Command"]'), null,
+    "a tool row without registry state has no stop control");
+
+  // A publish for a different session does not authorize this one either.
+  h.post({ type: "backgroundShells", sessionId: "other", items: [{ toolCallId: "tc1", stopping: false }] });
+  await h.settle(20);
+  assert.strictEqual(h.document.querySelector('button[title="Stop Background Command"]'), null,
+    "another session's registry is not this session's");
+
+  h.post({ type: "backgroundShells", sessionId: "s1", items: [{ toolCallId: "tc1", stopping: false }] });
+  await h.settle(20);
+  const stop = h.document.querySelector('button[title="Stop Background Command"]');
+  assert.ok(stop, "the stop control appeared once authorized");
+  stop.click();
+  await h.settle(10);
+  const req = h.posted.filter((m) => m.type === "stopBackgroundShell").pop();
+  assert.deepStrictEqual(req, { type: "stopBackgroundShell", sessionId: "s1", toolCallId: "tc1" });
+
+  // While the stop is in flight the control is disabled, and a failure offers
+  // the inline error with a retry.
+  h.post({ type: "backgroundShells", sessionId: "s1", items: [{ toolCallId: "tc1", stopping: true }] });
+  await h.settle(20);
+  const stopping = h.document.querySelector('button[title="Stopping…"]');
+  assert.ok(stopping, "the in flight state is labelled");
+  assert.strictEqual(stopping.disabled, true, "and cannot be double clicked");
+
+  h.post({ type: "backgroundShells", sessionId: "s1",
+    items: [{ toolCallId: "tc1", stopping: false, error: "Could not stop the background command." }] });
+  await h.settle(20);
+  const err = h.document.querySelector(".tool-bg-error");
+  assert.ok(err, "the failure is shown beside the retry");
+  assert.strictEqual(err.textContent, "Could not stop the background command.");
+  assert.strictEqual(h.document.querySelector('button[title="Stop Background Command"]').disabled, false,
+    "retry is available");
+
+  // A successful stop clears the authorization and marks the row, which then
+  // replays as plain history with no control.
+  h.post({ type: "backgroundShells", sessionId: "s1", items: [] });
+  h.post({ type: "toolCallUpdate", id: "tc1", status: "cancelled", stopped: true });
+  await h.settle(30);
+  assert.strictEqual(h.document.querySelector('button[title="Stop Background Command"]'), null,
+    "the control is gone once the shell is stopped");
+  assert.ok(h.thread().textContent.includes("Stopped"), "the row reads Stopped");
+  assert.strictEqual(h.errors().length, 0);
+});
 });

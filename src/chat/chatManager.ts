@@ -351,6 +351,20 @@ export class ChatManager implements vscode.WebviewViewProvider, vscode.WebviewPa
     await chat?.showInfo();
   }
 
+  // The palette's prompt history command lands on the chat the user was last
+  // in, not whichever surface the palette happens to cover: opening the palette
+  // blurs the chat, so the focused set is empty by then and the last focused
+  // surface this manager owns is the answer. Anything else falls back to the
+  // side panel.
+  async showPromptHistory(): Promise<void> {
+    const ours = (c: ChatController | undefined) =>
+      c && this.controllers().includes(c) ? c : undefined;
+    const chat = ours(ChatController.focusedSurface())
+      ?? ours(ChatController.lastFocusedSurface())
+      ?? (await this.ensureSidebar());
+    await chat?.showPromptHistory();
+  }
+
   // Rename the chat in the editor tab this was invoked on (its context menu). VS
   // Code only offers a tab's context menu items for the active tab, so that is
   // the one it applies to.

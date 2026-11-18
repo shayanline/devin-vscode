@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.16.0] - 2026-11-17
+
+### Highlights
+- Reuse recent prompts from the current workspace folder.
+- Search conversation content and sort chats by activity or creation.
+- Stop a background command without stopping the conversation.
+
+### Under the hood
+- Read every ACP session page before updating tracked sessions.
+- Keep background command controls out of replayed history.
+
 ## [0.15.0] - 2026-11-17
 
 ### Highlights

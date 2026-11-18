@@ -33,7 +33,8 @@ export function activate(context: vscode.ExtensionContext): void {
   }, 0).unref?.();
   const changes = new ChangeTracker();
   working = changes;
-  const store = new SessionStore(context.workspaceState);
+  const store = new SessionStore(context.workspaceState, () =>
+    !!vscode.workspace.workspaceFolders?.length || !!vscode.workspace.workspaceFile);
   const statusBar = new StatusBar();
   context.subscriptions.push(output, changes.register(), changes, statusBar);
   // A change waiting to be reviewed has nothing to do with the agent that made it,
@@ -73,6 +74,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("devin.cancel", () => chat.cancel()),
     vscode.commands.registerCommand("devin.runSetup", () => chat.runSetup()),
     vscode.commands.registerCommand("devin.showInfo", () => chat.showInfo()),
+    vscode.commands.registerCommand("devin.showPromptHistory", () => chat.showPromptHistory()),
     vscode.commands.registerCommand("devin.openSettings", () => SettingsPanel.show(context)),
     // Reachable from the editor and the explorer, so a question about the code in
     // front of you does not start with finding the panel and describing where you are.

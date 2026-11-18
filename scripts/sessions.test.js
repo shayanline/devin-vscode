@@ -31,12 +31,12 @@ function build(rel) {
   return require(outfile);
 }
 
-const { fromAcpRows, listSessions } = build("src/session/sessionList.ts");
+const { fromAcpRows, fromAcpRow, listSessions } = build("src/session/sessionList.ts");
 const { SessionStore } = build("src/session/sessionStore.ts");
 
 // A Memento over a plain object, which is all SessionStore asks for.
-function memento() {
-  const map = new Map();
+function memento(seed) {
+  const map = new Map(Object.entries(seed || {}));
   return {
     get: (k, fallback) => (map.has(k) ? map.get(k) : fallback),
     update: async (k, v) => { map.set(k, v); },
@@ -88,6 +88,45 @@ test("a session the agent did not mention is pruned, unless it mentioned none at
   // on it emptied the whole workspace list, and every cwd and draft with it.
   const empty = fromAcpRows([], tracked);
   assert.deepStrictEqual(empty.prunedIds, [], "an empty answer prunes nothing");
+});
+
+test("one protocol row maps to a panel session, creation stamp included", () => {
+  const row = {
+    sessionId: "s1",
+    cwd: "/w",
+    title: "A chat",
+    updatedAt: "2026-08-15T10:00:00Z",
+    _meta: { "cognition.ai/createdAt": "2026-08-14T09:30:00Z", "cognition.ai/isLocked": true }
+  };
+
+  assert.deepStrictEqual(fromAcpRow(row), {
+    id: "s1",
+    short_id: "s1",
+    working_directory: "/w",
+    last_activity_at: Math.floor(Date.parse("2026-08-15T10:00:00Z") / 1000),
+    created_at: Math.floor(Date.parse("2026-08-14T09:30:00Z") / 1000),
+    title: "A chat",
+    tracked: true
+  });
+});
+
+test("a row without a usable creation stamp simply has none", () => {
+  const bare = fromAcpRow({ sessionId: "s2", cwd: "", updatedAt: "not a date" });
+  assert.strictEqual(bare.created_at, undefined);
+  assert.strictEqual(bare.last_activity_at, undefined);
+  assert.strictEqual(bare.working_directory, "");
+
+  const wrongType = fromAcpRow({
+    sessionId: "s3",
+    _meta: { "cognition.ai/createdAt": 1723680000 }
+  });
+  assert.strictEqual(wrongType.created_at, undefined, "only an ISO string is a stamp");
+});
+
+test("the authoritative listing and a display row agree on shape", () => {
+  const row = { sessionId: "kept", cwd: "/w", title: "Kept", updatedAt: "2026-08-15T10:00:00Z" };
+  const { sessions } = fromAcpRows([row], ["kept"]);
+  assert.deepStrictEqual(sessions[0], fromAcpRow(row), "fromAcpRows must not drift from fromAcpRow");
 });
 
 test("the newest interrupted turns are the ones kept", async () => {
@@ -197,6 +236,119 @@ test("removing a session also removes its cached list row", () => {
   store.remove("gone");
 
   assert.deepStrictEqual(store.sessionList().sessions.map((session) => session.id), ["kept"]);
+});
+
+// --- The submitted prompt journal --------------------------------------------
+
+test("prompt history is scoped to the exact session directory", posixOnly, () => {
+  const store = new SessionStore(memento());
+  store.add("a", "/w/a");
+  store.add("a2", "/w/a2");
+  store.add("sub", "/w/a/sub");
+  store.add("b", "/w/b");
+  store.rememberPrompt("a", "prompt for a");
+  store.rememberPrompt("a2", "prompt for a2");
+  store.rememberPrompt("sub", "prompt for sub");
+  store.rememberPrompt("b", "prompt for b");
+
+  assert.deepStrictEqual(store.promptHistory("/w/a"), ["prompt for a"]);
+  assert.deepStrictEqual(store.promptHistory("/w/a2"), ["prompt for a2"]);
+  assert.deepStrictEqual(store.promptHistory("/w/a/sub"), ["prompt for sub"]);
+  assert.deepStrictEqual(store.promptHistory("/w/b"), ["prompt for b"]);
+  // A parent directory, a relative path and an empty one are never owners.
+  assert.deepStrictEqual(store.promptHistory("/w"), []);
+  assert.deepStrictEqual(store.promptHistory("relative/dir"), []);
+  assert.deepStrictEqual(store.promptHistory(""), []);
+});
+
+test("independent mementos never share history even for identical cwd", posixOnly, () => {
+  const one = new SessionStore(memento());
+  const two = new SessionStore(memento());
+  one.add("s1", "/w/same");
+  two.add("s2", "/w/same");
+  one.rememberPrompt("s1", "only in one");
+  two.rememberPrompt("s2", "only in two");
+
+  assert.deepStrictEqual(one.promptHistory("/w/same"), ["only in one"]);
+  assert.deepStrictEqual(two.promptHistory("/w/same"), ["only in two"]);
+});
+
+test("only tracked sessions with a saved absolute cwd contribute", posixOnly, () => {
+  const store = new SessionStore(memento());
+  store.add("known", "/w/known");
+  store.rememberPrompt("known", "tracked prompt");
+  // Never added to the tracked list, so it cannot own history.
+  store.rememberPrompt("ghost", "untracked prompt");
+  // Tracked but with no saved directory: there is no owner to check against.
+  store.add("nocwd");
+  store.rememberPrompt("nocwd", "no cwd prompt");
+  // A relative saved cwd is not an owner either.
+  store.add("rel", "relative/path");
+  store.rememberPrompt("rel", "relative cwd prompt");
+
+  assert.deepStrictEqual(store.promptHistory("/w/known"), ["tracked prompt"]);
+  assert.deepStrictEqual(store.promptHistory(process.cwd()), []);
+});
+
+test("the journal keeps complete prompts, deduped, capped and bounded", posixOnly, () => {
+  const store = new SessionStore(memento());
+  store.add("s", "/w/s");
+  const multiline = "first line\n\nsecond line with  spaces";
+  store.rememberPrompt("s", multiline);
+  store.rememberPrompt("s", multiline);
+  store.rememberPrompt("s", "   ");
+  store.rememberPrompt("s", "x".repeat(100001));
+  store.rememberPrompt("s", "older prompt");
+
+  assert.deepStrictEqual(store.promptHistory("/w/s"), ["older prompt", multiline]);
+
+  const capped = new SessionStore(memento());
+  capped.add("s", "/w/s");
+  for (let i = 0; i < 55; i++) {
+    capped.rememberPrompt("s", `prompt ${i}`);
+  }
+  const history = capped.promptHistory("/w/s");
+  assert.strictEqual(history.length, 50, "at most 50 complete entries remain");
+  assert.strictEqual(history[0], "prompt 54", "newest first");
+  assert.strictEqual(history[49], "prompt 5", "the oldest five fell off");
+});
+
+test("a disabled policy leaves the journal completely untouched", posixOnly, () => {
+  const seeded = [{ sessionId: "old", text: "seeded prompt" }];
+  const mem = memento({ "devin.promptHistory.v1": seeded });
+  const store = new SessionStore(mem, () => false);
+
+  store.add("s", "/w/s");
+  store.rememberPrompt("s", "new prompt");
+  store.remove("s");
+
+  assert.deepStrictEqual(mem.get("devin.promptHistory.v1"), seeded,
+    "no write ever reached the key, not even a prune");
+  assert.deepStrictEqual(store.promptHistory("/w/s"), [],
+    "and nothing reads back either");
+});
+
+test("removing or evicting a session drops its journal records", posixOnly, () => {
+  const store = new SessionStore(memento());
+  store.add("kept", "/w/k");
+  store.add("gone", "/w/g");
+  store.rememberPrompt("kept", "kept prompt");
+  store.rememberPrompt("gone", "gone prompt");
+
+  store.remove("gone");
+
+  assert.deepStrictEqual(store.promptHistory("/w/g"), []);
+  assert.deepStrictEqual(store.promptHistory("/w/k"), ["kept prompt"]);
+
+  // Eviction past the tracked id cap prunes the same way.
+  const crowded = new SessionStore(memento());
+  for (let i = 0; i < 200; i++) {
+    crowded.add(`s${i}`, "/w/e");
+  }
+  crowded.rememberPrompt("s0", "evicted prompt");
+  crowded.add("one-more", "/w/e");
+
+  assert.deepStrictEqual(crowded.promptHistory("/w/e"), []);
 });
 
 test.after(() => {

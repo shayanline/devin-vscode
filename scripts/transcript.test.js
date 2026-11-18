@@ -164,3 +164,33 @@ test("a chat moved mid turn rebuilds the same transcript on the new surface", as
   assert.strictEqual(after.errors().length, 0, "rebuild threw: " + JSON.stringify(after.errors()));
   assert.strictEqual(before.errors().length, 0);
 });
+
+test("a stopped background shell replays as history and never regrows its control", async () => {
+  // The host records a stopped tool row so a moved chat still says Stopped. What
+  // must NOT come back with it is the authorization: the shell registry is
+  // ephemeral state the host publishes live, so a replayed row alone can never
+  // grow a stop button on the new surface.
+  const stream = [
+    { type: "userMessage", text: "run it in the background" },
+    { type: "toolCall", id: "tc-bg", title: "sleep 90", kind: "execute", status: "in_progress",
+      rawInput: { command: "sleep 90" } },
+    { type: "toolCallUpdate", id: "tc-bg", status: "cancelled", stopped: true }
+  ];
+  const { log, dropped } = recordAll(stream);
+  assert.strictEqual(dropped, false);
+
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "capabilities", revert: true, surface: "view" });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "clear", loading: true });
+  paintedReplay(log).forEach((m) => h.post(m));
+  h.post({ type: "loaded" });
+  await h.settle(30);
+
+  assert.ok(h.thread().textContent.includes("Stopped"), "the row reads Stopped after the move");
+  assert.strictEqual(h.document.querySelector('button[title="Stop Background Command"]'), null,
+    "and no stop control came back with the transcript");
+  assert.strictEqual(h.errors().length, 0, "rebuild threw: " + JSON.stringify(h.errors()));
+});

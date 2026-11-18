@@ -359,7 +359,8 @@ test("a diagnostics pull is answered in the shape the agent demands", async () =
   await client.shutdown();
 });
 
-test("session listing accepts a caller supplied timeout", async () => {
+test("session listing accepts a caller supplied timeout", async (t) => {
+  t.mock.method(Date, "now", () => 1000);
   const client = new AcpClient({ cliPath: "devin", cwd: TMP });
   let timeout;
   client.rpc = async (_method, _params, value) => {
@@ -684,6 +685,296 @@ test("query sessions do not start after shutdown begins", async () => {
 
   assert.strictEqual(result, undefined);
   assert.strictEqual(seen(log).some((m) => m.method === "initialize"), false);
+});
+
+// --- session/list queries ----------------------------------------------------
+
+test("session list capabilities come from the advertised meta, known fields only", async () => {
+  const { cli } = fakeAgent("listcaps", {
+    "cognition.ai/sessionListContentSearch": true,
+    "cognition.ai/sessionListOrderBy": ["updated_at", "created_at", "sideways"],
+    "cognition.ai/sessionListSortDirection": true
+  });
+  const client = start(cli);
+  await client.initialize();
+
+  assert.deepStrictEqual(client.sessionListCapabilities(), {
+    contentSearch: true,
+    orderBy: ["updated_at", "created_at"],
+    sortDirection: true
+  });
+  await client.shutdown();
+});
+
+test("session list sends only advertised query fields with the page size", async () => {
+  const { cli, log } = fakeAgent("listquery", {
+    "cognition.ai/sessionListContentSearch": true,
+    "cognition.ai/sessionListOrderBy": ["created_at"],
+    "cognition.ai/sessionListSortDirection": true
+  });
+  const client = start(cli);
+  await client.initialize();
+
+  const rows = await client.listSessions(5000, { content: "needle", orderBy: "created_at", sortDirection: "asc" });
+
+  assert.deepStrictEqual(rows, []);
+  const call = seen(log).find((m) => m.method === "session/list");
+  assert.deepStrictEqual(call.params, {
+    _meta: {
+      "cognition.ai/limit": 100,
+      "cognition.ai/content": "needle",
+      "cognition.ai/orderBy": "created_at",
+      "cognition.ai/sortDirection": "asc"
+    }
+  });
+  await client.shutdown();
+});
+
+test("session list drops query fields the agent did not advertise", async () => {
+  const { cli, log } = fakeAgent("listnoads", {});
+  const client = start(cli);
+  await client.initialize();
+
+  assert.deepStrictEqual(client.sessionListCapabilities(), {
+    contentSearch: false,
+    orderBy: [],
+    sortDirection: false
+  });
+  await client.listSessions(5000, { content: "x", orderBy: "created_at", sortDirection: "asc" });
+  const call = seen(log).find((m) => m.method === "session/list");
+  assert.deepStrictEqual(call.params, { _meta: { "cognition.ai/limit": 100 } });
+  await client.shutdown();
+});
+
+test("session list walks every cursor page with the same filters", async () => {
+  const { cli, log } = fakeAgent("listpages", {
+    "cognition.ai/sessionListContentSearch": true,
+    "cognition.ai/sessionListOrderBy": ["updated_at"],
+    "cognition.ai/sessionListSortDirection": true
+  }, {
+    onMessage: `if (msg.method === "session/list") {
+      if (!msg.params.cursor) {
+        send({ jsonrpc: "2.0", id: msg.id, result: { sessions: [{ sessionId: "a" }], nextCursor: "page-2" } });
+      } else if (msg.params.cursor === "page-2") {
+        send({ jsonrpc: "2.0", id: msg.id, result: { sessions: [{ sessionId: "b" }], nextCursor: "page-3" } });
+      } else {
+        send({ jsonrpc: "2.0", id: msg.id, result: { sessions: [{ sessionId: "c" }] } });
+      }
+      continue;
+    }`
+  });
+  const client = start(cli);
+  await client.initialize();
+
+  const rows = await client.listSessions(8000, { content: "q", orderBy: "updated_at", sortDirection: "desc" });
+
+  assert.deepStrictEqual(rows.map((r) => r.sessionId), ["a", "b", "c"]);
+  const calls = seen(log).filter((m) => m.method === "session/list");
+  assert.strictEqual(calls.length, 3);
+  for (const c of calls) {
+    assert.deepStrictEqual(c.params._meta, {
+      "cognition.ai/limit": 100,
+      "cognition.ai/content": "q",
+      "cognition.ai/orderBy": "updated_at",
+      "cognition.ai/sortDirection": "desc"
+    }, "every page carries identical query metadata");
+  }
+  assert.strictEqual(calls[1].params.cursor, "page-2");
+  assert.strictEqual(calls[2].params.cursor, "page-3");
+  await client.shutdown();
+});
+
+test("session list refuses a repeated cursor instead of looping", async () => {
+  const { cli } = fakeAgent("listloop", {}, {
+    onMessage: `if (msg.method === "session/list") {
+      send({ jsonrpc: "2.0", id: msg.id, result: { sessions: [{ sessionId: "a" }], nextCursor: "again" } });
+      continue;
+    }`
+  });
+  const client = start(cli);
+  await client.initialize();
+
+  await assert.rejects(() => client.listSessions(8000), /repeated cursor/);
+  await client.shutdown();
+});
+
+test("session list retries once without metadata when the agent rejects it", async () => {
+  const { cli, log } = fakeAgent("listreject", {
+    "cognition.ai/sessionListContentSearch": true,
+    "cognition.ai/sessionListOrderBy": ["updated_at"],
+    "cognition.ai/sessionListSortDirection": true
+  }, {
+    onMessage: `if (msg.method === "session/list") {
+      if (msg.params._meta) {
+        send({ jsonrpc: "2.0", id: msg.id, error: { code: -32602, message: "Invalid params" } });
+      } else {
+        send({ jsonrpc: "2.0", id: msg.id, result: { sessions: [{ sessionId: "plain" }] } });
+      }
+      continue;
+    }`
+  });
+  const client = start(cli);
+  await client.initialize();
+
+  const rows = await client.listSessions(8000, { content: "q", orderBy: "updated_at", sortDirection: "desc" });
+
+  assert.deepStrictEqual(rows.map((r) => r.sessionId), ["plain"]);
+  let calls = seen(log).filter((m) => m.method === "session/list");
+  assert.strictEqual(calls.length, 2, "one rejected attempt, one bare retry");
+  assert.ok(calls[0].params._meta, "the first attempt carried metadata");
+  assert.strictEqual(calls[1].params._meta, undefined, "the retry carries none at all");
+  assert.strictEqual(calls[1].params.cursor, undefined, "and restarts from the beginning");
+
+  // The connection remembers: later listings go straight to the bare form.
+  await client.listSessions(8000, { content: "q" });
+  calls = seen(log).filter((m) => m.method === "session/list");
+  assert.strictEqual(calls.length, 3);
+  assert.strictEqual(calls[2].params._meta, undefined);
+  assert.deepStrictEqual(client.sessionListCapabilities(), {
+    contentSearch: false,
+    orderBy: [],
+    sortDirection: false
+  });
+  await client.shutdown();
+});
+
+test("session list does not retry a generic failure without metadata", async () => {
+  const { cli, log } = fakeAgent("listerr", {}, {
+    onMessage: `if (msg.method === "session/list") {
+      send({ jsonrpc: "2.0", id: msg.id, error: { code: -32603, message: "boom" } });
+      continue;
+    }`
+  });
+  const client = start(cli);
+  await client.initialize();
+
+  await assert.rejects(() => client.listSessions(8000), /boom/);
+  assert.strictEqual(seen(log).filter((m) => m.method === "session/list").length, 1);
+  await client.shutdown();
+});
+
+test("session list shares one timeout budget across pages", async () => {
+  const client = new AcpClient({ cliPath: "devin", cwd: TMP });
+  const timeouts = [];
+  // A scoped clock keeps the budget arithmetic exact: each page "takes" 100ms.
+  let now = 1_000_000;
+  const realNow = Date.now;
+  Date.now = () => now;
+  client.rpc = async (_method, params, timeoutMs) => {
+    timeouts.push(timeoutMs);
+    now += 100;
+    return params.cursor
+      ? { sessions: [{ sessionId: "b" }] }
+      : { sessions: [{ sessionId: "a" }], nextCursor: "p2" };
+  };
+  try {
+    const rows = await client.listSessions(5000, {});
+
+    assert.deepStrictEqual(rows.map((r) => r.sessionId), ["a", "b"]);
+    assert.deepStrictEqual(timeouts, [5000, 4900],
+      "the second page gets exactly what the first one left of the budget");
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("session list stops paging once the shared budget is spent", async () => {
+  const client = new AcpClient({ cliPath: "devin", cwd: TMP });
+  let now = 1_000_000;
+  const realNow = Date.now;
+  Date.now = () => now;
+  let calls = 0;
+  client.rpc = async () => {
+    calls++;
+    // The first page alone blows the whole budget, so no second RPC may go out.
+    now += 6000;
+    return { sessions: [{ sessionId: "a" }], nextCursor: "p2" };
+  };
+  try {
+    await assert.rejects(() => client.listSessions(5000, {}), /timed out/);
+    assert.strictEqual(calls, 1, "no page is requested after the deadline");
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+// --- background shell control ------------------------------------------------
+
+test("background shell control needs the advertised lifecycle", async () => {
+  const off = fakeAgent("shelloff", {});
+  const c1 = start(off.cli);
+  await c1.initialize();
+  assert.strictEqual(c1.supportsBackgroundShellControl(), false);
+  await c1.shutdown();
+
+  const on = fakeAgent("shellon", { "cognition.ai/terminalLifecycle": true });
+  const c2 = start(on.cli);
+  await c2.initialize();
+  assert.strictEqual(c2.supportsBackgroundShellControl(), true);
+  await c2.shutdown();
+});
+
+test("a kill without the advertised lifecycle never reaches the wire", async () => {
+  const { cli, log } = fakeAgent("shellnogate", {});
+  const client = start(cli);
+  await client.initialize();
+
+  assert.strictEqual(client.supportsBackgroundShellControl(), false);
+  assert.strictEqual(await client.killBackgroundShell("s1", "sh-1"), false);
+  assert.strictEqual(
+    seen(log).filter((m) => m.method === "_cognition.ai/terminal/killBackgroundShell").length,
+    0,
+    "no lifecycle advertisement means no kill call at all"
+  );
+  await client.shutdown();
+});
+
+test("killing a background shell sends the confirmed payload", async () => {
+  const { cli, log } = fakeAgent("shellkill", { "cognition.ai/terminalLifecycle": true });
+  const client = start(cli);
+  await client.initialize();
+
+  assert.strictEqual(await client.killBackgroundShell("s1", "sh-9"), true);
+  const call = seen(log).find((m) => m.method === "_cognition.ai/terminal/killBackgroundShell");
+  assert.deepStrictEqual(call.params, { sessionId: "s1", shellId: "sh-9" });
+  assert.ok(!seen(log).some((m) => m.method === "session/cancel"), "a kill is never a cancel");
+  await client.shutdown();
+});
+
+test("an unsupported kill disables the control for the connection", async () => {
+  const { cli, log } = fakeAgent("shellno", { "cognition.ai/terminalLifecycle": true }, {
+    onMessage: `if (msg.method === "_cognition.ai/terminal/killBackgroundShell") {
+      send({ jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "no such method" } });
+      continue;
+    }`
+  });
+  const client = start(cli);
+  await client.initialize();
+
+  assert.strictEqual(await client.killBackgroundShell("s1", "sh-1"), false);
+  assert.strictEqual(client.supportsBackgroundShellControl(), false);
+  assert.strictEqual(await client.killBackgroundShell("s1", "sh-2"), false);
+  assert.strictEqual(
+    seen(log).filter((m) => m.method === "_cognition.ai/terminal/killBackgroundShell").length,
+    1,
+    "the second kill must not ask again"
+  );
+  await client.shutdown();
+});
+
+test("a failed kill propagates so the caller can offer a retry", async () => {
+  const { cli } = fakeAgent("shellfail", { "cognition.ai/terminalLifecycle": true }, {
+    onMessage: `if (msg.method === "_cognition.ai/terminal/killBackgroundShell") {
+      send({ jsonrpc: "2.0", id: msg.id, error: { code: -32603, message: "shell already gone" } });
+      continue;
+    }`
+  });
+  const client = start(cli);
+  await client.initialize();
+
+  await assert.rejects(() => client.killBackgroundShell("s1", "sh-1"), /shell already gone/);
+  assert.strictEqual(client.supportsBackgroundShellControl(), true, "a real failure is not unsupported");
+  await client.shutdown();
 });
 
 test.after(() => {

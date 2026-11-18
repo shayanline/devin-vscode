@@ -27,6 +27,8 @@ import {
   RevertPreviewResult,
   RevertStep,
   RevertStepsUpdate,
+  SessionListCapabilities,
+  SessionListQuery,
   SessionUpdateNotification,
   TerminalExitStatus,
   TerminalRef,
@@ -100,6 +102,10 @@ export class AcpClient extends EventEmitter {
   private usageCapture?: UsageRead;
   private promptCalls = 0;
   private cancelVersion = 0;
+  // Per connection compat flags: an agent that rejects our session/list
+  // `_meta` or background shell kill once is not asked again.
+  private sessionListMetaRejected = false;
+  private backgroundShellKillUnsupported = false;
   initializeResult?: InitializeResult;
 
   constructor(private readonly options: AcpClientOptions) {
@@ -440,9 +446,138 @@ export class AcpClient extends EventEmitter {
   // its own, so any live agent can answer it. Unlike `devin list`, which is exact
   // match on cwd, this is not scoped: a session created in a subdirectory of the
   // workspace comes back too.
-  async listSessions(timeoutMs = QUERY_TIMEOUT_MS): Promise<AcpSessionRow[]> {
-    const res = await this.rpc<{ sessions?: AcpSessionRow[] }>("session/list", {}, timeoutMs || QUERY_TIMEOUT_MS);
-    return res?.sessions || [];
+  //
+  // All pages are read: the agent paginates with an opaque `nextCursor`, and a
+  // single page would silently truncate both the display list and the pruning
+  // decisions built on it. The caller's timeout is the budget for the whole
+  // walk, not per page, so a slow agent cannot stretch a list refresh.
+  async listSessions(timeoutMs = QUERY_TIMEOUT_MS, query: SessionListQuery = {}): Promise<AcpSessionRow[]> {
+    const budget = timeoutMs || QUERY_TIMEOUT_MS;
+    const deadline = Date.now() + budget;
+    const collect = async (meta: Record<string, unknown> | undefined): Promise<AcpSessionRow[]> => {
+      const rows: AcpSessionRow[] = [];
+      const seenCursors = new Set<string>();
+      let cursor: string | undefined;
+      for (;;) {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) {
+          throw new Error("session/list timed out");
+        }
+        const params: Record<string, unknown> = {};
+        if (cursor) {
+          params.cursor = cursor;
+        }
+        if (meta) {
+          params._meta = meta;
+        }
+        const res = await this.rpc<{ sessions?: AcpSessionRow[]; nextCursor?: string }>(
+          "session/list",
+          params,
+          // The caller's budget is shared across pages, and no single page
+          // outlives the usual query timeout either.
+          Math.min(QUERY_TIMEOUT_MS, remaining)
+        );
+        for (const row of res?.sessions || []) {
+          rows.push(row);
+        }
+        const next = typeof res?.nextCursor === "string" && res.nextCursor ? res.nextCursor : undefined;
+        if (!next) {
+          return rows;
+        }
+        // A cursor that comes back unchanged would loop forever, so treating
+        // it as a failure keeps a broken agent from hanging the list.
+        if (seenCursors.has(next)) {
+          throw new Error("session/list returned a repeated cursor");
+        }
+        seenCursors.add(next);
+        cursor = next;
+      }
+    };
+    const meta = this.sessionListMeta(query);
+    try {
+      return await collect(meta);
+    } catch (err) {
+      // An agent that does not understand our `_meta` says so with a params
+      // error. Retry once from the beginning with none of it, rather than
+      // guessing which key it rejected, and stop sending it on this connection.
+      if (meta && (err as { code?: number })?.code !== undefined
+        && ((err as { code?: number }).code === -32601 || (err as { code?: number }).code === -32602)) {
+        this.sessionListMetaRejected = true;
+        return collect(undefined);
+      }
+      throw err;
+    }
+  }
+
+  // The `_meta` session/list understands on this connection: the page size we
+  // always ask for, plus only the query fields the agent advertised. An agent
+  // that rejected `_meta` once gets none of it afterwards.
+  private sessionListMeta(query: SessionListQuery): Record<string, unknown> | undefined {
+    if (this.sessionListMetaRejected) {
+      return undefined;
+    }
+    const caps = this.sessionListCapabilities();
+    const meta: Record<string, unknown> = { "cognition.ai/limit": 100 };
+    const content = typeof query.content === "string" ? query.content.trim() : "";
+    if (content && caps.contentSearch) {
+      meta["cognition.ai/content"] = content;
+    }
+    if (query.orderBy && caps.orderBy.includes(query.orderBy)) {
+      meta["cognition.ai/orderBy"] = query.orderBy;
+    }
+    if (query.sortDirection && caps.sortDirection) {
+      meta["cognition.ai/sortDirection"] = query.sortDirection;
+    }
+    return meta;
+  }
+
+  // What session/list queries this connection can actually serve: the agent's
+  // advertised flags minus anything a compatibility fallback has disabled.
+  sessionListCapabilities(): SessionListCapabilities {
+    const none: SessionListCapabilities = { contentSearch: false, orderBy: [], sortDirection: false };
+    if (this.sessionListMetaRejected) {
+      return none;
+    }
+    const meta = this.initializeResult?.agentCapabilities?._meta as Record<string, unknown> | undefined;
+    if (!meta) {
+      return none;
+    }
+    const advertised = meta["cognition.ai/sessionListOrderBy"];
+    const orderBy = Array.isArray(advertised)
+      ? advertised.filter((v): v is "updated_at" | "created_at" => v === "updated_at" || v === "created_at")
+      : [];
+    return {
+      contentSearch: meta["cognition.ai/sessionListContentSearch"] === true,
+      orderBy,
+      sortDirection: meta["cognition.ai/sessionListSortDirection"] === true
+    };
+  }
+
+  // Targeted background shell control. Gated on the advertised terminal
+  // lifecycle plus a per connection flag for agents that turn out not to serve
+  // the kill method.
+  supportsBackgroundShellControl(): boolean {
+    return !this.backgroundShellKillUnsupported && this.agentCapability("cognition.ai/terminalLifecycle");
+  }
+
+  // Kill one background shell the agent reported through tool update metadata.
+  // True when the agent accepted it, false when it does not serve the method
+  // (-32601 disables the control for this connection), and throws on anything
+  // else so the caller can offer a retry.
+  async killBackgroundShell(sessionId: string, shellId: string): Promise<boolean> {
+    if (!this.supportsBackgroundShellControl()) {
+      return false;
+    }
+    try {
+      await this.rpc("_cognition.ai/terminal/killBackgroundShell", { sessionId, shellId }, QUERY_TIMEOUT_MS);
+      return true;
+    } catch (err) {
+      if ((err as { code?: number })?.code === -32601) {
+        this.backgroundShellKillUnsupported = true;
+        return false;
+      }
+      throw err;
+    }
   }
 
   // Devin exposes both `mode` and `model` as config options set through this
