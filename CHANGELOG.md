@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.16.4] - 2026-11-18
+
+### Highlights
+- Edit earlier messages without checkpoint parameter errors.
+- Show checkpoint controls for messages with verified checkpoints.
+- Keep checkpoint controls available after reopening a chat.
+- Preserve earlier messages when editing or restoring a checkpoint.
+
+### Under the hood
+- Stabilize session list visibility checks during delayed refreshes.
+
 ## [0.16.3] - 2026-11-18
 
 ### Highlights

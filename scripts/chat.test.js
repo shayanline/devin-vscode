@@ -726,20 +726,25 @@ test("a stored session list paints before a cold revalidation", posixOnly, async
 });
 
 test("a visible session list revalidates after its surface returns", posixOnly, async () => {
-  const h = createChat();
-  await h.ready();
-  await h.startChat("keep the agent live");
-  h.send({ type: "listVisible", value: true });
-  await h.until(() => h.agentSaw("session/list").length === 1, 5000);
-  await h.until(() => h.postsOf("sessions").length === 1, 5000);
-  const before = h.agentSaw("session/list").length;
+  const h = createChat({ listDelay: 250 });
+  try {
+    await h.ready();
+    await h.startChat("keep the agent live");
+    h.send({ type: "listVisible", value: true });
+    assert.ok(await h.until(() => h.agentSaw("session/list").length > 0, 5000),
+      "the initial session list request never started");
+    // Local rows can paint before ACP answers, so join the whole refresh first.
+    await h.controller.refreshSessions();
+    const before = h.agentSaw("session/list").length;
 
-  h.controller.setSurfaceVisible(false);
-  h.controller.setSurfaceVisible(true);
-  const refreshed = await h.until(() => h.agentSaw("session/list").length === before + 1, 1000);
+    h.controller.setSurfaceVisible(false);
+    h.controller.setSurfaceVisible(true);
+    const refreshed = await h.until(() => h.agentSaw("session/list").length > before, 5000);
 
-  assert.ok(refreshed, "returning to a visible list revalidates its rows");
-  await h.dispose();
+    assert.ok(refreshed, "returning to a visible list revalidates its rows");
+  } finally {
+    await h.dispose();
+  }
 });
 
 test("a direct send wakes a visible retained transcript without clearing it", posixOnly, async () => {
