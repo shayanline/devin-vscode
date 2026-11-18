@@ -220,7 +220,7 @@ export class AcpClient extends EventEmitter {
           reading.stats = meta["cognition.ai/sessionStats"];
           return;
         }
-        if (this.usagePending && reading.command === "session-stats" && meta["cognition.ai/instant"] === true) {
+        if (this.usagePending && meta["cognition.ai/instant"] === true) {
           return;
         }
       }
@@ -393,7 +393,8 @@ export class AcpClient extends EventEmitter {
     const reading: UsageRead = { sessionId, command: "context", contexts: [] };
     this.usageCapture = reading;
     // These instant commands do not echo a correlation ID, so keep them
-    // between prompts and consume only their structured report messages.
+    // between prompts and consume their structured report messages and
+    // instant command replies.
     const work = async (): Promise<UsageReport> => {
       const report: UsageReport = {};
       try {

@@ -161,4 +161,82 @@ test("a fresh view loading a busy session replays local history without touching
   }
 });
 
+// The chunk shape the real agent sends for a /context read on a session with no
+// context yet: instant tagged, carrying only text, and no structured report.
+const INSTANT_USAGE_TEXT = "No context usage available yet. Send a message first.";
+const INSTANT_USAGE_CHUNKS = [{
+  sessionUpdate: "agent_message_chunk",
+  content: { type: "text", text: INSTANT_USAGE_TEXT },
+  _meta: { "cognition.ai/instant": true }
+}];
+
+test("session lifecycle: reopening an empty session never paints the internal usage reply", posixOnly, async () => {
+  const host = createChat({
+    usage: { contextChunks: INSTANT_USAGE_CHUNKS },
+    config: { idleSessionKeepAliveMinutes: 60 }
+  });
+  const page = createHarness();
+  bridge(host, page);
+  try {
+    await host.ready();
+    host.send({ type: "newSession" });
+    assert.ok(await page.until(() => page.document.querySelectorAll("#thread .welcome-chip").length === 4, 10000), "the starter prompts never rendered");
+    // The chips render from the clear, before session/new claims the session,
+    // so wait for the id and its sessionReady before capturing it.
+    assert.ok(await host.until(() => !!host.activeId()
+      && host.postsOf("sessionReady").some((m) => m.sessionId === host.activeId()), 15000), "the new session was never activated");
+    const id = host.activeId();
+
+    const contextReads = () => host.agentSaw("session/prompt").filter((m) =>
+      (m.params.prompt || []).some((b) => (b.text || "").startsWith("/context"))).length;
+    const usageSettled = () => {
+      const rt = host.controller.runtimes.get(id);
+      return !!rt && !rt.usagePending && (host.postsOf("usageState").at(-1) || {}).loading === false;
+    };
+    const assertEmptyWelcome = (round) => {
+      assert.strictEqual(page.document.querySelectorAll("#thread .turn").length, 0, `round ${round}: a transcript turn appeared`);
+      assert.ok(!page.thread().textContent.includes(INSTANT_USAGE_TEXT), `round ${round}: the internal usage reply reached the page`);
+      assert.strictEqual(page.document.querySelectorAll("#thread .welcome-chip").length, 4, `round ${round}: the starter prompts went missing`);
+      assert.ok(settled(page), `round ${round}: a loader was left behind`);
+    };
+    // One return to the list and back, with a forced fresh usage read once the
+    // reopen's own read has settled, so every round proves a read went out and
+    // came back without touching the transcript.
+    const reopenAndRefresh = async (round, status) => {
+      await leaveToList(host, page);
+      await openSessionRow(host, page, id, status);
+      assert.ok(await host.until(usageSettled, 15000), `round ${round}: the reopen's usage read never settled`);
+      // Snapshot after the reopen's own read so the forced one is what the
+      // counter proves went out.
+      const readsBefore = contextReads();
+      host.send({ type: "refreshUsage" });
+      assert.ok(await host.until(() => contextReads() > readsBefore, 10000), `round ${round}: the forced usage read never went out`);
+      assert.ok(await host.until(usageSettled, 10000), `round ${round}: the usage refresh never settled`);
+      assert.ok(await page.until(() => settled(page) && page.document.querySelectorAll("#thread .welcome-chip").length === 4, 10000), `round ${round}: the starter prompts never came back`);
+      assertEmptyWelcome(round);
+    };
+
+    await reopenAndRefresh("first", "idle");
+    await reopenAndRefresh("second", "idle");
+
+    // A cold wake of the same empty session: the runtime is reaped, so the row
+    // click takes the wake path and the transcript still comes back empty.
+    await leaveToList(host, page);
+    const runtime = host.controller.runtimes.get(id);
+    runtime.lastActivityAt = Date.now() - 2 * 60 * 60 * 1000;
+    host.controller.reapIdleRuntimes();
+    assert.ok(await host.until(() => !host.controller.runtimes.has(id), 5000), "the idle runtime was not reaped");
+    const readsBeforeWake = contextReads();
+    await openSessionRow(host, page, id, undefined);
+    assert.ok(await host.until(() => contextReads() > readsBeforeWake, 20000), "the wake never refreshed usage");
+    assert.ok(await host.until(usageSettled, 15000), "the wake's usage read never settled");
+    assert.ok(await page.until(() => settled(page) && page.document.querySelectorAll("#thread .welcome-chip").length === 4, 10000), "the starter prompts never came back after the wake");
+    assertEmptyWelcome("wake");
+    assert.strictEqual(page.errors().length, 0, "the page reported handler errors");
+  } finally {
+    page.window.close();
+    await host.dispose();
+  }
+});
+
 test.after(() => cleanup());

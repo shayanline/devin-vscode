@@ -66,6 +66,9 @@ import { createWorkingMark } from "./workingMark.js";
 
   let body = "list"; // "list" | "thread"
   let busy = false; // whether a turn is in flight; gates edit/restore chrome
+  // A send has left the composer but its echo has not rendered yet: the welcome
+  // screen must stay down across the gap, however the host's messages land.
+  let pendingSend = false;
   // The Fusion role the host last saw producing work this turn, if any:
   // { model, role: "lead" | "sub" }. Ephemeral chrome, never persisted.
   let modelActivity = null;
@@ -2599,6 +2602,8 @@ import { createWorkingMark } from "./workingMark.js";
     hideDockedPlan();
     closeUsagePopup();
     if (busy) setBusy(false);
+    // Whatever was on its way to render belongs to the chat being left.
+    pendingSend = false;
   }
 
   function isAliveStatus(st) { return st === "running" || st === "idle" || st === "starting" || st === "attention"; }
@@ -2659,6 +2664,7 @@ import { createWorkingMark } from "./workingMark.js";
     curSessionId = null;
     resetBgShells();
     pendingModelChange = 0; pendingPrefIntent = null;
+    pendingSend = false;
     setBody("thread");
     stopThreadLoading();
     elsewhereId = m.id || null;
@@ -2735,6 +2741,9 @@ import { createWorkingMark } from "./workingMark.js";
       currentTitle = "Chat";
       setBody("thread");
     }
+    // Keep the welcome down across the gap until the host echoes the message.
+    pendingSend = true;
+    hideWelcome();
     vscode.postMessage({ type: "send", text, newSession: startNew, preserveTranscript: !startNew && threadHasContent() });
     el.input.value = "";
     savedDraft = "";
@@ -4709,6 +4718,9 @@ import { createWorkingMark } from "./workingMark.js";
   function revertAndResend(turn, text) {
     if (turn.headBefore == null) {
       // Host starts a fresh session (posts "clear") then resends the text.
+      // Keep the welcome down across that gap like any pending send.
+      pendingSend = true;
+      hideWelcome();
       vscode.postMessage({ type: "revertExecute", newSession: true, resendText: text });
     } else {
       pendingRevert = { head: turn.headBefore, showRestored: false };
@@ -8774,7 +8786,12 @@ import { createWorkingMark } from "./workingMark.js";
   // exists and come up blank.
   function snapshotCurrent(opening) {
     cancelPreviewWaiters();
-    if (!curSessionId) return;
+    if (!curSessionId) {
+      // Nothing mounted owns the pending send (a sessionless first send, or the
+      // list), so it must not leak into whatever view is selected next.
+      pendingSend = false;
+      return;
+    }
     // Abandon any in-progress queued-message edit (releases the host's queue
     // hold) so it does not carry over to the next session.
     cancelQueuedEdit();
@@ -8822,8 +8839,12 @@ import { createWorkingMark } from "./workingMark.js";
       // files it has changed and their line counts, and the context ring.
       plan: dockedPlan.slice(), planCollapsePref,
       wsFiles: wsFiles.slice(), wsCounts: new Map(wsCounts), wsCollapsePref,
-      usage: lastUsage
+      usage: lastUsage,
+      // A send still waiting for its echo, and whether this snapshot caught the
+      // transcript mid load: both belong to this view, not to the live page.
+      pendingSend, loading: loadingSession
     });
+    pendingSend = false;
     // Per session: the next session must not inherit this one's last message
     // (it backs ArrowUp recall and Retry) nor its unsent draft. Both are put
     // back by restoreView when this session is reopened.
@@ -8838,7 +8859,11 @@ import { createWorkingMark } from "./workingMark.js";
     // painting a replay for a chat that is no longer on screen. Restoring that showed
     // a chat missing most of itself under a spinner that had nothing left to clear it.
     const leaving = sessionStatuses[curSessionId];
-    if (leaving === "running" || leaving === "starting") dirtyViews.add(curSessionId);
+    // The page's own flags catch what the host status may not have reported yet:
+    // a turn still streaming, or a replay still filling the transcript in.
+    if (leaving === "running" || leaving === "starting" || loadingSession || busy) {
+      dirtyViews.add(curSessionId);
+    }
     // Cap retained transcripts to bound DOM retention. Never the one being left, and
     // never the one being opened: evicting that left the chat it was about to
     // restore with an empty thread and no reload, so it came up blank.
@@ -8883,6 +8908,10 @@ import { createWorkingMark } from "./workingMark.js";
   function restoreView(id) {
     const v = views.get(id);
     if (!v) return;
+    // The cached view is complete, so any replay freeze left over from another
+    // session's load must not carry into it.
+    stopThreadLoading();
+    pendingSend = !!v.pendingSend;
     el.thread.innerHTML = "";
     el.thread.appendChild(v.frag);
     el.thread.querySelectorAll(".resp-text, .subagent-prose-content, .subagent-section-body, .thinking-item-content")
@@ -8957,10 +8986,13 @@ import { createWorkingMark } from "./workingMark.js";
     const haveView = views.has(id) && !dirtyViews.has(id);
     curSessionId = id;
     resetBgShells();
-    if (running && views.has(id)) {
+    const cached = views.get(id);
+    if (running && cached && cached.loading !== true) {
       // A turn is in flight. Reloading its transcript over the live channel
       // aborts the prompt ("channel closed"), so re-attach to the running
-      // session instead and let it keep streaming into the restored thread.
+      // session instead and let it keep streaming into the restored thread. A
+      // snapshot caught mid load is partial, though, so it takes the normal
+      // load path and waits for the authoritative record instead.
       restoreView(id);
       dirtyViews.delete(id);
       vscode.postMessage({ type: "activateSession", id });
@@ -9233,6 +9265,10 @@ import { createWorkingMark } from "./workingMark.js";
   ];
 
   function renderWelcome() {
+    if (body !== "thread") return;
+    if (pendingSend) return;
+    if (loadingSession) return;
+    if (busy) return;
     if (el.thread.querySelector(".welcome")) return;
     if (el.thread.querySelector(".turn")) return;
     const box = document.createElement("div");
@@ -9324,6 +9360,10 @@ import { createWorkingMark } from "./workingMark.js";
     // send/new-session (where the host may not post busy=false) never leaves the
     // composer stuck on Stop.
     setBusy(false);
+    // The send it belonged to is over, one way or the other, and a failed load
+    // must leave a readable transcript rather than a frozen replay.
+    pendingSend = false;
+    stopThreadLoading();
     hideWorking();
     finalizeBlock();
     hideWelcome();
@@ -9875,6 +9915,10 @@ import { createWorkingMark } from "./workingMark.js";
         updateTerminateBtn();
         break;
       case "clear":
+        // A pending send survives a clear that is not an explicit fresh start:
+        // a load finishing for the same view may race the submitted message,
+        // and resetting on it would flash the welcome.
+        pendingSend = !!m.pendingSend || (!m.reset && pendingSend);
         clearElsewhere();
         if (m.reset || m.loading) { pendingModelChange = 0; pendingPrefIntent = null; reportedThoughtLevels = {}; }
         // The warning belongs to the agent behind this chat, so it does not carry
@@ -10022,6 +10066,7 @@ import { createWorkingMark } from "./workingMark.js";
         break;
       }
       case "userMessage":
+        pendingSend = false;
         if (currentTitle === "Chat") { currentTitle = m.text.slice(0, 40); el.chatTitle.textContent = currentTitle; }
         addUserMessage(m.text, m.attachments);
         break;

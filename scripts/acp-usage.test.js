@@ -38,12 +38,16 @@ const SESSION_STATS = {
   ]
 };
 
+const INSTANT_REPLY_TEXT = "No context usage available yet. Send a message first.";
+
 // A scripted peer: answers initialize/session/new, advertises the two instant
 // commands when `commands` is set, and replies to read prompts by pushing their
 // report chunks as ordinary session/update notifications first. `contextDelay`
 // holds the /context reply open so a test can act while the read is in flight,
-// and `slowPrompt` holds a real turn open for the same reason.
-function fakeAgent(name, { commands = true, contextDelay = 0, statsError = false, slowPrompt = false, emptyContext = false } = {}) {
+// `slowPrompt` holds a real turn open for the same reason, and `contextInstant`
+// makes /context answer with the agent's instant text reply and no structured
+// report, the shape a fresh session actually returns.
+function fakeAgent(name, { commands = true, contextDelay = 0, statsError = false, slowPrompt = false, emptyContext = false, contextInstant = false } = {}) {
   const log = path.join(TMP, name + ".log");
   const js = path.join(TMP, name + ".js");
   const shim = path.join(TMP, name + (process.platform === "win32" ? ".cmd" : ".sh"));
@@ -87,7 +91,12 @@ function fakeAgent(name, { commands = true, contextDelay = 0, statsError = false
           const sessionId = msg.params.sessionId;
           if (/^\\/context(?:\\s|$)/.test(text)) {
             const answer = () => {
-              ${emptyContext ? `
+              ${contextInstant ? `
+              // The instant reply a session with no context yet returns: tagged
+              // instant, carrying text, and no structured report at all.
+              update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: ${JSON.stringify(INSTANT_REPLY_TEXT)} }, _meta: {
+                "cognition.ai/instant": true
+              } });` : emptyContext ? `
               // A valid object window followed by the authoritative empty
               // snapshot: the array replaces, it does not merge.
               update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "" }, _meta: {
@@ -365,6 +374,32 @@ test("an authoritative empty snapshot replaces an earlier object report", async 
     // Both report chunks stayed out of the ordinary update stream.
     assert.equal(updates.filter((n) => n.update?._meta?.["cognition.ai/contextUsage"] !== undefined).length, 0);
     assert.deepEqual(prompts(log), ["/context", "/session-stats"]);
+  } finally {
+    await client.shutdown();
+  }
+});
+
+test("session lifecycle: the instant text a fresh session answers /context stays out of the transcript until asked", async () => {
+  const { cli, log } = fakeAgent("usage-instant", { contextInstant: true });
+  const client = start(cli);
+  const updates = [];
+  client.on("update", (n) => updates.push(n));
+  try {
+    await openSession(client);
+    const report = await client.readUsage("usage-s");
+    assert.deepEqual(report.contexts, []);
+    assert.equal(report.sessionAcus, 1.9281);
+    assert.equal(report.error, undefined);
+    // The instant reply was consumed as part of the read, not shown as chat.
+    assert.equal(updates.filter((n) => n.update?.content?.text === INSTANT_REPLY_TEXT).length, 0);
+    assert.equal(updates.filter((n) => n.update?._meta?.["cognition.ai/instant"] === true).length, 0);
+    assert.deepEqual(prompts(log), ["/context", "/session-stats"]);
+    // The same instant text a manual /context earns still reaches listeners
+    // once the read has settled: only the read window suppresses it.
+    const manual = await client.prompt("usage-s", [{ type: "text", text: "/context" }]);
+    assert.deepEqual(manual, { stopReason: "end_turn" });
+    assert.equal(updates.filter((n) => n.update?.content?.text === INSTANT_REPLY_TEXT).length, 1,
+      "a manual /context's instant reply never reached the update stream");
   } finally {
     await client.shutdown();
   }

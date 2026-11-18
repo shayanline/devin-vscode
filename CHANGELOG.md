@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.16.1] - 2026-11-18
+
+### Highlights
+- Restore starter prompts when opening an empty chat.
+- Keep starter prompts hidden after sending from either chat input.
+- Keep the selected chat visible while other sessions start or wake.
+- Reopen live chats without loading their complete history again.
+- Recover from failed loads and wakes without a stuck loading screen.
+
+### Under the hood
+- Keep automatic context usage replies out of conversation history.
+- Preserve message order and attachments during session startup.
+- Reload partial transcripts instead of restoring incomplete snapshots.
+
 ## [0.16.0] - 2026-11-17
 
 ### Highlights

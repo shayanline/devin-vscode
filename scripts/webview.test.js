@@ -392,6 +392,7 @@ test("returning to an idle session restores its transcript without reloading", a
   h.post({ type: "assistantStart" });
   h.post({ type: "assistantChunk", text: "hi A" });
   h.post({ type: "assistantEnd" });
+  h.post({ type: "busy", value: false });
   await h.settle(20);
   assert.deepStrictEqual(h.reqTexts(), ["hello from A"]);
 
@@ -543,6 +544,7 @@ test("reselecting a terminated session restores its transcript and wakes silentl
   h.post({ type: "assistantStart" });
   h.post({ type: "assistantChunk", text: "hi A" });
   h.post({ type: "assistantEnd" });
+  h.post({ type: "busy", value: false });
   await h.settle(20);
   assert.deepStrictEqual(h.reqTexts(), ["hello from A"]);
 
@@ -1120,6 +1122,7 @@ test("starting a new chat from the list does not flash the welcome screen", asyn
     "no welcome during a pending new-chat send"
   );
   h.post({ type: "userMessage", text: "hello new chat" });
+  h.post({ type: "busy", value: false });
   await h.settle(10);
   assert.strictEqual(h.document.querySelectorAll("#thread .welcome").length, 0, "still no welcome after the message renders");
   assert.deepStrictEqual(h.reqTexts(), ["hello new chat"]);
@@ -1429,6 +1432,9 @@ test("leaving a working session and returning never shows two Working lines", as
   h.post({ type: "userMessage", text: "go" });
   h.post({ type: "assistantStart" });
   h.post({ type: "busy", value: true });
+  // The list learns the session is working, which is what lets the retained
+  // transcript re-attach on return rather than take the reload path.
+  h.post({ type: "sessionStatuses", statuses: { aaa: "running", bbb: "idle" }, activeId: "aaa" });
   await h.settle(20);
   assert.strictEqual(h.thread().querySelectorAll(".working").length, 1, "one Working line while it runs");
 
@@ -1472,10 +1478,12 @@ test("an unsent draft stays with its own session when switching", async () => {
   // Open A, leave a draft, then switch to B: B must start clean.
   openRow("aaa");
   h.post({ type: "sessionReady", sessionId: "aaa" });
+  h.post({ type: "loaded" });
   await h.settle(10);
   input.value = "draft for A";
   openRow("bbb");
   h.post({ type: "sessionReady", sessionId: "bbb" });
+  h.post({ type: "loaded" });
   await h.settle(10);
   assert.strictEqual(input.value, "", "the draft does not follow into the other session");
 
@@ -4331,9 +4339,11 @@ test("switching sessions keeps each one's plan and changed files", async () => {
   assert.deepStrictEqual(planRows(), [], "B does not inherit A's plan");
   assert.deepStrictEqual(wsRows(), [], "nor A's changed files");
 
-  // Back to A: both come back, once each.
+  // Back to A: both come back, once each. A's turn is still running, so the list
+  // reports it as such and its retained transcript re-attaches rather than reloads.
   h.document.getElementById("history-btn").click();
   h.post(sessions(null));
+  h.post({ type: "sessionStatuses", statuses: { A: "running", B: "idle" }, activeId: null });
   await h.settle(10);
   rowFor("A").click();
   h.post({ type: "workingSet", files: [{ path: "/w/a.ts", name: "a.ts" }] });
@@ -4489,6 +4499,7 @@ test("a restored transcript keeps its own fresher draft over the stored one", as
   h.post({ type: "sessionReady", sessionId: "A" });
   h.post({ type: "userMessage", text: "hello" });
   h.post({ type: "assistantEnd" });
+  h.post({ type: "busy", value: false });
   await h.settle(10);
   const input = h.document.getElementById("input");
   input.value = "the freshest text";
@@ -7005,6 +7016,204 @@ test("a reported background shell gets a stop control only for the session on sc
   assert.strictEqual(h.document.querySelector('button[title="Stop Background Command"]'), null,
     "the control is gone once the shell is stopped");
   assert.ok(h.thread().textContent.includes("Stopped"), "the row reads Stopped");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("session lifecycle: a send from the starter page hides the welcome before the host echoes", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  assert.strictEqual(h.document.querySelectorAll("#thread .welcome-chip").length, 4, "the starter prompts are up");
+
+  const input = h.document.getElementById("input");
+  input.value = "first message";
+  input.dispatchEvent(new h.window.Event("input", { bubbles: true }));
+  h.document.getElementById("send").click();
+  // The welcome disappears synchronously before any host reply can land.
+  assert.strictEqual(h.document.querySelectorAll("#thread .welcome").length, 0, "the welcome hid on send");
+  assert.deepStrictEqual(
+    h.posted.filter((m) => m.type === "send").map((m) => ({ text: m.text, newSession: m.newSession })),
+    [{ text: "first message", newSession: false }],
+    "the starter page sends into the session being created, not a new one"
+  );
+
+  // The host's pending clear and a load completion land before the echo.
+  h.post({ type: "clear", pendingSend: true });
+  await h.settle(10);
+  assert.strictEqual(h.document.querySelectorAll("#thread .welcome").length, 0, "the pending clear must not restore the welcome");
+  h.post({ type: "loaded" });
+  await h.settle(10);
+  assert.strictEqual(h.document.querySelectorAll("#thread .welcome").length, 0, "loaded must not bring the welcome back");
+
+  h.post({ type: "userMessage", text: "first message" });
+  await h.settle(10);
+  assert.deepStrictEqual(h.reqTexts(), ["first message"], "exactly one request bubble");
+  assert.strictEqual(h.document.querySelectorAll("#thread .welcome").length, 0);
+  // The turn finishes before the next fresh start, the way a real session's
+  // does, so the welcome is not held down by a busy flag that never cleared.
+  h.post({ type: "busy", value: false });
+  await h.settle(10);
+
+  // An explicit fresh start shows the starter prompts again.
+  h.post({ type: "clear", reset: true });
+  await h.settle(10);
+  assert.strictEqual(h.document.querySelectorAll("#thread .welcome-chip").length, 4, "the starter prompts return on reset");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("session lifecycle: a sessionless pending send does not suppress the next empty session's prompts", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "list" });
+  const input = h.document.getElementById("input");
+  input.value = "from the list";
+  input.dispatchEvent(new h.window.Event("input", { bubbles: true }));
+  h.document.getElementById("send").click();
+  assert.deepStrictEqual(
+    h.posted.filter((m) => m.type === "send").map((m) => ({ text: m.text, newSession: m.newSession })),
+    [{ text: "from the list", newSession: true }],
+    "the list composer asks for a new session"
+  );
+  // No session is mounted yet (curSessionId is still null), so the pending
+  // send must not leak into whatever view is selected next.
+  h.post({ type: "clear", pendingSend: true });
+  h.post({ type: "loaded" });
+  await h.settle(10);
+  assert.strictEqual(h.document.querySelectorAll("#thread .welcome").length, 0, "the pending send holds the welcome down");
+
+  // Before the echo lands, the user opens a different, still empty session
+  // straight from a picker: its starter prompts are not the pending send's to
+  // suppress.
+  h.post({ type: "openSession", id: "empty-b" });
+  h.post({ type: "clear", loading: true });
+  h.post({ type: "loaded" });
+  await h.settle(10);
+  assert.strictEqual(h.document.querySelectorAll("#thread .welcome-chip").length, 4, "the empty session's starter prompts are not suppressed");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("session lifecycle: a partial replay snapshot asks for loading instead of restoring half a transcript", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "sessionReady", sessionId: "C", title: "C" });
+  h.post({ type: "userMessage", text: "from C" });
+  h.post({ type: "assistantStart" }); h.post({ type: "assistantChunk", text: "answer C" }); h.post({ type: "assistantEnd" });
+  h.post({ type: "busy", value: false });
+  // P only ever reports "idle" and Q reports "running", so the page's own
+  // loading flag is the only thing that can mark their snapshots partial.
+  h.post({ type: "sessionStatuses", statuses: { C: "idle", P: "idle", Q: "running" }, activeId: null });
+  await h.settle(10);
+  const switchTo = (id) => h.post({ type: "openSession", id });
+  const loadsFor = (id) => h.posted.filter((m) => m.type === "loadSession" && m.id === id).length;
+  const partialReplay = async (userText) => {
+    // The load the page asked for starts replaying but never finishes: no
+    // "loaded" ever arrives, which is exactly the snapshot being left behind.
+    h.post({ type: "userMessage", text: userText });
+    h.post({ type: "assistantStart" }); h.post({ type: "assistantChunk", text: "partial answer" });
+    await h.settle(10);
+    assert.ok(h.thread().classList.contains("loading-replay"), "the replay freeze is up");
+    assert.ok(h.document.querySelector("#thread .thread-loading"), "the spinner is up");
+  };
+
+  // P is alive but not running, so only the page's loading flag can mark the
+  // snapshot partial.
+  switchTo("P");
+  assert.strictEqual(loadsFor("P"), 1, "an unseen session asks for a load");
+  await partialReplay("partial p");
+  switchTo("C");
+  assert.ok(!h.thread().classList.contains("loading-replay"), "the restored session carries no replay freeze");
+  assert.strictEqual(h.document.querySelector("#thread .thread-loading"), null, "and no leftover spinner");
+  assert.deepStrictEqual(h.reqTexts(), ["from C"], "the cached transcript is whole");
+  switchTo("P");
+  assert.strictEqual(loadsFor("P"), 2, "the partial snapshot asks for a fresh load rather than restoring");
+  assert.ok(h.thread().classList.contains("loading-replay"), "the new load shows its spinner");
+  assert.ok(!h.thread().textContent.includes("partial p"), "the partial transcript is not restored");
+
+  // Q is running, which previously allowed restoring its partial transcript.
+  switchTo("Q");
+  assert.strictEqual(loadsFor("Q"), 1);
+  await partialReplay("partial q");
+  switchTo("C");
+  assert.ok(!h.thread().classList.contains("loading-replay"), "the restored session carries no replay freeze");
+  switchTo("Q");
+  assert.strictEqual(loadsFor("Q"), 2, "a running session with a partial snapshot reloads instead of re-attaching");
+  assert.ok(!h.posted.some((m) => m.type === "activateSession" && m.id === "Q"), "no re-attach to a partial transcript");
+  assert.ok(h.thread().classList.contains("loading-replay"), "the new load shows its spinner");
+  assert.ok(!h.thread().textContent.includes("partial q"), "the partial transcript is not restored");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("session lifecycle: a first turn resend keeps the welcome down until its echo", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "capabilities", revert: true, editRequests: "inline", checkpoints: true });
+  h.post({ type: "sessionReady", sessionId: "S" });
+  h.post({ type: "userMessage", text: "original" });
+  h.post({ type: "assistantStart" }); h.post({ type: "assistantChunk", text: "a1" }); h.post({ type: "assistantEnd" });
+  h.post({ type: "turnHead", head: 10, reliable: true });
+  h.post({ type: "busy", value: false });
+  await h.settle(10);
+
+  // The first turn's headBefore is null, so editing it resends through a fresh
+  // session: the page must hold the welcome down across session/new.
+  h.document.querySelector("#thread .turn-request .req-body").click();
+  await h.settle(5);
+  const ta = h.document.querySelector(".req-editor-input");
+  assert.ok(ta, "the editor is open");
+  ta.value = "edited first turn";
+  ta.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  await h.settle(10);
+  assert.deepStrictEqual(
+    h.posted.filter((m) => m.type === "revertExecute").pop(),
+    { type: "revertExecute", newSession: true, resendText: "edited first turn" },
+    "the first turn resend asks for a fresh session"
+  );
+
+  // The host's pending clear and a load completion land before the echo.
+  h.post({ type: "clear", pendingSend: true });
+  h.post({ type: "loaded" });
+  await h.settle(10);
+  assert.strictEqual(h.document.querySelectorAll("#thread .welcome").length, 0, "no welcome flash while the new session is created");
+  h.post({ type: "userMessage", text: "edited first turn" });
+  await h.settle(10);
+  assert.deepStrictEqual(h.reqTexts(), ["edited first turn"], "the resend is the only request");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("session lifecycle: restoring the first turn without a resend shows a normal new welcome", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "capabilities", revert: true, editRequests: "inline", checkpoints: true });
+  h.post({ type: "sessionReady", sessionId: "S" });
+  h.post({ type: "userMessage", text: "original" });
+  h.post({ type: "assistantStart" }); h.post({ type: "assistantChunk", text: "a1" }); h.post({ type: "assistantEnd" });
+  h.post({ type: "turnHead", head: 10, reliable: true });
+  h.post({ type: "busy", value: false });
+  await h.settle(10);
+
+  // Restoring the first turn rewinds by starting a fresh session with no resend:
+  // the prompt text goes back to the composer and the new empty chat shows its
+  // starter prompts like any other new session.
+  const btn = h.document.querySelector("#thread .checkpoint-restore");
+  assert.ok(btn, "the first turn offers a restore");
+  btn.dispatchEvent(new h.window.MouseEvent("click", { bubbles: true }));
+  await h.settle(10);
+  assert.deepStrictEqual(
+    h.posted.filter((m) => m.type === "revertExecute").pop(),
+    { type: "revertExecute", newSession: true },
+    "the first turn restore asks for a fresh session without a resend"
+  );
+
+  // The host's newSession clear carries no pendingSend: nothing is on its way.
+  h.post({ type: "clear", reset: true });
+  await h.settle(10);
+  assert.strictEqual(h.document.querySelectorAll("#thread .welcome-chip").length, 4, "the new empty session shows its starter prompts");
   assert.strictEqual(h.errors().length, 0);
 });
 });

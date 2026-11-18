@@ -227,6 +227,11 @@ async function handleRequest(msg) {
           send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: msg.params.sessionId, update } });
         }
       } catch {}
+      if (process.env.DV_USAGE) {
+        // A woken session advertises its instant read commands again, the same
+        // as a new one, so the first refresh after the load can find them.
+        send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: msg.params.sessionId, update: { sessionUpdate: "available_commands_update", availableCommands: [{ name: "context" }, { name: "session-stats" }] } } });
+      }
       reply({});
       break;
     case "session/prompt": {

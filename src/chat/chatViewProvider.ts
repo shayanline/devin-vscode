@@ -416,6 +416,13 @@ export class ChatController implements AcpHost {
   private readonly loading = new Map<string, Promise<void>>();
   // A brand-new session being created (id not known until session/new returns).
   private startingNew?: Promise<Runtime>;
+  // Bumped on every navigation intent: it invalidates earlier presentation
+  // work, including when activeId stays undefined (the sessions list and a not
+  // yet claimed new chat look the same to activeId alone).
+  private navigationVersion = 0;
+  // The navigation generation `startingNew` belongs to. A different intent
+  // starts its own creation rather than adopting this one.
+  private startingNewVersion = -1;
   private idleTimer?: NodeJS.Timeout;
 
   private health?: CliHealth;
@@ -682,6 +689,7 @@ export class ChatController implements AcpHost {
   // Bind this controller to a webview (from a WebviewView or a WebviewPanel).
   // `reveal` brings the surface to the front when focus() is called.
   bind(webview: vscode.Webview, reveal?: () => void): void {
+    this.navigationVersion++;
     this.webview = webview;
     this.reveal = reveal;
     // A re-bind is a brand new page with an empty transcript, and nothing painted
@@ -812,6 +820,7 @@ export class ChatController implements AcpHost {
   // `shutdown()` when the extension host itself is going away, since that timer
   // will not fire once it has exited.
   dispose(): void {
+    this.navigationVersion++;
     this.closed = true;
     if (ChatController.lastFocused === this) {
       ChatController.lastFocused = undefined;
@@ -844,6 +853,7 @@ export class ChatController implements AcpHost {
   // the next window can say the turn was interrupted rather than losing it
   // silently.
   async shutdown(): Promise<void> {
+    this.navigationVersion++;
     this.closed = true;
     if (ChatController.lastFocused === this) {
       ChatController.lastFocused = undefined;
@@ -980,6 +990,7 @@ export class ChatController implements AcpHost {
     if (this.activeId !== id) {
       return;
     }
+    this.navigationVersion++;
     this.activeId = undefined;
     if (this.kind === "view") {
       this.store.setViewing(undefined);
@@ -1040,6 +1051,7 @@ export class ChatController implements AcpHost {
     if (visible) {
       // This surface has nothing to show any more, so it goes back to its list.
       // An editor tab has no list: it is one chat, and the manager closes it.
+      this.navigationVersion++;
       this.activeId = undefined;
       if (this.kind === "view") {
         this.store.setViewing(undefined);
@@ -1060,6 +1072,7 @@ export class ChatController implements AcpHost {
     if (this.closed) {
       throw new Error("Chat surface is closed");
     }
+    this.navigationVersion++;
     const rt = transfer.rt;
     this.runtimes.set(rt.id, rt);
     // A usage read that was already in flight reports to this surface now that
@@ -2101,11 +2114,11 @@ export class ChatController implements AcpHost {
   }
 
   // Create a brand-new session in its own `devin acp` and make it active.
-  private async createSession(): Promise<Runtime> {
-    if (this.startingNew) {
+  private async createSession(navigationVersion = this.navigationVersion): Promise<Runtime> {
+    if (this.startingNew && this.startingNewVersion === navigationVersion) {
       return this.startingNew;
     }
-    this.startingNew = (async () => {
+    const starting = (async () => {
       const cwd = this.resolveNewSessionCwd();
       const rt = this.spawnRuntime(cwd);
       try {
@@ -2118,8 +2131,12 @@ export class ChatController implements AcpHost {
         // Starting a chat takes seconds, and the user can open an existing one
         // while it does. It is a real session either way, so it stays in the pool
         // and runs in the background, but it must not take the panel back from
-        // whatever they are looking at now.
-        const claimed = this.activeId === undefined;
+        // whatever they are looking at now. `activeId === undefined` alone cannot
+        // tell the sessions list from this new chat, so the navigation that
+        // asked for it has to still be the current one.
+        const claimed = !this.closed
+          && this.navigationVersion === navigationVersion
+          && this.activeId === undefined;
         if (claimed) {
           this.activeId = rt.id;
           this.currentMode = undefined;
@@ -2136,7 +2153,15 @@ export class ChatController implements AcpHost {
         // Start it off knowing what is already open, rather than waiting for the
         // user to switch files before it has any editor context at all.
         this.sendOpenDocuments(rt);
-        if (claimed) {
+        // The claim was made before applyDefaults, and the user may have
+        // navigated since, so only the navigation that still owns this view
+        // gets its draft, staged files and readiness announcement.
+        const ownsView = () =>
+          !this.closed
+          && this.navigationVersion === navigationVersion
+          && this.activeId === rt.id
+          && this.runtimes.get(rt.id) === rt;
+        if (ownsView()) {
           // Whatever was in the "new chat" box has been carried into this session,
           // so it is no longer waiting in the list: the text, and the files staged
           // with it, belong to this chat now.
@@ -2146,8 +2171,10 @@ export class ChatController implements AcpHost {
             this.staged.set(this.stagedKey(rt.id), carried);
           }
           await this.dropStaged(undefined);
-          this.stagedChanged(rt.id);
-          this.post({ type: "sessionReady", sessionId: rt.id });
+          if (ownsView()) {
+            this.stagedChanged(rt.id);
+            this.post({ type: "sessionReady", sessionId: rt.id });
+          }
         }
         this.ensureIdleTimer();
         this.broadcastStatuses();
@@ -2162,10 +2189,15 @@ export class ChatController implements AcpHost {
         throw err;
       }
     })();
+    this.startingNew = starting;
+    this.startingNewVersion = navigationVersion;
     try {
-      return await this.startingNew;
+      return await starting;
     } finally {
-      this.startingNew = undefined;
+      if (this.startingNew === starting) {
+        this.startingNew = undefined;
+        this.startingNewVersion = -1;
+      }
     }
   }
 
@@ -2262,6 +2294,7 @@ export class ChatController implements AcpHost {
   // stops streaming into the now-hidden thread, and its completion/error is not
   // posted to the list view. Returning to the session re-attaches (activate).
   private leaveToList(): void {
+    this.navigationVersion++;
     this.activeId = undefined;
     if (this.kind === "view") {
       this.store.setViewing(undefined);
@@ -2347,7 +2380,11 @@ export class ChatController implements AcpHost {
   }
 
   async newSession(): Promise<void> {
+    const navigationVersion = ++this.navigationVersion;
     if (!(await this.ensureReady())) {
+      return;
+    }
+    if (this.closed || this.navigationVersion !== navigationVersion) {
       return;
     }
     // The previous session (if any) is left alive in the background and keeps its
@@ -2355,15 +2392,23 @@ export class ChatController implements AcpHost {
     // was staged in the "new chat" box comes with it: that is what it was for.
     this.activeId = undefined;
     await this.loadStaged(undefined);
+    if (this.closed || this.navigationVersion !== navigationVersion) {
+      return;
+    }
     this.focus();
     this.post({ type: "body", body: "thread" });
     // `reset` tells the webview this is a fresh session so it clears the title
     // (and code badge) instead of keeping the previous session's.
     this.post({ type: "clear", reset: true });
     try {
-      await this.createSession();
+      await this.createSession(navigationVersion);
     } catch (err) {
-      this.post({ type: "error", text: err instanceof Error ? err.message : String(err) });
+      const message = err instanceof Error ? err.message : String(err);
+      if (!this.closed && this.navigationVersion === navigationVersion) {
+        this.post({ type: "error", text: message });
+      } else {
+        this.log(`[new-session] ${message}`);
+      }
     }
   }
 
@@ -2382,7 +2427,14 @@ export class ChatController implements AcpHost {
   // wake it (spawn a fresh acp and load its history). Either way the session is
   // alive when this returns. Item 4.
   private async loadSession(id: string): Promise<void> {
-    if (!id || !(await this.ensureReady())) {
+    if (!id) {
+      return;
+    }
+    const navigationVersion = ++this.navigationVersion;
+    if (!(await this.ensureReady())) {
+      return;
+    }
+    if (this.closed || this.navigationVersion !== navigationVersion) {
       return;
     }
     if (this.openedElsewhere(id)) {
@@ -2423,8 +2475,10 @@ export class ChatController implements AcpHost {
     // Never reload a session whose turn is in flight: issuing a loadSession over
     // its live channel aborts the running prompt ("channel closed"). Re-attach
     // to the running runtime instead (it keeps streaming), rebuilding the
-    // transcript the requesting webview has no copy of.
-    if (already && already.busy) {
+    // transcript the requesting webview has no copy of. The same seam serves a
+    // complete local transcript: replaying it locally costs nothing and avoids
+    // a second ACP load of history the runtime already proved it has.
+    if (already && (already.busy || (already.logFull && !already.replaying && !already.waking))) {
       await this.activateSession(id, true);
       return;
     }
@@ -2500,20 +2554,22 @@ export class ChatController implements AcpHost {
       }
       this.ensureIdleTimer();
     } catch (err) {
-      // Waking failed: drop the half-spawned runtime so the row goes gray again,
-      // and stop pointing `activeId` at a runtime that no longer exists.
+      // Waking failed: drop the half-spawned runtime so the row goes gray again.
+      // `activeId` is left alone here: the finally block decides whether this
+      // failure is on screen before clearing it, because clearing it early used
+      // to make a visible failure look like a background one.
       if (!already) {
         this.destroyRuntime(rt);
         this.runtimes.delete(id);
-        if (this.activeId === id) {
-          this.activeId = undefined;
-        }
       }
       loadFailed = err instanceof Error ? err.message : String(err);
     } finally {
       rt.replaying = false;
       if (loadFailed) {
+        // A failed replay is incomplete, so the local record can no longer
+        // stand in for the agent's history on the next open.
         rt.replay = [];
+        rt.logFull = false;
       }
       this.starting.delete(id);
       if (loadFailed) {
@@ -2526,8 +2582,14 @@ export class ChatController implements AcpHost {
         this.sessionsCache = undefined;
         this.broadcastStatuses();
         // Only if the user is still on this chat. Closing out would otherwise send
-        // them back to the list from a chat that opened perfectly well.
+        // them back to the list from a chat that opened perfectly well. A cold
+        // load's runtime is already gone, so its id has to be released here. A
+        // live runtime keeps it so an editor surface's Retry still names it.
         if (this.activeId === id) {
+          if (!already) {
+            this.navigationVersion++;
+            this.activeId = undefined;
+          }
           await this.closeOutSession(OPEN_FAILED);
           this.reportLoadFailure(loadFailed, rt);
         } else {
@@ -2578,6 +2640,7 @@ export class ChatController implements AcpHost {
   // re-point the active session and refresh the composer chrome. Falls back to a
   // full wake/load if the runtime is not alive. Item: switch without reload.
   private async activateSession(id: string, replay = false): Promise<void> {
+    const navigationVersion = ++this.navigationVersion;
     const rt = this.runtimes.get(id);
     if (!rt) {
       await this.loadSession(id);
@@ -2600,7 +2663,7 @@ export class ChatController implements AcpHost {
     // The awaits above can outlive this activation: the user can open another
     // chat, or this runtime can be replaced, while staged files load. Nothing
     // below may paint into a session that is no longer the one on screen.
-    if (this.activeId !== id || this.runtimes.get(id) !== rt) {
+    if (this.closed || this.navigationVersion !== navigationVersion || this.activeId !== id || this.runtimes.get(id) !== rt) {
       return;
     }
     this.postDraft();
@@ -2647,6 +2710,11 @@ export class ChatController implements AcpHost {
     if (!rt.busy) {
       await this.postTurnHead(true);
     }
+    // postTurnHead awaited too: the same activation may have been superseded
+    // while the head was read, so check again before showing its pending widgets.
+    if (this.closed || this.navigationVersion !== navigationVersion || this.activeId !== id || this.runtimes.get(id) !== rt) {
+      return;
+    }
     // Re-surface any prompts this session raised while backgrounded.
     for (const p of rt.pending) {
       this.post(p.payload);
@@ -2690,24 +2758,43 @@ export class ChatController implements AcpHost {
   // its history WITHOUT clearing the thread or streaming a replay ("Waking…"
   // spinner). The row shows a "starting" dot until it is interactive. A send
   // that races the wake waits on `rt.waking`.
-  private async wakeSession(id: string): Promise<void> {
-    if (!id || !(await this.ensureReady())) {
+  private async wakeSession(id: string, select = true): Promise<void> {
+    if (!id) {
       return;
     }
-    if (this.openedElsewhere(id)) {
+    const navigationVersion = select ? ++this.navigationVersion : this.navigationVersion;
+    if (!(await this.ensureReady())) {
       return;
     }
-    if (this.runtimes.has(id)) {
-      await this.activateSession(id);
+    if (this.closed || (select && this.navigationVersion !== navigationVersion)) {
+      return;
+    }
+    if (select) {
+      if (this.openedElsewhere(id)) {
+        return;
+      }
+    } else if (this.surfaces?.owner(id, this)) {
+      // A background wake must not post an elsewhere placeholder into another chat.
       return;
     }
     const inflight = this.loading.get(id);
     if (inflight) {
-      // A load/wake for this session is already spawning an acp; share it.
-      this.activeId = id;
+      // A load/wake for this session is already spawning an acp, so share it. The
+      // runtime it installs can be present while the load is still running, so
+      // this has to be checked before runtimes.has or the caller would prompt a
+      // half loaded session.
+      if (select) {
+        this.activeId = id;
+      }
       return inflight;
     }
-    const p = this.doWakeSession(id);
+    if (this.runtimes.has(id)) {
+      if (select) {
+        await this.activateSession(id);
+      }
+      return;
+    }
+    const p = this.doWakeSession(id, select);
     this.loading.set(id, p);
     try {
       await p;
@@ -2724,11 +2811,13 @@ export class ChatController implements AcpHost {
     }
   }
 
-  private async doWakeSession(id: string): Promise<void> {
+  private async doWakeSession(id: string, select = true): Promise<void> {
     const startedAt = Date.now();
-    this.activeId = id;
-    this.postWorkingSet();
-    this.postDraft();
+    if (select) {
+      this.activeId = id;
+      this.postWorkingSet();
+      this.postDraft();
+    }
     const staged = this.loadStaged(id);
     const cwd = this.store.cwds()[id] || this.resolveNewSessionCwd();
     const rt = this.spawnRuntime(cwd);
@@ -2771,9 +2860,6 @@ export class ChatController implements AcpHost {
       if (this.runtimes.get(id) === rt) {
         this.destroyRuntime(rt);
         this.runtimes.delete(id);
-        if (this.activeId === id) {
-          this.activeId = undefined;
-        }
       }
       wakeFailed = err instanceof Error ? err.message : String(err);
     } finally {
@@ -2787,9 +2873,12 @@ export class ChatController implements AcpHost {
         // than leaving a stale, non interactive transcript on screen. Only if the
         // user is still on it, though. A wake takes seconds, and closing out after
         // they have moved to another chat rips them out of the one they are reading
-        // to report a failure in the one they left.
+        // to report a failure in the one they left. The runtime is already gone,
+        // so its id has to be released here before the close out.
         this.sessionsCache = undefined;
         if (this.activeId === id) {
+          this.navigationVersion++;
+          this.activeId = undefined;
           await this.closeOutSession(OPEN_FAILED);
           this.reportLoadFailure(wakeFailed, rt);
         } else {
@@ -3464,6 +3553,7 @@ export class ChatController implements AcpHost {
     // workspace's storage for good, since nothing else ever looks at that file again.
     void this.dropStaged(id);
     if (this.activeId === id) {
+      this.navigationVersion++;
       this.activeId = undefined;
       this.post({ type: "clear" });
     }
@@ -4494,6 +4584,10 @@ export class ChatController implements AcpHost {
     if (!text.trim()) {
       return;
     }
+    // Captured before the first await so a later navigation cannot retarget
+    // this send or let it paint into a chat it was not written in.
+    const navigationVersion = startNew ? ++this.navigationVersion : this.navigationVersion;
+    const starting = this.startingNewVersion === navigationVersion ? this.startingNew : undefined;
     // The text has left the composer, so it is no longer a draft. Every way out
     // of this method from here on either sends it, queues it, or hands it back:
     // clearing the draft and then returning is how a message disappears.
@@ -4511,11 +4605,30 @@ export class ChatController implements AcpHost {
     const giveBack = (why?: string) => {
       this.store.setDraft(draftFor, message.text);
       this.restoreStaged(draftFor, message.attachments);
-      this.post({ type: "draft", id: draftFor || null, text: message.text });
-      if (why) {
-        this.post({ type: "error", text: why });
+      // Only paint the recovery into the composer this send still owns.
+      const owns = draftFor ? this.activeId === draftFor : this.navigationVersion === navigationVersion;
+      if (owns) {
+        this.post({ type: "draft", id: draftFor || null, text: message.text });
+        if (why) {
+          this.post({ type: "error", text: why });
+        }
+      } else if (why) {
+        this.log(`[send-recovery] ${why}`);
       }
     };
+    // Starting a fresh chat leaves the previous session alive in the background. What was
+    // staged in the sessions list was staged for THIS message, so it goes with it. The
+    // detach and the echo run synchronously with the intent capture, before any await,
+    // so a second send can never be pointed at the session being left.
+    if (startNew) {
+      this.activeId = undefined;
+      // `pendingSend` tells the webview not to show the welcome screen on this
+      // clear, and we render the user's message right away, so a new chat
+      // started from the list never flashes the welcome while the ACP session
+      // spins up.
+      this.post({ type: "clear", reset: true, pendingSend: true });
+      this.post({ type: "userMessage", text: message.text, attachments: this.shownAttachments(message.attachments) });
+    }
     if (!(await this.ensureReady())) {
       giveBack();
       return;
@@ -4543,16 +4656,24 @@ export class ChatController implements AcpHost {
         return;
       }
     }
-    // Starting a fresh chat leaves the previous session alive in the background. What was
-    // staged in the sessions list was staged for THIS message, so it goes with it.
-    if (startNew) {
-      this.activeId = undefined;
-      // `pendingSend` tells the webview not to show the welcome screen on this
-      // clear, and we render the user's message right away, so a new chat
-      // started from the list never flashes the welcome while the ACP session
-      // spins up.
-      this.post({ type: "clear", pendingSend: true });
-      this.post({ type: "userMessage", text: message.text, attachments: this.shownAttachments(message.attachments) });
+    // A creation this navigation already started is the session this message
+    // belongs to: wait for it rather than opening a second one, and rather than
+    // reading a runtime whose defaults have not finished applying.
+    let started: Runtime | undefined;
+    if (starting) {
+      try {
+        // While the shared creation is still registered, go through
+        // createSession so this send resolves on the same promise chain as the
+        // one that started it and cannot overtake its prompt. Once that
+        // creation has finished and cleared the slot, await the captured
+        // promise directly rather than opening a second session.
+        started = this.startingNew === starting
+          ? await this.createSession(navigationVersion)
+          : await starting;
+      } catch (err) {
+        giveBack(err instanceof Error ? err.message : String(err));
+        return;
+      }
     }
 
     let rt = startNew || !target ? undefined : this.runtimes.get(target);
@@ -4570,11 +4691,16 @@ export class ChatController implements AcpHost {
         if (!startNew && target) {
           // The session this was written in was idle-exited: wake it, then send. The
           // wake takes seconds, so the message belongs to the session it was written
-          // in, not to whichever one is on screen when the wake finishes.
-          await (preserveTranscript ? this.wakeSession(target) : this.loadSession(target));
+          // in. If the user has navigated on while this send waited, the wake runs
+          // silently in the background rather than stealing the selection back.
+          if (this.activeId === target && this.navigationVersion === navigationVersion) {
+            await (preserveTranscript ? this.wakeSession(target) : this.loadSession(target));
+          } else {
+            await this.wakeSession(target, false);
+          }
           rt = this.runtimes.get(target);
         } else {
-          rt = await this.createSession();
+          rt = started ?? await this.createSession(navigationVersion);
         }
       } catch (err) {
         // Waking or creating the session failed, so there is nowhere to send it.
@@ -5222,15 +5348,19 @@ export class ChatController implements AcpHost {
   // Execute a revert (edit-in-place submit, restore checkpoint, or undo). When
   // `resendText` is given, resend it as the next prompt after the rewind.
   private async handleRevertExecute(head: number, resendText: unknown, startNew: boolean): Promise<void> {
-    if (!(await this.ensureReady())) {
+    // Reverting the very first turn has no prior node: start fresh instead. This
+    // goes through the same atomic new send path as the composer, before any
+    // readiness wait, so a delayed session/new cannot drop the resend into a
+    // different session the user picked meanwhile.
+    if (startNew || !Number.isFinite(head)) {
+      if (typeof resendText === "string" && resendText.trim()) {
+        await this.handleSend(resendText, true);
+      } else {
+        await this.newSession();
+      }
       return;
     }
-    // Reverting the very first turn has no prior node: start fresh instead.
-    if (startNew || !Number.isFinite(head)) {
-      await this.newSession();
-      if (typeof resendText === "string" && resendText.trim()) {
-        await this.handleSend(resendText, false);
-      }
+    if (!(await this.ensureReady())) {
       return;
     }
     const rt = this.active();
@@ -5244,6 +5374,11 @@ export class ChatController implements AcpHost {
       // rewind, apply whatever it did ask for, and keep everything it did not.
       const preview = await rt.client.revertPreview(rt.id, head).catch(() => undefined);
       await rt.client.revertExecute(rt.id, head);
+      // The conversation was rewound, so the local transcript no longer proves a
+      // complete history: the next full restore has to ask the agent again.
+      rt.log = [];
+      rt.logFull = false;
+      rt.bgBuffer = [];
       const restored = await this.applyRevertFileUndo(preview, rt);
       // Only the files that were really put back leave the working set. The rest
       // still hold the agent's edits, so they stay listed and undoable rather than
