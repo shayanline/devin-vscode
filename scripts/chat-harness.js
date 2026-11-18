@@ -308,7 +308,13 @@ async function handleRequest(msg) {
       failNow();
       break;
     }
-    case "_cognition.ai/revert/listSteps": await delay(num("DV_STEPS_DELAY")); reply({ steps: [] }); break;
+    case "_cognition.ai/revert/listSteps": {
+      await delay(num("DV_STEPS_DELAY"));
+      // DV_STEPS is the exact step list JSON; absent means the agent reports no
+      // revertible history, the way a session with no prompts does.
+      reply({ steps: JSON.parse(process.env.DV_STEPS || "[]") });
+      break;
+    }
     case "_cognition.ai/reads/promptHistory": {
       // DV_HISTORY holds the entries array. Absent means the agent does not
       // serve the read at all, the way an older CLI answers. The extension
@@ -429,6 +435,7 @@ function createChat(opts = {}) {
     DV_CANCEL_DELAY: String(opts.cancelDelay || 0),
     DV_PROMPT_FAIL: opts.promptFail ? JSON.stringify(opts.promptFail) : "",
     DV_STEPS_DELAY: String(opts.stepsDelay || 0),
+    DV_STEPS: opts.steps ? JSON.stringify(opts.steps) : "",
     DV_DOCUMENT_LIFECYCLE: opts.documentLifecycle ? "1" : "",
     // The instant usage reads the host may send: advertised only when the test
     // supplies reports for them to answer with.

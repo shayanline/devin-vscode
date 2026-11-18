@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.16.2] - 2026-11-18
+
+### Highlights
+- Keep first messages visible after returning to the session list.
+- Show new chats while the session list refreshes.
+- Keep text editing keys inside the message editor.
+- Leave the conversation unchanged when submitting unchanged text.
+- Edit the first message without creating another session.
+- Keep edits intact when checkpoint checks fail or time out.
+
+### Under the hood
+- Match optimistic and saved message echoes using stable identifiers.
+- Wait for new session setup before opening or sending another message.
+
 ## [0.16.1] - 2026-11-18
 
 ### Highlights

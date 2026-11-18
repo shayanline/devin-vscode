@@ -7158,8 +7158,9 @@ test("session lifecycle: a first turn resend keeps the welcome down until its ec
   h.post({ type: "busy", value: false });
   await h.settle(10);
 
-  // The first turn's headBefore is null, so editing it resends through a fresh
-  // session: the page must hold the welcome down across session/new.
+  // The first turn's headBefore is null, so editing it rewinds to the checkpoint
+  // before it inside THIS session: the page must hold the welcome down across
+  // the rewind and the resend's echo.
   h.document.querySelector("#thread .turn-request .req-body").click();
   await h.settle(5);
   const ta = h.document.querySelector(".req-editor-input");
@@ -7167,24 +7168,35 @@ test("session lifecycle: a first turn resend keeps the welcome down until its ec
   ta.value = "edited first turn";
   ta.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
   await h.settle(10);
+  // The first turn's preview asks the host for the checkpoint before it.
+  const preview = h.posted.filter((m) => m.type === "revertPreview").pop();
+  assert.ok(preview && preview.firstTurn === true, "the first turn edit previews its checkpoint");
+  h.post({
+    type: "revertPreview",
+    token: preview.token,
+    result: { fileActions: [], irreversibleWarnings: [], conflicts: [] },
+    pendingFiles: 0
+  });
+  await h.settle(10);
   assert.deepStrictEqual(
     h.posted.filter((m) => m.type === "revertExecute").pop(),
-    { type: "revertExecute", newSession: true, resendText: "edited first turn" },
-    "the first turn resend asks for a fresh session"
+    { type: "revertExecute", firstTurn: true, resendText: "edited first turn" },
+    "the first turn resend rewinds inside the same session"
   );
 
-  // The host's pending clear and a load completion land before the echo.
-  h.post({ type: "clear", pendingSend: true });
-  h.post({ type: "loaded" });
+  // The host confirms the rewind and the resend is on its way: no clear, no new
+  // session, and nothing may flash the welcome in the gap before the echo.
+  h.post({ type: "reverted", head: 3, firstTurn: true, resending: true });
   await h.settle(10);
-  assert.strictEqual(h.document.querySelectorAll("#thread .welcome").length, 0, "no welcome flash while the new session is created");
+  assert.strictEqual(h.document.querySelectorAll("#thread .welcome").length, 0, "no welcome flash while the resend is on its way");
+  assert.strictEqual(h.reqTexts().length, 0, "the rewound turn is gone before the echo");
   h.post({ type: "userMessage", text: "edited first turn" });
   await h.settle(10);
   assert.deepStrictEqual(h.reqTexts(), ["edited first turn"], "the resend is the only request");
   assert.strictEqual(h.errors().length, 0);
 });
 
-test("session lifecycle: restoring the first turn without a resend shows a normal new welcome", async () => {
+test("session lifecycle: restoring the first turn shows the welcome on the same session", async () => {
   const h = createHarness();
   h.post({ type: "ready" });
   h.post({ type: "body", body: "thread" });
@@ -7197,23 +7209,289 @@ test("session lifecycle: restoring the first turn without a resend shows a norma
   h.post({ type: "busy", value: false });
   await h.settle(10);
 
-  // Restoring the first turn rewinds by starting a fresh session with no resend:
-  // the prompt text goes back to the composer and the new empty chat shows its
-  // starter prompts like any other new session.
+  // Restoring the first turn rewinds to the checkpoint before it in THIS
+  // session: the prompt text goes back to the composer and the emptied chat
+  // shows its starter prompts like any other empty session.
   const btn = h.document.querySelector("#thread .checkpoint-restore");
   assert.ok(btn, "the first turn offers a restore");
   btn.dispatchEvent(new h.window.MouseEvent("click", { bubbles: true }));
   await h.settle(10);
+  // The first turn's preview asks the host for the checkpoint before it.
+  const preview = h.posted.filter((m) => m.type === "revertPreview").pop();
+  assert.ok(preview && preview.firstTurn === true, "the first turn restore previews its checkpoint");
+  h.post({
+    type: "revertPreview",
+    token: preview.token,
+    result: { fileActions: [], irreversibleWarnings: [], conflicts: [] },
+    pendingFiles: 0
+  });
+  await h.settle(10);
   assert.deepStrictEqual(
     h.posted.filter((m) => m.type === "revertExecute").pop(),
-    { type: "revertExecute", newSession: true },
-    "the first turn restore asks for a fresh session without a resend"
+    { type: "revertExecute", firstTurn: true },
+    "the first turn restore rewinds inside the same session without a resend"
   );
 
-  // The host's newSession clear carries no pendingSend: nothing is on its way.
-  h.post({ type: "clear", reset: true });
+  // The host confirms on the same session: the turn is trimmed, the restored
+  // divider shows, and the emptied thread gets its welcome back.
+  h.post({ type: "reverted", head: 3, firstTurn: true, resending: false });
   await h.settle(10);
-  assert.strictEqual(h.document.querySelectorAll("#thread .welcome-chip").length, 4, "the new empty session shows its starter prompts");
+  assert.strictEqual(h.reqTexts().length, 0, "the rewound turn is gone");
+  assert.strictEqual(h.document.querySelectorAll("#thread .welcome-chip").length, 4, "the emptied session shows its starter prompts");
+  assert.strictEqual(h.document.getElementById("input").value, "original", "the prompt text returned to the composer");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("reported regressions: keys typed inside the inline editor do not fire the bubble shortcuts", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "capabilities", revert: true, editRequests: "inline", checkpoints: true });
+  h.post({ type: "sessionReady", sessionId: "S" });
+  h.post({ type: "userMessage", text: "first" });
+  h.post({ type: "assistantStart" }); h.post({ type: "assistantChunk", text: "a1" }); h.post({ type: "assistantEnd" });
+  h.post({ type: "turnHead", head: 10, reliable: true });
+  h.post({ type: "busy", value: false });
+  await h.settle(10);
+
+  h.document.querySelector("#thread .turn-request .req-body").click();
+  await h.settle(5);
+  const ta = h.document.querySelector(".req-editor-input");
+  assert.ok(ta, "the editor is open");
+
+  // Every key typed into the editor bubbles up through the request bubble. The
+  // bubble's own shortcuts (Space/Enter to edit, Delete/Backspace to restore)
+  // must only answer for the bubble itself: jsdom has no native typing, so the
+  // defaultPrevented flag is what proves the key was left alone.
+  for (const init of [
+    { key: " " },
+    { key: "Backspace" },
+    { key: "Delete" },
+    { key: "ArrowLeft" },
+    { key: "Enter", shiftKey: true }
+  ]) {
+    const e = new h.window.KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init });
+    ta.dispatchEvent(e);
+    assert.strictEqual(e.defaultPrevented, false, `${init.key} was swallowed by the bubble shortcut`);
+  }
+  assert.strictEqual(h.posted.filter((m) => m.type === "revertPreview" || m.type === "revertExecute" || m.type === "send" || m.type === "newSession").length, 0, "a typed key asked for a revert or a send");
+  assert.ok(h.document.querySelector(".req-editor-input"), "the editor is still open");
+
+  // Escape remains the editor's own cancel.
+  const esc = new h.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+  ta.dispatchEvent(esc);
+  await h.settle(5);
+  assert.ok(!h.document.querySelector(".req-editor-input"), "Escape closed the editor");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("reported regressions: submitting an unchanged inline edit is a no op", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "capabilities", revert: true, editRequests: "inline", checkpoints: true });
+  h.post({ type: "sessionReady", sessionId: "S" });
+  h.post({ type: "userMessage", text: "first" });
+  h.post({ type: "assistantStart" }); h.post({ type: "assistantChunk", text: "a1" }); h.post({ type: "assistantEnd" });
+  h.post({ type: "turnHead", head: 10, reliable: true });
+  h.post({ type: "busy", value: false });
+  await h.settle(10);
+
+  h.document.querySelector("#thread .turn-request .req-body").click();
+  await h.settle(5);
+  const ta = h.document.querySelector(".req-editor-input");
+  assert.ok(ta, "the editor is open");
+  // The text is untouched: pressing Enter must close the editor without
+  // rewinding the conversation or resending the same prompt.
+  ta.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+  await h.settle(10);
+
+  assert.ok(!h.document.querySelector(".req-editor-input"), "the editor closed");
+  assert.strictEqual(h.posted.filter((m) => m.type === "revertPreview" || m.type === "revertExecute" || m.type === "send" || m.type === "newSession").length, 0, "an unchanged edit still asked for a rewind");
+  assert.deepStrictEqual(h.reqTexts(), ["first"], "the transcript is unchanged");
+  assert.strictEqual(h.document.querySelectorAll("#thread .welcome").length, 0, "no welcome appeared");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("reported regressions: submitting unchanged text while editing in the composer is a no op", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "capabilities", revert: true, editRequests: "input", checkpoints: true });
+  h.post({ type: "sessionReady", sessionId: "S" });
+  h.post({ type: "userMessage", text: "first" });
+  h.post({ type: "assistantStart" }); h.post({ type: "assistantChunk", text: "a1" }); h.post({ type: "assistantEnd" });
+  h.post({ type: "turnHead", head: 10, reliable: true });
+  h.post({ type: "busy", value: false });
+  await h.settle(10);
+
+  // editRequests:"input" loads the request into the composer with a banner.
+  h.document.querySelector("#thread .turn-request .req-body").click();
+  await h.settle(5);
+  assert.strictEqual(h.document.getElementById("input").value, "first", "the request loaded into the composer");
+  assert.ok(h.document.getElementById("input-editing-banner"), "the editing banner is shown");
+
+  // Sending the untouched text cancels the edit instead of rewinding and
+  // resending the same prompt into a different session.
+  h.document.getElementById("input").dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+  await h.settle(10);
+
+  assert.ok(!h.document.getElementById("input-editing-banner"), "the editing banner cleared");
+  assert.strictEqual(h.posted.filter((m) => m.type === "revertPreview" || m.type === "revertExecute" || m.type === "send" || m.type === "newSession").length, 0, "an unchanged edit still asked for a rewind");
+  assert.deepStrictEqual(h.reqTexts(), ["first"], "the transcript is unchanged");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("reported regressions: optimistic and canonical echoes of one send render once", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "sessionReady", sessionId: "S" });
+  h.post({ type: "userMessage", text: "hello", clientMessageId: "m1" });
+  await h.settle(10);
+  assert.deepStrictEqual(h.reqTexts(), ["hello"]);
+
+  // The canonical echo of the same send repeats the id: it must not paint a
+  // second bubble for a message already on screen.
+  h.post({ type: "userMessage", text: "hello", clientMessageId: "m1" });
+  await h.settle(10);
+  assert.deepStrictEqual(h.reqTexts(), ["hello"], "the canonical echo painted a second bubble");
+
+  // The same text sent again is a different message: a new id renders normally.
+  h.post({ type: "userMessage", text: "hello", clientMessageId: "m2" });
+  await h.settle(10);
+  assert.deepStrictEqual(h.reqTexts(), ["hello", "hello"], "an intentional repeat did not render");
+
+  // An echo without an id keeps the old behavior: it always renders.
+  h.post({ type: "userMessage", text: "hello" });
+  await h.settle(10);
+  assert.strictEqual(h.reqTexts().length, 3, "an idless echo was deduped");
+  // Settle the turns so the snapshot taken on the way out is a clean one.
+  h.post({ type: "busy", value: false });
+  await h.settle(10);
+
+  // Leave for the list and come back: the cached view keeps each turn's dedupe
+  // key, so the host's replayed canonical copy still cannot double a bubble.
+  h.post({ type: "sessions", sessions: [{ id: "S", short_id: "S", title: "S", working_directory: "/w" }], activeId: "S", statuses: { S: "idle" } });
+  h.post({ type: "body", body: "list" });
+  await h.settle(10);
+  h.post({ type: "openSession", id: "S" });
+  await h.settle(10);
+  assert.deepStrictEqual(h.reqTexts(), ["hello", "hello", "hello"], "the restored view kept its turns");
+  h.post({ type: "sessionReady", sessionId: "S" });
+  h.post({ type: "replay", items: [
+    { type: "userMessage", text: "hello", clientMessageId: "m1" },
+    { type: "userMessage", text: "hello", clientMessageId: "m2" }
+  ] });
+  await h.settle(10);
+  assert.strictEqual(h.reqTexts().length, 3, "a replayed canonical echo doubled a bubble");
+
+  // A full reload replay dedupes the same way: the recorded copy carries the id.
+  h.post({ type: "clear" });
+  h.post({ type: "replay", items: [
+    { type: "userMessage", text: "hello", clientMessageId: "m1" },
+    { type: "userMessage", text: "hello", clientMessageId: "m1" }
+  ] });
+  await h.settle(10);
+  assert.deepStrictEqual(h.reqTexts(), ["hello"], "a replayed duplicate was not deduped");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("reported regressions: a sessionReady while browsing the list does not claim the transcript", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  await h.settle(10);
+
+  // A chat that finishes starting while the user browses the list must not take
+  // over the view state: only a real selection (which sets the thread body)
+  // claims the mounted transcript.
+  h.post({ type: "sessionReady", sessionId: "S", title: "Late chat" });
+  await h.settle(10);
+  assert.notStrictEqual(h.state()?.sessionId, "S", "the list view claimed the late session");
+  assert.strictEqual(h.document.querySelectorAll("#thread .turn").length, 0, "a transcript was claimed while listing");
+
+  // The same announcement lands once the view is actually showing a chat.
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "sessionReady", sessionId: "S", title: "Late chat" });
+  await h.settle(10);
+  assert.strictEqual(h.state()?.sessionId, "S", "the mounted chat did not take its ready announcement");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("review regressions: a failed checkpoint check keeps the edited message in its editor", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "capabilities", revert: true, editRequests: "inline", checkpoints: true });
+  h.post({ type: "sessionReady", sessionId: "S" });
+  h.post({ type: "userMessage", text: "original" });
+  h.post({ type: "assistantStart" }); h.post({ type: "assistantChunk", text: "a1" }); h.post({ type: "assistantEnd" });
+  h.post({ type: "turnHead", head: 10, reliable: true });
+  h.post({ type: "busy", value: false });
+  await h.settle(10);
+
+  h.document.querySelector("#thread .turn-request .req-body").click();
+  await h.settle(5);
+  const ta = h.document.querySelector(".req-editor-input");
+  assert.ok(ta, "the editor is open");
+  ta.value = "edited first turn";
+  ta.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  await h.settle(10);
+  const preview = h.posted.filter((m) => m.type === "revertPreview").pop();
+  assert.ok(preview && preview.firstTurn === true, "the edit asked for its checkpoint");
+
+  // The host cannot answer the checkpoint check: the edit must not proceed as
+  // if the rewind were safe, and the editor keeps the typed text.
+  h.post({ type: "revertPreview", token: preview.token, error: "checkpoint unavailable" });
+  await h.settle(10);
+
+  const still = h.document.querySelector(".req-editor-input");
+  assert.ok(still, "the editor stayed open");
+  assert.strictEqual(still.value, "edited first turn", "the edited text was kept");
+  assert.strictEqual(h.posted.filter((m) => m.type === "revertExecute" || m.type === "send" || m.type === "newSession").length, 0,
+    "the failed check still rewound or sent");
+  const card = h.document.querySelector(".error-card");
+  assert.ok(card && card.textContent.includes("checkpoint unavailable"), "the failure was not shown");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("review regressions: a timed out checkpoint check keeps the composer edit and says so", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "capabilities", revert: true, editRequests: "input", checkpoints: true });
+  h.post({ type: "sessionReady", sessionId: "S" });
+  h.post({ type: "userMessage", text: "original" });
+  h.post({ type: "assistantStart" }); h.post({ type: "assistantChunk", text: "a1" }); h.post({ type: "assistantEnd" });
+  h.post({ type: "turnHead", head: 10, reliable: true });
+  h.post({ type: "busy", value: false });
+  await h.settle(10);
+
+  // editRequests:"input" loads the request into the composer with a banner.
+  h.document.querySelector("#thread .turn-request .req-body").click();
+  await h.settle(5);
+  const input = h.document.getElementById("input");
+  assert.strictEqual(input.value, "original", "the request loaded into the composer");
+  input.value = "edited in composer";
+  input.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+  await h.settle(10);
+  const preview = h.posted.filter((m) => m.type === "revertPreview").pop();
+  assert.ok(preview && preview.firstTurn === true, "the edit asked for its checkpoint");
+
+  // No answer ever arrives: the check must time out into a visible error, not
+  // into a rewind.
+  assert.ok(await h.until(() => !!h.document.querySelector(".error-card"), 6000), "the timeout never surfaced");
+  assert.ok(h.document.querySelector(".error-card").textContent.includes("timed out"), "the timeout was not explained");
+  assert.ok(h.document.getElementById("input-editing-banner"), "the composer edit was cancelled");
+  assert.strictEqual(input.value, "edited in composer", "the edited text was kept");
+  assert.strictEqual(h.posted.filter((m) => m.type === "revertExecute" || m.type === "send" || m.type === "newSession").length, 0,
+    "the timed out check still rewound or sent");
   assert.strictEqual(h.errors().length, 0);
 });
 });

@@ -4245,6 +4245,9 @@ import { createWorkingMark } from "./workingMark.js";
     turn.reqBody.tabIndex = 0;
     turn.reqBody.setAttribute("role", "button");
     turn.reqBody.onkeydown = (e) => {
+      // Only the bubble itself: keys typed inside the inline editor (or on a
+      // button descendant) bubble here and must not fire the bubble shortcuts.
+      if (e.target !== turn.reqBody) return;
       if ((e.key === "Delete" || e.key === "Backspace") && canRestoreTurn(turn)) {
         e.preventDefault();
         doRestore(turn);
@@ -4352,8 +4355,8 @@ import { createWorkingMark } from "./workingMark.js";
   // conversation expansion. The agent re-expands the conversation on session
   // load and assigns fresh node ids, orphaning any id captured before the load
   // (verified: reverting to a pre-load head fails with "Invalid params"). So:
-  //  - the first live turn of a fresh session (headBefore null) reverts by
-  //    starting a new session;
+  //  - the first live turn of a fresh session (headBefore null) resolves its
+  //    checkpoint from the agent's step list;
   //  - any later turn is revertable only if its head-before was captured live
   //    from a completed turn on this expansion (headBeforeReliable);
   //  - replayed/historical turns and the first turn after a reload are NOT
@@ -4460,9 +4463,10 @@ import { createWorkingMark } from "./workingMark.js";
       return;
     }
     if (turn.headBefore == null) {
-      // No prior node: the host starts a fresh session and posts "clear",
-      // which resets the transcript for us (no trim needed here).
-      vscode.postMessage({ type: "revertExecute", newSession: true });
+      // The first turn has no prior node: the host rewinds to the checkpoint
+      // before it inside THIS session (firstTurn), it does not open a new one.
+      pendingRevert = { firstTurn: true, showRestored: true };
+      vscode.postMessage({ type: "revertExecute", firstTurn: true });
     } else {
       // Defer trimming + the "restored" divider until the host confirms.
       pendingRevert = { head: turn.headBefore, showRestored: true };
@@ -4599,7 +4603,7 @@ import { createWorkingMark } from "./workingMark.js";
   // Ask the host to preview the revert; returns true if it would discard edits
   // or has irreversible actions and confirmation is enabled.
   function revertNeedsConfirm(turn) {
-    if (!caps.confirmRemoval || turn.headBefore == null) return Promise.resolve(false);
+    if (!caps.confirmRemoval) return Promise.resolve(false);
     const token = "pv" + (++previewSeq);
     const sessionId = curSessionId;
     return new Promise((resolve) => {
@@ -4616,15 +4620,30 @@ import { createWorkingMark } from "./workingMark.js";
         // stay on disk through the rewind, so this is the case most worth stopping
         // for, and it is the one the agent reports nothing about.
         const staying = msg.pendingFiles || 0;
-        if (msg.error || !msg.result) { finish(staying > 0 ? { staying } : false); return; }
+        if (msg.error || !msg.result) {
+          // A checkpoint check that cannot answer must not silently authorize a
+          // destructive rewind: fail closed and leave the editor as it was.
+          finish(null);
+          if (sessionId === curSessionId) {
+            renderError(msg.error || "Couldn't check this checkpoint. Your message is still in the editor.");
+          }
+          return;
+        }
         const r = msg.result;
         const planned = (r.fileActions && r.fileActions.length) || 0;
         const warnings = (r.irreversibleWarnings && r.irreversibleWarnings.length) || 0;
         if (!planned && !warnings && !staying) { finish(false); return; }
         finish({ staying: planned ? 0 : staying });
       });
-      timer = setTimeout(() => finish(false), 4000);
-      vscode.postMessage({ type: "revertPreview", head: turn.headBefore, token });
+      timer = setTimeout(() => {
+        finish(null);
+        if (sessionId === curSessionId) {
+          renderError("The checkpoint check timed out. Your message is still in the editor.");
+        }
+      }, 4000);
+      // The first turn carries no head: the host resolves the checkpoint before
+      // it from the agent's step list (firstTurn).
+      vscode.postMessage({ type: "revertPreview", head: turn.headBefore, firstTurn: turn.headBefore == null || undefined, token });
     });
   }
 
@@ -4717,11 +4736,12 @@ import { createWorkingMark } from "./workingMark.js";
   // revert does not remove turns that are, in fact, still there.
   function revertAndResend(turn, text) {
     if (turn.headBefore == null) {
-      // Host starts a fresh session (posts "clear") then resends the text.
-      // Keep the welcome down across that gap like any pending send.
+      // The first turn rewinds inside this session and resends here: keep the
+      // welcome down across the gap like any pending send.
       pendingSend = true;
       hideWelcome();
-      vscode.postMessage({ type: "revertExecute", newSession: true, resendText: text });
+      pendingRevert = { firstTurn: true, showRestored: false };
+      vscode.postMessage({ type: "revertExecute", firstTurn: true, resendText: text });
     } else {
       pendingRevert = { head: turn.headBefore, showRestored: false };
       vscode.postMessage({ type: "revertExecute", head: turn.headBefore, resendText: text });
@@ -4737,6 +4757,12 @@ import { createWorkingMark } from "./workingMark.js";
   async function submitEdit(turn, text) {
     text = (text || "").trim();
     if (!text || turn.submitting) return;
+    // Submitting the text unchanged is a no-op: rewinding and resending the same
+    // prompt would discard the conversation for nothing.
+    if (text === (turn.text || "").trim()) {
+      finishEditing(turn);
+      return;
+    }
     turn.submitting = true;
     try {
       const needs = await revertNeedsConfirm(turn);
@@ -4780,7 +4806,12 @@ import { createWorkingMark } from "./workingMark.js";
   }
 
   async function submitInputEdit(turn, text) {
-    if (turn.submitting) return;
+    text = (text || "").trim();
+    if (!text || turn.submitting) return;
+    if (text === (turn.text || "").trim()) {
+      cancelInputEditing();
+      return;
+    }
     turn.submitting = true;
     try {
       const needs = await revertNeedsConfirm(turn);
@@ -9883,6 +9914,9 @@ import { createWorkingMark } from "./workingMark.js";
         break;
       case "sessionStatuses": applyStatuses(m.statuses, m.activeId, m.elsewhere); break;
       case "sessionActivity": if (m.id && views.has(m.id)) dirtyViews.add(m.id); break;
+      // A rewind rewrote this chat's history on the host: any cached copy of it
+      // is superseded and must reload rather than restore the old transcript.
+      case "sessionHistoryChanged": if (m.sessionId) dirtyViews.add(m.sessionId); break;
       case "openSession":
         // Host-initiated open (e.g. the "needs your input" notification). Reuse
         // the same path as a click so view restore / wake / load all apply.
@@ -9902,6 +9936,10 @@ import { createWorkingMark } from "./workingMark.js";
       }
       case "lockConflict": showLockConflict(m); break;
       case "sessionReady":
+        // A session that finished starting while the user is on the list must
+        // not claim the mounted transcript: only a view actually showing a chat
+        // takes the ready announcement (the host sets thread on real selection).
+        if (body !== "thread") break;
         if (m.title) { currentTitle = m.title; el.chatTitle.textContent = currentTitle; }
         // The thread now shows this session; retire any retained snapshot for it.
         if (m.sessionId && curSessionId !== m.sessionId) { cancelPreviewWaiters(); if (curSessionId) { pendingModelChange = 0; pendingPrefIntent = null; reportedThoughtLevels = {}; } clearModelActivity(); }
@@ -10067,8 +10105,13 @@ import { createWorkingMark } from "./workingMark.js";
       }
       case "userMessage":
         pendingSend = false;
+        // The host echoes a send twice for a new chat: once optimistically and
+        // once canonically once the session exists. The id tells them apart from
+        // an intentional repeat of the same text.
+        if (m.clientMessageId && turns.some((t) => t.clientMessageId === m.clientMessageId)) break;
         if (currentTitle === "Chat") { currentTitle = m.text.slice(0, 40); el.chatTitle.textContent = currentTitle; }
         addUserMessage(m.text, m.attachments);
+        if (currentTurn && m.clientMessageId) currentTurn.clientMessageId = m.clientMessageId;
         break;
       case "userChunk": appendUserChunk(m.text, m.messageId, m.attachments); break;
       case "assistantStart": finalizeBlock(); announce("Devin is working."); break;
@@ -10209,11 +10252,17 @@ import { createWorkingMark } from "./workingMark.js";
         // The host has performed the rewind; now it is safe to trim the turns
         // from the reverted point onward (and drop the "restored" divider for a
         // checkpoint restore). A resend, if any, streams in as new turns after.
-        const head = typeof m.head === "number" ? m.head : (pendingRevert && pendingRevert.head);
-        const turn = turns.find((t) => t.headBefore === head);
+        // A first turn rewind targets the checkpoint before it, so the turn to
+        // trim from is the first one rather than a head lookup.
+        const turn = m.firstTurn
+          ? turns.find((t) => t.headBefore == null)
+          : turns.find((t) => t.headBefore === (typeof m.head === "number" ? m.head : pendingRevert && pendingRevert.head));
         if (turn) trimTurnsFrom(turn);
         if (pendingRevert && pendingRevert.showRestored) renderRestoredRow();
         pendingRevert = null;
+        // A restore that emptied the thread (the first turn's checkpoint) leaves
+        // this same session welcome again, unless a resend is on its way.
+        if (!m.resending && body === "thread" && !threadHasContent()) renderWelcome();
         break;
       }
       case "revertPreview": {

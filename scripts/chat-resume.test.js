@@ -239,4 +239,63 @@ test("session lifecycle: reopening an empty session never paints the internal us
   }
 });
 
+test("reported regressions: a chat sent from the list keeps its first bubble when reopened mid creation and after it settles", posixOnly, async () => {
+  const host = createChat({
+    promptDelay: 200,
+    bgUpdates: [{ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "assistant reply" } }],
+    config: { idleSessionKeepAliveMinutes: 60 }
+  });
+  const page = createHarness();
+  bridge(host, page);
+  let releaseDefaults;
+  const defaultsGate = new Promise((r) => { releaseDefaults = r; });
+  try {
+    await host.ready();
+    // Hold the new session's defaults so its list row can be opened while the
+    // creation is still in flight.
+    const originalDefaults = host.controller.applyDefaults.bind(host.controller);
+    host.controller.applyDefaults = async (rt, res) => {
+      await defaultsGate;
+      return originalDefaults(rt, res);
+    };
+
+    // A real send from the list composer, then straight back to the list before
+    // the session exists on screen.
+    send(page, "first list message");
+    await leaveToList(host, page);
+
+    // The host's own session list carries the live row: wait for the real post
+    // to render it, never an injected one.
+    assert.ok(await page.until(() => page.document.querySelector("#sessions-list .session-main"), 15000), "the new session's row never rendered");
+    const id = [...host.controller.runtimes.keys()][0];
+    assert.ok(id, "no runtime was created for the list send");
+
+    // Open it while creation is still held: the transcript must come up whole.
+    page.document.querySelector("#sessions-list .session-main").click();
+    releaseDefaults();
+    assert.ok(await host.until(() => host.activeId() === id, 15000), "the row never opened the new session");
+    assert.ok(await page.until(() => settled(page) && page.reqTexts().includes("first list message"), 15000), "the first bubble never rendered");
+    assert.ok(await page.until(() => page.respTexts().includes("assistant reply"), 15000), "the response never rendered");
+    assert.strictEqual(page.reqTexts().filter((t) => t === "first list message").length, 1, "the first request rendered more than once");
+    assert.strictEqual(page.respTexts().filter((t) => t === "assistant reply").length, 1, "the response rendered more than once");
+    assert.strictEqual(host.agentSaw("session/prompt").filter((m) => m.params.sessionId === id).length, 1, "the first prompt went out more than once");
+    assert.strictEqual(page.document.querySelectorAll("#thread .welcome").length, 0, "a welcome flashed over the transcript");
+    assert.strictEqual(page.errors().length, 0, "the page reported handler errors");
+
+    // And once everything has settled, leaving and reopening still shows it once.
+    await leaveToList(host, page);
+    assert.ok(await page.until(() => page.document.querySelector("#sessions-list .session-main"), 10000), "the session row never rendered again");
+    page.document.querySelector("#sessions-list .session-main").click();
+    assert.ok(await page.until(() => settled(page) && page.reqTexts().includes("first list message") && page.respTexts().includes("assistant reply"), 15000),
+      "the settled reopen never restored the transcript");
+    assert.strictEqual(page.reqTexts().filter((t) => t === "first list message").length, 1, "the first request rendered twice after settling");
+    assert.strictEqual(page.respTexts().filter((t) => t === "assistant reply").length, 1, "the response rendered twice after settling");
+    assert.strictEqual(page.errors().length, 0, "the page reported handler errors");
+  } finally {
+    releaseDefaults?.();
+    page.window.close();
+    await host.dispose();
+  }
+});
+
 test.after(() => cleanup());
