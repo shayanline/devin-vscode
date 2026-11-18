@@ -53,3 +53,16 @@ export function paintedReplay(log: Painted[]): Painted[] {
   out.push({ type: "assistantEnd" });
   return out;
 }
+
+// Drop the painted prompt a rewind targets and everything after it, keeping the
+// earlier history without asking the agent to replay it. A miss means the local
+// record was already partial (or the prompt was never painted here), which is
+// not permission to guess at what to keep.
+export function rewindPainted(log: Painted[], userMessageId: string): boolean {
+  const index = log.findIndex((entry) =>
+    (entry.type === "userMessage" && entry.clientMessageId === userMessageId)
+    || (entry.type === "userChunk" && entry.messageId === userMessageId));
+  if (index < 0) return false;
+  log.splice(index);
+  return true;
+}

@@ -220,7 +220,7 @@ export class AcpClient extends EventEmitter {
           reading.stats = meta["cognition.ai/sessionStats"];
           return;
         }
-        if (this.usagePending && reading.command === "session-stats" && meta["cognition.ai/instant"] === true) {
+        if (this.usagePending && meta["cognition.ai/instant"] === true) {
           return;
         }
       }
@@ -366,7 +366,7 @@ export class AcpClient extends EventEmitter {
     }, OPEN_TIMEOUT_MS);
   }
 
-  async prompt(sessionId: string, blocks: ContentBlock[]): Promise<PromptResult> {
+  async prompt(sessionId: string, blocks: ContentBlock[], clientMessageId?: string): Promise<PromptResult> {
     const version = this.cancelVersion;
     this.promptCalls++;
     try {
@@ -377,7 +377,11 @@ export class AcpClient extends EventEmitter {
         && /^\/(?:context|session-stats)(?:\s|$)/.test(String((block as { text?: string }).text || "")))) {
         this.usageCapture = undefined;
       }
-      return await this.rpc<PromptResult>("session/prompt", { sessionId, prompt: blocks });
+      return await this.rpc<PromptResult>("session/prompt", {
+        sessionId,
+        prompt: blocks,
+        ...(clientMessageId ? { _meta: { "cognition.ai/clientMessageId": clientMessageId } } : {})
+      });
     } finally {
       this.promptCalls--;
     }
@@ -393,7 +397,8 @@ export class AcpClient extends EventEmitter {
     const reading: UsageRead = { sessionId, command: "context", contexts: [] };
     this.usageCapture = reading;
     // These instant commands do not echo a correlation ID, so keep them
-    // between prompts and consume only their structured report messages.
+    // between prompts and consume their structured report messages and
+    // instant command replies.
     const work = async (): Promise<UsageReport> => {
       const report: UsageReport = {};
       try {
@@ -642,22 +647,26 @@ export class AcpClient extends EventEmitter {
   }
 
   // --- Revert (conversation rewind + file undo) ---------------------------
-  // Preview what reverting to `targetNodeId` would do, without mutating.
-  revertPreview(sessionId: string, targetNodeId: number, opts?: { force?: boolean; skipFileUndo?: boolean }): Promise<RevertPreviewResult> {
+  // Whether the agent can target a revert at a stable prompt id.
+  supportsRevertByUserMessageId(): boolean {
+    return this.agentCapability("cognition.ai/revertByUserMessageId");
+  }
+
+  // Preview what rewinding to `userMessageId` would do, without mutating. The
+  // agent rejects any extra fields here (force/skipFileUndo are execute flags).
+  revertPreview(sessionId: string, userMessageId: string): Promise<RevertPreviewResult> {
     return this.rpc<RevertPreviewResult>("_cognition.ai/revert/preview", {
       sessionId,
-      targetNodeId,
-      force: opts?.force ?? false,
-      skipFileUndo: opts?.skipFileUndo ?? false
+      userMessageId
     }, QUERY_TIMEOUT_MS);
   }
 
-  // Execute the rewind: truncate the conversation back to `targetNodeId` and
-  // undo the file edits made from that node onward (unless skipFileUndo).
-  revertExecute(sessionId: string, targetNodeId: number, opts?: { force?: boolean; skipFileUndo?: boolean }): Promise<unknown> {
+  // Execute the rewind: truncate the conversation back to `userMessageId` and
+  // undo the file edits made from that prompt onward (unless skipFileUndo).
+  revertExecute(sessionId: string, userMessageId: string, opts?: { force?: boolean; skipFileUndo?: boolean }): Promise<unknown> {
     return this.rpc("_cognition.ai/revert/execute", {
       sessionId,
-      targetNodeId,
+      userMessageId,
       force: opts?.force ?? true,
       skipFileUndo: opts?.skipFileUndo ?? false
     }, QUERY_TIMEOUT_MS);

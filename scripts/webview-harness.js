@@ -91,14 +91,16 @@ function createHarness({ surface = "view", state: initialState, bundle: bundlePa
 
     // Drive a session load the way loadSession() does: clear, capabilities,
     // then the recorded turns as user/assistant chunks, then "loaded".
-    // `turns` is [{ role: "user"|"assistant", text }].
+    // `turns` is [{ role: "user"|"assistant", text, mid? }]: `mid` is the stable
+    // prompt id a replayed user turn carries in messageId, which is what the
+    // checkpoint bindings key on.
     replay(turns) {
       post({ type: "ready" });
       post({ type: "body", body: "thread" });
       post({ type: "clear", loading: true });
       post({ type: "capabilities", revert: true, editRequests: "inline", checkpoints: true });
       for (const t of turns) {
-        post({ type: t.role === "user" ? "userChunk" : "assistantChunk", text: t.text });
+        post({ type: t.role === "user" ? "userChunk" : "assistantChunk", text: t.text, messageId: t.mid });
       }
       post({ type: "loaded" });
     }

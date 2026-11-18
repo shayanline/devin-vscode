@@ -111,7 +111,11 @@ test("opening a session reads usage once and emits only what the report supplies
       ["/context", "/session-stats", "hello"]
     );
     // Nothing about the reads appears as a transcript message.
-    assert.deepEqual(h.postsOf("userMessage").map((m) => m.text), ["hello"]);
+    // A new chat's optimistic and canonical echoes share one prompt identity.
+    const echoes = h.postsOf("userMessage");
+    assert.deepEqual([...new Set(echoes.map((m) => m.text))], ["hello"]);
+    assert.ok(echoes.every((m) => typeof m.clientMessageId === "string" && m.clientMessageId.length > 0));
+    assert.equal(new Set(echoes.map((m) => m.clientMessageId)).size, 1);
     assert.equal(h.postsOf("assistantChunk").length, 0);
     // The popup state finished loading without an error.
     const states = h.postsOf("usageState");

@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.16.3] - 2026-11-18
+
+### Highlights
+- Edit earlier messages without checkpoint parameter errors.
+- Show checkpoint controls for messages with verified checkpoints.
+- Keep checkpoint controls available after reopening a chat.
+- Preserve earlier messages when editing or restoring a checkpoint.
+
+### Under the hood
+- Match checkpoints using stable message identifiers.
+- Keep new sends queued while a checkpoint rewind is running.
+
+## [0.16.2] - 2026-11-18
+
+### Highlights
+- Keep first messages visible after returning to the session list.
+- Show new chats while the session list refreshes.
+- Keep text editing keys inside the message editor.
+- Leave the conversation unchanged when submitting unchanged text.
+- Edit the first message without creating another session.
+- Keep edits intact when checkpoint checks fail or time out.
+
+### Under the hood
+- Match optimistic and saved message echoes using stable identifiers.
+- Wait for new session setup before opening or sending another message.
+
+## [0.16.1] - 2026-11-18
+
+### Highlights
+- Restore starter prompts when opening an empty chat.
+- Keep starter prompts hidden after sending from either chat input.
+- Keep the selected chat visible while other sessions start or wake.
+- Reopen live chats without loading their complete history again.
+- Recover from failed loads and wakes without a stuck loading screen.
+
+### Under the hood
+- Keep automatic context usage replies out of conversation history.
+- Preserve message order and attachments during session startup.
+- Reload partial transcripts instead of restoring incomplete snapshots.
+
 ## [0.16.0] - 2026-11-17
 
 ### Highlights

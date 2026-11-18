@@ -84,7 +84,7 @@ export interface PromptResult {
 export type SessionUpdate =
   | { sessionUpdate: "agent_message_chunk"; messageId?: string; content: ContentBlock; _meta?: UpdateMeta }
   | { sessionUpdate: "agent_thought_chunk"; messageId?: string; content: ContentBlock; _meta?: UpdateMeta }
-  | { sessionUpdate: "user_message_chunk"; messageId?: string; content: ContentBlock }
+  | { sessionUpdate: "user_message_chunk"; messageId?: string; content: ContentBlock; _meta?: UpdateMeta }
   | { sessionUpdate: "plan"; entries: PlanEntry[] }
   | { sessionUpdate: "tool_call"; toolCallId: string; name?: string; title?: string; kind?: string; status?: ToolCallStatus; content?: ToolCallContent[]; rawInput?: unknown; locations?: { path: string; line?: number }[]; _meta?: UpdateMeta }
   | { sessionUpdate: "tool_call_update"; toolCallId: string; name?: string; title?: string; kind?: string; status?: ToolCallStatus; content?: ToolCallContent[]; rawInput?: unknown; locations?: { path: string; line?: number }[]; _meta?: UpdateMeta }
@@ -218,7 +218,7 @@ export interface TerminalExitStatus {
 // clientCapabilities._meta["cognition.ai/revert"] = true).
 export interface RevertParams {
   sessionId: string;
-  targetNodeId: number;
+  userMessageId: string;
   force?: boolean;
   skipFileUndo?: boolean;
 }
@@ -251,6 +251,7 @@ export interface RevertStep {
   // "prompt" for a user request; the agent also reports question and tool steps.
   kind?: string;
   userMessageId?: string;
+  stepId?: string;
   toolCallId?: string;
   questionNodeId?: number;
   revertTargetNodeId: number;

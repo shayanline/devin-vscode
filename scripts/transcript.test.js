@@ -34,7 +34,7 @@ esbuild.buildSync({
   format: "cjs",
   logLevel: "error"
 });
-const { recordPainted, paintedReplay, LOG_MAX } = require(outfile);
+const { recordPainted, paintedReplay, rewindPainted, LOG_MAX } = require(outfile);
 
 // Record a whole stream the way the host does, one payload at a time.
 function recordAll(payloads, max) {
@@ -100,6 +100,58 @@ test("a replay settles the last block and does not re-time old reasoning", () =>
   assert.strictEqual(log[0].replayed, false, "and the record itself is left alone");
   assert.deepStrictEqual(replay[replay.length - 1], { type: "assistantEnd" },
     "the last block is settled, since turn markers are per surface");
+});
+
+test("checkpoint identity: a rewind keeps the prefix and drops the target and later", () => {
+  // The painted record mixes live echoes (userMessage + clientMessageId) and
+  // replayed prompts (userChunk + messageId). Either spelling of the stable id
+  // identifies the rewind target.
+  const { log } = recordAll([
+    { type: "userMessage", text: "first", clientMessageId: "m1" },
+    { type: "assistantChunk", text: "a1", messageId: "a1" },
+    { type: "userMessage", text: "second", clientMessageId: "m2" },
+    { type: "assistantChunk", text: "a2", messageId: "a2" },
+    { type: "toolCall", id: "t1", title: "Read x.ts" },
+    { type: "userChunk", text: "third", messageId: "m3" },
+    { type: "assistantChunk", text: "a3", messageId: "a3" }
+  ]);
+
+  const label = (e) => e.type + ":" + (e.clientMessageId || e.messageId || e.id || e.text);
+
+  // Targeting the live echo drops it and everything after, prefix intact.
+  assert.strictEqual(rewindPainted(log, "m2"), true);
+  assert.deepStrictEqual(log.map(label), [
+    "userMessage:m1",
+    "assistantChunk:a1"
+  ], "the earlier turn survives, the target and later are gone");
+
+  // Rebuild and target the replayed chunk spelling instead.
+  const replayed = recordAll([
+    { type: "userChunk", text: "first", messageId: "r1" },
+    { type: "assistantChunk", text: "a1", messageId: "a1" },
+    { type: "userChunk", text: "second", messageId: "r2" },
+    { type: "assistantChunk", text: "a2", messageId: "a2" }
+  ]).log;
+  assert.strictEqual(rewindPainted(replayed, "r2"), true);
+  assert.deepStrictEqual(replayed.map(label), [
+    "userChunk:r1",
+    "assistantChunk:a1"
+  ], "a replayed prompt id rewinds the same way");
+});
+
+test("checkpoint identity: a rewind never guesses at a prompt it cannot name", () => {
+  const { log } = recordAll([
+    { type: "userMessage", text: "same words", clientMessageId: "m1" },
+    { type: "assistantChunk", text: "reply", messageId: "m2" },
+    { type: "userMessage", text: "same words", clientMessageId: "m3" }
+  ]);
+  const before = JSON.stringify(log);
+
+  // Identical text under a different id is a different prompt: no match.
+  assert.strictEqual(rewindPainted(log, "m9"), false, "an unknown id must not match by text");
+  // An assistant chunk's messageId is not a prompt id either.
+  assert.strictEqual(rewindPainted(log, "m2"), false, "an assistant messageId is not a rewind target");
+  assert.strictEqual(JSON.stringify(log), before, "a miss leaves the record untouched");
 });
 
 test("a chat moved mid turn rebuilds the same transcript on the new surface", async () => {

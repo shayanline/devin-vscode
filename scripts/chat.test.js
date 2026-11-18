@@ -1048,19 +1048,21 @@ test("resolving a takeover clears its timeout", async () => {
   }
 });
 
-test("a pushed revert step list avoids a follow-up ACP query", posixOnly, async () => {
+test("checkpoint identity: a pushed revert step list avoids a follow-up ACP query", posixOnly, async () => {
   const h = createChat();
   await h.ready();
   const id = await h.startChat("keep the agent live");
   const rt = h.controller.runtimes.get(id);
-  rt.steps = [{ stepNumber: 1, revertTargetNodeId: 1, forkTargetNodeId: 2 }];
+  rt.steps = [{ stepNumber: 1, kind: "prompt", userMessageId: "m1", revertTargetNodeId: 1, forkTargetNodeId: 2 }];
   rt.stepsKnown = true;
   const before = h.agentSaw("_cognition.ai/revert/listSteps").length;
 
-  await h.controller.postTurnHead(false);
+  await h.controller.refreshCheckpoints(rt);
 
   assert.strictEqual(h.agentSaw("_cognition.ai/revert/listSteps").length, before);
-  assert.ok(h.postsOf("turnHead").some((message) => message.head === 2));
+  assert.ok(h.postsOf("checkpoints").some((message) =>
+    message.sessionId === id
+    && message.checkpoints.some((c) => c.userMessageId === "m1" && c.canFork === false)));
   await h.dispose();
 });
 
@@ -1123,11 +1125,14 @@ test("an optimistic ready hint refreshes a list after health succeeds", posixOnl
   h.send({ type: "ready" });
   assert.strictEqual(await h.until(() => h.postsOf("ready").length === 1, 1000), true);
   h.send({ type: "listVisible", value: true });
-  await h.settle(25);
-  assert.strictEqual(h.postsOf("sessions").length, 0);
+  // The rows already known publish at once, while the remote listing still
+  // waits on health.
+  assert.strictEqual(await h.until(() => h.postsOf("sessions").length === 1, 1000), true);
+  assert.strictEqual(h.postsOf("sessions").length, 1);
 
   release();
-  assert.strictEqual(await h.until(() => h.postsOf("sessions").length === 1, 5000), true);
+  const published = h.postsOf("sessions").length;
+  assert.ok(await h.until(() => h.postsOf("sessions").length > published, 5000));
   await h.dispose();
 });
 
@@ -3108,6 +3113,1605 @@ test("two sessions sharing a toolCallId stop only their own shell", posixOnly, a
     assert.strictEqual(h.agentSaw("_cognition.ai/terminal/killBackgroundShell").length, 1,
       "the foreign stop never reached an agent");
     assert.strictEqual(rtB.backgroundShells.get("tc-same")?.shellId, `sh-${idB}`);
+  } finally {
+    await h.dispose();
+  }
+});
+
+// The text of the last text block a prompt carried, which is the user's own
+// words: implicit context blocks are prepended ahead of it.
+function lastPromptText(m) {
+  const texts = (m.params.prompt || []).filter((b) => b.type === "text").map((b) => b.text);
+  return texts.at(-1) || "";
+}
+
+test("session lifecycle: a new chat finishing after the user left the list stays in the background", posixOnly, async () => {
+  const h = createChat();
+  try {
+    await h.ready();
+    const existing = await h.startChat("existing chat");
+    h.send({ type: "leaveToList" });
+    assert.ok(await h.until(() => !h.activeId(), 5000), "the panel never left the session");
+
+    // session/new is held open while the user is already on the list.
+    h.setDelays({ newDelay: 800 });
+    h.send({ type: "send", text: "background chat", newSession: true });
+    assert.ok(await h.until(() => h.agentSaw("session/new").length === 2, 10000), "session/new never went out");
+    h.send({ type: "leaveToList" });
+    assert.ok(await h.until(() => h.liveChats() === 2, 20000), "the background chat never finished");
+    assert.ok(await h.until(() => h.agentSaw("session/prompt").some((m) => m.params.sessionId !== existing && lastPromptText(m) === "background chat"), 10000), "the submitted prompt never went out");
+    await h.settle(200);
+
+    const bgId = [...h.controller.runtimes.keys()].find((k) => k !== existing);
+    assert.ok(bgId, "no second runtime was created");
+    assert.strictEqual(h.activeId(), undefined, "the list still owns the panel");
+    assert.strictEqual(h.store.viewing(), undefined, "no viewed session was recorded for a background chat");
+    assert.ok(!h.postsOf("sessionReady").some((m) => m.sessionId === bgId), "the background chat announced itself");
+    const sent = h.agentSaw("session/prompt").filter((m) => m.params.sessionId === bgId && lastPromptText(m) === "background chat");
+    assert.strictEqual(sent.length, 1, "the submitted prompt ran once in the background");
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("session lifecycle: leaving while session defaults apply keeps the finished chat in the background", posixOnly, async () => {
+  const h = createChat({ config: { defaultMode: "plan" } });
+  try {
+    await h.ready();
+    const first = await h.startChat("first chat");
+    // Hold every set_config_option the shared client prototype serves, so the
+    // next session's applyDefaults parks midway through its creation.
+    const proto = Object.getPrototypeOf(h.controller.runtimes.get(first).client);
+    const original = proto.setConfigOption;
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    let calls = 0;
+    proto.setConfigOption = function (...args) {
+      calls++;
+      return gate.then(() => original.apply(this, args));
+    };
+    try {
+      h.setDelays({ newDelay: 50 });
+      h.send({ type: "send", text: "held defaults", newSession: true });
+      // Wait until the new runtime exists and its defaults call is parked: the
+      // id is already claimed by then, which is exactly the window the fix
+      // guards.
+      let rt2;
+      assert.ok(await h.until(() => {
+        rt2 = [...h.controller.runtimes.values()].find((r) => r.id && r.id !== first);
+        return !!rt2 && calls > 0;
+      }, 15000), "applyDefaults never reached setConfigOption");
+      const newId = rt2.id;
+      assert.strictEqual(h.activeId(), newId, "the creation claimed the panel");
+
+      h.send({ type: "leaveToList" });
+      assert.ok(await h.until(() => !h.activeId(), 5000), "the panel never left");
+      release();
+      assert.ok(await h.until(() => h.agentSaw("session/prompt").some((m) => m.params.sessionId === newId && lastPromptText(m) === "held defaults"), 15000), "the submitted prompt never went out");
+      await h.settle(200);
+
+      assert.strictEqual(h.activeId(), undefined, "the list still owns the panel");
+      assert.strictEqual(h.store.viewing(), undefined, "no viewed session was recorded");
+      assert.ok(!h.postsOf("sessionReady").some((m) => m.sessionId === newId), "the finished chat announced itself after the user left");
+      const sent = h.agentSaw("session/prompt").filter((m) => m.params.sessionId === newId && lastPromptText(m) === "held defaults");
+      assert.strictEqual(sent.length, 1, "the prompt ran once, on the runtime that created it");
+    } finally {
+      proto.setConfigOption = original;
+      release?.();
+    }
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("session lifecycle: two rapid new chat intents run independent sessions with one prompt each", posixOnly, async () => {
+  const h = createChat();
+  try {
+    await h.ready();
+    h.setDelays({ newDelay: 700 });
+    h.send({ type: "send", text: "first intent", newSession: true });
+    assert.ok(await h.until(() => h.agentSaw("session/new").length === 1, 10000), "the first session/new never went out");
+    h.send({ type: "send", text: "second intent", newSession: true });
+    assert.ok(await h.until(() => h.agentSaw("session/new").length === 2, 10000), "the second session/new never went out");
+    assert.ok(await h.until(() => h.liveChats() === 2, 30000), "the second chat never finished");
+    assert.ok(await h.until(() => h.agentSaw("session/prompt").filter((m) => ["first intent", "second intent"].includes(lastPromptText(m))).length === 2, 15000), "both prompts never went out");
+    await h.settle(200);
+
+    const sent = h.agentSaw("session/prompt").filter((m) => ["first intent", "second intent"].includes(lastPromptText(m)));
+    assert.strictEqual(sent.length, 2, "each submission prompted exactly once");
+    const byText = Object.fromEntries(sent.map((m) => [lastPromptText(m), m.params.sessionId]));
+    assert.notStrictEqual(byText["first intent"], byText["second intent"], "the two intents shared one session");
+    assert.strictEqual(h.activeId(), byText["second intent"], "the later intent owns the panel");
+    assert.ok(h.postsOf("sessionReady").some((m) => m.sessionId === byText["second intent"]), "the claimed chat announced itself");
+    assert.ok(!h.postsOf("sessionReady").some((m) => m.sessionId === byText["first intent"]), "the abandoned intent announced itself");
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("session lifecycle: a send into a new chat waits out its defaults and lands once", posixOnly, async () => {
+  const h = createChat({ config: { defaultMode: "plan" } });
+  try {
+    await h.ready();
+    // Hold applyDefaults open on this controller only. The new session's
+    // runtime is already claimed and in the pool when the gate parks, which is
+    // the window a plain first message has to wait out.
+    const originalDefaults = h.controller.applyDefaults.bind(h.controller);
+    let releaseDefaults;
+    const defaultsGate = new Promise((r) => { releaseDefaults = r; });
+    let defaultsCalls = 0;
+    h.controller.applyDefaults = async (rt, res) => {
+      defaultsCalls++;
+      await defaultsGate;
+      return originalDefaults(rt, res);
+    };
+    try {
+      h.send({ type: "newSession" });
+      assert.ok(await h.until(() => defaultsCalls === 1, 15000), "creation never reached applyDefaults");
+      const newId = h.activeId();
+      assert.ok(newId, "the new session was never claimed");
+      assert.ok(h.controller.runtimes.has(newId), "the runtime was not in the pool yet");
+
+      h.send({ type: "send", text: "held first message" });
+      await h.settle(200);
+      assert.strictEqual(h.agentSaw("session/prompt").filter((m) => lastPromptText(m) === "held first message").length, 0,
+        "the message went out before the defaults finished");
+
+      releaseDefaults();
+      assert.ok(await h.until(() => h.agentSaw("session/prompt").some((m) => m.params.sessionId === newId && lastPromptText(m) === "held first message"), 15000), "the held message never went out");
+      await h.settle(200);
+
+      assert.strictEqual(h.agentSaw("session/new").length, 1, "more than one session was created");
+      const rt = h.controller.runtimes.get(newId);
+      assert.ok(rt, "the created runtime is gone");
+      assert.strictEqual(h.agentSaw("session/prompt").filter((m) => m.params.sessionId === newId && lastPromptText(m) === "held first message").length, 1,
+        "the message did not reach the created session exactly once");
+      assert.strictEqual((rt.log || []).filter((e) => e.type === "userMessage" && e.text === "held first message").length, 1,
+        "the record does not hold the message exactly once");
+    } finally {
+      releaseDefaults?.();
+    }
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("session lifecycle: a send during session/new reuses the creation it shares", posixOnly, async () => {
+  const h = createChat();
+  try {
+    await h.ready();
+    h.setDelays({ newDelay: 800 });
+    h.send({ type: "newSession" });
+    assert.ok(await h.until(() => h.agentSaw("session/new").length === 1, 10000), "session/new never went out");
+    // session/new is still held open, so this send has no runtime to aim at and
+    // has to wait on the creation its navigation already started.
+    h.send({ type: "send", text: "early first message" });
+    assert.ok(await h.until(() => h.liveChats() === 1, 30000), "the shared creation never finished");
+    assert.ok(await h.until(() => h.agentSaw("session/prompt").some((m) => lastPromptText(m) === "early first message"), 15000), "the early message never went out");
+    await h.settle(200);
+
+    assert.strictEqual(h.agentSaw("session/new").length, 1, "the send opened a second session");
+    const id = h.activeId();
+    assert.ok(id, "the shared creation never claimed the panel");
+    const sent = h.agentSaw("session/prompt").filter((m) => m.params.sessionId === id && lastPromptText(m) === "early first message");
+    assert.strictEqual(sent.length, 1, "the message did not reach the created session exactly once");
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("session lifecycle: a first turn resend finishing after navigation stays in its own session", posixOnly, async () => {
+  const h = createChat({
+    promptDelay: 200,
+    steps: [{ stepNumber: 1, kind: "prompt", userMessageId: "m1", revertTargetNodeId: 42, forkTargetNodeId: 43 }]
+  });
+  try {
+    await h.ready();
+    const a = await h.startChat("first turn in A");
+    assert.ok(await h.until(() => !h.controller.runtimes.get(a)?.busy, 10000), "the first turn never settled");
+    const b = await h.startChat("chat B");
+    assert.ok(await h.until(() => !h.controller.runtimes.get(b)?.busy, 10000), "the second turn never settled");
+    h.send({ type: "activateSession", id: a });
+    assert.ok(await h.until(() => h.activeId() === a, 10000), "session A never came back");
+    const mid = h.postsOf("userMessage").find((m) => m.text === "first turn in A")?.clientMessageId;
+    assert.ok(mid, "the first turn's echo carried no stable prompt id");
+
+    // The rewind is held inside the agent's revert/execute while the user picks B.
+    const rtA = h.controller.runtimes.get(a);
+    let releaseRewind;
+    const rewindGate = new Promise((r) => { releaseRewind = r; });
+    let rewindEntered = false;
+    const agentExecute = rtA.client.revertExecute.bind(rtA.client);
+    rtA.client.revertExecute = async (sessionId, userMessageId, opts) => {
+      rewindEntered = true;
+      await rewindGate;
+      return agentExecute(sessionId, userMessageId, opts);
+    };
+
+    h.send({ type: "revertExecute", sessionId: a, userMessageId: mid, resendText: "edited first turn" });
+    assert.ok(await h.until(() => rewindEntered, 15000), "the rewind never reached the agent");
+
+    h.send({ type: "activateSession", id: b });
+    assert.ok(await h.until(() => h.activeId() === b, 10000), "session B never came back");
+    releaseRewind();
+    assert.ok(await h.until(() => h.agentSaw("session/prompt").some((m) => m.params.sessionId === a && lastPromptText(m) === "edited first turn"), 20000), "the resend never went out");
+    await h.settle(200);
+
+    // The resend belongs to the session being rewound: it reached A exactly
+    // once, B kept the selection, and no reverted trim was painted into it.
+    assert.strictEqual(h.agentSaw("session/prompt").filter((m) => m.params.sessionId === a && lastPromptText(m) === "edited first turn").length, 1,
+      "the resend did not reach session A exactly once");
+    assert.strictEqual(h.activeId(), b, "the rewind stole the selection");
+    assert.strictEqual(h.postsOf("reverted").length, 0, "a reverted was painted into another session's transcript");
+    assert.ok(h.postsOf("sessionHistoryChanged").some((m) => m.sessionId === a), "the rewound session was not marked changed");
+    assert.strictEqual(h.agentSaw("session/new").length, 2, "the first turn edit created another session");
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("session lifecycle: a new send detaches before readiness and a fast follow up cannot reach the old session", posixOnly, async () => {
+  const h = createChat({ promptDelay: 200 });
+  try {
+    await h.ready();
+    const existing = await h.startChat("existing chat");
+    // Force the next send through a fresh health check and hold it open, which
+    // is the window the synchronous detach has to survive.
+    h.controller.health = undefined;
+    const runHealthCheck = h.controller.runHealthCheck.bind(h.controller);
+    let releaseHealth;
+    const healthGate = new Promise((r) => { releaseHealth = r; });
+    h.controller.runHealthCheck = async () => { await healthGate; await runHealthCheck(); };
+
+    h.send({ type: "send", text: "first", newSession: true });
+    // Health is still held, so these can only be the synchronous detach and
+    // echo, not anything that waited on readiness.
+    assert.ok(await h.until(() => h.activeId() === undefined && h.postsOf("userMessage").some((m) => m.text === "first"), 10000), "the detach and echo never landed while readiness was held");
+    assert.strictEqual(h.activeId(), undefined, "the old session was not detached before readiness");
+    assert.ok(h.postsOf("clear").some((m) => m.pendingSend === true), "the pending clear was not posted early");
+    assert.ok(h.postsOf("userMessage").some((m) => m.text === "first"), "the echo was not posted early");
+
+    // What the thread composer sends next while readiness is still held: a
+    // plain send that must not be pointed at the session being left.
+    h.send({ type: "send", text: "second", newSession: false });
+    releaseHealth();
+    assert.ok(await h.until(() => h.liveChats() === 2, 30000), "the new chat never finished");
+    assert.ok(await h.until(() => h.agentSaw("session/prompt").filter((m) => ["first", "second"].includes(lastPromptText(m))).length === 2, 15000), "both prompts never went out");
+    await h.settle(200);
+
+    const newId = [...h.controller.runtimes.keys()].find((k) => k !== existing);
+    assert.ok(newId, "no new runtime was created");
+    const onExisting = h.agentSaw("session/prompt").filter((m) => m.params.sessionId === existing && ["first", "second"].includes(lastPromptText(m)));
+    assert.strictEqual(onExisting.length, 0, "a send landed in the session being left");
+    const onNew = h.agentSaw("session/prompt").filter((m) => m.params.sessionId === newId && ["first", "second"].includes(lastPromptText(m)));
+    assert.strictEqual(onNew.length, 2, "both sends reached the new session once each");
+    assert.deepStrictEqual(onNew.map(lastPromptText).sort(), ["first", "second"]);
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("session lifecycle: a failed visible load returns to the list while a failed background load preserves the open chat", posixOnly, async () => {
+  const h = createChat();
+  try {
+    await h.ready();
+    const existing = await h.startChat("existing chat");
+    // Every loadWithTakeover parks on its own gate, so each failure is released
+    // exactly when the test wants it.
+    const gates = [];
+    let entered = 0;
+    h.controller.loadWithTakeover = () => {
+      entered++;
+      return new Promise((_, reject) => gates.push(() => reject(new Error("load blew up"))));
+    };
+
+    // The visible cold load fails: the runtime goes away, the panel returns to
+    // the list, and the failure is diagnosed.
+    h.send({ type: "loadSession", id: "ghost-visible" });
+    assert.ok(await h.until(() => entered === 1, 15000), "the visible load never reached the agent seam");
+    gates[0]();
+    assert.ok(await h.until(() => !h.controller.runtimes.has("ghost-visible"), 10000), "the failed runtime was not removed");
+    assert.ok(await h.until(() => h.activeId() === undefined && h.last("body")?.body === "list", 10000), "the panel did not return to the list");
+    assert.ok(h.logs.some((l) => l.includes("[load-failed]")), "the failure was not diagnosed");
+    assert.ok(globalThis.__dvVscode.window.shown.error.some((m) => m.includes("Couldn't open this session")), "the user was not told");
+
+    // The same failure while another chat is on screen must not touch it.
+    h.send({ type: "loadSession", id: "ghost-bg" });
+    assert.ok(await h.until(() => entered === 2, 15000), "the background load never reached the agent seam");
+    h.send({ type: "activateSession", id: existing });
+    assert.ok(await h.until(() => h.activeId() === existing, 10000), "the existing chat never came back");
+    const listBefore = h.postsOf("body").filter((m) => m.body === "list").length;
+    gates[1]();
+    assert.ok(await h.until(() => h.logs.some((l) => l.includes("[load-failed] ghost-bg (no longer on screen)")), 10000), "the background failure was not diagnosed");
+    assert.strictEqual(h.activeId(), existing, "the background failure moved the panel");
+    assert.ok(h.controller.runtimes.has(existing), "the open chat's runtime was removed");
+    assert.ok(!h.controller.runtimes.has("ghost-bg"), "the failed runtime was not removed");
+    assert.strictEqual(h.postsOf("body").filter((m) => m.body === "list").length, listBefore, "the panel was sent back to the list");
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("session lifecycle: a send whose target was left mid readiness wakes it silently in the background", posixOnly, async () => {
+  const h = createChat({ promptDelay: 200, config: { idleSessionKeepAliveMinutes: 60 } });
+  try {
+    await h.ready();
+    const b = await h.startChat("live chat B");
+    const a = await h.startChat("exited chat A");
+    assert.ok(await h.until(() => !h.controller.runtimes.get(a)?.busy, 10000), "A's turn never settled");
+    assert.ok(await h.until(() => !h.controller.runtimes.get(b)?.busy, 10000), "B's turn never settled");
+
+    // Age A past the reap window: it stays the panel's target as history but
+    // its runtime is gone, which is the idle exited session a send wakes.
+    const rtA = h.controller.runtimes.get(a);
+    rtA.lastActivityAt = Date.now() - 2 * 60 * 60 * 1000;
+    h.controller.reapIdleRuntimes();
+    assert.ok(await h.until(() => !h.controller.runtimes.has(a), 5000), "the idle runtime was not reaped");
+    assert.strictEqual(h.activeId(), a, "the exited session is still the send's target");
+
+    // Hold this send's readiness check open, pick B while it waits, then let it
+    // go: the wake it starts must not steal the selection back.
+    const originalEnsure = h.controller.ensureReady.bind(h.controller);
+    let releaseReady;
+    const readyGate = new Promise((r) => { releaseReady = r; });
+    let ensureCalls = 0;
+    h.controller.ensureReady = async () => { ensureCalls++; await readyGate; return originalEnsure(); };
+    h.send({ type: "send", text: "text for A", preserveTranscript: true });
+    assert.ok(await h.until(() => ensureCalls === 1, 10000), "the send never reached its readiness wait");
+    h.controller.ensureReady = originalEnsure;
+    h.send({ type: "activateSession", id: b });
+    assert.ok(await h.until(() => h.activeId() === b, 10000), "session B never came back");
+    const readyBefore = h.postsOf("sessionReady").filter((m) => m.sessionId === a).length;
+    releaseReady();
+
+    assert.ok(await h.until(() => h.agentSaw("session/prompt").some((m) => m.params.sessionId === a && lastPromptText(m) === "text for A"), 20000), "the woken send never went out");
+    await h.settle(200);
+    assert.strictEqual(h.activeId(), b, "the background wake stole the selection");
+    assert.strictEqual(h.agentSaw("session/prompt").filter((m) => m.params.sessionId === a && lastPromptText(m) === "text for A").length, 1,
+      "the submitted text did not reach A exactly once");
+    assert.strictEqual(h.postsOf("sessionReady").filter((m) => m.sessionId === a).length, readyBefore, "the background wake announced itself");
+    assert.ok(h.controller.runtimes.has(a), "the woken runtime did not stay in the pool");
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("session lifecycle: a background wake during an in progress load waits for it instead of returning early", posixOnly, async () => {
+  const h = createChat({ promptDelay: 200, config: { idleSessionKeepAliveMinutes: 60 } });
+  try {
+    await h.ready();
+    const b = await h.startChat("live chat B");
+    const a = await h.startChat("exited chat A");
+    assert.ok(await h.until(() => !h.controller.runtimes.get(a)?.busy, 10000), "A's turn never settled");
+    assert.ok(await h.until(() => !h.controller.runtimes.get(b)?.busy, 10000), "B's turn never settled");
+
+    // Age A past the reap window so its runtime is gone: an exited session a
+    // background wake has to rebuild.
+    const rtA = h.controller.runtimes.get(a);
+    rtA.lastActivityAt = Date.now() - 2 * 60 * 60 * 1000;
+    h.controller.reapIdleRuntimes();
+    assert.ok(await h.until(() => !h.controller.runtimes.has(a), 5000), "the idle runtime was not reaped");
+    // B is the session left on screen while A wakes in the background.
+    h.send({ type: "activateSession", id: b });
+    assert.ok(await h.until(() => h.activeId() === b, 10000), "session B never came back");
+
+    // Hold the agent load open. The wake installs its runtime and its loading
+    // entry before it gets there, which is the state a second wake used to
+    // mistake for a ready session and return on immediately.
+    const realLoad = h.controller.loadWithTakeover.bind(h.controller);
+    let releaseLoad;
+    const loadGate = new Promise((r) => { releaseLoad = r; });
+    let loadCalls = 0;
+    h.controller.loadWithTakeover = (rt, id, cwd) => {
+      loadCalls++;
+      return loadGate.then(() => realLoad(rt, id, cwd));
+    };
+    const first = h.controller.wakeSession(a, false);
+    assert.ok(await h.until(() => loadCalls === 1 && h.controller.loading.has(a) && h.controller.runtimes.has(a), 15000),
+      "the first wake never reached its in-flight load");
+
+    // A second background wake for the same session shares that load. Before the
+    // reorder it saw the installed runtime and returned at once, which let a
+    // caller prompt a session still replaying its history.
+    let secondResolved = false;
+    const second = h.controller.wakeSession(a, false).then(() => { secondResolved = true; });
+    for (let i = 0; i < 3; i++) await new Promise((r) => setImmediate(r));
+    assert.strictEqual(secondResolved, false, "the second wake returned before the load finished");
+    assert.strictEqual(h.activeId(), b, "the background wake moved the selection");
+    assert.strictEqual(h.agentSaw("session/prompt").filter((m) => m.params.sessionId === a && lastPromptText(m) === "for A").length, 0,
+      "a prompt went out before the wake finished");
+
+    releaseLoad();
+    await Promise.all([first, second]);
+    assert.ok(await h.until(() => h.controller.runtimes.has(a) && !h.controller.loading.has(a) && !h.controller.runtimes.get(a)?.waking, 10000),
+      "the shared wake never completed");
+    assert.strictEqual(loadCalls, 1, "the load ran twice");
+    assert.strictEqual(h.agentSaw("session/load").filter((m) => m.params?.sessionId === a).length, 1, "the agent load ran twice");
+    assert.strictEqual(h.activeId(), b, "the completed wake moved the selection");
+
+    // The woken session takes a submitted message exactly once.
+    h.send({ type: "activateSession", id: a });
+    assert.ok(await h.until(() => h.activeId() === a, 10000), "the woken session never came back");
+    h.send({ type: "send", text: "for A" });
+    assert.ok(await h.until(() => h.agentSaw("session/prompt").some((m) => m.params.sessionId === a && lastPromptText(m) === "for A"), 20000),
+      "the submitted message never reached the woken session");
+    assert.strictEqual(h.agentSaw("session/prompt").filter((m) => m.params.sessionId === a && lastPromptText(m) === "for A").length, 1,
+      "the submitted message did not reach A exactly once");
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("session lifecycle: a new session failing after navigation logs instead of posting an error", posixOnly, async () => {
+  const h = createChat({ promptDelay: 200 });
+  try {
+    await h.ready();
+    const a = await h.startChat("existing chat A");
+    const b = await h.startChat("existing chat B");
+    assert.ok(await h.until(() => !h.controller.runtimes.get(b)?.busy, 10000), "B's turn never settled");
+    h.send({ type: "activateSession", id: a });
+    assert.ok(await h.until(() => h.activeId() === a, 10000), "session A never came back");
+
+    // Park this controller's creation on a gate the test rejects later.
+    let entered = 0;
+    let rejectCreate;
+    const createGate = new Promise((_, reject) => { rejectCreate = reject; });
+    h.controller.createSession = async () => { entered++; await createGate; };
+    h.send({ type: "newSession" });
+    assert.ok(await h.until(() => entered === 1, 10000), "the held creation never started");
+    assert.ok(h.postsOf("clear").some((m) => m.reset === true), "the new session clear never posted");
+
+    // The user picks B while the creation is still parked, then it fails.
+    h.send({ type: "activateSession", id: b });
+    assert.ok(await h.until(() => h.activeId() === b, 10000), "session B never came back");
+    const errorsBefore = h.postsOf("error").length;
+    const readyBefore = h.postsOf("sessionReady").length;
+    rejectCreate(new Error("creation blew up"));
+    assert.ok(await h.until(() => h.logs.some((l) => l.includes("[new-session] creation blew up")), 10000), "the failure was not logged");
+    await h.settle(200);
+
+    assert.strictEqual(h.postsOf("error").length, errorsBefore, "the failed creation posted an error into B's chat");
+    assert.strictEqual(h.activeId(), b, "the failed creation moved the selection");
+    assert.strictEqual(h.last("body")?.body, "thread", "the panel left B's thread");
+    assert.ok(!h.controller.runtimes.get(b)?.busy, "B was left busy by the failed creation");
+    assert.strictEqual(h.postsOf("sessionReady").length, readyBefore, "the failed creation announced a session");
+    assert.ok(h.controller.runtimes.has(b), "B's runtime was removed");
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("session lifecycle: a failed visible wake returns to the list while a failed background wake only logs", posixOnly, async () => {
+  const h = createChat({ promptDelay: 200, config: { idleSessionKeepAliveMinutes: 60 } });
+  try {
+    await h.ready();
+    const a = await h.startChat("waking chat");
+    const b = await h.startChat("live chat");
+    h.send({ type: "activateSession", id: a });
+    assert.ok(await h.until(() => h.activeId() === a, 10000), "session A never came back");
+    assert.ok(await h.until(() => !h.controller.runtimes.get(a)?.busy, 10000), "A's turn never settled");
+
+    // Age A past the reap window so the next open takes the wake path, then
+    // hold every wake's loadWithTakeover on its own gate.
+    const rtA = h.controller.runtimes.get(a);
+    rtA.lastActivityAt = Date.now() - 2 * 60 * 60 * 1000;
+    h.controller.reapIdleRuntimes();
+    assert.ok(await h.until(() => !h.controller.runtimes.has(a), 5000), "the idle runtime was not reaped");
+
+    const gates = [];
+    let entered = 0;
+    h.controller.loadWithTakeover = () => {
+      entered++;
+      return new Promise((_, reject) => gates.push(() => reject(new Error("wake blew up"))));
+    };
+
+    // The visible cold wake fails: the half spawned runtime goes away, the
+    // panel returns to the list, and the failure is diagnosed.
+    h.send({ type: "wakeSession", id: a });
+    assert.ok(await h.until(() => entered === 1, 15000), "the wake never reached the agent seam");
+    assert.ok(await h.until(() => h.controller.runtimes.has(a), 5000), "the waking runtime never spawned");
+    gates[0]();
+    assert.ok(await h.until(() => !h.controller.runtimes.has(a), 10000), "the failed wake runtime was not removed");
+    assert.ok(await h.until(() => h.activeId() === undefined && h.last("body")?.body === "list", 10000), "the panel did not return to the list");
+    assert.ok(h.logs.some((l) => l.includes("[load-failed]")), "the wake failure was not diagnosed");
+    assert.ok(globalThis.__dvVscode.window.shown.error.some((m) => m.includes("Couldn't open this session")), "the user was not told");
+
+    // The same failure while B is on screen must not touch it: only the log
+    // learns about it, once the diagnostic line lands.
+    h.send({ type: "wakeSession", id: a });
+    assert.ok(await h.until(() => entered === 2, 15000), "the second wake never reached the agent seam");
+    h.send({ type: "activateSession", id: b });
+    assert.ok(await h.until(() => h.activeId() === b, 10000), "session B never came back");
+    const readyBefore = h.postsOf("sessionReady").length;
+    gates[1]();
+    assert.ok(await h.until(() => h.logs.some((l) => l.includes(`[wake-failed] ${a} (no longer on screen)`)), 10000), "the background wake failure was not logged");
+    assert.strictEqual(h.activeId(), b, "the background failure moved the panel");
+    assert.strictEqual(h.postsOf("sessionReady").length, readyBefore, "the background failure posted a sessionReady");
+    assert.ok(h.controller.runtimes.has(b), "the open chat's runtime was removed");
+    assert.ok(!h.controller.runtimes.has(a), "the failed wake runtime was not removed");
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("session lifecycle: a failed live reload keeps the log partial, survives on an editor surface, and retries through ACP", posixOnly, async () => {
+  const h = createChat({ promptDelay: 200 });
+  try {
+    await h.ready();
+    const id = await h.startChat("reload me");
+    const rt = h.controller.runtimes.get(id);
+    await h.until(() => !rt.busy, 10000);
+    // The local record is marked incomplete, so the next open takes the full
+    // ACP path rather than the local replay seam.
+    rt.logFull = false;
+    const original = h.controller.loadWithTakeover.bind(h.controller);
+    let calls = 0;
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    h.controller.loadWithTakeover = async (runtime, sessionId, cwd) => {
+      calls++;
+      if (calls === 1) {
+        await gate;
+        throw new Error("load blew up");
+      }
+      return original(runtime, sessionId, cwd);
+    };
+
+    h.send({ type: "loadSession", id });
+    assert.ok(await h.until(() => calls === 1, 15000), "the reload never reached the agent seam");
+    release();
+    assert.ok(await h.until(() => rt.logFull === false && h.last("body")?.body === "list", 10000), "the failed reload did not settle");
+    assert.ok(h.controller.runtimes.has(id), "a live runtime was destroyed by a failed reload");
+    assert.strictEqual(rt.logFull, false, "a failed replay left the log marked complete");
+
+    // Retrying asks the agent again rather than trusting the same partial log.
+    h.send({ type: "loadSession", id });
+    assert.ok(await h.until(() => calls === 2, 15000), "the retry never reached the agent seam");
+    assert.ok(await h.until(() => h.agentSaw("session/load").some((m) => m.params.sessionId === id), 15000), "the retry never issued session/load");
+    assert.strictEqual(calls, 2, "the retry went somewhere other than ACP");
+  } finally {
+    await h.dispose();
+  }
+
+  // An editor surface has no list to fall back to: a failed live reload keeps
+  // its target id so Retry still names the same session.
+  const editor = createChat({ kind: "editor", promptDelay: 200 });
+  try {
+    await editor.ready();
+    const id = await editor.startChat("editor reload");
+    const rt = editor.controller.runtimes.get(id);
+    await editor.until(() => !rt.busy, 10000);
+    rt.logFull = false;
+    editor.controller.loadWithTakeover = async () => { throw new Error("load blew up"); };
+    editor.send({ type: "loadSession", id });
+    assert.ok(await editor.until(() => editor.logs.some((l) => l.includes("[load-failed]")), 15000), "the editor reload failure was not diagnosed");
+    await editor.settle(200);
+    assert.strictEqual(editor.activeId(), id, "the editor surface lost its target id");
+    assert.ok(editor.controller.runtimes.has(id), "the editor surface's runtime was removed");
+    assert.strictEqual(rt.logFull, false, "a failed replay left the log marked complete");
+  } finally {
+    await editor.dispose();
+  }
+});
+
+test("session lifecycle: reopening a live idle session replays its complete local log without a second ACP load", posixOnly, async () => {
+  const h = createChat({ promptDelay: 200, config: { defaultMode: "" } });
+  try {
+    await h.ready();
+    const id = await h.startChat("big log session");
+    const rt = h.controller.runtimes.get(id);
+    assert.ok(await h.until(() => !rt.busy, 10000), "the first turn never settled");
+    // A transcript bigger than one replay batch, the way a long session's
+    // painted log actually looks.
+    for (let i = 0; i < 250; i++) {
+      rt.log.push({ type: "userMessage", text: `painted ${i}` });
+    }
+    const expectedItems = rt.log.length + 1; // paintedReplay settles the last block
+    const sessionLoads = () => h.agentSaw("session/load").filter((m) => m.params.sessionId === id).length;
+    const loadsBefore = sessionLoads();
+    const replaysBefore = h.postsOf("replay").length;
+    const postsBefore = h.posted.length;
+    const loadedBefore = h.postsOf("loaded").length;
+
+    h.send({ type: "leaveToList" });
+    assert.ok(await h.until(() => !h.activeId(), 5000), "the panel never left");
+    h.send({ type: "loadSession", id });
+    assert.ok(await h.until(() => h.postsOf("loaded").length > loadedBefore && h.activeId() === id, 10000), "the local replay never finished");
+    await h.settle(200);
+
+    assert.strictEqual(sessionLoads(), loadsBefore, "a second ACP load went out for a complete local log");
+    const replays = h.postsOf("replay").slice(replaysBefore);
+    const items = replays.flatMap((m) => m.items || []);
+    assert.strictEqual(items.length, expectedItems, "every painted record replayed once");
+    assert.ok(replays.every((m) => m.items.length <= 100), "the replay stayed in bounded batches");
+    assert.strictEqual(Math.ceil(expectedItems / 100), replays.length, "the batches cover the log exactly");
+    const lastReplay = h.posted.map((m, i) => (m.type === "replay" ? i : -1)).filter((i) => i >= postsBefore && i >= 0).at(-1);
+    const loadedIdx = h.posted.findIndex((m, i) => i > (lastReplay ?? -1) && m.type === "loaded");
+    assert.ok(lastReplay !== undefined && loadedIdx > lastReplay, "loaded did not follow the last replay batch");
+
+    // Mark the log partial: the next open must ask the agent again.
+    rt.logFull = false;
+    h.send({ type: "leaveToList" });
+    assert.ok(await h.until(() => !h.activeId(), 5000), "the panel never left");
+    h.send({ type: "loadSession", id });
+    assert.ok(await h.until(() => sessionLoads() === loadsBefore + 1, 15000), "a partial log did not go through ACP");
+    assert.ok(await h.until(() => h.activeId() === id, 10000), "the reloaded session never came back");
+
+    // A successful rewind invalidates the local record: what follows must ask
+    // the agent again rather than trust a transcript the rewind superseded.
+    const revertedBefore = h.postsOf("reverted").length;
+    h.send({ type: "revertExecute", sessionId: id, userMessageId: "m-x" });
+    assert.ok(await h.until(() => h.postsOf("reverted").length > revertedBefore, 10000), "the rewind never completed");
+    assert.strictEqual(rt.log.length, 0, "the superseded transcript was kept");
+    assert.strictEqual(rt.logFull, false, "the log still claimed to be complete");
+    assert.deepStrictEqual(rt.bgBuffer, [], "the background buffer was kept");
+
+    const loadsAfterRewind = sessionLoads();
+    h.send({ type: "leaveToList" });
+    assert.ok(await h.until(() => !h.activeId(), 5000), "the panel never left");
+    h.send({ type: "loadSession", id });
+    assert.ok(await h.until(() => sessionLoads() === loadsAfterRewind + 1, 15000), "the post rewind open trusted the invalidated log");
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("session lifecycle: a superseded activation does not post the old session's pending widgets", posixOnly, async () => {
+  const h = createChat({ promptDelay: 200, stepsDelay: 900, config: { defaultMode: "" } });
+  try {
+    await h.ready();
+    const a = await h.startChat("chat a");
+    assert.ok(await h.until(() => !h.controller.runtimes.get(a)?.busy, 10000), "chat a's turn never settled");
+    const b = await h.startChat("chat b");
+    assert.ok(await h.until(() => !h.controller.runtimes.get(b)?.busy, 10000), "chat b's turn never settled");
+
+    // A is in the background with a permission request and a queued message
+    // waiting to be re-surfaced on activation.
+    const rtA = h.controller.runtimes.get(a);
+    const permission = h.controller.requestPermission({
+      sessionId: a,
+      toolCall: { toolCallId: "perm-a", title: "run it", kind: "execute" },
+      options: [{ optionId: "allow_once", name: "Allow", kind: "allow_once" }]
+    });
+    permission.catch(() => {});
+    h.controller.enqueueMessage(rtA, h.controller.pendingMessage("queued words", [], "queue"));
+    const headsBefore = h.agentSaw("_cognition.ai/revert/listSteps").length;
+
+    // Reactivate A while the agent's delay holds its turn head read open, then
+    // B takes the panel while it is still in flight.
+    h.send({ type: "activateSession", id: a });
+    assert.ok(await h.until(() => h.agentSaw("_cognition.ai/revert/listSteps").length > headsBefore, 10000), "the head read never went out");
+    h.send({ type: "activateSession", id: b });
+    assert.ok(await h.until(() => h.activeId() === b, 10000), "B never took the panel");
+    assert.ok(await h.until(() => rtA.stepsKnown, 10000), "A's held head read never settled");
+
+    assert.strictEqual(h.postsOf("permission").length, 0, "A's pending permission painted into B's session");
+    assert.ok(!h.postsOf("queued").some((m) => (m.items || []).some((i) => i.text === "queued words")), "A's queue rows painted into B's session");
+    assert.strictEqual(h.activeId(), b, "the panel moved again");
+    for (const p of [...rtA.pending]) {
+      h.controller.resolvePermission(p.requestId, "cancelled");
+    }
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("reported regressions: editing the first message rewinds to its checkpoint in the same session", posixOnly, async () => {
+  const h = createChat({
+    promptDelay: 200,
+    steps: [{ stepNumber: 1, kind: "prompt", userMessageId: "m1", revertTargetNodeId: 42, forkTargetNodeId: 43 }]
+  });
+  try {
+    await h.ready();
+    const id = await h.startChat("first turn");
+    assert.ok(await h.until(() => !h.controller.runtimes.get(id)?.busy, 10000), "the turn never settled");
+    const mid = h.postsOf("userMessage").find((m) => m.text === "first turn")?.clientMessageId;
+    assert.ok(mid, "the first turn's echo carried no stable prompt id");
+
+    // The confirmation preview asks about the stable prompt id, on this session,
+    // with no node id or execute flags.
+    h.send({ type: "revertPreview", sessionId: id, userMessageId: mid, token: "p1" });
+    assert.ok(await h.until(() => h.postsOf("revertPreview").some((m) => m.token === "p1"), 10000), "the preview never answered");
+    const previewReq = h.agentSaw("_cognition.ai/revert/preview").at(-1);
+    assert.deepStrictEqual(previewReq.params, { sessionId: id, userMessageId: mid }, "the preview did not carry exactly the scoped prompt id");
+
+    h.send({ type: "revertExecute", sessionId: id, userMessageId: mid, resendText: "edited first turn" });
+    assert.ok(await h.until(() => h.postsOf("reverted").some((m) => m.userMessageId === mid && m.resending === true), 15000), "the rewind never completed");
+    assert.ok(await h.until(() => h.agentSaw("session/prompt").some((m) => m.params.sessionId === id && lastPromptText(m) === "edited first turn"), 15000), "the resend never went out");
+    await h.settle(200);
+
+    const executeReq = h.agentSaw("_cognition.ai/revert/execute").at(-1);
+    assert.strictEqual(executeReq.params.sessionId, id, "the rewind hit another session");
+    assert.strictEqual(executeReq.params.userMessageId, mid, "the rewind did not target the prompt's stable id");
+    assert.strictEqual(executeReq.params.force, true);
+    assert.strictEqual(executeReq.params.skipFileUndo, false);
+    assert.strictEqual(h.activeId(), id, "the session changed under the edit");
+    assert.strictEqual(h.agentSaw("session/new").length, 1, "editing the first message created a session");
+    assert.strictEqual(h.agentSaw("session/prompt").filter((m) => m.params.sessionId === id && lastPromptText(m) === "edited first turn").length, 1,
+      "the resend did not reach the session exactly once");
+    const echo = h.postsOf("userMessage").filter((m) => m.text === "edited first turn");
+    assert.strictEqual(echo.length, 1, "the resend echo did not post exactly once");
+    assert.ok(echo[0].clientMessageId, "the resend echo carries no dedupe id");
+    assert.ok(h.postsOf("sessionHistoryChanged").some((m) => m.sessionId === id), "the rewound session was not marked changed");
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("reported regressions: editing the first message when the rewind fails keeps the conversation", posixOnly, async () => {
+  const h = createChat({ promptDelay: 200, executeFail: true });
+  try {
+    await h.ready();
+    const id = await h.startChat("first turn");
+    assert.ok(await h.until(() => !h.controller.runtimes.get(id)?.busy, 10000), "the turn never settled");
+    const mid = h.postsOf("userMessage").find((m) => m.text === "first turn")?.clientMessageId;
+    assert.ok(mid, "the first turn's echo carried no stable prompt id");
+
+    // The agent refuses the rewind: the edit must fail with the chat intact and
+    // the resend text handed back, exactly like a checkpoint that cannot be read.
+    h.send({ type: "revertExecute", sessionId: id, userMessageId: mid, resendText: "edited first turn" });
+    assert.ok(await h.until(() => h.postsOf("error").length > 0, 15000), "the refused rewind was not reported");
+    await h.settle(200);
+
+    assert.strictEqual(h.agentSaw("_cognition.ai/revert/execute").length, 1, "the rewind was not attempted");
+    assert.strictEqual(h.agentSaw("session/new").length, 1, "the failed edit created a session");
+    assert.strictEqual(h.agentSaw("session/prompt").filter((m) => lastPromptText(m) === "edited first turn").length, 0,
+      "the resend went out anyway");
+    assert.ok(h.postsOf("draft").some((m) => m.text === "edited first turn"), "the resend text was not handed back");
+    assert.strictEqual(h.activeId(), id, "the session changed under the failed edit");
+    const rt = h.controller.runtimes.get(id);
+    assert.ok(rt && rt.log.length > 0, "the conversation record was cleared");
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("reported regressions: editing a later message still rewinds to its own checkpoint", posixOnly, async () => {
+  const h = createChat({ promptDelay: 200 });
+  try {
+    await h.ready();
+    const id = await h.startChat("first turn");
+    assert.ok(await h.until(() => !h.controller.runtimes.get(id)?.busy, 10000), "the turn never settled");
+    h.send({ type: "send", text: "second turn" });
+    // A plain send is dispatched asynchronously: waiting only for !busy can
+    // return in the gap before the new turn flips it, so wait for the turn to
+    // start and then settle.
+    assert.ok(await h.until(() => h.controller.runtimes.get(id)?.busy, 10000), "the second turn never started");
+    assert.ok(await h.until(() => !h.controller.runtimes.get(id)?.busy, 10000), "the second turn never settled");
+    const mid = h.postsOf("userMessage").filter((m) => m.text === "second turn").pop()?.clientMessageId;
+    assert.ok(mid, "the second turn's echo carried no stable prompt id");
+
+    h.send({ type: "revertExecute", sessionId: id, userMessageId: mid, resendText: "second try" });
+    assert.ok(await h.until(() => h.postsOf("reverted").some((m) => m.userMessageId === mid), 15000), "the rewind never completed");
+    await h.settle(200);
+
+    const executeReq = h.agentSaw("_cognition.ai/revert/execute").at(-1);
+    assert.strictEqual(executeReq.params.sessionId, id);
+    assert.strictEqual(executeReq.params.userMessageId, mid, "a later turn's prompt id was not used as the target");
+    assert.strictEqual(h.activeId(), id);
+    assert.ok(h.agentSaw("session/prompt").some((m) => m.params.sessionId === id && lastPromptText(m) === "second try"), "the resend never went out");
+    // The rewind kept the earlier turn: only the targeted prompt and what
+    // followed it left the painted record.
+    const rt = h.controller.runtimes.get(id);
+    assert.ok(rt && !rt.log.some((p) => p.type === "userMessage" && p.clientMessageId === mid), "the rewound prompt stayed painted");
+    assert.ok(rt && rt.log.some((p) => p.type === "userMessage" && p.text === "first turn"), "the earlier turn was discarded too");
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("reported regressions: restoring the first message keeps the same session", posixOnly, async () => {
+  const h = createChat({
+    promptDelay: 200,
+    steps: [{ stepNumber: 1, kind: "prompt", userMessageId: "m1", revertTargetNodeId: 42, forkTargetNodeId: 43 }]
+  });
+  try {
+    await h.ready();
+    const id = await h.startChat("first turn");
+    assert.ok(await h.until(() => !h.controller.runtimes.get(id)?.busy, 10000), "the turn never settled");
+    const mid = h.postsOf("userMessage").find((m) => m.text === "first turn")?.clientMessageId;
+    assert.ok(mid, "the first turn's echo carried no stable prompt id");
+    const promptsBefore = h.agentSaw("session/prompt").length;
+
+    // No resend: the rewind still targets the first prompt's checkpoint inside
+    // this session, and nothing new is created or sent.
+    h.send({ type: "revertExecute", sessionId: id, userMessageId: mid });
+    assert.ok(await h.until(() => h.postsOf("reverted").some((m) => m.userMessageId === mid && m.resending === false), 15000), "the rewind never completed");
+    await h.settle(200);
+
+    const executeReq = h.agentSaw("_cognition.ai/revert/execute").at(-1);
+    assert.strictEqual(executeReq.params.sessionId, id);
+    assert.strictEqual(executeReq.params.userMessageId, mid);
+    assert.strictEqual(h.activeId(), id, "the restore moved the selection");
+    assert.strictEqual(h.agentSaw("session/new").length, 1, "the restore created a session");
+    assert.strictEqual(h.agentSaw("session/prompt").length, promptsBefore, "the restore sent a prompt");
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("reported regressions: the session list publishes a new live row before the remote listing answers", posixOnly, async () => {
+  const h = createChat();
+  let releaseList;
+  let releaseDefaults;
+  try {
+    await h.ready();
+    h.send({ type: "listVisible", value: true });
+    // Hold the remote listing and the new session's defaults: the two waits the
+    // old list used to sit behind before a started chat could be seen.
+    const listGate = new Promise((r) => { releaseList = r; });
+    h.controller.listOverProtocol = () => listGate.then(() => ({ sessions: [], prunedIds: [] }));
+    const originalDefaults = h.controller.applyDefaults.bind(h.controller);
+    const defaultsGate = new Promise((r) => { releaseDefaults = r; });
+    h.controller.applyDefaults = async (rt, res) => {
+      await defaultsGate;
+      return originalDefaults(rt, res);
+    };
+
+    h.send({ type: "send", text: "listed first", newSession: true });
+    assert.ok(await h.until(() => h.controller.runtimes.size === 1, 15000), "the creation never registered its runtime");
+    const id = [...h.controller.runtimes.keys()][0];
+    assert.ok(h.controller.runtimes.get(id)?.initializing, "the runtime never marked itself initializing");
+
+    // The row is listed even though the remote listing has not answered.
+    assert.ok(await h.until(() => h.postsOf("sessions").some((m) => (m.sessions || []).some((s) => s.id === id)), 10000),
+      "the live row never reached the list while the remote listing was held");
+
+    // Opening it while defaults are still held waits for readiness instead of
+    // loading or creating another agent.
+    h.send({ type: "activateSession", id });
+    await h.settle(100);
+    assert.ok(!h.postsOf("sessionReady").some((m) => m.sessionId === id), "the half built session announced itself");
+    releaseDefaults();
+    assert.ok(await h.until(() => h.postsOf("sessionReady").some((m) => m.sessionId === id) && h.activeId() === id, 15000),
+      "the session never finished activating");
+    releaseList();
+    await h.settle(200);
+
+    assert.strictEqual(h.agentSaw("session/new").length, 1, "opening the row created another session");
+    assert.strictEqual(h.agentSaw("session/load").length, 0, "opening the row reloaded the live session");
+    assert.ok(await h.until(() => h.agentSaw("session/prompt").some((m) => m.params.sessionId === id && lastPromptText(m) === "listed first"), 15000),
+      "the first prompt never went out");
+    assert.strictEqual(h.agentSaw("session/prompt").filter((m) => m.params.sessionId === id && lastPromptText(m) === "listed first").length, 1,
+      "the first prompt went out more than once");
+    // The send echoed twice, optimistically and canonically, under one dedupe
+    // id: that pairing is what lets a returning view render it exactly once.
+    const echoes = h.postsOf("userMessage").filter((m) => m.text === "listed first");
+    assert.strictEqual(echoes.length, 2, "the send did not echo optimistically and canonically");
+    assert.ok(echoes.every((m) => m.clientMessageId), "an echo carries no dedupe id");
+    assert.strictEqual(echoes[0].clientMessageId, echoes[1].clientMessageId, "the two echoes carry different dedupe ids");
+  } finally {
+    releaseList?.();
+    releaseDefaults?.();
+    await h.dispose();
+  }
+});
+
+test("review regressions: a reload retried while the failed load's cleanup still runs asks the agent again", posixOnly, async () => {
+  const h = createChat({ promptDelay: 200 });
+  let releaseClose;
+  try {
+    await h.ready();
+    const id = await h.startChat("reload me");
+    const rt = h.controller.runtimes.get(id);
+    assert.ok(await h.until(() => !rt.busy, 10000), "the first turn never settled");
+    // The local record is marked incomplete, so the next open takes the full
+    // ACP path rather than the local replay seam.
+    rt.logFull = false;
+    // Warm the list cache so the failed load's own return to the list does not
+    // wait on a remote listing.
+    await h.controller.refreshSessions(true);
+    const original = h.controller.loadWithTakeover.bind(h.controller);
+    let calls = 0;
+    h.controller.loadWithTakeover = async (runtime, sessionId, cwd) => {
+      calls++;
+      if (calls === 1) {
+        throw new Error("load blew up");
+      }
+      return original(runtime, sessionId, cwd);
+    };
+    // Hold the failed load's cleanup AFTER it has already returned the panel to
+    // the list: the original loading promise is still in flight, which is the
+    // window a fast retry used to be swallowed by.
+    const closeOut = h.controller.closeOutSession.bind(h.controller);
+    const closeGate = new Promise((r) => { releaseClose = r; });
+    let closeEntered = 0;
+    h.controller.closeOutSession = async (...args) => {
+      closeEntered++;
+      const result = await closeOut(...args);
+      await closeGate;
+      return result;
+    };
+    try {
+      h.send({ type: "loadSession", id });
+      assert.ok(await h.until(() => closeEntered === 1 && h.last("body")?.body === "list" && rt.logFull === false, 15000),
+        "the failed load never reached the list");
+      h.send({ type: "loadSession", id });
+      assert.ok(await h.until(() => h.activeId() === id, 10000), "the retry never became active");
+      await h.settle(50);
+      assert.strictEqual(calls, 1, "the retry started its own agent load before the first one finished cleaning up");
+      releaseClose();
+      releaseClose = undefined;
+      assert.ok(await h.until(() => calls === 2, 15000), "the retry never reached the agent seam");
+      assert.ok(await h.until(() => h.agentSaw("session/load").some((m) => m.params.sessionId === id), 15000), "the retry never issued session/load");
+    } finally {
+      releaseClose?.();
+    }
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("review regressions: a failed readiness check hands an edited resend back with its files and keeps a newer draft", posixOnly, async () => {
+  const h = createChat({ promptDelay: 200 });
+  let releaseHealth;
+  try {
+    await h.ready();
+    const id = await h.startChat("first turn");
+    assert.ok(await h.until(() => !h.controller.runtimes.get(id)?.busy, 10000), "the turn never settled");
+    h.send({ type: "attachImage", name: "edit-file.png", mime: "image/png", data: PNG });
+    assert.ok(await h.until(() => ((h.last("attachments") || {}).items || []).length === 1, 10000), "the file never staged");
+
+    // Hold the next health check open, then let it answer signed out: the
+    // resend must go back to the chat rather than vanish with the failure.
+    const healthGate = new Promise((r) => { releaseHealth = r; });
+    let healthCalls = 0;
+    h.controller.runHealthCheck = async () => {
+      healthCalls++;
+      await healthGate;
+      h.controller.health = { found: false, loggedIn: false, path: "devin" };
+    };
+    h.controller.health = undefined;
+
+    const mid = h.postsOf("userMessage").find((m) => m.text === "first turn")?.clientMessageId;
+    assert.ok(mid, "the first turn's echo carried no stable prompt id");
+    h.send({ type: "revertExecute", sessionId: id, userMessageId: mid, resendText: "edited words" });
+    assert.ok(await h.until(() => healthCalls >= 1, 15000), "the rewind never reached the readiness check");
+    // A newer draft typed while readiness was out is preserved, not overwritten.
+    h.store.setDraft(id, "typed while waiting");
+    releaseHealth();
+    releaseHealth = undefined;
+    assert.ok(await h.until(() => h.store.draft(id) === "edited words\n\ntyped while waiting", 10000), "the resend was not handed back");
+    assert.ok(await h.until(() => ((h.last("attachments") || {}).items || []).some((a) => a.label === "edit-file.png"), 10000), "the resend's file was not handed back");
+    assert.strictEqual(h.agentSaw("_cognition.ai/revert/execute").length, 0, "the rewind ran without readiness");
+    assert.strictEqual(h.agentSaw("session/prompt").filter((m) => lastPromptText(m) === "edited words").length, 0, "the resend went out anyway");
+    assert.strictEqual(h.activeId(), id, "the session changed under the failed readiness");
+  } finally {
+    releaseHealth?.();
+    await h.dispose();
+  }
+});
+
+test("review regressions: a rewind finishing after its chat moved surfaces echoes and resends through the new owner", posixOnly, async () => {
+  const a = createChat({ promptDelay: 200 });
+  // B is built only once A's agents exist: a second harness rewrites the shared
+  // vscode stub globals, and an agent spawned after that would log somewhere
+  // `a.agentSaw` never reads.
+  let b;
+  let releaseRevert;
+  try {
+    await a.ready();
+    const id = await a.startChat("first");
+    assert.ok(await a.until(() => !a.controller.runtimes.get(id)?.busy, 10000), "the turn never settled");
+    // A second chat on A gives it a different selected session after the move.
+    const other = await a.startChat("second");
+    assert.ok(await a.until(() => !a.controller.runtimes.get(other)?.busy, 10000), "the second turn never settled");
+    a.send({ type: "activateSession", id });
+    assert.ok(await a.until(() => a.activeId() === id, 10000), "the first chat never came back");
+
+    const rt = a.controller.runtimes.get(id);
+    assert.ok(await a.until(() => !rt.replaying, 10000), "the transcript was still replaying");
+    const mid = a.postsOf("userMessage").find((m) => m.text === "first")?.clientMessageId;
+    assert.ok(mid, "the first turn's echo carried no stable prompt id");
+    const originalRevert = rt.client.revertExecute.bind(rt.client);
+    const revertGate = new Promise((r) => { releaseRevert = r; });
+    let revertCalls = 0;
+    rt.client.revertExecute = (...args) => {
+      revertCalls++;
+      return revertGate.then(() => originalRevert(...args));
+    };
+
+    a.send({ type: "revertExecute", sessionId: id, userMessageId: mid, resendText: "edited words" });
+    assert.ok(await a.until(() => revertCalls === 1, 15000), "the rewind never reached the agent");
+
+    // Move the chat to B while the rewind is still on the wire, then put A on
+    // its other chat: everything the rewind still has to say belongs to B.
+    b = createChat({ promptDelay: 200 });
+    await b.ready();
+    const transfer = a.controller.exportRuntime(id);
+    assert.ok(transfer, "the chat could not be handed over");
+    await b.controller.importRuntime(transfer);
+    a.send({ type: "activateSession", id: other });
+    assert.ok(await a.until(() => a.activeId() === other, 10000), "A never selected its other chat");
+
+    releaseRevert();
+    releaseRevert = undefined;
+    assert.ok(await b.until(() => b.postsOf("reverted").some((m) => m.userMessageId === mid && m.resending === true), 15000), "the rewind never completed on the new owner");
+    assert.ok(await b.until(() => b.postsOf("userMessage").some((m) => m.text === "edited words"), 15000), "the resend echo never reached the new owner");
+    await a.settle(200);
+
+    assert.strictEqual(a.agentSaw("session/prompt").filter((m) => m.params.sessionId === id && lastPromptText(m) === "edited words").length, 1,
+      "the resend did not reach the session exactly once");
+    const echo = b.postsOf("userMessage").filter((m) => m.text === "edited words");
+    assert.strictEqual(echo.length, 1, "the resend echo did not post exactly once on the new owner");
+    assert.ok(echo[0].clientMessageId, "the resend echo carries no dedupe id");
+    assert.ok(b.postsOf("sessionHistoryChanged").some((m) => m.sessionId === id), "the new owner was not told the history changed");
+    assert.ok(!a.postsOf("userMessage").some((m) => m.text === "edited words"), "the echo painted into the old surface");
+    assert.strictEqual(a.postsOf("reverted").length, 0, "the rewind notice painted into the old surface");
+    // The scoped history notice DOES reach the old surface: it is what makes
+    // its cached copy of this chat reload instead of resurrecting superseded
+    // history. What must not cross is an unscoped trim, echo or error.
+    assert.ok(a.postsOf("sessionHistoryChanged").some((m) => m.sessionId === id), "the old surface was not told to invalidate its cached copy");
+    assert.strictEqual(a.activeId(), other, "the old surface's selection moved");
+    assert.strictEqual(b.activeId(), id, "the new owner does not show the chat");
+  } finally {
+    releaseRevert?.();
+    await b?.dispose();
+    await a.dispose();
+  }
+});
+
+test("review regressions: a new session that fails while opening returns the panel to the list", posixOnly, async () => {
+  const h = createChat();
+  let releaseDefaults;
+  try {
+    await h.ready();
+    h.send({ type: "listVisible", value: true });
+    const defaultsGate = new Promise((r) => { releaseDefaults = r; });
+    let defaultsCalls = 0;
+    h.controller.applyDefaults = async () => {
+      defaultsCalls++;
+      await defaultsGate;
+      throw new Error("defaults blew up");
+    };
+
+    h.send({ type: "newSession" });
+    assert.ok(await h.until(() => defaultsCalls === 1, 15000), "creation never reached applyDefaults");
+    const rt = [...h.controller.runtimes.values()][0];
+    assert.ok(rt?.initializing, "the runtime never marked itself initializing");
+    const id = rt.id;
+    // The row is already listed, so selecting it waits on the same readiness.
+    assert.ok(await h.until(() => h.postsOf("sessions").some((m) => (m.sessions || []).some((s) => s.id === id)), 10000), "the live row never reached the list");
+    h.send({ type: "activateSession", id });
+    await h.settle(50);
+    assert.ok(!h.postsOf("sessionReady").some((m) => m.sessionId === id), "the half built session announced itself");
+
+    releaseDefaults();
+    releaseDefaults = undefined;
+    assert.ok(await h.until(() => h.last("body")?.body === "list" && !h.controller.runtimes.has(id), 15000), "the failed creation never returned to the list");
+    assert.ok(h.logs.some((l) => l.includes("[new-session-failed]")), "the failure was not diagnosed");
+    assert.ok(!h.postsOf("sessionReady").some((m) => m.sessionId === id), "the failed session announced itself");
+    assert.strictEqual(h.postsOf("error").length, 0, "the superseded creation posted an error");
+    assert.strictEqual(h.activeId(), undefined, "the panel kept a dead session");
+  } finally {
+    releaseDefaults?.();
+    await h.dispose();
+  }
+});
+
+test("review regressions: an editor surface opening a failing new session gets the error in place", posixOnly, async () => {
+  const editor = createChat({ kind: "editor" });
+  let releaseDefaults;
+  try {
+    await editor.ready();
+    const defaultsGate = new Promise((r) => { releaseDefaults = r; });
+    let defaultsCalls = 0;
+    editor.controller.applyDefaults = async () => {
+      defaultsCalls++;
+      await defaultsGate;
+      throw new Error("defaults blew up");
+    };
+
+    editor.send({ type: "newSession" });
+    assert.ok(await editor.until(() => defaultsCalls === 1, 15000), "creation never reached applyDefaults");
+    const rt = [...editor.controller.runtimes.values()][0];
+    assert.ok(rt?.initializing, "the runtime never marked itself initializing");
+    const id = rt.id;
+    editor.send({ type: "activateSession", id });
+    await editor.settle(50);
+
+    releaseDefaults();
+    releaseDefaults = undefined;
+    assert.ok(await editor.until(() => editor.postsOf("loaded").length > 0
+      && editor.postsOf("error").some((m) => (m.text || "").includes("Couldn't open")), 15000), "the editor never learned the creation failed");
+    assert.ok(editor.logs.some((l) => l.includes("[new-session-failed]")), "the failure was not diagnosed");
+    assert.strictEqual(editor.activeId(), id, "the editor surface lost its target id");
+    assert.ok(!editor.controller.runtimes.has(id), "the failed runtime was kept");
+  } finally {
+    releaseDefaults?.();
+    await editor.dispose();
+  }
+});
+
+test("review regressions: a failed creation does not disturb the chat selected after it", posixOnly, async () => {
+  const h = createChat({ promptDelay: 200 });
+  let releaseDefaults;
+  try {
+    await h.ready();
+    const a = await h.startChat("chat a");
+    assert.ok(await h.until(() => !h.controller.runtimes.get(a)?.busy, 10000), "chat a's turn never settled");
+    const defaultsGate = new Promise((r) => { releaseDefaults = r; });
+    let defaultsCalls = 0;
+    h.controller.applyDefaults = async () => {
+      defaultsCalls++;
+      await defaultsGate;
+      throw new Error("defaults blew up");
+    };
+
+    h.send({ type: "newSession" });
+    assert.ok(await h.until(() => defaultsCalls === 1, 15000), "creation never reached applyDefaults");
+    const rt = [...h.controller.runtimes.values()].find((r) => r.id !== a);
+    assert.ok(rt?.initializing, "the runtime never marked itself initializing");
+    const b = rt.id;
+    // Opening the half built chat parks on its readiness, then the user picks
+    // the chat that was already working instead.
+    h.send({ type: "activateSession", id: b });
+    await h.settle(50);
+    h.send({ type: "activateSession", id: a });
+    assert.ok(await h.until(() => h.activeId() === a, 10000), "chat a never came back");
+
+    releaseDefaults();
+    releaseDefaults = undefined;
+    await h.settle(200);
+
+    assert.strictEqual(h.activeId(), a, "the failed creation moved the selection");
+    assert.ok(!h.controller.runtimes.has(b), "the failed runtime was kept");
+    assert.strictEqual(h.postsOf("error").length, 0, "the superseded creation posted an error");
+    assert.ok(h.logs.some((l) => l.includes("[new-session-failed]")), "the failure was not diagnosed");
+  } finally {
+    releaseDefaults?.();
+    await h.dispose();
+  }
+});
+
+test("checkpoint identity: editing a middle message keeps the first turn, resends once and drops the third", posixOnly, async () => {
+  const h = createChat({ promptDelay: 200 });
+  try {
+    await h.ready();
+    const id = await h.startChat("FIRST");
+    assert.ok(await h.until(() => !h.controller.runtimes.get(id)?.busy, 10000), "the first turn never settled");
+    h.send({ type: "send", text: "SECOND" });
+    assert.ok(await h.until(() => h.controller.runtimes.get(id)?.busy, 10000), "the second turn never started");
+    assert.ok(await h.until(() => !h.controller.runtimes.get(id)?.busy, 10000), "the second turn never settled");
+    h.send({ type: "send", text: "THIRD" });
+    assert.ok(await h.until(() => h.controller.runtimes.get(id)?.busy, 10000), "the third turn never started");
+    assert.ok(await h.until(() => !h.controller.runtimes.get(id)?.busy, 10000), "the third turn never settled");
+
+    const mids = Object.fromEntries(h.postsOf("userMessage").map((m) => [m.text, m.clientMessageId]));
+    assert.ok(mids.FIRST && mids.SECOND && mids.THIRD, "every echo carried a stable prompt id");
+    for (const mid of Object.values(mids)) {
+      assert.match(mid, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+        "the prompt identity must be a UUID that can be shared with ACP");
+    }
+    const rt = h.controller.runtimes.get(id);
+
+    h.send({ type: "revertExecute", sessionId: id, userMessageId: mids.SECOND, resendText: "edited SECOND" });
+    assert.ok(await h.until(() => h.postsOf("reverted").some((m) => m.userMessageId === mids.SECOND && m.resending === true), 15000), "the rewind never completed");
+    assert.ok(await h.until(() => h.agentSaw("session/prompt").some((m) => m.params.sessionId === id && lastPromptText(m) === "edited SECOND"), 15000), "the resend never went out");
+    await h.settle(300);
+
+    const executeReq = h.agentSaw("_cognition.ai/revert/execute").at(-1);
+    assert.deepStrictEqual(executeReq.params, { sessionId: id, userMessageId: mids.SECOND, force: true, skipFileUndo: false },
+      "the rewind did not carry exactly the scoped prompt id and execute flags");
+    const resends = h.agentSaw("session/prompt").filter((m) => m.params.sessionId === id && lastPromptText(m) === "edited SECOND");
+    assert.strictEqual(resends.length, 1, "the edited resend went out more than once");
+    const resendId = resends[0].params._meta?.["cognition.ai/clientMessageId"];
+    assert.ok(typeof resendId === "string" && resendId !== mids.SECOND && resendId !== mids.FIRST && resendId !== mids.THIRD,
+      "the resend did not declare a fresh stable id");
+    assert.strictEqual(h.agentSaw("session/prompt").filter((m) => lastPromptText(m) === "THIRD").length, 1,
+      "the discarded turn was prompted again");
+
+    // FIRST stays painted and the record still claims to be complete: the
+    // retained prefix is the whole point of the scoped rewind.
+    assert.ok(rt.log.some((p) => p.type === "userMessage" && p.clientMessageId === mids.FIRST), "FIRST left the painted record");
+    assert.ok(!rt.log.some((p) => p.clientMessageId === mids.SECOND || p.clientMessageId === mids.THIRD), "SECOND or THIRD stayed painted");
+    assert.strictEqual(rt.logFull, true, "the retained prefix was marked partial");
+    const echo = h.postsOf("userMessage").filter((m) => m.text === "edited SECOND");
+    assert.strictEqual(echo.length, 1, "the resend echo did not post exactly once");
+    assert.strictEqual(echo[0].clientMessageId, resendId, "the echo id does not match the prompt metadata");
+    assert.strictEqual(h.activeId(), id, "the session changed under the edit");
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("checkpoint identity: a rewind whose preview fails still releases the sends queued behind it", posixOnly, async () => {
+  const h = createChat({ promptDelay: 200 });
+  let releasePreview;
+  try {
+    await h.ready();
+    const id = await h.startChat("first turn");
+    assert.ok(await h.until(() => !h.controller.runtimes.get(id)?.busy, 10000), "the turn never settled");
+    const mid = h.postsOf("userMessage").find((m) => m.text === "first turn")?.clientMessageId;
+    assert.ok(mid, "the turn's echo carried no stable prompt id");
+    const rt = h.controller.runtimes.get(id);
+
+    // Hold the preview open so a send can queue behind the rewind, then refuse
+    // it: the mutation never happens and the queue must not stay locked.
+    const previewGate = new Promise((r) => { releasePreview = r; });
+    let previewCalls = 0;
+    rt.client.revertPreview = (...args) => {
+      previewCalls++;
+      return previewGate.then(() => { throw new Error("preview blew up"); });
+    };
+
+    h.send({ type: "revertExecute", sessionId: id, userMessageId: mid, resendText: "edited words" });
+    assert.ok(await h.until(() => previewCalls === 1, 15000), "the rewind never reached the preview");
+    h.send({ type: "send", text: "queued behind" });
+    await h.settle(150);
+    assert.strictEqual(h.agentSaw("session/prompt").filter((m) => lastPromptText(m) === "queued behind").length, 0,
+      "the queued send went out while the rewind held the lock");
+    assert.strictEqual(h.agentSaw("_cognition.ai/revert/execute").length, 0, "the rewind executed without a preview");
+
+    releasePreview();
+    releasePreview = undefined;
+    assert.ok(await h.until(() => h.agentSaw("session/prompt").some((m) => m.params.sessionId === id && lastPromptText(m) === "queued behind"), 15000),
+      "the queued send never went out after the failed rewind");
+    await h.settle(300);
+
+    assert.strictEqual(h.agentSaw("session/prompt").filter((m) => lastPromptText(m) === "queued behind").length, 1,
+      "the queued send went out more than once");
+    assert.strictEqual(h.agentSaw("session/prompt").filter((m) => lastPromptText(m) === "edited words").length, 0,
+      "the refused edit's resend went out anyway");
+    assert.strictEqual(h.store.draft(id), "edited words", "the refused edit was not handed back");
+    assert.ok(h.postsOf("error").length > 0, "the failed rewind was not reported");
+    assert.strictEqual(rt.rewinding, undefined, "the rewind lock was left set");
+    assert.strictEqual(h.activeId(), id, "the session changed under the failed rewind");
+  } finally {
+    releasePreview?.();
+    await h.dispose();
+  }
+});
+
+test("checkpoint identity: a rewind refused at readiness still releases the sends queued behind it", posixOnly, async () => {
+  const h = createChat({ promptDelay: 200 });
+  let releaseHealth;
+  try {
+    await h.ready();
+    const id = await h.startChat("first turn");
+    assert.ok(await h.until(() => !h.controller.runtimes.get(id)?.busy, 10000), "the turn never settled");
+    const mid = h.postsOf("userMessage").find((m) => m.text === "first turn")?.clientMessageId;
+    assert.ok(mid, "the turn's echo carried no stable prompt id");
+    const rt = h.controller.runtimes.get(id);
+
+    // Hold the readiness check open so a send can queue behind the rewind,
+    // then answer signed out: the mutation stops before the preview and the
+    // queue must not stay locked behind a resend that will never come.
+    const healthGate = new Promise((r) => { releaseHealth = r; });
+    let healthCalls = 0;
+    h.controller.runHealthCheck = async () => {
+      healthCalls++;
+      await healthGate;
+      h.controller.health = { found: false, loggedIn: false, path: "devin" };
+    };
+    h.controller.health = undefined;
+
+    h.send({ type: "revertExecute", sessionId: id, userMessageId: mid, resendText: "edited words" });
+    assert.ok(await h.until(() => healthCalls >= 1, 15000), "the rewind never reached the readiness check");
+    // A send typed through the composer would be refused at the same readiness
+    // gate, so the queued message is put where handleSend would have put it:
+    // on the runtime's queue, behind the rewind's lock.
+    h.controller.enqueueMessage(rt, h.controller.pendingMessage("queued behind", []));
+    await h.settle(150);
+    assert.strictEqual(h.agentSaw("session/prompt").filter((m) => lastPromptText(m) === "queued behind").length, 0,
+      "the queued send went out while the rewind held the lock");
+
+    releaseHealth();
+    releaseHealth = undefined;
+    assert.ok(await h.until(() => h.agentSaw("session/prompt").some((m) => m.params.sessionId === id && lastPromptText(m) === "queued behind"), 15000),
+      "the queued send never went out after the refused rewind");
+    await h.settle(300);
+
+    assert.strictEqual(h.agentSaw("session/prompt").filter((m) => lastPromptText(m) === "queued behind").length, 1,
+      "the queued send went out more than once");
+    assert.strictEqual(h.agentSaw("_cognition.ai/revert/preview").length, 0, "the preview ran without readiness");
+    assert.strictEqual(h.agentSaw("_cognition.ai/revert/execute").length, 0, "the rewind ran without readiness");
+    assert.strictEqual(h.agentSaw("session/prompt").filter((m) => lastPromptText(m) === "edited words").length, 0,
+      "the refused edit's resend went out anyway");
+    assert.strictEqual(h.store.draft(id), "edited words", "the refused edit was not handed back");
+    assert.strictEqual(rt.rewinding, undefined, "the rewind lock was left set");
+    assert.strictEqual(h.activeId(), id, "the session changed under the refused rewind");
+  } finally {
+    releaseHealth?.();
+    await h.dispose();
+  }
+});
+
+test("checkpoint identity: a successful rewind keeps its resend ahead of the sends queued behind it", posixOnly, async () => {
+  const h = createChat({ promptDelay: 200 });
+  let releaseRevert;
+  try {
+    await h.ready();
+    const id = await h.startChat("first turn");
+    assert.ok(await h.until(() => !h.controller.runtimes.get(id)?.busy, 10000), "the turn never settled");
+    const mid = h.postsOf("userMessage").find((m) => m.text === "first turn")?.clientMessageId;
+    assert.ok(mid, "the turn's echo carried no stable prompt id");
+    const rt = h.controller.runtimes.get(id);
+
+    const revertGate = new Promise((r) => { releaseRevert = r; });
+    let revertCalls = 0;
+    const agentRevert = rt.client.revertExecute.bind(rt.client);
+    rt.client.revertExecute = (...args) => {
+      revertCalls++;
+      return revertGate.then(() => agentRevert(...args));
+    };
+
+    h.send({ type: "revertExecute", sessionId: id, userMessageId: mid, resendText: "edited words" });
+    assert.ok(await h.until(() => revertCalls === 1, 15000), "the rewind never reached the agent");
+    h.send({ type: "send", text: "queued behind" });
+    await h.settle(150);
+
+    releaseRevert();
+    releaseRevert = undefined;
+    assert.ok(await h.until(() => h.agentSaw("session/prompt").some((m) => m.params.sessionId === id && lastPromptText(m) === "queued behind"), 20000),
+      "the queued send never went out");
+    await h.settle(400);
+
+    const prompts = h.agentSaw("session/prompt").filter((m) => m.params.sessionId === id).map(lastPromptText);
+    const editedAt = prompts.indexOf("edited words");
+    const queuedAt = prompts.indexOf("queued behind");
+    assert.ok(editedAt !== -1 && queuedAt !== -1, "both prompts went out");
+    assert.ok(editedAt < queuedAt, "the queued send overtook the edited resend");
+    assert.strictEqual(prompts.filter((t) => t === "edited words").length, 1, "the resend went out twice");
+    assert.strictEqual(prompts.filter((t) => t === "queued behind").length, 1, "the queued send went out twice");
+  } finally {
+    releaseRevert?.();
+    await h.dispose();
+  }
+});
+
+test("checkpoint identity: reopening a chat while its rewind runs publishes busy without another step read", posixOnly, async () => {
+  const h = createChat({ promptDelay: 200 });
+  let releaseRevert;
+  try {
+    await h.ready();
+    const a = await h.startChat("chat a");
+    assert.ok(await h.until(() => !h.controller.runtimes.get(a)?.busy, 10000), "chat a's turn never settled");
+    const b = await h.startChat("chat b");
+    assert.ok(await h.until(() => !h.controller.runtimes.get(b)?.busy, 10000), "chat b's turn never settled");
+    h.send({ type: "activateSession", id: a });
+    assert.ok(await h.until(() => h.activeId() === a, 10000), "chat a never came back");
+    const mid = h.postsOf("userMessage").find((m) => m.text === "chat a")?.clientMessageId;
+    assert.ok(mid, "chat a's echo carried no stable prompt id");
+
+    const rtA = h.controller.runtimes.get(a);
+    const revertGate = new Promise((r) => { releaseRevert = r; });
+    let revertCalls = 0;
+    const agentRevert = rtA.client.revertExecute.bind(rtA.client);
+    rtA.client.revertExecute = (...args) => {
+      revertCalls++;
+      return revertGate.then(() => agentRevert(...args));
+    };
+    const listsFor = () => h.agentSaw("_cognition.ai/revert/listSteps").filter((m) => m.params.sessionId === a).length;
+
+    h.send({ type: "revertExecute", sessionId: a, userMessageId: mid, resendText: "edited a" });
+    assert.ok(await h.until(() => revertCalls === 1, 15000), "the rewind never reached the agent");
+
+    // Away and back while the mutation is held: the activation must publish the
+    // busy checkpoint state it already knows, not start a competing step read.
+    h.send({ type: "activateSession", id: b });
+    assert.ok(await h.until(() => h.activeId() === b, 10000), "chat b never came back");
+    const listsBefore = listsFor();
+    h.send({ type: "activateSession", id: a });
+    assert.ok(await h.until(() => h.activeId() === a, 10000), "chat a never reopened");
+    await h.settle(400);
+
+    assert.strictEqual(listsFor(), listsBefore, "the activation started a step read over the rewind");
+    assert.ok(h.postsOf("checkpoints").some((m) => m.sessionId === a && m.busy === true),
+      "the busy checkpoint state never published on activation");
+
+    // And when the rewind finishes elsewhere, the selection stays where the
+    // user put it rather than being dragged back to the rewound chat.
+    h.send({ type: "activateSession", id: b });
+    assert.ok(await h.until(() => h.activeId() === b, 10000), "chat b never came back again");
+    releaseRevert();
+    releaseRevert = undefined;
+    assert.ok(await h.until(() => h.agentSaw("session/prompt").some((m) => m.params.sessionId === a && lastPromptText(m) === "edited a"), 20000),
+      "the resend never went out");
+    await h.settle(300);
+    assert.strictEqual(h.activeId(), b, "the finished rewind stole the selection");
+    assert.strictEqual(h.postsOf("reverted").length, 0, "a reverted painted into another session's transcript");
+  } finally {
+    releaseRevert?.();
+    await h.dispose();
+  }
+});
+
+test("checkpoint identity: a repeated rewind is ignored and a different edit waits its turn", posixOnly, async () => {
+  const h = createChat({ promptDelay: 200 });
+  let releaseRevert;
+  try {
+    await h.ready();
+    const id = await h.startChat("first turn");
+    assert.ok(await h.until(() => !h.controller.runtimes.get(id)?.busy, 10000), "the turn never settled");
+    const mid = h.postsOf("userMessage").find((m) => m.text === "first turn")?.clientMessageId;
+    assert.ok(mid, "the turn's echo carried no stable prompt id");
+    const rt = h.controller.runtimes.get(id);
+
+    const revertGate = new Promise((r) => { releaseRevert = r; });
+    let revertCalls = 0;
+    const agentRevert = rt.client.revertExecute.bind(rt.client);
+    rt.client.revertExecute = (...args) => {
+      revertCalls++;
+      return revertGate.then(() => agentRevert(...args));
+    };
+
+    h.send({ type: "revertExecute", sessionId: id, userMessageId: mid, resendText: "edited words" });
+    assert.ok(await h.until(() => revertCalls === 1, 15000), "the rewind never reached the agent");
+
+    // The exact same request again is the same operation, not a second one.
+    h.send({ type: "revertExecute", sessionId: id, userMessageId: mid, resendText: "edited words" });
+    await h.settle(200);
+    assert.strictEqual(revertCalls, 1, "the duplicate rewind reached the agent");
+
+    // A different edit cannot join the locked operation: it is handed back
+    // rather than queued behind a mutation it does not belong to.
+    h.send({ type: "revertExecute", sessionId: id, userMessageId: mid, resendText: "other edit" });
+    await h.settle(200);
+    assert.strictEqual(revertCalls, 1, "the different edit reached the agent");
+    assert.ok(h.postsOf("error").some((m) => /current checkpoint action/.test(m.text)),
+      "the locked-out edit was not told to wait");
+    assert.strictEqual(h.store.draft(id), "other edit", "the different edit was not handed back");
+
+    releaseRevert();
+    releaseRevert = undefined;
+    assert.ok(await h.until(() => h.agentSaw("session/prompt").some((m) => m.params.sessionId === id && lastPromptText(m) === "edited words"), 20000),
+      "the resend never went out");
+    await h.settle(300);
+    const prompts = h.agentSaw("session/prompt").filter((m) => m.params.sessionId === id).map(lastPromptText);
+    assert.strictEqual(prompts.filter((t) => t === "edited words").length, 1, "the resend went out twice");
+    assert.strictEqual(prompts.filter((t) => t === "other edit").length, 0, "the handed back edit went out anyway");
+  } finally {
+    releaseRevert?.();
+    await h.dispose();
+  }
+});
+
+test("checkpoint identity: a fork read raced by a new prompt does not fork a stale node", posixOnly, async () => {
+  const h = createChat({
+    promptDelay: 150,
+    steps: [{ stepNumber: 1, kind: "prompt", userMessageId: "m-old", revertTargetNodeId: 9, forkTargetNodeId: 10 }]
+  });
+  let releaseList;
+  try {
+    await h.ready();
+    const id = await h.startChat("first turn");
+    assert.ok(await h.until(() => !h.controller.runtimes.get(id)?.busy, 10000), "the turn never settled");
+    const rt = h.controller.runtimes.get(id);
+
+    // Hold the fork's step read open, land a fresh prompt while it is out (the
+    // turn start bumps the steps revision), then let the read answer: the node
+    // it found belongs to a conversation that has already moved on.
+    const listGate = new Promise((r) => { releaseList = r; });
+    let listCalls = 0;
+    const agentList = rt.client.listRevertSteps.bind(rt.client);
+    rt.client.listRevertSteps = (...args) => {
+      listCalls++;
+      return listGate.then(() => agentList(...args));
+    };
+    let forkCalls = 0;
+    const agentFork = rt.client.revertForkFromStep.bind(rt.client);
+    rt.client.revertForkFromStep = (...args) => {
+      forkCalls++;
+      return agentFork(...args);
+    };
+
+    h.send({ type: "revertFork", sessionId: id, userMessageId: "m-old" });
+    assert.ok(await h.until(() => listCalls >= 1, 15000), "the fork never read the step list");
+    h.send({ type: "send", text: "fresh prompt" });
+    assert.ok(await h.until(() => h.agentSaw("session/prompt").some((m) => lastPromptText(m) === "fresh prompt"), 15000), "the fresh prompt never went out");
+    assert.ok(await h.until(() => !h.controller.runtimes.get(id)?.busy, 15000), "the fresh prompt never settled");
+
+    releaseList();
+    releaseList = undefined;
+    assert.ok(await h.until(() => h.postsOf("error").some((m) => /changed while the fork/.test(m.text)), 15000),
+      "the stale fork read was not refused");
+    await h.settle(300);
+    assert.strictEqual(forkCalls, 0, "the fork reached the agent on a stale node");
+    assert.strictEqual(h.agentSaw("_cognition.ai/revert/forkFromStep").length, 0, "a fork went out on the wire");
+    assert.strictEqual(h.activeId(), id, "the session changed under the refused fork");
+  } finally {
+    releaseList?.();
+    await h.dispose();
+  }
+});
+
+test("checkpoint identity: a newer step push beats an older list read", posixOnly, async () => {
+  const h = createChat({
+    promptDelay: 200,
+    steps: [{ stepNumber: 1, kind: "prompt", userMessageId: "m-old", revertTargetNodeId: 9, forkTargetNodeId: 10 }]
+  });
+  let releaseList;
+  try {
+    await h.ready();
+    const id = await h.startChat("first turn");
+    assert.ok(await h.until(() => !h.controller.runtimes.get(id)?.busy, 10000), "the turn never settled");
+    const rt = h.controller.runtimes.get(id);
+
+    // Gate the list read, deliver the agent's push while it is out, then let
+    // the older answer arrive: the push is the newer word on the conversation
+    // and must be what the bindings publish.
+    const listGate = new Promise((r) => { releaseList = r; });
+    let listCalls = 0;
+    const agentList = rt.client.listRevertSteps.bind(rt.client);
+    rt.client.listRevertSteps = (...args) => {
+      listCalls++;
+      return listGate.then(() => agentList(...args));
+    };
+
+    void h.controller.refreshCheckpoints(rt, true);
+    assert.ok(await h.until(() => listCalls === 1, 15000), "the gated read never went out");
+    rt.client.emit("revertSteps", {
+      sessionId: id,
+      steps: [{ stepNumber: 2, kind: "prompt", userMessageId: "m-push", revertTargetNodeId: 20, forkTargetNodeId: 21 }]
+    });
+    await h.settle(100);
+    releaseList();
+    releaseList = undefined;
+    await h.settle(300);
+
+    const last = h.postsOf("checkpoints").filter((m) => m.sessionId === id).at(-1);
+    assert.ok(last, "no checkpoint frame was published");
+    assert.deepStrictEqual(last.checkpoints.map((c) => c.userMessageId), ["m-push"],
+      "the older list read overwrote the newer push");
+    assert.strictEqual(rt.steps[0]?.userMessageId, "m-push", "the runtime kept the stale step list");
+  } finally {
+    releaseList?.();
+    await h.dispose();
+  }
+});
+
+test("checkpoint identity: a replayed prompt's client id becomes the chunk's message id", posixOnly, async () => {
+  // Replay reports the stable prompt id through _meta, not the standard
+  // messageId: the painted record must key on it or the turn can never bind.
+  const h = createChat({
+    loadUpdates: [
+      { sessionUpdate: "user_message_chunk", content: { type: "text", text: "old prompt" }, messageId: "node-1", _meta: { "cognition.ai/clientMessageId": "m-replay" } },
+      { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "old reply" }, messageId: "a-1" }
+    ]
+  });
+  try {
+    await h.ready();
+    h.store.add("stored", h.cwd);
+    h.send({ type: "loadSession", id: "stored" });
+    assert.ok(await h.until(() => h.activeId() === "stored", 15000), "the stored session never opened");
+    assert.ok(await h.until(() => h.postsOf("sessionReady").some((m) => m.sessionId === "stored"), 15000), "the replay never finished");
+    await h.settle(300);
+
+    const rt = h.controller.runtimes.get("stored");
+    assert.ok(rt, "the session has no runtime");
+    assert.ok(rt.log.some((p) => p.type === "userChunk" && p.messageId === "m-replay"),
+      "the replayed prompt did not paint under its stable id");
+    assert.ok(!rt.log.some((p) => p.type === "userChunk" && p.messageId === "node-1"),
+      "the raw node id was painted as the prompt id");
+    // The replay batches carry the same painted entries to the page.
+    const replayed = h.postsOf("replay").flatMap((m) => m.items || []);
+    assert.ok(replayed.some((item) => item.type === "userChunk" && item.messageId === "m-replay"),
+      "the webview never saw the stable id");
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("checkpoint identity: unsupported agents settle readiness without a step read", posixOnly, async () => {
+  const h = createChat({ noRevertByUserMessageId: true, promptDelay: 200 });
+  try {
+    await h.ready();
+    const id = await h.startChat("hello");
+    assert.ok(await h.until(() => !h.controller.runtimes.get(id)?.busy, 10000), "the turn never settled");
+    const rt = h.controller.runtimes.get(id);
+    const before = h.agentSaw("_cognition.ai/revert/listSteps").length;
+
+    await h.controller.refreshCheckpoints(rt);
+
+    assert.strictEqual(h.agentSaw("_cognition.ai/revert/listSteps").length, before,
+      "an unsupported agent received a checkpoint query");
+    const frame = h.postsOf("checkpoints").filter((m) => m.sessionId === id).at(-1);
+    assert.ok(frame, "the checkpoint readiness state never settled");
+    assert.strictEqual(frame.busy, false, "a cached wake would remain marked as pending");
+    assert.deepStrictEqual(frame.checkpoints, []);
+    assert.strictEqual(h.postsOf("capabilities").at(-1).revert, false,
+      "an unsupported agent offered checkpoint controls");
   } finally {
     await h.dispose();
   }
