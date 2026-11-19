@@ -60,6 +60,11 @@ import { fusionIdentity, fusionModelKey, modelIdentity } from "../cli/modelId";
 import { lockOwner, removeLock } from "../cli/sessionLocks";
 import { contextReportFromUpdate } from "../acp/usage";
 
+interface QueuedDispatch {
+  message: PendingMessage;
+  failed: boolean;
+}
+
 // One live session: its own `devin acp` process and terminal manager, plus the
 // per-session state that used to be flat on the provider. Several of these can
 // be alive at once (one acp each), which is what lets a session keep running
@@ -128,6 +133,8 @@ interface Runtime {
   // next drain sends ahead of everything else, of either kind. One shot: it is
   // cleared when the message goes out or leaves the queue.
   runNextId?: string;
+  // Records keep each queued message's first dispatch order until the turn settles.
+  queuedDispatches?: QueuedDispatch[];
   // Webview messages a background turn produced while this session was not the
   // visible one. Replayed when the session is reopened so its progress is shown
   // even for a turn that is still running (capped so it can't grow unbounded).
@@ -1138,12 +1145,13 @@ export class ChatController implements AcpHost {
     // This surface is responsible for stopping it now.
     this.spawnedRuntimes.add(rt);
     this.activeId = rt.id;
-    this.rememberSession(rt.id, rt.cwd);
+    const remembered = this.rememberSession(rt.id, rt.cwd, rt);
     this.markVisible(rt.id);
     this.ensureIdleTimer();
     // The agent can die during the handover, when its exit has no listener and is
     // never emitted again, so the arriving surface has to ask.
     if (rt.client.hasExited()) {
+      await remembered;
       this.onRuntimeExit(rt);
       return;
     }
@@ -1191,6 +1199,7 @@ export class ChatController implements AcpHost {
     // say once more where it should be: showing the chat, not its session list.
     this.post({ type: "body", body: "thread" });
     this.focus();
+    await remembered;
   }
 
   // --- Runtime pool --------------------------------------------------------
@@ -2175,10 +2184,10 @@ export class ChatController implements AcpHost {
         rt.messages = this.messageStore.get(rt.id);
         rt.lastActivityAt = Date.now();
         this.runtimes.set(rt.id, rt);
-        this.rememberSession(rt.id, cwd);
         // The id is real now, so the row can be listed before defaults finish:
         // initializing gates anything that would use the half built runtime.
         rt.initializing = starting;
+        await this.rememberSession(rt.id, cwd, rt);
         if (this.listVisible && this.surfaceVisible) {
           this.postSessionList(this.sessionsCache?.sessions ?? []);
         }
@@ -2622,7 +2631,7 @@ export class ChatController implements AcpHost {
       this.flushReplayUser(rt);
       await staged;
       rt.lastActivityAt = Date.now();
-      this.rememberSession(id, cwd);
+      await this.rememberSession(id, cwd, rt);
       // Loading a chat means spawning an agent and replaying its history, which
       // takes seconds, and nothing stops the user picking a different chat while
       // it runs. Everything below speaks for the panel, so it only applies if this
@@ -2961,7 +2970,7 @@ export class ChatController implements AcpHost {
       this.flushReplayUser(rt);
       await staged;
       rt.lastActivityAt = Date.now();
-      this.rememberSession(id, cwd);
+      await this.rememberSession(id, cwd, rt);
       // A wake takes seconds too, so this only speaks for the panel while the panel
       // is still showing this chat, the same as loading one does. Recording it as
       // the chat being viewed regardless sent the next window reload to the chat the
@@ -3434,9 +3443,18 @@ export class ChatController implements AcpHost {
         // A first turn may not have persisted yet. Keep live sessions and saved
         // queues even when the agent does not list them.
         for (const id of prunedIds) {
-          const messages = await this.messageStore.load(id);
+          let messages: MessageState;
+          try {
+            messages = await this.messageStore.load(id);
+          } catch (err) {
+            this.reportMessageRestoreFailure(id, err);
+            continue;
+          }
           const held = this.runtimes.has(id) || this.starting.has(id) || !!this.surfaces?.owner(id)
-            || messages.queued.length > 0;
+            || this.store.hasPendingQueue(id) || messages.queued.length > 0;
+          if (messages.queued.length) {
+            this.store.setQueuePending(id, true);
+          }
           if (!held) {
             this.store.remove(id);
             void this.dropStaged(id);
@@ -4177,8 +4195,43 @@ export class ChatController implements AcpHost {
     return id || ChatController.NEW_CHAT_ATTACHMENTS;
   }
 
-  private rememberSession(id: string, cwd: string): void {
-    for (const evicted of this.store.add(id, cwd)) {
+  // Read eviction candidates before dropping their snapshots. Recheck the tail
+  // after reads because another registration may have moved it.
+  private async rememberSession(id: string, cwd: string, runtime?: Runtime): Promise<void> {
+    const checked = new Set<string>();
+    const retained = new Set<string>();
+    for (;;) {
+      const candidates = this.store.ids().filter((value) => value !== id)
+        .slice(SessionStore.MAX_SESSIONS - 1).filter((value) => !checked.has(value));
+      if (!candidates.length) {
+        break;
+      }
+      for (const candidate of candidates) {
+        checked.add(candidate);
+        if (this.runtimes.has(candidate) || this.starting.has(candidate)
+          || this.surfaces?.owner(candidate) || this.store.hasPendingQueue(candidate)) {
+          retained.add(candidate);
+          continue;
+        }
+        try {
+          const state = await this.messageStore.load(candidate);
+          if (state.queued.length) {
+            retained.add(candidate);
+            this.store.setQueuePending(candidate, true);
+          }
+        } catch (err) {
+          retained.add(candidate);
+          this.reportMessageRestoreFailure(candidate, err);
+        }
+      }
+    }
+    if (runtime && (this.closed || this.runtimes.get(id) !== runtime)) {
+      return;
+    }
+    for (const live of this.runtimes.keys()) retained.add(live);
+    for (const live of this.starting) retained.add(live);
+    for (const live of this.elsewhere()) retained.add(live);
+    for (const evicted of this.store.add(id, cwd, retained)) {
       if (!this.runtimes.has(evicted) && !this.surfaces?.owner(evicted)) {
         void this.dropStaged(evicted);
         void this.messageStore.remove(evicted);
@@ -4905,7 +4958,7 @@ export class ChatController implements AcpHost {
   // session/prompt while the first runs, and both replies wait for the same
   // completion. `rt.turn` is a barrier over every prompt that joined the turn,
   // and only the newest barrier owns its completion (see adoptTurn).
-  private async runPrompt(rt: Runtime, message: PendingMessage): Promise<void> {
+  private async runPrompt(rt: Runtime, message: PendingMessage, queued?: QueuedDispatch): Promise<void> {
     // Last stop before the wire. Attaching already refuses an image the model
     // cannot read, but the model can be changed after that (or while the message
     // sat in the queue), and an image block the model cannot decode does not fail
@@ -4954,20 +5007,46 @@ export class ChatController implements AcpHost {
           if (at !== -1) {
             rt.messages.sent.splice(at, 1);
           }
-          await this.saveRuntimeMessages(rt);
         }
-        if (!rt.owner.messageStore.owns(rt.id, rt.messages)) {
-          throw error;
-        }
-        await rt.owner.store.queuedBackToDrafts([{ id: rt.id, text: message.text }]);
-        // Read the owner again after the awaits: a surface move retargets who
-        // restores the staged files, and only while that owner still holds
-        // this state is the draft posted.
-        const owner = rt.owner;
-        if (owner.messageStore.owns(rt.id, rt.messages)) {
-          owner.restoreStaged(rt.id, message.attachments);
-          if (owner.activeId === rt.id) {
-            owner.postDraft();
+        if (queued) {
+          // A queued message goes back into the queue it left, in dispatch
+          // order and paused so the drain cannot cascade the rest into the
+          // draft. No await sits between the owns check and these mutations,
+          // and pendingChanged is the one save.
+          queued.failed = true;
+          const waiting = new Map(rt.messages.queued.map((entry) => [entry.id, entry]));
+          const failed = (rt.queuedDispatches || []).flatMap((entry) => {
+            if (!entry.failed) {
+              return [];
+            }
+            if (entry === queued) {
+              return [message];
+            }
+            const recovered = waiting.get(entry.message.id);
+            return recovered ? [recovered] : [];
+          });
+          const ids = new Set(failed.map((entry) => entry.id));
+          rt.messages.queued = [...failed, ...rt.messages.queued.filter((entry) => !ids.has(entry.id))];
+          rt.messages.paused = true;
+          rt.runNextId = undefined;
+          rt.owner.pendingChanged(rt.id);
+        } else {
+          if (sentRecord) {
+            await this.saveRuntimeMessages(rt);
+          }
+          if (!rt.owner.messageStore.owns(rt.id, rt.messages)) {
+            throw error;
+          }
+          await rt.owner.store.queuedBackToDrafts([{ id: rt.id, text: message.text }]);
+          // Read the owner again after the awaits: a surface move retargets who
+          // restores the staged files, and only while that owner still holds
+          // this state is the draft posted.
+          const owner = rt.owner;
+          if (owner.messageStore.owns(rt.id, rt.messages)) {
+            owner.restoreStaged(rt.id, message.attachments);
+            if (owner.activeId === rt.id) {
+              owner.postDraft();
+            }
           }
         }
       }
@@ -4997,6 +5076,9 @@ export class ChatController implements AcpHost {
     }
     rt.cancelling = false;
     this.setRuntimeBusy(rt, false);
+    // The turn barrier this queue belonged to has settled: its dispatch
+    // records go with it, so a later turn starts its own list.
+    rt.queuedDispatches = undefined;
     // Send the next queued message first: the revert-head probe below is an
     // extra round trip on the same channel, and awaiting it here is what used
     // to leave a visible gap before a queued message went out.
@@ -5170,8 +5252,16 @@ export class ChatController implements AcpHost {
       // is backgrounded is buffered and replays (its user bubble shows on
       // return), instead of being dropped like the old active only post. What
       // was attached goes with it, as it does for a message sent straight away.
+      const dispatch: QueuedDispatch = { message, failed: false };
+      const dispatches = (rt.queuedDispatches ??= []);
+      const previous = dispatches.findIndex((entry) => entry.message.id === message.id);
+      if (previous === -1) {
+        dispatches.push(dispatch);
+      } else {
+        dispatches[previous] = dispatch;
+      }
       this.emit(rt, { type: "userMessage", text: message.text, attachments: this.shownAttachments(message.attachments), clientMessageId: message.id });
-      void this.runPrompt(rt, message);
+      void this.runPrompt(rt, message, dispatch);
     }
   }
 
@@ -5349,6 +5439,7 @@ export class ChatController implements AcpHost {
   // see it: a queue that cannot be saved is the user's own writing, and
   // silently dropping it is the one outcome worse than an error message.
   private saveMessages(id: string): Promise<void> {
+    this.store.setQueuePending(id, this.messageStore.get(id).queued.length > 0);
     return this.messageStore.save(id).catch((err) => {
       const message = err instanceof Error ? err.message : String(err);
       this.log(`[messages-save-failed] ${id}: ${message}`);
@@ -5739,7 +5830,7 @@ export class ChatController implements AcpHost {
       // came from is still the one on screen and nothing navigated meanwhile: an
       // offscreen result is remembered for the session list instead of pulling
       // the user away from what they are reading.
-      this.rememberSession(forked, rt.cwd);
+      await this.rememberSession(forked, rt.cwd);
       if (this.activeId === rt.id && this.navigationVersion === navigationVersion) {
         await this.loadSession(forked);
         await this.refreshSessionsIfVisible(true);

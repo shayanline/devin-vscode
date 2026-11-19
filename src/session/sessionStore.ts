@@ -36,11 +36,28 @@ export class SessionStore {
   // The journal uses the same ceiling: an oversized entry is skipped, never
   // truncated into something reusable.
   static readonly MAX_DRAFT = 100000;
+  static readonly MAX_SESSIONS = 200;
 
   constructor(
     private readonly state: vscode.Memento,
     private readonly promptHistoryEnabled: () => boolean = () => true
   ) {}
+
+  // Only the owning save clears a queue flag. A cold read cannot invalidate
+  // another surface's unsaved recovery.
+  private readonly pendingQueues = new Set<string>();
+
+  setQueuePending(id: string, pending: boolean): void {
+    if (pending) {
+      this.pendingQueues.add(id);
+    } else {
+      this.pendingQueues.delete(id);
+    }
+  }
+
+  hasPendingQueue(id: string): boolean {
+    return this.pendingQueues.has(id);
+  }
 
   // Sessions whose turn was still in flight when the window reloaded or the
   // extension shut down. A `devin acp` agent cannot outlive its extension host
@@ -212,20 +229,23 @@ export class SessionStore {
     void this.state.update(SessionStore.CWDS_KEY, map);
   }
 
-  add(id: string, cwd?: string): string[] {
+  add(id: string, cwd?: string, retained: ReadonlySet<string> = new Set()): string[] {
     if (!id) {
       return [];
     }
     const ids = this.ids().filter((x) => x !== id);
     ids.unshift(id);
-    const capped = ids.slice(0, 200);
-    const evicted = ids.slice(200);
+    const capped = ids.filter((value, index) => index < SessionStore.MAX_SESSIONS
+      || retained.has(value) || this.pendingQueues.has(value));
+    const keep = new Set(capped);
+    const evicted = ids.filter((value) => !keep.has(value));
     void this.state.update(SessionStore.IDS_KEY, capped);
     if (cwd) {
       this.setCwd(id, cwd);
     }
     // Keep the cwd and draft maps bounded to the capped id list, so they don't
-    // grow without limit as old sessions fall off the end. (Titles are
+    // grow without limit as old sessions fall off the end. Sessions retained
+    // past the cap keep their metadata for the same reason. (Titles are
     // deliberately left untouched: they are also cached for external sessions
     // that are not in the tracked id list, and are used to fill names in the
     // list.)
@@ -365,6 +385,7 @@ export class SessionStore {
   }
 
   remove(id: string): void {
+    this.pendingQueues.delete(id);
     const ids = this.ids().filter((x) => x !== id);
     void this.state.update(SessionStore.IDS_KEY, ids);
     this.pruneSessionList(ids);

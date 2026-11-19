@@ -617,37 +617,64 @@ test("a message written while a chat wakes is sent once it is awake", posixOnly,
 test("a message goes to the chat it was written in, not the one opened while it woke", posixOnly, async () => {
   // The same shape as every other bug here: the send waits for the wake, and the code
   // after the await asked what was on screen by then. Writing into a chat, then opening
-  // another while it wakes, used to send the message to that other chat's agent.
+  // another while it wakes, used to send the message to that other chat's agent. The
+  // wake is held on its load gate rather than a guessed delay, so the send and the
+  // navigation land inside it every time.
   const h = createChat({ promptDelay: 150 });
-  await h.ready();
-  const woken = await h.startChat("the chat with the message");
-  await h.until(() => prompts(h).length === 1, 6000);
-  h.answerWith("Terminate");
-  h.send({ type: "terminateSession", woken, id: woken });
-  await h.until(() => h.liveChats() === 0, 6000);
-  h.answerWith(undefined);
+  try {
+    await h.ready();
+    const woken = await h.startChat("the chat with the message");
+    assert.ok(await h.until(() => prompts(h).length === 1, 6000), "the first chat's prompt went out");
+    h.answerWith("Terminate");
+    h.send({ type: "terminateSession", id: woken });
+    assert.ok(await h.until(() => h.liveChats() === 0, 6000), "the first chat was terminated");
+    h.answerWith(undefined);
 
-  const other = await h.startChat("the chat opened instead");
-  await h.until(() => prompts(h).length === 2, 6000);
-  h.send({ type: "leaveToList" });
-  await h.settle(100);
+    const other = await h.startChat("the chat opened instead");
+    assert.ok(await h.until(() => prompts(h).length === 2, 6000), "the second chat's prompt went out");
+    h.send({ type: "leaveToList" });
+    assert.ok(await h.until(() => h.activeId() === undefined, 8000), "the list is showing");
 
-  // Wake the first, write into it, then open the other one while it is still waking.
-  h.setDelays({ loadDelay: 1200 });
-  h.send({ type: "wakeSession", id: woken });
-  await h.settle(250);
-  h.send({ type: "send", text: "for the chat I wrote it in" });
-  await h.settle(50);
-  h.send({ type: "activateSession", id: other });
-  await h.until(() => h.activeId() === other, 4000);
-  await h.settle(2000);
-
-  const carried = h.agentSaw("session/prompt").filter((m) =>
-    (m.params.prompt || []).some((b) => b.text === "for the chat I wrote it in")
-  );
-  assert.strictEqual(carried.length, 1, "it was sent once");
-  assert.strictEqual(carried[0].params.sessionId, woken, "to the chat it was written in");
-  await h.dispose();
+    // Wake the first, write into it, then open the other one while it is still waking.
+    const realLoad = h.controller.loadWithTakeover.bind(h.controller);
+    let releaseWake;
+    let wakeStarted = false;
+    const wakeGate = new Promise((resolve) => { releaseWake = resolve; });
+    h.controller.loadWithTakeover = async (...args) => {
+      if (args[1] === woken) {
+        wakeStarted = true;
+        await wakeGate;
+      }
+      return realLoad(...args);
+    };
+    const realSend = h.controller.handleSend.bind(h.controller);
+    let captured = false;
+    h.controller.handleSend = (...args) => {
+      const pending = realSend(...args);
+      if (args[0] === "for the chat I wrote it in") captured = true;
+      return pending;
+    };
+    try {
+      h.send({ type: "wakeSession", id: woken });
+      assert.ok(await h.until(() => wakeStarted, 8000), "the wake reached its load");
+      h.send({ type: "send", text: "for the chat I wrote it in" });
+      assert.ok(await h.until(() => captured, 8000), "the send was dispatched while the wake was held");
+      h.send({ type: "activateSession", id: other });
+      assert.ok(await h.until(() => h.activeId() === other, 8000), "the other chat was opened");
+      releaseWake();
+      const carried = () => h.agentSaw("session/prompt").filter((m) =>
+        (m.params.prompt || []).some((b) => b.text === "for the chat I wrote it in"));
+      assert.ok(await h.until(() => carried().length > 0, 10000), "the message was sent");
+      assert.strictEqual(carried().length, 1, "it was sent once");
+      assert.strictEqual(carried()[0].params.sessionId, woken, "to the chat it was written in");
+    } finally {
+      releaseWake();
+      delete h.controller.loadWithTakeover;
+      delete h.controller.handleSend;
+    }
+  } finally {
+    await h.dispose();
+  }
 });
 
 test("a chat announcing its mode while it starts does not set the panel's", posixOnly, async () => {
@@ -5914,5 +5941,535 @@ test("message persistence replay uses stable prompt ids after a history cut", po
     await h.dispose();
   }
 });
+
+
+for (const variant of ["cold", "warm"]) {
+  test(`message persistence history eviction preserves a saved queue (${variant})`, posixOnly, async () => {
+    const h = createChat();
+    try {
+      await h.ready();
+      await h.controller.refreshSessions(true);
+      const id = "queue-past-the-cap";
+      // Added first, so it sits at the tail the cap drops first.
+      h.store.add(id, h.cwd);
+      for (let i = 0; i < 199; i++) h.store.add(`cap-old-${i}`, h.cwd);
+      const queued = {
+        id: "queued-row", kind: "queue", text: "saved queued work",
+        implicit: [IMPLICIT_NOTE],
+        attachments: [{
+          id: "kept-attachment", label: "kept.png", type: "image",
+          block: { type: "image", mimeType: "image/png", data: PNG }
+        }]
+      };
+      const snapshot = JSON.stringify({ version: 1, queued: [queued], sent: [] });
+      const file = messagesFile(h.storage, id);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, snapshot);
+      h.store.setDraft(id, "composer words kept");
+      h.store.rememberPrompt(id, "the prompt that queued it");
+      if (variant === "warm") {
+        const state = await h.controller.messageStore.load(id);
+        assert.strictEqual(state.queued.length, 1, "setup: the queue was hydrated");
+        assert.strictEqual(state.paused, true, "setup: the recovered queue is paused");
+      }
+
+      await h.controller.rememberSession("new-session", h.cwd);
+      await h.controller.messageStore.flush();
+
+      assert.ok(h.store.has(id), "the queued session stayed tracked past the cap");
+      assert.ok(h.store.has("new-session"), "the new session registered");
+      assert.strictEqual(h.store.cwds()[id], h.cwd, "its cwd survived");
+      assert.strictEqual(h.store.draft(id), "composer words kept", "its draft survived");
+      assert.ok(h.store.promptHistory(h.cwd).includes("the prompt that queued it"),
+        "its prompt history survived");
+      assert.strictEqual(fs.readFileSync(file, "utf8"), snapshot, "the snapshot is byte for byte intact");
+      assert.strictEqual(h.store.hasPendingQueue(id), true, "the pending flag protects it from here on");
+      const state = await h.controller.messageStore.load(id);
+      assert.strictEqual(state.queued.length, 1);
+      assert.strictEqual(state.queued[0].id, "queued-row");
+      assert.strictEqual(state.queued[0].kind, "queue");
+      assert.deepStrictEqual(state.queued[0].implicit, [IMPLICIT_NOTE]);
+      assert.strictEqual(state.queued[0].attachments[0].block.data, PNG, "the attachment kept its bytes");
+      assert.strictEqual(state.paused, true, "and it is still paused");
+
+      await h.controller.shutdown();
+      await h.dispose();
+
+      const carried = Object.fromEntries(h.state.__map);
+      delete carried["devin.viewingSession.v1"];
+      delete carried["devin.activeSession.v1"];
+      const next = createChat({ storage: h.storage, cwd: h.cwd, state: carried });
+      try {
+        await next.ready();
+        assert.ok(next.store.has(id), "the session is still tracked after a reload");
+        await next.controller.refreshSessions(true);
+        assert.ok(await next.until(() => (next.last("sessions")?.sessions || []).some((s) => s.id === id), 8000),
+          "and it is discoverable in the session list");
+        next.send({ type: "loadSession", id });
+        assert.ok(await next.until(() => {
+          const q = next.last("queued");
+          return next.activeId() === id && q && q.paused === true && (q.items || []).length === 1;
+        }, 10000), "the saved queue loaded paused");
+        const rt = next.controller.runtimes.get(id);
+        const stored = rt.messages.queued;
+        assert.strictEqual(stored.length, 1);
+        assert.strictEqual(stored[0].id, "queued-row");
+        assert.strictEqual(stored[0].kind, "queue");
+        assert.strictEqual(stored[0].text, "saved queued work");
+        assert.deepStrictEqual(stored[0].implicit, [IMPLICIT_NOTE]);
+        assert.strictEqual(stored[0].attachments[0].label, "kept.png");
+        assert.strictEqual(stored[0].attachments[0].block.data, PNG);
+        assert.strictEqual(next.store.draft(id), "composer words kept", "the draft came back too");
+        assert.ok(next.store.promptHistory(h.cwd).includes("the prompt that queued it"),
+          "and so did the prompt history");
+      } finally {
+        await next.dispose();
+      }
+    } finally {
+      await h.dispose();
+    }
+  });
+}
+
+test("message persistence history eviction preserves an unreadable snapshot", posixOnly, async () => {
+  const h = createChat();
+  try {
+    await h.ready();
+    await h.controller.refreshSessions(true);
+    const id = "corrupt-past-the-cap";
+    h.store.add(id, h.cwd);
+    for (let i = 0; i < 199; i++) h.store.add(`cap-old-${i}`, h.cwd);
+    const file = messagesFile(h.storage, id);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const raw = "{not valid json";
+    fs.writeFileSync(file, raw);
+
+    await h.controller.rememberSession("new-session", h.cwd);
+    await h.controller.messageStore.flush();
+
+    assert.ok(h.store.has(id), "an unreadable snapshot is retained rather than evicted");
+    assert.strictEqual(fs.readFileSync(file, "utf8"), raw, "the corrupt file is left byte for byte");
+    assert.ok(h.store.has("new-session"), "the new session registered");
+    assert.ok(h.postsOf("error").some((m) => /saved messages and attachments/.test(m.text || "")),
+      "the restore failure was reported");
+    assert.ok(h.logs.some((line) => line.includes(`[messages-restore-failed] ${id}`)),
+      "and written to the log");
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("message persistence discovery isolates a corrupt snapshot", posixOnly, async () => {
+  const h = createChat();
+  try {
+    await h.ready();
+    const bad = "discovery-corrupt";
+    const healthy = "discovery-empty";
+    h.store.add(bad, h.cwd);
+    h.store.add(healthy, h.cwd);
+    const badFile = messagesFile(h.storage, bad);
+    fs.mkdirSync(path.dirname(badFile), { recursive: true });
+    const raw = "{not valid json";
+    fs.writeFileSync(badFile, raw);
+    const healthyFile = seedMessageFile(h.storage, healthy);
+    const cached = { id: "cached-row", short_id: "cached-row", title: "Cached chat", working_directory: h.cwd, last_activity_at: 1 };
+    const fresh = { id: "fresh-row", short_id: "fresh-row", title: "Fresh chat", working_directory: h.cwd, last_activity_at: 2 };
+    h.controller.sessionsCache = { at: 0, sessions: [cached] };
+    let listed = false;
+    h.controller.listOverProtocol = () => {
+      listed = true;
+      return Promise.resolve({ sessions: [fresh], prunedIds: [bad, healthy] });
+    };
+
+    await h.controller.refreshSessions(true);
+    await h.controller.messageStore.flush();
+
+    assert.ok(listed, "the fresh listing was actually fetched");
+    const shown = (h.last("sessions")?.sessions || []).map((s) => s.id);
+    assert.ok(shown.includes("fresh-row"), "the fresh row is shown");
+    assert.ok(!shown.includes("cached-row"), "the stale cache row did not answer for it");
+    assert.ok(h.store.has(bad), "the corrupt snapshot's session stayed tracked");
+    assert.strictEqual(fs.readFileSync(badFile, "utf8"), raw, "the corrupt file is preserved");
+    assert.ok(h.postsOf("error").some((m) => /saved messages and attachments/.test(m.text || "")),
+      "the unreadable snapshot was reported");
+    assert.strictEqual(h.store.has(healthy), false, "the healthy empty snapshot was pruned");
+    assert.strictEqual(fs.existsSync(healthyFile), false, "and its file removed");
+    assert.deepStrictEqual((h.controller.sessionsCache?.sessions || []).map((s) => s.id), ["fresh-row"],
+      "the cache holds the fresh listing");
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("message persistence queued not sent failures retain structured work on reload", posixOnly, async () => {
+  const h = createChat({ promptGate: true });
+  try {
+    await h.ready();
+    const id = await h.startChat("the running turn");
+    assert.ok(await h.until(() => h.postsOf("busy").some((m) => m.value), 8000), "the turn is running");
+    h.controller.buildImplicitBlocks = () => [IMPLICIT_NOTE];
+    const rt = h.controller.runtimes.get(id);
+
+    const texts = ["first queued task", "second queued task", "third queued task"];
+    const names = ["q1.png", "q2.png", "q3.png"];
+    const datas = [IMG_A, IMG_B, IMG_A];
+    const stagedIds = [];
+    for (let i = 0; i < texts.length; i++) {
+      h.send({ type: "attachImage", name: names[i], mime: "image/png", data: datas[i] });
+      assert.ok(await h.until(() => ((h.last("attachments") || {}).items || []).length === 1, 8000),
+        `attachment ${i} staged`);
+      stagedIds.push(h.last("attachments").items[0].id);
+      h.send({ type: "send", text: texts[i], kind: "queue" });
+      assert.ok(await h.until(() => (h.last("queued") || { items: [] }).items.length === i + 1, 8000),
+        `queued message ${i} listed`);
+    }
+    const queuedSnapshot = JSON.parse(JSON.stringify(rt.messages.queued));
+    assert.strictEqual(queuedSnapshot.length, 3);
+
+    // Composer state of its own, saved after the queue was written.
+    h.send({ type: "draft", id, text: "composer words, not queued" });
+    assert.ok(await h.until(() => h.store.draft(id) === "composer words, not queued", 8000));
+    h.send({ type: "attachImage", name: "composer.png", mime: "image/png", data: IMG_B });
+    assert.ok(await h.until(() => ((h.last("attachments") || {}).items || []).length === 1, 8000),
+      "the composer image staged");
+    const composerStagedId = h.last("attachments").items[0].id;
+
+    const realPrompt = rt.client.prompt.bind(rt.client);
+    let queuedCalls = 0;
+    rt.client.prompt = () => {
+      queuedCalls++;
+      return Promise.reject(new h.AcpRequestNotSentError("ACP connection is closed"));
+    };
+    try {
+      h.releasePrompt(id, 1);
+      assert.ok(await h.until(() => rt.messages.paused === true && rt.busy === false, 10000),
+        "the unsent queue settled paused and idle");
+      assert.strictEqual(queuedCalls, 1, "only the first queued dispatch was attempted");
+      assert.strictEqual(h.agentSaw("session/prompt").length, 1, "only the original prompt reached the wire");
+
+      const restored = rt.messages.queued;
+      assert.deepStrictEqual(restored.map((q) => q.id), queuedSnapshot.map((q) => q.id),
+        "the same rows came back in order");
+      assert.deepStrictEqual(restored.map((q) => q.kind), ["queue", "queue", "queue"]);
+      assert.deepStrictEqual(restored.map((q) => q.text), texts);
+      assert.deepStrictEqual(restored.map((q) => q.implicit), [[IMPLICIT_NOTE], [IMPLICIT_NOTE], [IMPLICIT_NOTE]],
+        "each kept its implicit context");
+      restored.forEach((q, i) => {
+        assert.strictEqual(q.attachments.length, 1, `row ${i} kept its attachment`);
+        assert.strictEqual(q.attachments[0].id, stagedIds[i], `row ${i} kept its staged id`);
+        assert.strictEqual(q.attachments[0].label, names[i]);
+        assert.strictEqual(q.attachments[0].block.data, datas[i], `row ${i} kept its image bytes`);
+      });
+      assert.strictEqual(h.store.draft(id), "composer words, not queued",
+        "the independent draft was never concatenated into");
+      const stagedNow = (h.last("attachments") || {}).items || [];
+      assert.strictEqual(stagedNow.length, 1, "the composer image is still staged");
+      assert.strictEqual(stagedNow[0].id, composerStagedId);
+      assert.strictEqual(rt.messages.sent.length, 0, "the failed dispatch's manifest record is gone");
+
+      await h.controller.messageStore.flush();
+      await h.controller.shutdown();
+      await h.dispose();
+
+      const carried = Object.fromEntries(h.state.__map);
+      delete carried["devin.viewingSession.v1"];
+      delete carried["devin.activeSession.v1"];
+      const next = createChat({ storage: h.storage, cwd: h.cwd, state: carried, promptGate: true });
+      try {
+        await next.ready();
+        next.send({ type: "loadSession", id });
+        assert.ok(await next.until(() => {
+          const q = next.last("queued");
+          return next.activeId() === id && q && q.paused === true && (q.items || []).length === 3;
+        }, 10000), "the paused queue came back after the reload");
+        const rt2 = next.controller.runtimes.get(id);
+        const stored = rt2.messages.queued;
+        assert.deepStrictEqual(stored.map((q) => q.id), queuedSnapshot.map((q) => q.id));
+        assert.deepStrictEqual(stored.map((q) => q.kind), ["queue", "queue", "queue"]);
+        assert.deepStrictEqual(stored.map((q) => q.text), texts);
+        assert.deepStrictEqual(stored.map((q) => q.implicit), [[IMPLICIT_NOTE], [IMPLICIT_NOTE], [IMPLICIT_NOTE]]);
+        stored.forEach((q, i) => {
+          assert.strictEqual(q.attachments.length, 1);
+          assert.strictEqual(q.attachments[0].label, names[i]);
+          assert.strictEqual(q.attachments[0].block.data, datas[i]);
+        });
+        assert.strictEqual(next.store.draft(id), "composer words, not queued",
+          "the draft survived the reload untouched");
+        assert.ok(await next.until(() => (next.last("attachments")?.items || []).some((a) => a.id === composerStagedId), 8000),
+          "the independent composer image came back after reload");
+        const composerFiles = next.controller.staged.get(id) || [];
+        assert.strictEqual(composerFiles.length, 1);
+        assert.strictEqual(composerFiles[0].id, composerStagedId);
+        assert.strictEqual(composerFiles[0].label, "composer.png");
+        assert.strictEqual(composerFiles[0].block.data, IMG_B);
+        assert.strictEqual(next.agentSaw("session/prompt").length, 0,
+          "the restored queue sent nothing by itself");
+      } finally {
+        await next.dispose();
+      }
+    } finally {
+      rt.client.prompt = realPrompt;
+    }
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("message persistence concurrent unsent steers recover in dispatch order", posixOnly, async () => {
+  const h = createChat({ midTurnPrompts: true, promptGate: true });
+  try {
+    await h.ready();
+    const id = await h.startChat("the running turn");
+    assert.ok(await h.until(() => h.postsOf("busy").some((m) => m.value), 8000), "the turn is running");
+    h.controller.buildImplicitBlocks = () => [IMPLICIT_NOTE];
+    const rt = h.controller.runtimes.get(id);
+    const realPrompt = rt.client.prompt.bind(rt.client);
+    const rejecters = [];
+    rt.client.prompt = () => new Promise((_, reject) => rejecters.push(reject));
+    try {
+      const texts = ["steer one", "steer two", "steer three"];
+      const names = ["s1.png", "s2.png", "s3.png"];
+      const datas = [IMG_A, IMG_B, IMG_A];
+      const stagedIds = [];
+      for (let i = 0; i < texts.length; i++) {
+        h.send({ type: "attachImage", name: names[i], mime: "image/png", data: datas[i] });
+        assert.ok(await h.until(() => ((h.last("attachments") || {}).items || []).length === 1, 8000),
+          `attachment ${i} staged`);
+        stagedIds.push(h.last("attachments").items[0].id);
+        h.send({ type: "send", text: texts[i], kind: "steer" });
+      }
+      assert.ok(await h.until(() => rejecters.length === 3, 8000),
+        "all three steers reached the stub in dispatch order");
+      const echoIds = h.postsOf("userMessage")
+        .filter((m) => texts.includes(m.text))
+        .map((m) => m.clientMessageId);
+      assert.deepStrictEqual(echoIds.length, 3, "each steer echoed once");
+      const dispatchIds = rt.queuedDispatches.map((d) => d.message.id);
+      assert.deepStrictEqual(dispatchIds, echoIds, "the dispatch records match the echoes");
+
+      h.send({ type: "draft", id, text: "draft while steers fly" });
+      assert.ok(await h.until(() => h.store.draft(id) === "draft while steers fly", 8000));
+
+      const notSent = () => new h.AcpRequestNotSentError("ACP connection is closed");
+      // Out of order on purpose: the queue must still come back in dispatch order.
+      rejecters[2](notSent());
+      assert.ok(await h.until(() => rt.messages.queued.length === 1, 8000), "the third steer recovered first");
+      rejecters[0](notSent());
+      assert.ok(await h.until(() => rt.messages.queued.length === 2, 8000), "then the first");
+      rejecters[1](notSent());
+      assert.ok(await h.until(() => rt.messages.queued.length === 3 && rt.messages.paused === true, 8000),
+        "then the second, leaving a paused queue of three");
+
+      h.releasePrompt(id, 1);
+      assert.ok(await h.until(() => rt.busy === false, 10000), "the turn settled");
+
+      const q = rt.messages.queued;
+      assert.deepStrictEqual(q.map((x) => x.id), dispatchIds, "dispatch order, not rejection order");
+      assert.deepStrictEqual(q.map((x) => x.kind), ["steer", "steer", "steer"]);
+      assert.deepStrictEqual(q.map((x) => x.text), texts);
+      assert.deepStrictEqual(q.map((x) => x.implicit), [[IMPLICIT_NOTE], [IMPLICIT_NOTE], [IMPLICIT_NOTE]]);
+      q.forEach((x, i) => {
+        assert.strictEqual(x.attachments.length, 1);
+        assert.strictEqual(x.attachments[0].id, stagedIds[i]);
+        assert.strictEqual(x.attachments[0].label, names[i]);
+        assert.strictEqual(x.attachments[0].block.data, datas[i]);
+      });
+      assert.strictEqual(h.store.draft(id), "draft while steers fly", "the draft was untouched");
+      assert.strictEqual(rt.messages.sent.length, 0, "every rejected request's manifest record is gone");
+      assert.strictEqual(h.agentSaw("session/prompt").length, 1,
+        "the original prompt only: no automatic retries reached the wire");
+      await h.controller.messageStore.flush();
+      const onDisk = JSON.parse(fs.readFileSync(messagesFile(h.storage, id), "utf8"));
+      assert.strictEqual(onDisk.sent.length, 0, "and none survived on disk");
+      assert.strictEqual(onDisk.queued.length, 3, "the paused queue is what the file holds");
+      assert.strictEqual(onDisk.queued[0].text, texts[0]);
+    } finally {
+      for (const reject of rejecters) {
+        reject(new Error("test cleanup"));
+      }
+      rt.client.prompt = realPrompt;
+      h.releasePrompt(id, 1);
+    }
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("message persistence a late queued not sent failure cannot resurrect a deleted session", posixOnly, async () => {
+  const h = createChat({ promptGate: true });
+  try {
+    await h.ready();
+    const id = await h.startChat("the running turn");
+    assert.ok(await h.until(() => h.postsOf("busy").some((m) => m.value), 8000), "the turn is running");
+    h.send({ type: "attachImage", name: "queued.png", mime: "image/png", data: IMG_A });
+    assert.ok(await h.until(() => ((h.last("attachments") || {}).items || []).length === 1, 8000));
+    h.send({ type: "send", text: "queued then deleted", kind: "queue" });
+    assert.ok(await h.until(() => (h.last("queued") || { items: [] }).items.length === 1, 8000));
+    await h.controller.messageStore.flush();
+    const file = messagesFile(h.storage, id);
+    assert.ok(fs.existsSync(file), "the queued snapshot is on disk before the delete");
+
+    const rt = h.controller.runtimes.get(id);
+    const realPrompt = rt.client.prompt.bind(rt.client);
+    let rejectQueued;
+    let queuedStarted = false;
+    rt.client.prompt = () => {
+      queuedStarted = true;
+      return new Promise((_, reject) => { rejectQueued = reject; });
+    };
+    try {
+      h.releasePrompt(id, 1);
+      assert.ok(await h.until(() => queuedStarted, 8000), "the queued dispatch reached the stub");
+      const barrier = rt.turn;
+      h.answerWith("Delete");
+      h.send({ type: "deleteSession", id, title: "queued then deleted" });
+      assert.ok(await h.until(() => !h.store.has(id) && !h.controller.runtimes.has(id), 8000),
+        "the session was deleted while its prompt was in flight");
+      await h.controller.messageStore.flush();
+      assert.ok(!fs.existsSync(file), "the delete removed the snapshot");
+
+      rejectQueued(new h.AcpRequestNotSentError("ACP connection is closed"));
+      await barrier.catch(() => {});
+      await h.controller.messageStore.flush();
+
+      assert.ok(!fs.existsSync(file), "the late failure did not recreate the snapshot");
+      assert.strictEqual(h.store.draft(id), "", "and no draft came back");
+      assert.strictEqual(h.controller.staged.has(id), false, "and no staged files were restored");
+      assert.strictEqual(h.store.hasPendingQueue(id), false, "and no pending flag survived");
+    } finally {
+      rejectQueued?.(new Error("test cleanup"));
+      rt.client.prompt = realPrompt;
+    }
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("message persistence a registration that outlives its runtime does not resurrect it", posixOnly, async () => {
+  const h = createChat({ promptDelay: 150 });
+  try {
+    await h.ready();
+    const id = await h.startChat("the live chat");
+    assert.ok(await h.until(() => h.postsOf("busy").some((m) => m.value === false), 8000),
+      "the opening turn ended");
+    const rt = h.controller.runtimes.get(id);
+    // A tracked list past the cap gives the registration a tail to scan, with
+    // the last entry's snapshot read held open below.
+    const olds = [];
+    for (let i = 0; i < 200; i++) olds.push(`register-old-${i}`);
+    await h.state.update("devin.sessionIds.v1", [id, ...olds]);
+    h.store.setDraft(id, "draft that must not return");
+    await h.controller.messageStore.save(id);
+    await h.controller.messageStore.flush();
+    const file = messagesFile(h.storage, id);
+    assert.ok(fs.existsSync(file), "the live session's snapshot is on disk");
+
+    const realLoad = h.controller.messageStore.load.bind(h.controller.messageStore);
+    let releaseRead;
+    const gate = new Promise((resolve) => { releaseRead = resolve; });
+    let readHit = false;
+    h.controller.messageStore.load = (sid) => {
+      if (sid === "register-old-199") {
+        readHit = true;
+        return gate.then(() => realLoad(sid));
+      }
+      return realLoad(sid);
+    };
+    try {
+      const pending = h.controller.rememberSession(id, h.cwd, rt);
+      assert.ok(await h.until(() => readHit, 8000), "the tail scan reached the gated read");
+      h.answerWith("Delete");
+      h.send({ type: "deleteSession", id, title: "the live chat" });
+      assert.ok(await h.until(() => !h.store.has(id) && !h.controller.runtimes.has(id), 8000),
+        "the session was deleted while the read was held");
+      await h.controller.messageStore.flush();
+      releaseRead();
+      await pending;
+      await h.controller.messageStore.flush();
+
+      assert.strictEqual(h.store.has(id), false, "the deleted session was not re-registered");
+      assert.strictEqual(h.store.draft(id), "", "and its draft stayed gone");
+      assert.ok(!fs.existsSync(file), "and no snapshot was recreated");
+      assert.strictEqual(h.store.hasPendingQueue(id), false, "and no pending flag survived");
+    } finally {
+      releaseRead?.();
+      delete h.controller.messageStore.load;
+    }
+  } finally {
+    await h.dispose();
+  }
+});
+
+
+for (const action of ["remove", "edit", "retry"]) {
+  test(`message persistence concurrent failure respects a recovered row ${action}`, posixOnly, async () => {
+    const h = createChat({ midTurnPrompts: true, promptGate: true });
+    try {
+      await h.ready();
+      const id = await h.startChat("the original turn");
+      const rt = h.controller.runtimes.get(id);
+      const realPrompt = rt.client.prompt.bind(rt.client);
+      const rejects = [];
+      rt.client.prompt = () => new Promise((_, reject) => rejects.push(reject));
+      try {
+        for (const [text, name] of [["recover A", "a.png"], ["recover B", "b.png"]]) {
+          h.send({ type: "attachImage", name, mime: "image/png", data: PNG });
+          assert.ok(await h.until(() => (h.last("attachments")?.items || []).length === 1, 8000));
+          h.send({ type: "send", text, kind: "steer" });
+        }
+        assert.ok(await h.until(() => rejects.length === 2, 8000));
+        const ids = h.postsOf("userMessage").filter((m) => ["recover A", "recover B"].includes(m.text))
+          .map((m) => m.clientMessageId);
+        assert.strictEqual(ids.length, 2);
+        h.store.setDraft(id, "independent composer words");
+        const notSent = () => new h.AcpRequestNotSentError("ACP connection is closed");
+        rejects[0](notSent());
+        assert.ok(await h.until(() => rt.messages.paused && rt.messages.queued.length === 1, 8000));
+        assert.strictEqual(rt.messages.queued[0].id, ids[0]);
+        if (action === "remove") {
+          h.send({ type: "removeQueued", id: ids[0] });
+          assert.ok(await h.until(() => rt.messages.queued.length === 0, 8000));
+        } else if (action === "edit") {
+          h.send({ type: "queueEditing", id: ids[0] });
+          assert.ok(await h.until(() => (h.last("attachments")?.items || []).some((a) => a.label === "a.png"), 8000));
+          h.send({ type: "editQueued", id: ids[0], text: "edited recovery A", kind: "steer" });
+          h.send({ type: "queueEditing", id: null });
+          assert.ok(await h.until(() => rt.messages.queued[0]?.text === "edited recovery A", 8000));
+        } else {
+          h.send({ type: "resumeQueue" });
+          assert.ok(await h.until(() => rejects.length === 3, 8000), "the explicit retry reached the stub");
+          rejects[2](notSent());
+          assert.ok(await h.until(() => rt.messages.paused && rt.messages.queued.length === 1, 8000),
+            "the retry restored exactly one row");
+        }
+        rejects[1](notSent());
+        h.releasePrompt(id, 1);
+        assert.ok(await h.until(() => !rt.busy, 10000));
+        const expectedIds = action === "remove" ? [ids[1]] : ids;
+        const expectedTexts = action === "remove" ? ["recover B"]
+          : action === "edit" ? ["edited recovery A", "recover B"] : ["recover A", "recover B"];
+        assert.deepStrictEqual(rt.messages.queued.map((q) => q.id), expectedIds,
+          "late failures preserve the current rows without resurrecting or duplicating an id");
+        assert.deepStrictEqual(rt.messages.queued.map((q) => q.text), expectedTexts);
+        assert.deepStrictEqual(rt.messages.queued.map((q) => q.attachments[0].label),
+          action === "remove" ? ["b.png"] : ["a.png", "b.png"]);
+        assert.ok(rt.messages.queued.every((q) => q.attachments[0].block.data === PNG));
+        assert.strictEqual(rt.messages.paused, true);
+        assert.strictEqual(h.store.draft(id), "independent composer words");
+        assert.strictEqual(rejects.length, action === "retry" ? 3 : 2,
+          "only the explicit retry made an extra attempt");
+        await h.controller.messageStore.flush();
+        const saved = JSON.parse(fs.readFileSync(messagesFile(h.storage, id), "utf8"));
+        assert.deepStrictEqual(saved.queued.map((q) => q.id), expectedIds);
+      } finally {
+        for (const reject of rejects) reject(new Error("test cleanup"));
+        rt.client.prompt = realPrompt;
+        h.releasePrompt(id, 1);
+      }
+    } finally {
+      await h.dispose();
+    }
+  });
+}
 
 test.after(() => cleanup());
