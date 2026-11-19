@@ -34,6 +34,12 @@ export function recordPainted(log: Painted[], payload: Painted, max = LOG_MAX): 
     typeof payload.text === "string"
   ) {
     last.text += payload.text;
+    // A streamed user message can arrive as several chunks, each carrying the
+    // attachments that came with it: keep them all rather than let the last
+    // chunk's array replace the earlier ones.
+    if (payload.type === "userChunk" && Array.isArray(payload.attachments) && payload.attachments.length) {
+      last.attachments = [...(Array.isArray(last.attachments) ? last.attachments : []), ...payload.attachments];
+    }
     return false;
   }
   log.push({ ...payload });

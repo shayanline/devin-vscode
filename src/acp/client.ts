@@ -675,8 +675,9 @@ export class AcpClient extends EventEmitter {
   // Branch from a step rather than rewinding to it. Nothing is discarded and no
   // file is touched: the agent copies the conversation up to that point into a
   // BRAND NEW session and returns its id, leaving this one exactly as it was.
-  // `targetNodeId` is the step's `forkTargetNodeId`, which is not its
-  // `revertTargetNodeId` (verified: passing the wrong one forks the wrong turn).
+  // `targetNodeId` is the exact conversation boundary to copy through. Use a
+  // prompt step's `revertTargetNodeId` to stop before that prompt, or its
+  // `forkTargetNodeId` to include its completed turn.
   async revertForkFromStep(sessionId: string, targetNodeId: number): Promise<string | undefined> {
     const res = await this.rpc<{ forkedSessionId?: string }>("_cognition.ai/revert/forkFromStep", {
       sessionId,

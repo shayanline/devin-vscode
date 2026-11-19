@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.17.0] - 2026-11-18
+
+### Highlights
+- Edit queued messages in place with Enter or Send.
+- Restore queued messages and their attachments after restarting VS Code.
+- Resume saved queues from a highlighted row above the chat input.
+- Show Restore and Fork controls before their target message.
+- Keep sent attachment labels and image previews when reopening chats.
+- Preserve queued messages and attachments when moving chat windows.
+- Keep saved queues available after a session fails to wake.
+
+### Under the hood
+- Save queue and attachment state safely during shutdown and chat transfers.
+
 ## [0.16.4] - 2026-11-18
 
 ### Highlights

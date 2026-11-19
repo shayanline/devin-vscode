@@ -244,8 +244,8 @@ export interface RevertPreviewResult {
 // stream, and the alternative (parsing them out of a preview error) breaks on any
 // change to the agent's wording.
 //
-// `revertTargetNodeId` rewinds to the step, discarding what came after.
-// `forkTargetNodeId` branches from it instead, leaving the later turns alone.
+// `revertTargetNodeId` is the boundary before this step.
+// `forkTargetNodeId` is the boundary after the step has completed.
 export interface RevertStep {
   stepNumber: number;
   // "prompt" for a user request; the agent also reports question and tool steps.

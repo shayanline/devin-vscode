@@ -351,6 +351,34 @@ test("removing or evicting a session drops its journal records", posixOnly, () =
   assert.deepStrictEqual(crowded.promptHistory("/w/e"), []);
 });
 
+test("history eviction preserves explicitly retained session metadata", () => {
+  const store = new SessionStore(memento());
+  for (let i = 0; i < 200; i++) store.add(`s${i}`, "/w");
+  store.setDraft("s0", "independent draft");
+  store.rememberPrompt("s0", "original prompt");
+  assert.deepStrictEqual(store.add("new", "/w", new Set(["s0"])), []);
+  assert.ok(store.has("s0"));
+  assert.strictEqual(store.cwds().s0, "/w");
+  assert.strictEqual(store.draft("s0"), "independent draft");
+  assert.ok(store.promptHistory("/w").includes("original prompt"));
+  // Eviction reports ids in list order, so the newer s1 precedes the older s0.
+  assert.deepStrictEqual(store.add("another", "/w"), ["s1", "s0"]);
+  assert.strictEqual(store.ids().length, 200);
+});
+
+test("history eviction protects a pending queue until its owner clears it", () => {
+  const store = new SessionStore(memento());
+  for (let i = 0; i < 200; i++) store.add(`s${i}`, "/w");
+  store.setQueuePending("s0", true);
+  store.add("new", "/w");
+  assert.ok(store.has("s0"));
+  store.setQueuePending("s0", false);
+  assert.ok(store.add("another", "/w").includes("s0"));
+  store.setQueuePending("another", true);
+  store.remove("another");
+  assert.strictEqual(store.hasPendingQueue("another"), false);
+});
+
 test.after(() => {
   fs.rmSync(TMP, { recursive: true, force: true });
 });
