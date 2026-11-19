@@ -2374,6 +2374,64 @@ test("a pending drag marks the whole row, refuses invalid targets and cleans up 
   assert.strictEqual(h.errors().length, 0);
 });
 
+for (const sendWhileWorking of ["steer", "stopAndSend"]) {
+  for (const submit of ["Enter", "Send"]) {
+    test(`cached queue edits keep their kind with ${submit} (${sendWhileWorking})`, () => {
+      const h = createHarness();
+      h.post({ type: "ready" });
+      h.post({ type: "body", body: "thread" });
+      h.post({ type: "clear" });
+      h.post({ type: "sessionReady", sessionId: "A" });
+      h.post({ type: "capabilities", steering: true, sendWhileWorking });
+      h.post({ type: "sessionStatuses", statuses: { A: "running" }, activeId: "A" });
+      h.post({ type: "busy", value: true });
+      h.post({ type: "queued", items: [
+        { id: "q1", kind: "queue", text: "first queued" },
+        { id: "q2", kind: "queue", text: "second queued" }
+      ] });
+
+      h.document.getElementById("history-btn").click();
+      h.post({ type: "body", body: "thread" });
+      h.post({ type: "clear" });
+      h.post({ type: "sessionReady", sessionId: "B" });
+      h.document.getElementById("history-btn").click();
+      h.post({
+        type: "sessions",
+        sessions: [{ id: "A", short_id: "A", title: "A", working_directory: "/w" }],
+        activeId: null,
+        statuses: { A: "running", B: "idle" },
+        folders: [{ path: "/w", name: "w" }]
+      });
+      h.document.querySelector("#sessions-list .session-main").click();
+      assert.ok(h.posted.some((m) => m.type === "activateSession" && m.id === "A"));
+      h.post({ type: "busy", value: true });
+
+      h.thread().querySelector('.queued-item[data-id="q1"] .codicon-edit').parentElement.click();
+      const input = h.document.getElementById("input");
+      input.value = "first edited";
+      input.dispatchEvent(new h.window.Event("input", { bubbles: true }));
+      const title = h.document.getElementById("send").title;
+      const mark = h.posted.length;
+      if (submit === "Enter") {
+        input.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      } else {
+        h.document.getElementById("send").click();
+      }
+
+      const messages = h.posted.slice(mark).filter((m) =>
+        ["send", "editQueued", "sendQueuedNow", "stopAndSend", "removeQueued", "queueEditing"].includes(m.type));
+      assert.deepStrictEqual(messages, [
+        { type: "editQueued", id: "q1", text: "first edited", kind: "queue" },
+        { type: "queueEditing", id: null }
+      ], "the edit keeps its queue kind and releases its hold without an immediate send");
+      assert.strictEqual(title, "Add to Queue (Enter)");
+      assert.deepStrictEqual([...h.thread().querySelectorAll(".queued-item")].map((row) => row.dataset.id), ["q1", "q2"]);
+      assert.ok(!h.document.getElementById("input-editing-banner"));
+      assert.strictEqual(h.errors().length, 0);
+    });
+  }
+}
+
 test("editing a pending message offers its kind in the send split", async () => {
   const h = createHarness();
   h.post({ type: "ready" });
@@ -4786,6 +4844,45 @@ test("a chat leaving a surface writes back its draft and its half given answers"
     order.indexOf("stateFlushed") === order.length - 1,
     "and the all clear comes last, so nothing is still in flight"
   );
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("a flush during a borrowed queue edit releases the hold without committing it", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "capabilities", steering: true, sendWhileWorking: "steer" });
+  h.post({ type: "busy", value: true });
+  h.post({ type: "queued", items: [{ id: "q1", kind: "queue", text: "queued words" }] });
+  await h.settle(10);
+
+  h.thread().querySelector('.queued-item[data-id="q1"] .codicon-edit').parentElement.click();
+  await h.settle(10);
+  const input = h.document.getElementById("input");
+  assert.strictEqual(input.value, "queued words", "the composer borrowed the row");
+
+  h.posted.length = 0;
+  h.post({ type: "flushState" });
+  await h.settle(5);
+
+  const order = h.posted.map((m) => m.type);
+  const release = h.posted.findIndex((m) => m.type === "queueEditing" && m.id === null);
+  assert.ok(release !== -1 && release < order.indexOf("stateFlushed"),
+    "the borrowed edit is released before the flush completes");
+  assert.ok(order.indexOf("stateFlushed") === order.length - 1, "and the all clear is still last");
+  assert.ok(!h.posted.some((m) => ["editQueued", "send", "sendQueuedNow", "stopAndSend", "removeQueued"].includes(m.type)),
+    "the move committed nothing");
+
+  // Back on this surface the row is still the one that was queued, unedited.
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({ type: "queued", items: [{ id: "q1", kind: "queue", text: "queued words" }] });
+  await h.settle(10);
+  const row = h.thread().querySelector('.queued-item[data-id="q1"]');
+  assert.ok(row, "the queued row is still there");
+  assert.ok(row.textContent.includes("queued words"), "with its original text");
+  assert.ok(!h.document.getElementById("input-editing-banner"), "and no edit is still open");
   assert.strictEqual(h.errors().length, 0);
 });
 
@@ -7914,4 +8011,204 @@ test("checkpoint identity: changed bindings cancel an armed confirmation and pen
   assert.ok(h.document.querySelector(".req-editor-input"), "the editor kept the text");
   assert.strictEqual(h.errors().length, 0, "binding-change handling threw: " + JSON.stringify(h.errors()));
 });
+
+test("message persistence replayed user chunks accumulate their attachments", async () => {
+  // A replayed request can arrive as several chunks, each carrying the
+  // attachments that came with it. They collect on the one user block rather
+  // than each chunk's array replacing the one before it.
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "userChunk", text: "look at ", messageId: "m1", attachments: [{ label: "a.png", type: "image", thumb: "data:image/png;base64,AAA" }] });
+  h.post({ type: "userChunk", text: "these", messageId: "m1", attachments: [{ label: "b.txt", type: "file" }] });
+  h.post({ type: "userChunk", text: " and ", messageId: "m1" });
+  h.post({ type: "userChunk", text: "those", messageId: "m1", attachments: [{ label: "c.md", type: "file" }] });
+  await h.settle(20);
+
+  const pills = [...h.thread().querySelectorAll(".chat-attached-context-attachment")];
+  assert.deepStrictEqual(pills.map((p) => p.textContent), ["a.png", "b.txt", "c.md"],
+    "every chunk's attachments are on the one request");
+  assert.ok(pills[0].querySelector("img.chat-attached-context-pill-image"), "the thumbnail survived");
+  assert.strictEqual(h.reqTexts().join(""), "look at these and those");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("message persistence a paused queue shows its banner and resume control", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "queued", items: [
+    { id: "q1", kind: "queue", text: "saved one", attachments: [{ label: "a.png", type: "image", thumb: "data:image/png;base64,AAA" }] },
+    { id: "q2", kind: "queue", text: "saved two" }
+  ], paused: true });
+  await h.settle(20);
+
+  const banner = h.document.getElementById("queue-resume");
+  assert.ok(!banner.classList.contains("hidden"), "the paused queue shows its composer row");
+  assert.match(banner.textContent, /Saved messages are paused\./);
+  const composer = h.document.getElementById("composer");
+  assert.strictEqual(banner.parentElement, composer);
+  assert.ok(!h.thread().contains(banner), "the resume control stays outside the scrolling transcript");
+  const children = [...composer.children];
+  assert.ok(children.indexOf(banner) < children.indexOf(h.document.getElementById("input-box")), "the resume row sits above the input");
+  const button = h.document.getElementById("resume-queue");
+  assert.ok(button.classList.contains("btn") && !button.classList.contains("secondary"), "resume is a primary action");
+  button.click();
+  assert.strictEqual(h.posted.filter((m) => m.type === "resumeQueue").length, 1);
+  assert.ok(!banner.classList.contains("hidden"), "the action stays available until the host confirms resume");
+
+  h.post({ type: "queued", items: [
+    { id: "q1", kind: "queue", text: "saved one" },
+    { id: "q2", kind: "queue", text: "saved two" }
+  ], paused: false });
+  await h.settle(20);
+  assert.ok(banner.classList.contains("hidden"), "the banner goes away when resumed");
+  assert.deepStrictEqual([...h.thread().querySelectorAll(".queued-item")].map((r) => r.dataset.id), ["q1", "q2"]);
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("message persistence a paused queue keeps its banner across a cached switch", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "sessionReady", sessionId: "A", title: "Paused chat" });
+  h.post({ type: "capabilities", steering: true, sendWhileWorking: "steer" });
+  h.post({ type: "sessionStatuses", statuses: { A: "idle", B: "idle" }, activeId: "A" });
+  h.post({ type: "queued", items: [
+    { id: "q1", kind: "queue", text: "saved one" },
+    { id: "q2", kind: "queue", text: "saved two" }
+  ], paused: true });
+  await h.settle(20);
+  assert.ok(!h.document.getElementById("queue-resume").classList.contains("hidden"), "the paused queue shows its composer row");
+
+  // Away to another chat, then back: the cached view must still say paused.
+  h.document.getElementById("history-btn").click();
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "sessionReady", sessionId: "B", title: "Other chat" });
+  await h.settle(10);
+  assert.ok(h.document.getElementById("queue-resume").classList.contains("hidden"), "the other chat has no such row");
+
+  h.document.getElementById("history-btn").click();
+  h.post({
+    type: "sessions",
+    sessions: [
+      { id: "A", short_id: "A", title: "Paused chat", working_directory: "/w" },
+      { id: "B", short_id: "B", title: "Other chat", working_directory: "/w" }
+    ],
+    activeId: null,
+    statuses: { A: "idle", B: "idle" },
+    folders: [{ path: "/w", name: "w" }]
+  });
+  const rowA = [...h.document.querySelectorAll("#sessions-list .session-main")]
+    .find((el) => el.textContent.includes("Paused chat"));
+  rowA.click();
+  assert.ok(h.posted.some((m) => m.type === "activateSession" && m.id === "A"));
+  assert.ok(!h.document.getElementById("queue-resume").classList.contains("hidden"),
+    "the cached queue's resume row returns before the host refreshes it");
+  h.post({ type: "sessionReady", sessionId: "A", title: "Paused chat" });
+  await h.settle(20);
+
+  assert.ok(!h.document.getElementById("queue-resume").classList.contains("hidden"), "the row is still there after the switch back");
+  assert.deepStrictEqual([...h.thread().querySelectorAll(".queued-item")].map((r) => r.dataset.id), ["q1", "q2"]);
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("message persistence clearing a paused queue hides its composer row", () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  const row = h.document.getElementById("queue-resume");
+  assert.ok(row.classList.contains("hidden"));
+  h.post({ type: "queued", items: [{ id: "q1", kind: "queue", text: "saved" }], paused: true });
+  assert.ok(!row.classList.contains("hidden"));
+  h.post({ type: "queued", items: [], paused: true });
+  assert.ok(row.classList.contains("hidden"), "an empty queue never offers resume");
+  h.post({ type: "queued", items: [{ id: "q2", kind: "queue", text: "saved again" }], paused: true });
+  assert.ok(!row.classList.contains("hidden"));
+  h.post({ type: "clear" });
+  assert.ok(row.classList.contains("hidden"), "a new chat does not inherit the old resume row");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("message persistence queue refresh preserves focus on the resume action", () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "queued", items: [{ id: "q1", kind: "queue", text: "saved" }], paused: true });
+  const button = h.document.getElementById("resume-queue");
+  button.focus();
+  h.post({ type: "queued", items: [
+    { id: "q1", kind: "queue", text: "saved" },
+    { id: "q2", kind: "queue", text: "another message" }
+  ], paused: true });
+  assert.strictEqual(h.document.activeElement, button);
+  assert.strictEqual(h.document.getElementById("resume-queue"), button);
+  assert.strictEqual(h.errors().length, 0);
+});
+
+
+for (const replayed of [false, true]) {
+  test(`checkpoint boundary: ${replayed ? "replayed" : "live"} actions cut before the message and its attachments`, async () => {
+    const h = createHarness();
+    h.post({ type: "ready" });
+    h.post({ type: "body", body: "thread" });
+    h.post({ type: "clear" });
+    h.post({ type: "capabilities", revert: true, editRequests: "inline", checkpoints: true, confirmRemoval: false });
+    h.post({ type: "sessionReady", sessionId: "S" });
+    for (let i = 1; i <= 3; i++) {
+      const request = {
+        type: replayed ? "userChunk" : "userMessage",
+        text: "Do the next task.",
+        attachments: [{ label: `context-${i}.txt`, type: "file" }]
+      };
+      request[replayed ? "messageId" : "clientMessageId"] = `m${i}`;
+      h.post(request);
+      h.post({ type: "assistantStart" });
+      h.post({ type: "assistantChunk", text: `This is answer ${i}.` });
+      h.post({ type: "toolCall", id: `tool-${i}`, title: `Read source-${i}.ts`, kind: "read", status: "completed",
+        rawInput: { path: `/w/source-${i}.ts` }, content: [{ type: "text", text: `This is tool result ${i}.` }] });
+      h.post({ type: "assistantEnd" });
+    }
+    if (replayed) h.post({ type: "loaded" });
+    h.post({ type: "busy", value: false });
+    bindCheckpoints(h, "S", ["m1", "m2", "m3"]);
+    assert.ok(await h.until(() => h.respTexts().length === 3));
+
+    const turns = [...h.thread().querySelectorAll(":scope > .turn")];
+    assert.strictEqual(turns.length, 3);
+    for (const turn of turns) {
+      const row = turn.querySelector(".checkpoint-row");
+      const request = turn.querySelector(".turn-request");
+      assert.strictEqual(turn.firstElementChild, row, "the checkpoint precedes the complete request");
+      assert.strictEqual(row.nextElementSibling, request);
+      assert.ok(request.querySelector(".chat-attached-context"), "attachments stay below the boundary with their message");
+    }
+    assert.strictEqual(turns[0].querySelector(".checkpoint-fork"), null);
+    turns[1].querySelector(".checkpoint-fork").click();
+    assert.deepStrictEqual(h.posted.filter((m) => m.type === "revertFork"), [
+      { type: "revertFork", sessionId: "S", userMessageId: "m2" }
+    ]);
+    assert.deepStrictEqual([...h.thread().querySelectorAll(":scope > .turn")], turns, "fork leaves the original transcript intact");
+
+    turns[1].querySelector(".checkpoint-restore").click();
+    assert.ok(await h.until(() => h.posted.some((m) => m.type === "revertExecute")));
+    assert.deepStrictEqual(h.posted.filter((m) => m.type === "revertExecute"), [
+      { type: "revertExecute", sessionId: "S", userMessageId: "m2" }
+    ]);
+    assert.strictEqual(h.reqTexts().length, 3, "the transcript waits for host confirmation before discarding anything");
+    h.post({ type: "reverted", sessionId: "S", userMessageId: "m2", resending: false });
+    assert.deepStrictEqual(h.reqTexts(), ["Do the next task."]);
+    assert.deepStrictEqual(h.respTexts(), ["This is answer 1."]);
+    assert.deepStrictEqual([...h.thread().querySelectorAll(".chat-attached-context-attachment")].map((p) => p.textContent), ["context-1.txt"]);
+    assert.strictEqual(h.thread().querySelectorAll(".tool").length, 1);
+    assert.ok(!/source-[23]\.ts|This is tool result [23]\./.test(h.thread().textContent), "later tool calls and results are discarded with their turns");
+    assert.strictEqual(h.document.getElementById("input").value, "Do the next task.");
+    assert.strictEqual(h.errors().length, 0);
+  });
+}
+
 });

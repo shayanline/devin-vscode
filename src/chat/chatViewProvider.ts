@@ -40,23 +40,25 @@ import { SessionStore } from "../session/sessionStore";
 import { ChangeTracker } from "../diff/changeTracker";
 import { diffStat } from "../diff/diffStat";
 import { paintedReplay, recordPainted, rewindPainted } from "./transcriptLog";
+import {
+  deleteJson,
+  MessageState,
+  MessageStateStore,
+  PendingKind,
+  PendingMessage,
+  promptKey,
+  readJson,
+  SentAttachmentRecord,
+  ShownAttachment,
+  Staged,
+  writeJson
+} from "./messageState";
 import { StatusBar } from "../ui/statusBar";
 import { checkHealth, CliHealth, loginShellEnv } from "../cli/locate";
 import { cachedFamilies, familyOf, listModelFamilies, ModelFamily } from "../cli/models";
 import { fusionIdentity, fusionModelKey, modelIdentity } from "../cli/modelId";
 import { lockOwner, removeLock } from "../cli/sessionLocks";
 import { contextReportFromUpdate } from "../acp/usage";
-
-// A message waiting behind a turn, either for the turn to end ("queue") or to
-// join it while it runs ("steer", which the agent must advertise support for).
-type PendingKind = "queue" | "steer";
-interface PendingMessage {
-  id: string;
-  kind: PendingKind;
-  text: string;
-  implicit: ContentBlock[];
-  attachments: Staged[];
-}
 
 // One live session: its own `devin acp` process and terminal manager, plus the
 // per-session state that used to be flat on the provider. Several of these can
@@ -110,13 +112,14 @@ interface Runtime {
   replay: Record<string, unknown>[];
   // False once the oldest entries were dropped, which makes a rebuild partial.
   logFull: boolean;
-  // Messages the user submitted while a turn was in flight, in submission order.
-  // The implicit context is snapshotted at queue time and the attachments travel
-  // with the message, so editing one can hand them back to the composer and take
-  // them again. The host sends them as the session frees up (VS Code's chat
-  // queue). The drain picks steers ahead of queued ones and may let a steer join
-  // the running turn instead.
-  queued: PendingMessage[];
+  // The session's durable queue and sent manifest, the same object its
+  // MessageStateStore entry persists so both survive the process.
+  messages: MessageState;
+  // A user_message_chunk group being accumulated during a history replay,
+  // keyed by the message id the agent gave it, and how far into
+  // messages.sent the replay matcher has already walked.
+  replayUser?: { messageId?: string; blocks: ContentBlock[] };
+  replaySentIndex?: number;
   // Set between asking the agent to stop a turn and that turn actually settling:
   // steering is off the table while the cancel is in flight, and the composer
   // stays busy until the shared turn really ends.
@@ -181,18 +184,20 @@ interface Runtime {
 const BG_BUFFER_MAX = 6000;
 const REPLAY_BATCH_SIZE = 100;
 
+// Session updates that mean the agent has started producing its own side of the
+// transcript, which ends any user message still being accumulated for replay.
+// Config, options, usage and similar housekeeping updates do not.
+const REPLAY_USER_ENDS = new Set([
+  "agent_message_chunk",
+  "agent_thought_chunk",
+  "tool_call",
+  "tool_call_update",
+  "plan"
+]);
+
 // Shown in place of a transcript that could not be opened. The reason itself goes
 // to the output channel, which the notification points at.
 const OPEN_FAILED = "Couldn't open this chat. See the Devin output for details.";
-
-// A file or image attached to a message: staged in the composer, then travelling
-// with the message it was attached to.
-export interface Staged {
-  id: string;
-  label: string;
-  type: string;
-  block: ContentBlock;
-}
 
 // A live session handed from one chat surface to another (the side panel to an
 // editor tab, or back). The `devin acp` process, its terminals and any request it
@@ -459,7 +464,9 @@ export class ChatController implements AcpHost {
   // the requests it is waiting on) moves from one surface to another.
   private static permissionSeq = 0;
 
-  private attachSeq = 0;
+  // Queued and sent message state per session, on disk under this storage
+  // root so it survives the window, the process and a move between surfaces.
+  private readonly messageStore: MessageStateStore;
 
   // Whether the active editor file is sent as implicit context (VS Code's
   // current-file behaviour). Mirrored to the composer as a pill.
@@ -479,6 +486,7 @@ export class ChatController implements AcpHost {
     // surfaces and one already open elsewhere is revealed rather than fought over.
     private readonly surfaces?: SurfaceHost
   ) {
+    this.messageStore = new MessageStateStore(context.storageUri || context.globalStorageUri);
     this.changeListSub = this.changes.onDidChangeList(() => this.postWorkingSet());
     // Keeping or undoing a change is answered by the tracker, not by the button
     // that asked: "Keep all" and the Source Control view resolve files nobody
@@ -845,6 +853,9 @@ export class ChatController implements AcpHost {
       this.keepQueued(rt);
       this.destroyRuntime(rt);
     }
+    // Queues were just paused, so releasing a borrowed edit cannot send: its
+    // staged copy is dropped rather than carried into the next draft.
+    this.setQueueEditing(undefined);
     this.runtimes.clear();
     this.spawnedRuntimes.clear();
     this.starting.clear();
@@ -874,8 +885,14 @@ export class ChatController implements AcpHost {
     const live = [...new Set([...this.runtimes.values(), ...this.spawnedRuntimes])];
     const interrupted = live.filter((rt) => rt.id && (rt.busy || rt.awaiting > 0)).map((rt) => rt.id);
     // Anything still waiting behind a turn is the user's own writing, and it only
-    // ever lived on the runtime we are about to stop.
-    const unsent = live.flatMap((rt) => rt.queued.map((q) => ({ id: rt.id, text: q.text })));
+    // ever lived on the runtime we are about to stop: each queue is paused and
+    // saved before its process goes, so the next window finds it structured.
+    for (const rt of live) {
+      this.keepQueued(rt);
+    }
+    // A borrowed queue edit ends here too: its staged copy is dropped rather than
+    // saved as an unrelated draft or sent by the shutdown.
+    this.setQueueEditing(undefined);
     this.stopLocalState();
     this.runtimes.clear();
     this.spawnedRuntimes.clear();
@@ -883,16 +900,14 @@ export class ChatController implements AcpHost {
     this.activeId = undefined;
     // Record before killing: the write has to be in flight while the host is
     // still alive to flush it.
-    const recorded = Promise.all([
-      this.store.markInterrupted(interrupted),
-      this.store.queuedBackToDrafts(unsent)
-    ]);
+    const recorded = this.store.markInterrupted(interrupted);
     await Promise.all(live.map((rt) => this.stopRuntime(rt)));
     try {
       await recorded;
     } catch {
       // workspaceState is best effort; losing the note is not worth failing on
     }
+    await this.messageStore.flush();
   }
 
   // Stop one runtime in order: cancel the turn so the agent can stop cleanly,
@@ -1017,6 +1032,10 @@ export class ChatController implements AcpHost {
     }
     this.runtimes.delete(id);
     this.starting.delete(id);
+    // The message state itself travels inside rt. Only this surface's cached
+    // entry is dropped, so a late save from here cannot land on the file the
+    // arriving surface now owns.
+    this.messageStore.forget(id);
     // Drop this controller's listeners: the new one attaches its own.
     rt.client.removeAllListeners();
     // The arriving surface owns the process from here, so this one must stop
@@ -1087,6 +1106,11 @@ export class ChatController implements AcpHost {
     // A usage read that was already in flight reports to this surface now that
     // the runtime lives here.
     rt.owner = this;
+    // The queue and sent manifest travelled with the runtime: adopt the same
+    // live state rather than letting a disk snapshot load over it, then persist
+    // it under this surface's ownership.
+    this.messageStore.adopt(rt.id, rt.messages);
+    void this.saveMessages(rt.id);
     rt.client.setHost(this);
     rt.client.on("log", (line: string) => this.log(line));
     rt.client.on("update", (n: SessionUpdateNotification) => this.onUpdate(n, rt));
@@ -1237,7 +1261,7 @@ export class ChatController implements AcpHost {
       turnCount: 0,
       lastActivityAt: Date.now(),
       pending: [],
-      queued: [],
+      messages: { queued: [], sent: [], paused: false },
       bgBuffer: [],
       log: [],
       replay: [],
@@ -1610,7 +1634,10 @@ export class ChatController implements AcpHost {
           this.reorderQueued(String(msg.id || ""), String(msg.targetId || ""), !!msg.before);
           return;
         case "sendQueuedNow":
-          this.sendQueuedNow(String(msg.id || ""));
+          await this.sendQueuedNow(String(msg.id || ""));
+          return;
+        case "resumeQueue":
+          await this.resumeQueue();
           return;
         case "queueEditing":
           // Which queued message (if any) the composer is editing. Changing it can
@@ -2145,6 +2172,7 @@ export class ChatController implements AcpHost {
         await this.ensureInitialized(rt);
         const res = await rt.client.newSession(cwd, this.additionalDirs(cwd));
         rt.id = res.sessionId;
+        rt.messages = this.messageStore.get(rt.id);
         rt.lastActivityAt = Date.now();
         this.runtimes.set(rt.id, rt);
         this.rememberSession(rt.id, cwd);
@@ -2154,6 +2182,9 @@ export class ChatController implements AcpHost {
         if (this.listVisible && this.surfaceVisible) {
           this.postSessionList(this.sessionsCache?.sessions ?? []);
         }
+        // A brand new session has no saved messages, but the read still has to
+        // settle before the session is handed back as ready.
+        await this.messageStore.load(rt.id);
         // Starting a chat takes seconds, and the user can open an existing one
         // while it does. It is a real session either way, so it stays in the pool
         // and runs in the background, but it must not take the panel back from
@@ -2552,6 +2583,10 @@ export class ChatController implements AcpHost {
     this.postWorkingSet();
     this.postDraft();
     const staged = this.loadStaged(id);
+    // The saved queue and sent manifest hydrate alongside the staged files, but
+    // must be settled before the replay starts: user_message_chunk updates are
+    // matched against it as they arrive.
+    const messagesReady = this.messageStore.load(id);
     if (!already) {
       this.starting.add(id);
     }
@@ -2561,16 +2596,30 @@ export class ChatController implements AcpHost {
     const rt = already ?? this.spawnRuntime(cwd);
     if (!already) {
       rt.id = id;
+      rt.messages = this.messageStore.get(id);
       this.runtimes.set(id, rt);
     }
     rt.replaying = true;
+    rt.replayUser = undefined;
+    rt.replaySentIndex = 0;
     let loadFailed = "";
     try {
       if (!already) {
         await this.ensureInitialized(rt);
       }
       this.postCapabilities();
+      try {
+        await messagesReady;
+      } catch (err) {
+        // A corrupt snapshot is reported rather than silently read as empty,
+        // and its file is left in place: replay then falls back to rebuilding
+        // each request from the blocks the agent actually sends.
+        this.reportMessageRestoreFailure(id, err);
+      }
       const res = await this.loadWithTakeover(rt, id, cwd);
+      // The last user_message_chunk of the history may have no following
+      // transcript update to flush it, including a user only interrupted tail.
+      this.flushReplayUser(rt);
       await staged;
       rt.lastActivityAt = Date.now();
       this.rememberSession(id, cwd);
@@ -2613,6 +2662,8 @@ export class ChatController implements AcpHost {
         // stand in for the agent's history on the next open.
         rt.replay = [];
         rt.logFull = false;
+        rt.replayUser = undefined;
+        rt.replaySentIndex = 0;
       }
       this.starting.delete(id);
       if (loadFailed) {
@@ -2657,7 +2708,7 @@ export class ChatController implements AcpHost {
           }
           // Republish the queue so any messages still waiting on this session
           // reappear after a reload, not just after an instant re-attach.
-          this.postQueued(opened);
+          this.postQueued(id);
           this.postMcpProblems(opened);
         }
         // Anything typed while it was opening has been waiting for the channel.
@@ -2780,7 +2831,7 @@ export class ChatController implements AcpHost {
       this.post(p.payload);
     }
     // Restore the composer's queued-message rows for this session.
-    this.postQueued(rt);
+    this.postQueued(id);
     this.refreshUsage(rt);
     void this.refreshSessionsIfVisible();
   }
@@ -2884,12 +2935,16 @@ export class ChatController implements AcpHost {
       this.postDraft();
     }
     const staged = this.loadStaged(id);
+    const messagesReady = this.messageStore.load(id);
     const cwd = this.store.cwds()[id] || this.resolveNewSessionCwd();
     const rt = this.spawnRuntime(cwd);
     rt.id = id;
+    rt.messages = this.messageStore.get(id);
     this.runtimes.set(id, rt);
     rt.replaying = true;
     rt.silentReplay = true;
+    rt.replayUser = undefined;
+    rt.replaySentIndex = 0;
     this.starting.add(id);
     this.broadcastStatuses();
     let done: () => void = () => {};
@@ -2897,7 +2952,13 @@ export class ChatController implements AcpHost {
     rt.waking = new Promise<void>((resolve) => { done = resolve; });
     try {
       await this.ensureInitialized(rt);
+      try {
+        await messagesReady;
+      } catch (err) {
+        this.reportMessageRestoreFailure(id, err);
+      }
       const res = await this.loadWithTakeover(rt, id, cwd);
+      this.flushReplayUser(rt);
       await staged;
       rt.lastActivityAt = Date.now();
       this.rememberSession(id, cwd);
@@ -2920,6 +2981,9 @@ export class ChatController implements AcpHost {
         this.post({ type: "sessionReady", sessionId: id });
         this.reportInterrupted(id);
       }
+      // A queue restored with this wake is paused until Resume Queue, but its
+      // rows still have to reach the composer that is showing this chat.
+      this.postQueued(id);
       this.ensureIdleTimer();
     } catch (err) {
       if (this.runtimes.get(id) === rt) {
@@ -2930,6 +2994,8 @@ export class ChatController implements AcpHost {
     } finally {
       rt.replaying = false;
       rt.silentReplay = false;
+      rt.replayUser = undefined;
+      rt.replaySentIndex = 0;
       rt.waking = undefined;
       this.starting.delete(id);
       this.broadcastStatuses();
@@ -3365,15 +3431,16 @@ export class ChatController implements AcpHost {
           cwdById: this.store.cwds()
         });
         const { sessions: live, prunedIds } = await listing;
-        // Drop tracked ids Devin no longer knows about so stale rows self-heal,
-        // but NEVER prune a session we still hold a live runtime for (or are
-        // starting): a freshly created session is not in `devin list` until its
-        // first turn persists, and pruning it here would make it vanish.
+        // A first turn may not have persisted yet. Keep live sessions and saved
+        // queues even when the agent does not list them.
         for (const id of prunedIds) {
-          const held = this.runtimes.has(id) || this.starting.has(id) || !!this.surfaces?.owner(id);
+          const messages = await this.messageStore.load(id);
+          const held = this.runtimes.has(id) || this.starting.has(id) || !!this.surfaces?.owner(id)
+            || messages.queued.length > 0;
           if (!held) {
             this.store.remove(id);
             void this.dropStaged(id);
+            void this.messageStore.remove(id);
           }
         }
         sessions = live;
@@ -3390,25 +3457,21 @@ export class ChatController implements AcpHost {
     this.log(`[perf] session-list ${source} ${Date.now() - startedAt}ms`);
   }
 
-  // Publish the session list: the rows we were given plus a synthesized row for
-  // every session that is live locally but has not reached `devin list` yet (a
-  // brand-new chat appears there only after its first turn persists). Shared by
-  // the remote refresh and the instant local snapshot, so both say the same
-  // thing. The input array is copied: callers pass the cached listing, which
-  // must not grow rows it does not own.
+  // Publish the remote list plus live sessions and saved queues that the agent
+  // has not listed yet. The input array stays untouched.
   private postSessionList(listed: DevinSession[]): void {
     const sessions = [...listed];
-    // List every live session even when `devin list` has not caught up yet (a
-    // brand-new session appears there only after its first turn persists), so a
-    // chat started from the list shows up immediately. Sessions running on
-    // another surface count: a chat started in an editor tab belongs in this list
-    // too, badged as running elsewhere.
+    // A saved queue remains reachable even if its process is gone and the
+    // session has not reached the agent's persisted history.
     const known = new Set(sessions.map((s) => s.id));
     const cwds = this.store.cwds();
     const titles = this.store.titles();
-    const liveIds = new Set<string>([...this.starting, ...this.runtimes.keys(), ...this.elsewhere()]);
+    const localIds = new Set<string>([
+      ...this.starting, ...this.runtimes.keys(), ...this.elsewhere(),
+      ...this.messageStore.queuedIds()
+    ]);
     const synthesized: DevinSession[] = [];
-    for (const id of liveIds) {
+    for (const id of localIds) {
       if (known.has(id)) {
         continue;
       }
@@ -3634,6 +3697,7 @@ export class ChatController implements AcpHost {
     // images: kilobytes to megabytes of base64 that would otherwise sit in the
     // workspace's storage for good, since nothing else ever looks at that file again.
     void this.dropStaged(id);
+    void this.messageStore.remove(id);
     if (this.activeId === id) {
       this.navigationVersion++;
       this.activeId = undefined;
@@ -4079,7 +4143,7 @@ export class ChatController implements AcpHost {
 
   // Attachments in the shape the request itself shows them: a label, and for a
   // picture the picture, so the pill can be a thumbnail of it.
-  private shownAttachments(list: Staged[]): { label: string; type: string; thumb?: string }[] {
+  private shownAttachments(list: Staged[]): ShownAttachment[] {
     return list.map((a) => {
       const b = a.block as { type?: string; mimeType?: string; data?: string };
       const thumb = a.type === "image" && b?.type === "image" && b.data
@@ -4117,6 +4181,7 @@ export class ChatController implements AcpHost {
     for (const evicted of this.store.add(id, cwd)) {
       if (!this.runtimes.has(evicted) && !this.surfaces?.owner(evicted)) {
         void this.dropStaged(evicted);
+        void this.messageStore.remove(evicted);
       }
     }
   }
@@ -4195,19 +4260,17 @@ export class ChatController implements AcpHost {
     const items = this.stagedFor(id);
     try {
       if (!items.length) {
-        await vscode.workspace.fs.delete(file);
+        await deleteJson(file);
         return;
       }
-      const body = Buffer.from(JSON.stringify(items), "utf8");
-      if (body.byteLength > ChatController.MAX_ATTACHMENT_BYTES) {
-        this.log(`[attachments] ${body.byteLength} bytes staged, too much to keep past this window`);
+      if (Buffer.byteLength(JSON.stringify(items), "utf8") > ChatController.MAX_ATTACHMENT_BYTES) {
+        this.log(`[attachments] staged files too large to keep past this window`);
         // And the older, smaller set that is still on disk is not the answer either: it
         // would come back after a reload as though it were what the composer holds.
-        await vscode.workspace.fs.delete(file).then(undefined, () => {});
+        await deleteJson(file);
         return;
       }
-      await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(file, ".."));
-      await vscode.workspace.fs.writeFile(file, body);
+      await writeJson(file, items);
     } catch {
       // Nothing staged to delete, or the storage is not writable: the composer is
       // still correct, it just will not survive a reload.
@@ -4220,21 +4283,27 @@ export class ChatController implements AcpHost {
     this.staged.delete(this.stagedKey(id));
     const file = this.attachmentsFile(id);
     if (file) {
-      await vscode.workspace.fs.delete(file).then(undefined, () => {});
+      await deleteJson(file).then(undefined, () => {});
     }
   }
 
   // Read back what was staged for a chat before the window was reloaded. Only for a
   // chat this window has not staged anything for yet: what is held here is never
-  // older than the file, and reading over it would undo an attach.
+  // older than the file, and reading over it would undo an attach. The shared
+  // write queue settles first, so a surface that has just handed this chat over
+  // cannot have its late write land after this read.
   private async loadStaged(id?: string): Promise<void> {
     const file = this.attachmentsFile(id);
     if (file && !this.staged.has(this.stagedKey(id))) {
       const list = this.stagedFor(id);
       try {
-        const raw = Buffer.from(await vscode.workspace.fs.readFile(file)).toString("utf8");
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) {
+        const parsed = await readJson(file);
+        // The read waited on the shared write queue, so the composer may have
+        // been staged for while it ran: only a list still empty and still the
+        // same one gets the disk copy, never over or beside a newer change.
+        if (Array.isArray(parsed)
+          && this.staged.get(this.stagedKey(id)) === list
+          && list.length === 0) {
           list.push(...parsed.filter((a) => a && a.id && a.block));
         }
       } catch {
@@ -4399,7 +4468,7 @@ export class ChatController implements AcpHost {
         }
         const buf = await fs.promises.readFile(fsPath);
         this.stagedFor(this.activeId).push({
-          id: `att-${++this.attachSeq}`,
+          id: `att-${crypto.randomUUID()}`,
           label: path.basename(fsPath),
           type: "image",
           block: { type: "image", mimeType: imageMime, data: buf.toString("base64") }
@@ -4410,7 +4479,7 @@ export class ChatController implements AcpHost {
       const raw = await fs.promises.readFile(fsPath, "utf8");
       const text = raw.length > MAX_ATTACH_CHARS ? raw.slice(0, MAX_ATTACH_CHARS) : raw;
       this.stagedFor(this.activeId).push({
-        id: `att-${++this.attachSeq}`,
+        id: `att-${crypto.randomUUID()}`,
         label: path.basename(fsPath),
         type: "file",
         block: {
@@ -4435,7 +4504,7 @@ export class ChatController implements AcpHost {
       .sort();
     const label = path.basename(dirPath) || dirPath;
     this.stagedFor(this.activeId).push({
-      id: `att-${++this.attachSeq}`,
+      id: `att-${crypto.randomUUID()}`,
       label,
       type: "directory",
       block: { type: "text", text: `Folder ${dirPath} contains:\n\n${lines.join("\n")}` }
@@ -4463,7 +4532,7 @@ export class ChatController implements AcpHost {
       "rather than assuming a path."
     ].join("\n");
     this.stagedFor(this.activeId).push({
-      id: `att-${++this.attachSeq}`,
+      id: `att-${crypto.randomUUID()}`,
       label,
       type: "directory",
       block: { type: "text", text }
@@ -4494,7 +4563,7 @@ export class ChatController implements AcpHost {
       body
     ].join("\n");
     this.stagedFor(this.activeId).push({
-      id: `att-${++this.attachSeq}`,
+      id: `att-${crypto.randomUUID()}`,
       label,
       type: "file",
       block: { type: "text", text: blockText }
@@ -4522,7 +4591,7 @@ export class ChatController implements AcpHost {
       : path.basename(doc.uri.fsPath);
     const text = `From ${rel}${hasSel ? ` lines ${sel.start.line + 1}-${sel.end.line + 1}` : ""}:\n\n\`\`\`${doc.languageId}\n${body.slice(0, MAX_ATTACH_CHARS)}\n\`\`\``;
     this.stagedFor(this.activeId).push({
-      id: `att-${++this.attachSeq}`,
+      id: `att-${crypto.randomUUID()}`,
       label,
       type: "selection",
       block: { type: "text", text }
@@ -4566,7 +4635,7 @@ export class ChatController implements AcpHost {
       .slice(0, MAX_ATTACHED_PROBLEMS)
       .map((d) => `- line ${d.range.start.line + 1}: ${severityLabel(d.severity)} ${d.message}${d.source ? ` (${d.source})` : ""}`);
     this.stagedFor(this.activeId).push({
-      id: `att-${++this.attachSeq}`,
+      id: `att-${crypto.randomUUID()}`,
       label: `${path.basename(editor.document.uri.fsPath)}: ${here.length} problem${here.length === 1 ? "" : "s"}`,
       type: "selection",
       block: { type: "text", text: `Problems the editor reports in ${rel}:\n\n${lines.join("\n")}` }
@@ -4652,7 +4721,7 @@ export class ChatController implements AcpHost {
       return;
     }
     this.stagedFor(this.activeId).push({
-      id: `att-${++this.attachSeq}`,
+      id: `att-${crypto.randomUUID()}`,
       label: typeof name === "string" && name ? name : "image",
       type: "image",
       block: { type: "image", mimeType: mime, data }
@@ -4842,6 +4911,24 @@ export class ChatController implements AcpHost {
     // sat in the queue), and an image block the model cannot decode does not fail
     // the turn, it breaks the session for good.
     const blocks = this.withoutUnreadableImages(rt, this.messageBlocks(message));
+    // The manifest a later history replay matches this request against: the
+    // digest of the exact wire blocks, the typed text, and what the request
+    // displayed. A plain message needs none, its replay rebuilds from blocks.
+    const includedAttachments = message.attachments.filter((a) => blocks.includes(a.block));
+    let sentRecord: SentAttachmentRecord | undefined;
+    if (includedAttachments.length) {
+      sentRecord = {
+        key: promptKey(blocks),
+        messageId: message.id,
+        text: message.text,
+        attachments: this.shownAttachments(includedAttachments)
+      };
+      rt.messages.sent.push(sentRecord);
+      // The manifest is on disk before graceful shutdown can need it, but the
+      // save is not awaited here: the turn barrier below must be installed
+      // without a disk round trip in the dispatch path.
+      void this.saveRuntimeMessages(rt);
+    }
     const prior = rt.turn;
     if (!prior) {
       // Only a genuinely new turn resets the checkpoint view, flips busy and
@@ -4856,16 +4943,32 @@ export class ChatController implements AcpHost {
       rt.turnCount++;
     }
     const prompt = rt.client.prompt(rt.id, blocks, message.id).catch(async (error: unknown) => {
-      if (error instanceof AcpRequestNotSentError) {
+      if (error instanceof AcpRequestNotSentError && rt.owner.messageStore.owns(rt.id, rt.messages)) {
         // The request provably never reached the agent, so the message is safe
-        // to hand back. The store write is workspace state and always lands.
-        // The composer it returns to is read AFTER the await, because a surface
-        // move in between retargets who owns the runtime now.
+        // to hand back: its manifest record goes with it, or a later replay
+        // would restore attachments for a prompt that was never sent. The
+        // owns gate keeps an explicit session delete from having its snapshot
+        // or draft resurrected by this late failure.
+        if (sentRecord) {
+          const at = rt.messages.sent.indexOf(sentRecord);
+          if (at !== -1) {
+            rt.messages.sent.splice(at, 1);
+          }
+          await this.saveRuntimeMessages(rt);
+        }
+        if (!rt.owner.messageStore.owns(rt.id, rt.messages)) {
+          throw error;
+        }
         await rt.owner.store.queuedBackToDrafts([{ id: rt.id, text: message.text }]);
+        // Read the owner again after the awaits: a surface move retargets who
+        // restores the staged files, and only while that owner still holds
+        // this state is the draft posted.
         const owner = rt.owner;
-        owner.restoreStaged(rt.id, message.attachments);
-        if (owner.activeId === rt.id) {
-          owner.postDraft();
+        if (owner.messageStore.owns(rt.id, rt.messages)) {
+          owner.restoreStaged(rt.id, message.attachments);
+          if (owner.activeId === rt.id) {
+            owner.postDraft();
+          }
         }
       }
       throw error;
@@ -4957,8 +5060,8 @@ export class ChatController implements AcpHost {
     if (rt.initialized && message.kind === "steer" && !rt.client.supportsMidTurnPrompts()) {
       message.kind = "queue";
     }
-    rt.queued.push(message);
-    this.postQueued(rt);
+    rt.messages.queued.push(message);
+    this.pendingChanged(rt.id);
   }
 
   // Ask the agent to stop the turn in flight, once: a second Stop while the
@@ -5016,27 +5119,33 @@ export class ChatController implements AcpHost {
       return;
     }
     const supportsSteering = rt.client.supportsMidTurnPrompts();
-    if (!supportsSteering && rt.queued.some((q) => q.kind === "steer")) {
-      for (const message of rt.queued) message.kind = "queue";
-      this.postQueued(rt);
+    if (!supportsSteering && rt.messages.queued.some((q) => q.kind === "steer")) {
+      for (const message of rt.messages.queued) message.kind = "queue";
+      this.pendingChanged(rt.id);
     }
-    while (rt.queued.length) {
+    while (rt.messages.queued.length) {
+      // A queue restored from disk waits for Resume Queue. Its one exception is
+      // an explicit Send Immediately pick, which runs exactly that message: the
+      // pick is consumed on dequeue and everything behind it stays paused.
+      if (rt.messages.paused && !rt.runNextId) {
+        return;
+      }
       // "Send Immediately" is authoritative over the order: its message is
       // sent next whatever kind it is. A stale pick (its message was removed)
       // is dropped and the ordinary order resumes. Otherwise a supported steer
       // goes before the queued messages behind it, keeping submission order
       // inside each kind.
-      let index = supportsSteering ? rt.queued.findIndex((q) => q.kind === "steer") : 0;
+      let index = supportsSteering ? rt.messages.queued.findIndex((q) => q.kind === "steer") : 0;
       if (index === -1) index = 0;
       if (rt.runNextId) {
-        const at = rt.queued.findIndex((q) => q.id === rt.runNextId);
+        const at = rt.messages.queued.findIndex((q) => q.id === rt.runNextId);
         if (at === -1) {
           rt.runNextId = undefined;
           continue;
         }
         index = at;
       }
-      const message = rt.queued[index];
+      const message = rt.messages.queued[index];
       // Hold only the message being edited, and only once it is chosen: the
       // ones before it still send, the ones after it wait behind it. Resumes
       // when the edit is committed or cancelled (see the queueEditing message).
@@ -5052,11 +5161,11 @@ export class ChatController implements AcpHost {
           return;
         }
       }
-      rt.queued.splice(index, 1);
+      rt.messages.queued.splice(index, 1);
       if (rt.runNextId === message.id) {
         rt.runNextId = undefined;
       }
-      this.postQueued(rt);
+      this.pendingChanged(rt.id);
       // Route the echo through emit so a flush that happens while the session
       // is backgrounded is buffered and replays (its user bubble shows on
       // return), instead of being dropped like the old active only post. What
@@ -5072,7 +5181,7 @@ export class ChatController implements AcpHost {
   // edit is abandoned. Committing replaces them with whatever the composer ended
   // up holding (editQueued), and abandoning drops that copy.
   private setQueueEditing(id?: string): void {
-    const rt = this.active();
+    const active = this.activeMessages();
     const was = this.queueEditingId;
     this.queueEditingId = id;
     if (was && was !== id && this.stagedFor(this.activeId).length) {
@@ -5080,13 +5189,13 @@ export class ChatController implements AcpHost {
       this.staged.set(this.stagedKey(this.activeId), []);
       this.stagedChanged(this.activeId);
     }
-    const to = id && rt ? rt.queued.find((q) => q.id === id) : undefined;
+    const to = id && active ? active.state.queued.find((q) => q.id === id) : undefined;
     if (to) {
       this.staged.set(this.stagedKey(this.activeId), to.attachments.map((a) => ({ ...a })));
       this.stagedChanged(this.activeId);
     }
-    if (rt) {
-      this.flushQueue(rt);
+    if (active?.rt) {
+      this.flushQueue(active.rt);
     }
   }
 
@@ -5095,14 +5204,15 @@ export class ChatController implements AcpHost {
   // with it, and the drain runs again so removing a blocker cannot strand the
   // queue behind it.
   private removeQueued(id: string): void {
-    const rt = this.active();
-    if (!rt) {
+    const active = this.activeMessages();
+    if (!active) {
       return;
     }
-    const before = rt.queued.length;
-    rt.queued = rt.queued.filter((q) => q.id !== id);
-    if (rt.queued.length !== before) {
-      if (rt.runNextId === id) {
+    const before = active.state.queued.length;
+    active.state.queued = active.state.queued.filter((q) => q.id !== id);
+    if (active.state.queued.length !== before) {
+      const rt = active.rt;
+      if (rt?.runNextId === id) {
         rt.runNextId = undefined;
       }
       if (this.queueEditingId === id) {
@@ -5114,8 +5224,10 @@ export class ChatController implements AcpHost {
           this.stagedChanged(this.activeId);
         }
       }
-      this.postQueued(rt);
-      this.flushQueue(rt);
+      this.pendingChanged(active.id);
+      if (rt) {
+        this.flushQueue(rt);
+      }
     }
   }
 
@@ -5124,22 +5236,25 @@ export class ChatController implements AcpHost {
   // different kind, the message onto itself) is not a reorder and changes
   // nothing.
   private reorderQueued(id: string, targetId: string, before: boolean): void {
-    const rt = this.active();
-    if (!rt || id === targetId) {
+    const active = this.activeMessages();
+    if (!active || id === targetId) {
       return;
     }
-    const from = rt.queued.findIndex((q) => q.id === id);
-    const to = rt.queued.findIndex((q) => q.id === targetId);
-    if (from === -1 || to === -1 || rt.queued[from].kind !== rt.queued[to].kind) {
+    const queued = active.state.queued;
+    const from = queued.findIndex((q) => q.id === id);
+    const to = queued.findIndex((q) => q.id === targetId);
+    if (from === -1 || to === -1 || queued[from].kind !== queued[to].kind) {
       return;
     }
-    const [moved] = rt.queued.splice(from, 1);
+    const [moved] = queued.splice(from, 1);
     // The target's index moved with the removal, so it is found again rather
     // than adjusted by arithmetic that a second removal would break.
-    const at = rt.queued.findIndex((q) => q.id === targetId);
-    rt.queued.splice(before ? at : at + 1, 0, moved);
-    this.postQueued(rt);
-    this.flushQueue(rt);
+    const at = queued.findIndex((q) => q.id === targetId);
+    queued.splice(before ? at : at + 1, 0, moved);
+    this.pendingChanged(active.id);
+    if (active.rt) {
+      this.flushQueue(active.rt);
+    }
   }
 
   // VS Code's "Send Immediately" on a pending request, which means now rather
@@ -5147,29 +5262,112 @@ export class ChatController implements AcpHost {
   // cancelled and the queue drains into the gap once it settles
   // (chatServiceImpl's sendPendingRequestImmediately). The pick also moves to
   // the front of its own kind for display, matching Copilot. On an idle
-  // session there is nothing to cancel, so it simply goes next.
-  private sendQueuedNow(id: string): void {
-    const rt = this.active();
-    if (!rt) {
+  // session there is nothing to cancel, so it simply goes next. A queue with
+  // no live runtime is woken first: the pick belongs to the session it was
+  // made on, never to whichever chat is on screen once the wake finishes.
+  private async sendQueuedNow(id: string): Promise<void> {
+    const active = this.activeMessages();
+    if (!active) {
       return;
     }
-    const at = rt.queued.findIndex((q) => q.id === id);
+    const sessionId = active.id;
+    if (!active.rt) {
+      await this.wakeSession(sessionId);
+    }
+    // Read the session's runtime again after the wake: the chat on screen, or
+    // even the runtime itself, may have changed while it ran.
+    const rt = this.runtimes.get(sessionId);
+    const state = this.messageStore.get(sessionId);
+    const at = state.queued.findIndex((q) => q.id === id);
     if (at === -1) {
       return;
     }
-    const message = rt.queued[at];
-    rt.queued.splice(at, 1);
-    const front = rt.queued.findIndex((q) => q.kind === message.kind);
-    rt.queued.splice(front === -1 ? rt.queued.length : front, 0, message);
-    rt.runNextId = id;
-    this.postQueued(rt);
+    const message = state.queued[at];
+    state.queued.splice(at, 1);
+    const front = state.queued.findIndex((q) => q.kind === message.kind);
+    state.queued.splice(front === -1 ? state.queued.length : front, 0, message);
+    if (rt) {
+      rt.runNextId = id;
+    }
+    this.pendingChanged(sessionId);
     // The turn ending drains the queue, and this message is the pick. A load in
     // flight is not a turn to cancel: the pick waits for the load's own drain.
-    if (rt.busy && !rt.replaying && !rt.waking && !this.loading.has(rt.id)) {
+    if (rt?.busy && !rt.replaying && !rt.waking && !this.loading.has(sessionId)) {
       this.cancelRuntime(rt);
       return;
     }
+    if (rt) {
+      this.flushQueue(rt);
+    }
+  }
+
+  // The queue the visible composer is editing, with its live runtime when the
+  // session still has one. A paused or dead session's rows stay usable: the
+  // state lives in the message store, not on the process.
+  private activeMessages(): { id: string; state: MessageState; rt?: Runtime } | undefined {
+    const id = this.activeId;
+    return id ? { id, state: this.messageStore.get(id), rt: this.runtimes.get(id) } : undefined;
+  }
+
+  // A queue mutation is persisted and republished together. An empty queue
+  // clears the pause flag: there is nothing left for Resume Queue to resume.
+  private pendingChanged(id: string): void {
+    const state = this.messageStore.get(id);
+    if (!state.queued.length) {
+      state.paused = false;
+    }
+    void this.saveMessages(id);
+    this.postQueued(id);
+  }
+
+  // Resume Queue: the recovered queue was paused on restore, and only this
+  // explicit ask lets it drain. The session is woken if its runtime is gone,
+  // but the resume always lands on the session the button belonged to.
+  private async resumeQueue(): Promise<void> {
+    const active = this.activeMessages();
+    if (!active) {
+      return;
+    }
+    const id = active.id;
+    if (!active.rt) {
+      await this.wakeSession(id);
+    }
+    // The wake can fail, or another surface can take the session while it was
+    // opening: unpausing a queue this surface cannot drain would strand it, so
+    // only a runtime that actually came up here gets the resume.
+    const rt = this.runtimes.get(id);
+    if (!rt) {
+      return;
+    }
+    const state = this.messageStore.get(id);
+    state.paused = false;
+    this.pendingChanged(id);
     this.flushQueue(rt);
+  }
+
+  // Persist a session's message state, reporting a failure where the user can
+  // see it: a queue that cannot be saved is the user's own writing, and
+  // silently dropping it is the one outcome worse than an error message.
+  private saveMessages(id: string): Promise<void> {
+    return this.messageStore.save(id).catch((err) => {
+      const message = err instanceof Error ? err.message : String(err);
+      this.log(`[messages-save-failed] ${id}: ${message}`);
+      this.post({
+        type: "error",
+        text: "Couldn't save this chat's messages and attachments. Keep this window open and check the Devin output."
+      });
+    });
+  }
+
+  // A save that outlives its runtime's place in the pool (a prompt still
+  // dispatching when its session was deleted or moved) must not write state
+  // the current owner no longer holds. Ordinary exit keeps ownership, so a
+  // not sent record is still cleaned up for a session that merely closed.
+  private saveRuntimeMessages(rt: Runtime): Promise<void> {
+    const owner = rt.owner;
+    return owner.messageStore.owns(rt.id, rt.messages)
+      ? owner.saveMessages(rt.id)
+      : Promise.resolve();
   }
 
   // What a queued message finally sends: the context it was queued with, then
@@ -5204,27 +5402,30 @@ export class ChatController implements AcpHost {
   // and its place in line was chosen under the old kind. The implicit context
   // it was queued with stays.
   private editQueued(id: string, text: string, kind?: PendingKind): void {
-    const rt = this.active();
-    if (!rt || !text.trim()) {
+    const active = this.activeMessages();
+    if (!active || !text.trim()) {
       return;
     }
-    const at = rt.queued.findIndex((x) => x.id === id);
+    const at = active.state.queued.findIndex((x) => x.id === id);
     if (at === -1) {
       return;
     }
-    const q = rt.queued[at];
+    const q = active.state.queued[at];
     q.text = text;
-    q.attachments = this.takeStaged(this.activeId);
-    const nextKind = kind === "steer" && rt.initialized && !rt.client.supportsMidTurnPrompts()
+    q.attachments = this.takeStaged(active.id);
+    const rt = active.rt;
+    const nextKind = kind === "steer" && rt?.initialized && !rt.client.supportsMidTurnPrompts()
       ? "queue"
       : kind || q.kind;
     if (nextKind !== q.kind) {
-      rt.queued.splice(at, 1);
+      active.state.queued.splice(at, 1);
       q.kind = nextKind;
-      rt.queued.push(q);
+      active.state.queued.push(q);
     }
-    this.postQueued(rt);
-    this.flushQueue(rt);
+    this.pendingChanged(active.id);
+    if (rt) {
+      this.flushQueue(rt);
+    }
   }
 
   // Replay a backgrounded session's buffered stream into the (now visible)
@@ -5289,32 +5490,105 @@ export class ChatController implements AcpHost {
     }
   }
 
-  // A chat losing its agent, however it lost it. Anything waiting behind the turn is
-  // the user's own writing and only ever lived on the runtime, so it goes back to
-  // that chat's draft, where an unsent draft in the same box already survives. The
-  // rows go with it: they offer Send now and Remove against a runtime that has gone,
-  // and both are no ops once it has.
-  private keepQueued(rt: Runtime): void {
-    if (!rt.id || !rt.queued.length) {
-      return;
+  // During a history replay, user_message_chunk updates are accumulated per
+  // message id rather than emitted chunk by chunk, so the flush can put back
+  // the whole request at once. A different message id, a transcript producing
+  // update, or the end of the load each close the group.
+  private accumulateReplayUser(rt: Runtime, u: { messageId?: string; content?: unknown }): void {
+    const content = Array.isArray(u.content) ? u.content : [u.content];
+    if (rt.replayUser && rt.replayUser.messageId !== u.messageId) {
+      this.flushReplayUser(rt);
     }
-    void this.store.queuedBackToDrafts(rt.queued.map((q) => ({ id: rt.id, text: q.text })));
-    rt.queued = [];
-    this.postQueued(rt);
-    if (this.activeId === rt.id) {
-      this.postDraft();
+    if (!rt.replayUser) {
+      rt.replayUser = { messageId: u.messageId, blocks: [] };
+    }
+    for (const block of content) {
+      if (typeof block === "string") {
+        rt.replayUser.blocks.push({ type: "text", text: block });
+      } else if (block && typeof block === "object") {
+        rt.replayUser.blocks.push(block as ContentBlock);
+      }
     }
   }
 
-  // Mirror a runtime's queue to the webview, but only while it is visible: the composer
-  // only ever shows the active session's queue.
-  private postQueued(rt: Runtime): void {
-    if (this.activeId === rt.id) {
-      this.post({
-        type: "queued",
-        items: rt.queued.map((q) => ({ id: q.id, kind: q.kind, text: q.text, attachments: this.shownAttachments(q.attachments) }))
-      });
+  // Match the stable prompt id and exact wire digest first, so a history cut
+  // cannot give a repeated prompt an older record's attachment labels. Older
+  // snapshots and replay sources without a known id match by digest in order.
+  // Anything unmatched is rebuilt from the blocks themselves.
+  private flushReplayUser(rt: Runtime): void {
+    const group = rt.replayUser;
+    rt.replayUser = undefined;
+    if (!group || !group.blocks.length) {
+      return;
     }
+    const saved = rt.messages.sent;
+    const from = rt.replaySentIndex ?? 0;
+    const key = promptKey(group.blocks);
+    const identifiedIndex = group.messageId
+      ? saved.findIndex((record, i) => i >= from && record.messageId === group.messageId && record.key === key)
+      : -1;
+    const index = identifiedIndex !== -1
+      ? identifiedIndex
+      : saved.findIndex((record, i) => i >= from && record.key === key);
+    const record = saved[index];
+    if (record) {
+      rt.replaySentIndex = index + 1;
+      this.emit(rt, {
+        type: "userChunk",
+        messageId: group.messageId,
+        text: record.text,
+        attachments: record.attachments
+      });
+      return;
+    }
+    const text = group.blocks
+      .filter((b) => b.type === "text")
+      .map((b) => (b as { type: "text"; text: string }).text)
+      .join("");
+    this.emit(rt, {
+      type: "userChunk",
+      messageId: group.messageId,
+      text,
+      attachments: replayedAttachments(group.blocks)
+    });
+  }
+
+  // A saved queue or sent manifest that cannot be read is reported, not
+  // silently treated as empty: the file is left in place for inspection.
+  private reportMessageRestoreFailure(id: string, err: unknown): void {
+    const message = err instanceof Error ? err.message : String(err);
+    this.log(`[messages-restore-failed] ${id}: ${message}`);
+    this.post({
+      type: "error",
+      text: "Couldn't restore this chat's saved messages and attachments. The saved file was left in place. Check the Devin output."
+    });
+  }
+
+  // Keep a dead runtime's queue editable until the user explicitly resumes it.
+  private keepQueued(rt: Runtime): void {
+    if (!rt.id) {
+      return;
+    }
+    if (rt.messages.queued.length) {
+      rt.messages.paused = true;
+    }
+    rt.runNextId = undefined;
+    void this.saveMessages(rt.id);
+    this.postQueued(rt.id);
+  }
+
+  // Mirror a session's queue to the webview, but only while it is visible: the
+  // composer only ever shows the active session's queue.
+  private postQueued(id: string): void {
+    if (this.activeId !== id) {
+      return;
+    }
+    const state = this.messageStore.get(id);
+    this.post({
+      type: "queued",
+      items: state.queued.map((q) => ({ id: q.id, kind: q.kind, text: q.text, attachments: this.shownAttachments(q.attachments) })),
+      paused: state.paused
+    });
   }
 
   // The agent pushes the whole revertible step list after every turn, so the
@@ -6037,6 +6311,11 @@ export class ChatController implements AcpHost {
     const u = n.update as any;
     const rt = this.runtimeBySessionId(n.sessionId, owner);
     this.updateModelActivity(rt, u);
+    // A user message being accumulated for replay ends where the transcript
+    // moves on to anything the agent produced.
+    if (rt?.replaying && rt.replayUser && REPLAY_USER_ENDS.has(String(u.sessionUpdate))) {
+      this.flushReplayUser(rt);
+    }
     // Context windows ride `_meta` on parent and delegated updates alike: the
     // real Sub report is tagged parentAgentId "sidekick" and would be filtered
     // out by the subagent dispatch below, so it is lifted here first. A raw
@@ -6066,16 +6345,24 @@ export class ChatController implements AcpHost {
         return;
       }
       case "user_message_chunk": {
-        // A replayed request carries what was attached to it as its own content
-        // blocks. Reading only the text out of them lost the attachments on every
-        // reload, so a request that had asked about a screenshot came back bare.
         // The stable prompt id the send declared arrives in _meta, not the
         // standard messageId; that id is what checkpoint bindings match on.
         const metaId = u._meta?.["cognition.ai/clientMessageId"];
+        const messageId = typeof metaId === "string" ? metaId : u.messageId;
+        if (rt?.replaying) {
+          // During a history replay the chunks of one user message are
+          // accumulated and flushed whole, so the saved sent manifest can
+          // restore the exact text and attachments it was sent with.
+          this.accumulateReplayUser(rt, { messageId, content: u.content });
+          return;
+        }
+        // A replayed request carries what was attached to it as its own content
+        // blocks. Reading only the text out of them lost the attachments on every
+        // reload, so a request that had asked about a screenshot came back bare.
         this.emit(rt, {
           type: "userChunk",
           text: textOf(u.content),
-          messageId: typeof metaId === "string" ? metaId : u.messageId,
+          messageId,
           attachments: replayedAttachments(u.content)
         });
         return;
@@ -6839,7 +7126,10 @@ function replayedAttachments(content: unknown): { label: string; type: string; t
   const blocks = Array.isArray(content) ? content : [content];
   const out: { label: string; type: string; thumb?: string }[] = [];
   for (const b of blocks) {
-    const block = b as { type?: string; uri?: string; name?: string; mimeType?: string; data?: string };
+    const block = b as {
+      type?: string; uri?: string; name?: string; mimeType?: string; data?: string;
+      resource?: { uri?: string }
+    };
     if (!block || typeof block !== "object") {
       continue;
     }
@@ -6847,6 +7137,10 @@ function replayedAttachments(content: unknown): { label: string; type: string; t
       out.push({ label: "Image", type: "image", thumb: `data:${block.mimeType || "image/png"};base64,${block.data}` });
     } else if (block.type === "resource_link" && block.uri) {
       out.push({ label: block.name || path.basename(fileFromUri(block.uri) || block.uri), type: "file" });
+    } else if (block.type === "resource" && block.resource?.uri) {
+      // A file attachment: the pill names it, its contents stay out of the
+      // typed message body.
+      out.push({ label: path.basename(fileFromUri(block.resource.uri) || block.resource.uri), type: "file" });
     }
   }
   return out;

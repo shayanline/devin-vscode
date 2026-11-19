@@ -217,6 +217,30 @@ test("a chat moved mid turn rebuilds the same transcript on the new surface", as
   assert.strictEqual(before.errors().length, 0);
 });
 
+test("message persistence streamed user chunks keep every attachment they carried", () => {
+  // A user message can be painted as several chunks, each with the attachments
+  // that came with it. Merging the text must not let the last chunk's array
+  // replace the earlier ones.
+  const { log } = recordAll([
+    { type: "userChunk", text: "look at ", messageId: "u1", attachments: [{ label: "a.png", type: "image", thumb: "data:image/png;base64,AAA" }] },
+    { type: "userChunk", text: "these", messageId: "u1", attachments: [{ label: "b.txt", type: "file" }] },
+    { type: "userChunk", text: " and ", messageId: "u1" },
+    { type: "userChunk", text: "those", messageId: "u1", attachments: [{ label: "c.md", type: "file" }] }
+  ]);
+  assert.strictEqual(log.length, 1, "the chunks merged into one entry");
+  assert.strictEqual(log[0].text, "look at these and those");
+  assert.deepStrictEqual(log[0].attachments.map((a) => a.label), ["a.png", "b.txt", "c.md"]);
+
+  // A different message id, or a non streamed payload, stands alone.
+  const separate = recordAll([
+    { type: "userChunk", text: "one", messageId: "u1", attachments: [{ label: "a.png", type: "file" }] },
+    { type: "userChunk", text: "two", messageId: "u2", attachments: [{ label: "b.png", type: "file" }] }
+  ]).log;
+  assert.strictEqual(separate.length, 2, "a new message id is a new entry");
+  assert.deepStrictEqual(separate[0].attachments.map((a) => a.label), ["a.png"]);
+  assert.deepStrictEqual(separate[1].attachments.map((a) => a.label), ["b.png"]);
+});
+
 test("a stopped background shell replays as history and never regrows its control", async () => {
   // The host records a stopped tool row so a moved chat still says Stopped. What
   // must NOT come back with it is the authorization: the shell registry is

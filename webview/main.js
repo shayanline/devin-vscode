@@ -56,6 +56,8 @@ import { createWorkingMark } from "./workingMark.js";
     inputBox: $("input-box"),
     composer: $("composer"),
     permissionTray: $("permission-tray"),
+    queueResume: $("queue-resume"),
+    resumeQueueBtn: $("resume-queue"),
     elicitationTray: $("elicitation-tray"),
     workingSet: $("working-set"),
     todoWidget: $("todo-widget"),
@@ -2993,6 +2995,7 @@ import { createWorkingMark } from "./workingMark.js";
     el.permissionTray.innerHTML = "";
   }
   el.attach.addEventListener("click", () => vscode.postMessage({ type: "addContext" }));
+  el.resumeQueueBtn.addEventListener("click", () => vscode.postMessage({ type: "resumeQueue" }));
 
   // The prompt history picker borrows the composer: whatever is in it now is
   // remembered so a late answer can tell "still the same draft" from "the user
@@ -3086,6 +3089,11 @@ import { createWorkingMark } from "./workingMark.js";
   // chat would arrive on the new surface with an empty composer and a blank
   // question.
   function flushState() {
+    // An open queue edit borrows the composer, including a copy of that row's
+    // attachments: end it before the draft and flush go out, or a transfer
+    // would carry the copy as an unrelated draft. The edit itself is not
+    // committed by the move.
+    if (editingQueuedId) cancelQueuedEdit();
     saveDraft();
     el.elicitationTray.querySelectorAll(".qc").forEach((w) => w.dispatchEvent(new Event("dv-teardown")));
     vscode.postMessage({ type: "stateFlushed" });
@@ -4124,7 +4132,7 @@ import { createWorkingMark } from "./workingMark.js";
     return ctrl;
   }
 
-  // Create a new turn shell (request container + checkpoint row + response
+  // Create a new turn shell (checkpoint row + request container + response
   // container) and make it current. `text` is the user's message.
   function newTurn(mid, text) {
     finalizeBlock();
@@ -4143,8 +4151,8 @@ import { createWorkingMark } from "./workingMark.js";
     resp.className = "turn-response";
     const checkpoint = document.createElement("div");
     checkpoint.className = "checkpoint-row hidden";
-    container.appendChild(req);
     container.appendChild(checkpoint);
+    container.appendChild(req);
     container.appendChild(resp);
     el.thread.appendChild(container);
     const turn = {
@@ -4273,7 +4281,7 @@ import { createWorkingMark } from "./workingMark.js";
       }
     };
 
-    // Checkpoint row (Restore Checkpoint) between request and response.
+    // Checkpoint actions cut before this request and its response.
     renderCheckpointRow(turn);
 
     // Response footer (Copy, Retry) + completion time, persistent under a
@@ -4426,7 +4434,7 @@ import { createWorkingMark } from "./workingMark.js";
     btn.className = "checkpoint-restore";
     // VS Code renders this as a plain text label (no leading icon).
     btn.innerHTML = '<span>Restore Checkpoint</span>';
-    btn.title = "Restores workspace and chat to this point";
+    btn.title = "Restore this chat to before this message.";
     const right = document.createElement("span");
     right.className = "checkpoint-line-right";
     // Inline two-state confirm: the label morphs to a shimmering "Discard Edits"
@@ -4450,9 +4458,9 @@ import { createWorkingMark } from "./workingMark.js";
       span.classList.toggle("dv-shimmer", v);
       btn.title = v
         ? (staying
-          ? `Rewinds the chat to this point. ${files} stay on disk, listed under changed files to keep or undo.`
-          : "Confirm restoring this checkpoint and discarding later edits")
-        : "Restores this chat to this point";
+          ? `Rewinds the chat to before this message. ${files} stay on disk, listed under changed files to keep or undo.`
+          : "Confirm restoring the chat to before this message and discarding later edits")
+        : "Restore this chat to before this message.";
     };
     // Lets an invalidation (send, busy, changed bindings) stand the armed
     // confirmation back down without rebuilding the row under focus.
@@ -4476,8 +4484,8 @@ import { createWorkingMark } from "./workingMark.js";
       const fork = document.createElement("button");
       fork.className = "checkpoint-fork";
       fork.innerHTML = '<i class="codicon codicon-git-branch"></i>';
-      fork.title = "Continue from here in a new chat, leaving this one as it is";
-      fork.setAttribute("aria-label", "Fork this chat from here");
+      fork.title = "Continue in a new chat with only the conversation before this message.";
+      fork.setAttribute("aria-label", "Fork this chat before this message.");
       fork.addEventListener("click", (e) => {
         e.stopPropagation();
         setConfirming(false);
@@ -5440,9 +5448,15 @@ import { createWorkingMark } from "./workingMark.js";
       const turn = newTurn(mid, "");
       turn.replayed = true; // from a loaded session
       buildTurnChrome(turn); // checkpoint row stays hidden until a binding names it
-      block = { kind: "user", mid, turn, buffer: "" };
+      block = { kind: "user", mid, turn, buffer: "", attachments: [] };
     }
-    if (attachments && attachments.length) setTurnAttachments(block.turn, attachments);
+    // A message's attachments can arrive across several chunks: they collect
+    // on the block and the whole set is rendered each time, so an earlier
+    // chunk's pills are never replaced by a later one's.
+    if (attachments && attachments.length) {
+      block.attachments.push(...attachments);
+      setTurnAttachments(block.turn, block.attachments);
+    }
     block.buffer += text;
     lastUserText = block.buffer;
     // Render the request text synchronously so a finalize between replayed
@@ -7956,6 +7970,8 @@ import { createWorkingMark } from "./workingMark.js";
   // the host auto-sends them in order. A CSS `order` keeps the block pinned below
   // every turn even when a flush appends a new one.
   let queuedItems = [];
+  // A queue restored from disk waits paused until the user asks for it.
+  let queuedPaused = false;
   // The queued message being edited in the composer (null = not editing one).
   let editingQueuedId = null;
   // The pending row being dragged, if any. Reorder is same kind only, the way
@@ -7989,8 +8005,14 @@ import { createWorkingMark } from "./workingMark.js";
     return JSON.stringify([queuedKind(q), q.text, q.attachments || []]);
   }
 
-  function renderQueued(items) {
+  function renderQueueResume() {
+    el.queueResume.classList.toggle("hidden", !queuedPaused || queuedItems.length === 0);
+  }
+
+  function renderQueued(items, paused = false) {
     queuedItems = Array.isArray(items) ? items : [];
+    queuedPaused = !!paused;
+    renderQueueResume();
     resetQueuedDrag();
     // The item being edited may have flushed (its turn started) while editing;
     // drop the stale editing state so the banner does not dangle.
@@ -8897,6 +8919,7 @@ import { createWorkingMark } from "./workingMark.js";
       checkpoints: new Map(checkpointBindings), checkpointBusy,
       toolEls: new Map(toolEls), subagentEls: new Map(subagentEls), terminalCache: new Map(terminalCache),
       commands: commands.slice(), title: currentTitle, lastUserText, draft: el.input.value,
+      queuedItems: queuedItems.slice(), queuedPaused,
       // The composer widgets live outside the thread, so they are kept here by
       // value and put back by restoreView: the plan Devin is working through, the
       // files it has changed and their line counts, and the context ring.
@@ -8941,6 +8964,9 @@ import { createWorkingMark } from "./workingMark.js";
     }
     turns = [];
     currentTurn = null;
+    queuedItems = [];
+    queuedPaused = false;
+    renderQueueResume();
     toolEls.clear();
     subagentEls.clear();
     terminalCache.clear();
@@ -8992,6 +9018,9 @@ import { createWorkingMark } from "./workingMark.js";
     v.terminalCache.forEach((val, k) => terminalCache.set(k, val));
     commands = v.commands || [];
     lastUserText = v.lastUserText || "";
+    queuedItems = v.queuedItems || [];
+    queuedPaused = !!v.queuedPaused;
+    renderQueueResume();
     // Put the composer widgets back: this session's plan, its changed files with
     // their line counts, and its context usage.
     planCollapsePref = v.planCollapsePref === undefined ? null : v.planCollapsePref;
@@ -10175,7 +10204,7 @@ import { createWorkingMark } from "./workingMark.js";
       case "subagentMode": setSubagentBackground(m); break;
       case "fileChange": addFileChange(m); break;
       case "workingSet": renderWorkingSet(m.files); break;
-      case "queued": renderQueued(m.items); break;
+      case "queued": renderQueued(m.items, m.paused); break;
       case "attachments": renderAttachments(m.items); break;
       case "draft": applyDraft(m); break;
       // Something outside the panel (an editor command) set the composer up and

@@ -14,6 +14,8 @@
 
 const test = require("node:test");
 const assert = require("node:assert");
+const crypto = require("crypto");
+const fs = require("fs");
 const path = require("node:path");
 const { createChat, createManager, cleanup } = require("./chat-harness");
 
@@ -24,6 +26,16 @@ const { createChat, createManager, cleanup } = require("./chat-harness");
 const posixOnly = { skip: process.platform === "win32" };
 
 const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
+// The per session message snapshot path, and a valid empty one to seed.
+const messagesFile = (storage, id) =>
+  path.join(storage, "messages", `${crypto.createHash("sha256").update(id).digest("hex")}.json`);
+const seedMessageFile = (storage, id) => {
+  const file = messagesFile(storage, id);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ version: 1, queued: [], sent: [] }));
+  return file;
+};
 
 test("bypass mode answers command permission requests without showing them", posixOnly, async () => {
   const h = createChat({ config: { defaultMode: "" } });
@@ -341,6 +353,67 @@ test("a chat handed to another surface leaves its staged files readable", posixO
   await h.dispose();
 });
 
+test("a staged read held open does not append over a fresher attach", posixOnly, async () => {
+  // loadStaged reads the on disk copy after an await. A file attached while
+  // that read was in flight must win: the disk copy only fills a list that is
+  // still empty, never appends beside or over the newer change.
+  const h = createChat({ promptDelay: 150 });
+  await h.ready();
+  const a = await h.startChat("first chat");
+  const b = await h.startChat("second chat");
+  const idle = (id) => h.until(() => {
+    const rt = h.controller.runtimes.get(id);
+    return !!rt && rt.busy === false;
+  }, 8000);
+  assert.ok(await idle(b), "the second chat's turn ended");
+
+  h.send({ type: "activateSession", id: a });
+  await h.until(() => h.activeId() === a, 8000);
+  h.send({ type: "attachImage", name: "old-on-disk.png", mime: "image/png", data: IMG_A });
+  await h.until(() => ((h.last("attachments") || {}).items || []).length === 1);
+  await h.controller.messageStore.flush();
+
+  // Back on b, and this window forgets it ever staged for a: only the disk
+  // file can restore it now.
+  h.send({ type: "activateSession", id: b });
+  await h.until(() => h.activeId() === b, 8000);
+  h.controller.staged.delete(a);
+
+  const vscode = globalThis.__dvVscode;
+  const fsApi = vscode.workspace.fs;
+  const originalRead = fsApi.readFile;
+  let releaseRead;
+  const gate = new Promise((resolve) => { releaseRead = resolve; });
+  let readEntered = false;
+  fsApi.readFile = async (uri) => {
+    const bytes = await originalRead(uri);
+    if (String(uri.path).includes("/attachments/")) {
+      readEntered = true;
+      await gate;
+    }
+    return bytes;
+  };
+  try {
+    const draftsBefore = h.postsOf("draft").length;
+    h.send({ type: "activateSession", id: a });
+    assert.ok(await h.until(() => readEntered, 8000), "the staged read reached the disk");
+    h.send({ type: "attachImage", name: "fresh.png", mime: "image/png", data: IMG_B });
+    await h.until(() => ((h.last("attachments") || {}).items || []).length === 1, 8000);
+    releaseRead();
+    // postDraft runs after loadStaged, so its arrival means the gated read
+    // has been applied (or correctly skipped).
+    assert.ok(await h.until(() => h.postsOf("draft").length > draftsBefore, 8000),
+      "the activation finished its staged read");
+    const items = (h.last("attachments") || {}).items || [];
+    assert.deepStrictEqual(items.map((x) => x.label), ["fresh.png"],
+      "only the fresh attachment is staged, once");
+  } finally {
+    releaseRead();
+    fsApi.readFile = originalRead;
+    await h.dispose();
+  }
+});
+
 test("a chat that finishes starting in the background does not take the panel", posixOnly, async () => {
   // No configured default mode, so each chat keeps the mode its own agent reports and
   // the two can be told apart.
@@ -407,23 +480,36 @@ test("a chat still opening is reported as starting, not as idle", posixOnly, asy
   await h.dispose();
 });
 
-test("messages queued behind a turn come back as a draft when the surface goes", posixOnly, async () => {
-  // The queue only ever lived on the runtime. Closing a chat tab mid turn offers to
-  // terminate it, and taking that offer went through dispose, which threw the queue
-  // away, while terminating the same chat from the list handed it back.
+test("messages queued behind a turn survive the surface as a paused queue", posixOnly, async () => {
+  // The queue only ever lived on the runtime, so losing the surface flattened it
+  // into the chat's draft and dropped what was attached to it. It is now a
+  // structured snapshot of its own: paused on restore, and the restore itself
+  // never sends it.
   const h = createChat({ promptDelay: 60000 });
   await h.ready();
   const id = await h.startChat("the turn");
   await h.until(() => h.postsOf("busy").some((m) => m.value));
 
+  h.send({ type: "attachImage", name: "kept.png", mime: "image/png", data: PNG });
+  await h.until(() => ((h.last("attachments") || {}).items || []).length === 1);
   h.send({ type: "send", text: "queued behind it" });
   await h.until(() => (h.last("queued") || { items: [] }).items.length === 1);
   assert.deepStrictEqual(prompts(h).map((p) => p.text), ["the turn"], "the second is not sent");
 
   h.controller.dispose();
-  await h.until(() => /queued behind it/.test(h.store.draft(id) || ""));
-  assert.match(h.store.draft(id), /queued behind it/, "the writing is back in that chat's box");
   await h.dispose();
+  assert.strictEqual(h.store.draft(id) || "", "", "the queue is not flattened into the draft");
+  const dir = path.join(h.storage, "messages");
+  const files = fs.existsSync(dir) ? fs.readdirSync(dir) : [];
+  assert.strictEqual(files.length, 1, "one message snapshot was written");
+  const saved = JSON.parse(fs.readFileSync(path.join(dir, files[0]), "utf8"));
+  assert.strictEqual(saved.version, 1);
+  assert.strictEqual(saved.queued.length, 1);
+  assert.strictEqual(saved.queued[0].text, "queued behind it");
+  assert.strictEqual(saved.queued[0].kind, "queue");
+  assert.strictEqual(saved.queued[0].attachments[0].label, "kept.png");
+  assert.strictEqual(saved.queued[0].attachments[0].block.data, PNG);
+  assert.deepStrictEqual(saved.sent, []);
 });
 
 test("a staged file goes with one message, not with both of them", posixOnly, async () => {
@@ -853,26 +939,38 @@ test("a session evicted from history releases its staged attachments", posixOnly
     h.store.add(`s${i}`, h.cwd);
   }
   h.controller.staged.set("s0", [{ id: "attachment", label: "image", type: "image", block: { type: "image", mimeType: "image/png", data: "a" } }]);
+  const evictedFile = seedMessageFile(h.storage, "s0");
 
   await h.controller.createSession();
+  await h.controller.messageStore.flush();
   await h.settle(100);
 
   assert.strictEqual(h.controller.staged.has("s0"), false);
+  assert.ok(!fs.existsSync(evictedFile), "the evicted session's message snapshot went with it");
   await h.dispose();
 });
 
 test("a session pruned from the list releases its staged attachments", posixOnly, async () => {
   const h = createChat();
   await h.ready();
-  await h.startChat("keep the agent live");
+  const liveId = await h.startChat("keep the agent live");
   h.store.add("gone", h.cwd);
   h.controller.staged.set("gone", [{ id: "attachment", label: "image", type: "image", block: { type: "image", mimeType: "image/png", data: "a" } }]);
+  const goneFile = seedMessageFile(h.storage, "gone");
+  const liveFile = seedMessageFile(h.storage, liveId);
+  // The agent no longer lists either id: gone is unowned and pruned, while the
+  // live runtime keeps its own snapshot regardless.
+  h.controller.listOverProtocol = () => Promise.resolve({ sessions: [], prunedIds: ["gone", liveId] });
 
   await h.controller.refreshSessions(true);
+  await h.controller.messageStore.flush();
   await h.settle(100);
 
   assert.strictEqual(h.store.has("gone"), false);
   assert.strictEqual(h.controller.staged.has("gone"), false);
+  assert.ok(!fs.existsSync(goneFile), "the unowned snapshot was removed");
+  assert.ok(fs.existsSync(liveFile), "the live session's snapshot was kept");
+  assert.strictEqual(h.store.has(liveId), true, "and its tracking row too");
   await h.dispose();
 });
 
@@ -1223,14 +1321,17 @@ test("history eviction retains attachments for a live session", posixOnly, async
   await h.ready();
   const id = await h.startChat("keep this session live");
   h.controller.staged.set(id, [{ id: "attachment", label: "image", type: "image", block: { type: "image", mimeType: "image/png", data: "a" } }]);
+  const liveFile = seedMessageFile(h.storage, id);
   for (let i = 0; i < 199; i++) {
     h.store.add(`older-${i}`, h.cwd);
   }
 
   h.controller.rememberSession("new", h.cwd);
+  await h.controller.messageStore.flush();
   await h.settle(50);
 
   assert.strictEqual(h.controller.staged.has(id), true);
+  assert.ok(fs.existsSync(liveFile), "the live session's message snapshot was kept");
   await h.dispose();
 });
 
@@ -2074,7 +2175,7 @@ test("a steered turn finishes and drains on the surface that took it", posixOnly
   const pendingId = from.last("queued").items[0].id;
 
   const transfer = from.controller.exportRuntime(id);
-  assert.strictEqual(transfer.rt.queued[0]?.id, pendingId, "the pending id survives the handover unchanged");
+  assert.strictEqual(transfer.rt.messages.queued[0]?.id, pendingId, "the pending id survives the handover unchanged");
   const to = createChat({ promptGate: path.join(from.storage, "prompt-gate") });
   await to.ready();
   await to.controller.importRuntime(transfer);
@@ -2674,7 +2775,7 @@ test("queued input joins the journal only when it is actually sent", posixOnly, 
   try {
     const id = await h.startChat("first gated prompt");
     h.send({ type: "send", text: "second queued prompt" });
-    assert.ok(await h.until(() => (h.controller.runtimes.get(id)?.queued || []).length === 1, 8000),
+    assert.ok(await h.until(() => (h.controller.runtimes.get(id)?.messages.queued || []).length === 1, 8000),
       "the second message is queued behind the running turn");
     assert.deepStrictEqual(h.store.promptHistory(h.cwd), ["first gated prompt"],
       "a pending queue row is not journaled yet");
@@ -4621,6 +4722,39 @@ test("checkpoint identity: a fork read raced by a new prompt does not fork a sta
   }
 });
 
+test("checkpoint boundary: fork uses the boundary before the selected message", posixOnly, async () => {
+  const h = createChat({ promptDelay: 100, forkId: "checkpoint-fork" });
+  try {
+    await h.ready();
+    const id = await h.startChat("FIRST");
+    const rt = h.controller.runtimes.get(id);
+    assert.ok(await h.until(() => !rt.busy && rt.stepsKnown, 10000));
+    for (const text of ["SECOND", "THIRD"]) {
+      const before = h.agentSaw("session/prompt").length;
+      h.send({ type: "send", text });
+      assert.ok(await h.until(() => h.agentSaw("session/prompt").length > before && !rt.busy && rt.stepsKnown, 10000));
+    }
+    const mids = Object.fromEntries(h.postsOf("userMessage").map((m) => [m.text, m.clientMessageId]));
+    assert.ok(mids.FIRST && mids.SECOND && mids.THIRD);
+    const sourceLog = JSON.parse(JSON.stringify(rt.log));
+    rt.client.listRevertSteps = async () => [
+      { stepNumber: 1, kind: "prompt", userMessageId: mids.FIRST, revertTargetNodeId: 10, forkTargetNodeId: 20 },
+      { stepNumber: 2, kind: "prompt", userMessageId: mids.SECOND, revertTargetNodeId: 20, forkTargetNodeId: 30 },
+      { stepNumber: 3, kind: "prompt", userMessageId: mids.THIRD, revertTargetNodeId: 30, forkTargetNodeId: 40 }
+    ];
+    h.send({ type: "revertFork", sessionId: id, userMessageId: mids.SECOND });
+    assert.ok(await h.until(() => h.agentSaw("_cognition.ai/revert/forkFromStep").length === 1, 10000));
+    assert.deepStrictEqual(h.agentSaw("_cognition.ai/revert/forkFromStep")[0].params, { sessionId: id, targetNodeId: 20 });
+    assert.ok(await h.until(() => h.activeId() === "checkpoint-fork", 10000));
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(rt.log)), sourceLog, "fork leaves all original turns and tool results unchanged");
+    assert.strictEqual(h.agentSaw("_cognition.ai/revert/execute").length, 0);
+    assert.strictEqual(h.agentSaw("_cognition.ai/revert/preview").length, 0);
+    assert.strictEqual(h.agentSaw("session/prompt").length, 3, "fork does not resend any prompt");
+  } finally {
+    await h.dispose();
+  }
+});
+
 test("checkpoint identity: a newer step push beats an older list read", posixOnly, async () => {
   const h = createChat({
     promptDelay: 200,
@@ -4718,6 +4852,1065 @@ test("checkpoint identity: unsupported agents settle readiness without a step re
     assert.strictEqual(h.postsOf("capabilities").at(-1).revert, false,
       "an unsupported agent offered checkpoint controls");
   } finally {
+    await h.dispose();
+  }
+});
+
+// --- Message persistence ---------------------------------------------------
+// Queued messages and the manifest of what each sent request displayed are kept
+// per session on disk, so a restart, a wake or a move between surfaces puts back
+// exactly what the user had: the queue paused until Resume Queue, and sent
+// requests rebuilt from the saved manifest rather than guessed from text.
+
+const IMG_A = PNG;
+const IMG_B = "aGVsbG8td29ybGQtcGl4ZWw=";
+const IMPLICIT_NOTE = { type: "text", text: "implicit note for the queue" };
+
+for (const end of ["shutdown", "dispose"]) {
+  test(`message persistence restores a queued message after ${end}`, posixOnly, async () => {
+    const h = createChat({ promptGate: true });
+    await h.ready();
+    const id = await h.startChat("the turn");
+    await h.until(() => h.postsOf("busy").some((m) => m.value));
+    // A fixed nonempty implicit snapshot, so the restore proves the whole
+    // queued message travelled rather than just its text and attachments.
+    h.controller.buildImplicitBlocks = () => [IMPLICIT_NOTE];
+
+    h.send({ type: "attachImage", name: "queued.png", mime: "image/png", data: IMG_A });
+    await h.until(() => ((h.last("attachments") || {}).items || []).length === 1);
+    h.send({ type: "send", text: "first queued" });
+    await h.until(() => (h.last("queued") || { items: [] }).items.length === 1);
+
+    h.send({ type: "attachDroppedText", name: "notes.txt", text: "the dropped file's contents" });
+    await h.until(() => ((h.last("attachments") || {}).items || []).length === 1);
+    h.send({ type: "send", text: "second queued" });
+    await h.until(() => (h.last("queued") || { items: [] }).items.length === 2);
+
+    // The second row moves to the front, then is edited through the composer.
+    let items = h.last("queued").items;
+    h.send({ type: "reorderQueued", id: items[1].id, targetId: items[0].id, before: true });
+    items = h.last("queued").items;
+    const head = items[0];
+    assert.strictEqual(head.text, "second queued");
+    const queuedIds = items.map((q) => q.id);
+    h.send({ type: "queueEditing", id: head.id });
+    h.send({ type: "attachImage", name: "added-while-editing.png", mime: "image/png", data: IMG_A });
+    await h.until(() => ((h.last("attachments") || {}).items || []).length === 2);
+    h.send({ type: "editQueued", id: head.id, text: "second queued, edited" });
+    h.send({ type: "queueEditing", id: null });
+    // A draft of its own, so the restore cannot confuse the two.
+    h.send({ type: "draft", id, text: "composer draft, not queued" });
+    await h.until(() => h.store.draft(id) === "composer draft, not queued");
+
+    if (end === "shutdown") {
+      await h.controller.shutdown();
+    } else {
+      h.controller.dispose();
+    }
+    await h.dispose();
+
+    const next = createChat({
+      storage: h.storage,
+      cwd: h.cwd,
+      state: Object.fromEntries(h.state.__map),
+      promptGate: true
+    });
+    try {
+      await next.ready();
+      next.send({ type: "loadSession", id });
+      assert.ok(await next.until(() => {
+        const q = next.last("queued");
+        return next.activeId() === id && q && q.paused === true && (q.items || []).length === 2;
+      }, 8000), "the saved queue came back paused");
+
+      const restored = next.last("queued").items;
+      assert.deepStrictEqual(restored.map((q) => q.id), queuedIds, "the same rows came back in the same order");
+      assert.deepStrictEqual(restored.map((q) => q.text), ["second queued, edited", "first queued"]);
+      assert.deepStrictEqual(restored.map((q) => q.kind), ["queue", "queue"]);
+      assert.deepStrictEqual(
+        restored.map((q) => (q.attachments || []).map((a) => a.label)),
+        [["notes.txt", "added-while-editing.png"], ["queued.png"]]
+      );
+
+      const rt = next.controller.runtimes.get(id);
+      assert.ok(rt, "the session has a runtime after load");
+      const stored = rt.messages.queued;
+      assert.deepStrictEqual(stored.map((q) => q.id), queuedIds);
+      assert.deepStrictEqual(stored.map((q) => q.text), ["second queued, edited", "first queued"]);
+      const headBlocks = stored[0].attachments.map((a) => a.block);
+      assert.strictEqual(headBlocks.filter((b) => b.type === "image" && b.data === IMG_A).length, 1,
+        "the head row's image kept its bytes");
+      assert.ok(headBlocks.some((b) => b.type === "text" && b.text.includes("the dropped file's contents")),
+        "the dropped file's contents survived");
+      assert.strictEqual(stored[1].attachments[0].block.data, IMG_A);
+      assert.deepStrictEqual(stored.map((q) => q.implicit), [[IMPLICIT_NOTE], [IMPLICIT_NOTE]],
+        "the implicit snapshots travelled unchanged");
+      assert.strictEqual(next.agentSaw("session/prompt").length, 0, "the restore itself sent nothing");
+      assert.strictEqual(next.store.draft(id), "composer draft, not queued", "the draft stayed a draft");
+
+      // Editing a restored row hands its attachments back. The fresh attach must
+      // not collide with the ids the restore brought back.
+      next.send({ type: "queueEditing", id: restored[0].id });
+      await next.until(() => ((next.last("attachments") || {}).items || []).length === 2);
+      next.send({ type: "attachImage", name: "post-restore.png", mime: "image/png", data: IMG_A });
+      await next.until(() => ((next.last("attachments") || {}).items || []).length === 3);
+      const stagedIds = (next.last("attachments").items || []).map((a) => a.id);
+      assert.strictEqual(new Set(stagedIds).size, stagedIds.length, "restored and fresh attachment ids are unique");
+      next.send({ type: "editQueued", id: restored[0].id, text: "second queued, edited twice" });
+      next.send({ type: "queueEditing", id: null });
+      assert.ok(await next.until(() => (next.last("queued") || { items: [] }).items[0]?.text === "second queued, edited twice"),
+        "the edit committed while paused");
+      assert.strictEqual(next.last("queued").paused, true, "and the queue stayed paused");
+
+      next.send({ type: "resumeQueue" });
+      assert.ok(await next.until(() => next.agentSaw("session/prompt").length === 1, 8000), "the first restored message went out");
+      const first = next.agentSaw("session/prompt")[0].params.prompt;
+      assert.strictEqual(first.at(-1).text, "second queued, edited twice");
+      assert.strictEqual(first[0].text, IMPLICIT_NOTE.text, "the implicit snapshot led the wire prompt");
+      assert.strictEqual(first.filter((b) => b.type === "image" && b.data === IMG_A).length, 2,
+        "every attachment image went once, with its bytes");
+      assert.ok(first.some((b) => b.type === "text" && b.text.includes("the dropped file's contents")));
+      next.releasePrompt(id, 1);
+      assert.ok(await next.until(() => next.agentSaw("session/prompt").length === 2, 8000), "the second followed in order");
+      const second = next.agentSaw("session/prompt")[1].params.prompt;
+      assert.strictEqual(second.at(-1).text, "first queued");
+      assert.strictEqual(second[0].text, IMPLICIT_NOTE.text);
+      assert.strictEqual(second.filter((b) => b.type === "image").length, 1);
+      next.releasePrompt(id, 2);
+      assert.ok(await next.until(() => next.postsOf("busy").some((m) => m.value === false), 8000));
+      assert.deepStrictEqual((next.last("queued") || { items: [] }).items, [], "the queue drained");
+
+      await next.controller.shutdown();
+      await next.dispose();
+
+      const third = createChat({
+        storage: h.storage,
+        cwd: h.cwd,
+        state: Object.fromEntries(next.state.__map)
+      });
+      try {
+        await third.ready();
+        third.send({ type: "loadSession", id });
+        assert.ok(await third.until(() => third.postsOf("loaded").length > 0, 8000), "the cold load finished");
+        const q3 = third.last("queued");
+        assert.ok(q3 && (q3.items || []).length === 0, "nothing already sent came back queued");
+        assert.strictEqual(q3.paused, false, "and the drained queue is not paused");
+        const rt3 = third.controller.runtimes.get(id);
+        assert.ok(rt3, "the session has a runtime after load");
+        assert.strictEqual(rt3.messages.sent.length, 2, "the sent manifest survived the cold restore");
+      } finally {
+        await third.dispose();
+      }
+    } finally {
+      await next.dispose();
+    }
+  });
+}
+
+test("message persistence restores sent attachments on load, wake and transfer", posixOnly, async () => {
+  const h = createChat({ promptDelay: 150 });
+  await h.ready();
+  const id = await h.startChat("warmup");
+  assert.ok(await h.until(() => prompts(h).length === 1, 8000));
+  const idle = () => h.until(() => {
+    const rt = h.controller.runtimes.get(id);
+    return !!rt && rt.busy === false;
+  }, 8000);
+  assert.ok(await idle(), "the warmup turn ends");
+
+  fs.writeFileSync(path.join(h.cwd, "notes.txt"), "the notes file contents");
+  const TEXT = "same typed text";
+  const sentBlocks = () => h.agentSaw("session/prompt").slice(1).map((m) => m.params.prompt);
+  const stageAll = async (imageName, imageData) => {
+    h.send({ type: "addMention", path: path.join(h.cwd, "notes.txt") });
+    await h.until(() => ((h.last("attachments") || {}).items || []).length === 1);
+    h.send({ type: "attachImage", name: imageName, mime: "image/png", data: imageData });
+    await h.until(() => ((h.last("attachments") || {}).items || []).length === 2);
+    h.send({ type: "attachDroppedText", name: "dropped.txt", text: "dropped file contents" });
+    await h.until(() => ((h.last("attachments") || {}).items || []).length === 3);
+    h.controller.stagedFor(id).push({
+      id: `att-sel-${imageName}`, label: "pick.ts:1-2", type: "selection",
+      block: { type: "text", text: "From pick.ts lines 1-2:\n\n```ts\nconst x = 1;\n```" }
+    });
+    h.controller.stagedChanged(id);
+    await h.until(() => ((h.last("attachments") || {}).items || []).length === 4);
+  };
+
+  // Three sends of the same typed text: the first and third carry byte
+  // identical blocks (only the image label differs), the second different ones,
+  // so plain text matching could never tell them apart.
+  await stageAll("first.png", IMG_A);
+  h.send({ type: "send", text: TEXT });
+  assert.ok(await h.until(() => sentBlocks().length === 1, 8000));
+  await idle();
+
+  h.send({ type: "attachImage", name: "second.png", mime: "image/png", data: IMG_B });
+  await h.until(() => ((h.last("attachments") || {}).items || []).length === 1);
+  h.send({ type: "send", text: TEXT });
+  assert.ok(await h.until(() => sentBlocks().length === 2, 8000));
+  await idle();
+
+  await stageAll("renamed.png", IMG_A);
+  h.send({ type: "send", text: TEXT });
+  assert.ok(await h.until(() => sentBlocks().length === 3, 8000));
+  await idle();
+
+  const captured = sentBlocks();
+  assert.strictEqual(captured.length, 3);
+  await h.dispose();
+
+  // Replay the captured blocks as history, each user message split over two
+  // chunks so the accumulation path is exercised, with agent chunks between.
+  const updates = [];
+  captured.forEach((blocks, i) => {
+    const mid = blocks.length >> 1;
+    updates.push({ sessionUpdate: "user_message_chunk", messageId: `u-${i}`, content: blocks.slice(0, mid) });
+    updates.push({ sessionUpdate: "user_message_chunk", messageId: `u-${i}`, content: blocks.slice(mid) });
+    updates.push({ sessionUpdate: "agent_message_chunk", messageId: `a-${i}`, content: { type: "text", text: `reply ${i}` } });
+  });
+  // The memento carried over, minus the "which chat was on screen" markers:
+  // ready() reopens that chat by itself, which would race the explicit load
+  // below and the transfer's import, so each surface here opens only when asked.
+  const carried = (from) => {
+    const state = Object.fromEntries(from.state.__map);
+    delete state["devin.viewingSession.v1"];
+    delete state["devin.activeSession.v1"];
+    return state;
+  };
+  const next = createChat({
+    storage: h.storage,
+    cwd: h.cwd,
+    state: carried(h),
+    loadUpdates: updates
+  });
+  try {
+    await next.ready();
+    next.send({ type: "loadSession", id });
+    // Replayed transcript arrives in batches, not as top level userChunk posts.
+    const replayedUserChunks = () => next.postsOf("replay")
+      .flatMap((m) => m.items || []).filter((p) => p.type === "userChunk");
+    assert.ok(await next.until(() => replayedUserChunks().length === 3, 8000), "three user chunks replayed");
+    const chunks = replayedUserChunks();
+    assert.deepStrictEqual(chunks.map((c) => c.text), [TEXT, TEXT, TEXT], "the typed text, not rebuilt content");
+    assert.deepStrictEqual(chunks.map((c) => c.messageId), ["u-0", "u-1", "u-2"]);
+    assert.deepStrictEqual(chunks[0].attachments.map((a) => a.label),
+      ["notes.txt", "first.png", "dropped.txt", "pick.ts:1-2"]);
+    assert.strictEqual(chunks[0].attachments[1].thumb, `data:image/png;base64,${IMG_A}`);
+    assert.deepStrictEqual(chunks[1].attachments.map((a) => a.label), ["second.png"]);
+    assert.strictEqual(chunks[1].attachments[0].thumb, `data:image/png;base64,${IMG_B}`);
+    // The repeated blocks matched in send order: the third group took the third
+    // record's labels, not the first record's identical key.
+    assert.deepStrictEqual(chunks[2].attachments.map((a) => a.label),
+      ["notes.txt", "renamed.png", "dropped.txt", "pick.ts:1-2"]);
+    assert.ok(!JSON.stringify(chunks).includes("the notes file contents"), "no file contents leaked into the display");
+
+    // A silent wake replays the same history against the same manifest. The
+    // agent dies without a terminate round trip, the path that must not prune
+    // the saved records.
+    const dead = next.controller.runtimes.get(id);
+    assert.ok(dead, "the loaded session has a runtime");
+    next.controller.destroyRuntime(dead);
+    next.controller.onRuntimeExit(dead);
+    assert.ok(await next.until(() => !next.controller.runtimes.has(id), 8000));
+    next.send({ type: "wakeSession", id });
+    assert.ok(await next.until(() => {
+      const rt = next.controller.runtimes.get(id);
+      return rt && rt.log.filter((p) => p.type === "userChunk").length === 3;
+    }, 10000), "the woken replay rebuilt the same three requests");
+    const woke = next.controller.runtimes.get(id).log.filter((p) => p.type === "userChunk");
+    assert.deepStrictEqual(woke.map((c) => c.text), [TEXT, TEXT, TEXT]);
+    assert.deepStrictEqual(woke[2].attachments.map((a) => a.label),
+      ["notes.txt", "renamed.png", "dropped.txt", "pick.ts:1-2"]);
+
+    // And a live transfer carries the woken transcript, attachments included.
+    const transfer = next.controller.exportRuntime(id);
+    const to = createChat({ storage: next.storage, cwd: next.cwd, state: carried(next) });
+    try {
+      await to.ready();
+      await to.controller.importRuntime(transfer);
+      assert.ok(await to.until(() => {
+        const items = to.postsOf("replay").flatMap((m) => m.items || []);
+        return items.filter((p) => p.type === "userChunk").length === 3;
+      }, 8000), "the transferred transcript replayed");
+      const moved = to.postsOf("replay").flatMap((m) => m.items || []).filter((p) => p.type === "userChunk");
+      assert.deepStrictEqual(moved[0].attachments.map((a) => a.label),
+        ["notes.txt", "first.png", "dropped.txt", "pick.ts:1-2"]);
+      assert.strictEqual(moved[0].attachments[1].thumb, `data:image/png;base64,${IMG_A}`);
+      assert.deepStrictEqual(moved[2].attachments.map((a) => a.label),
+        ["notes.txt", "renamed.png", "dropped.txt", "pick.ts:1-2"]);
+      // The queue and manifest travelled unpaused with the live runtime.
+      assert.strictEqual(to.controller.runtimes.get(id)?.messages.paused, false);
+      assert.strictEqual(to.controller.runtimes.get(id)?.messages.sent.length, 3);
+    } finally {
+      await to.dispose();
+    }
+  } finally {
+    await next.dispose();
+  }
+});
+
+test("message persistence replay without a manifest still restores attachment pills", posixOnly, async () => {
+  // History written before the manifest existed has no saved records: the
+  // request is rebuilt from the blocks themselves. A resource block becomes a
+  // file pill without its contents, and every image keeps its thumbnail.
+  const h = createChat({
+    loadUpdates: [
+      { sessionUpdate: "user_message_chunk", messageId: "u1", content: [
+        { type: "resource", resource: { uri: "file:///w/notes.txt", text: "the notes file contents" } },
+        { type: "image", mimeType: "image/png", data: IMG_A },
+        { type: "image", mimeType: "image/png", data: IMG_B },
+        { type: "text", text: "what about these" }
+      ] },
+      { sessionUpdate: "agent_message_chunk", messageId: "a1", content: { type: "text", text: "ok" } }
+    ]
+  });
+  try {
+    await h.ready();
+    h.send({ type: "loadSession", id: "legacy-session" });
+    // Replayed transcript arrives in batches, not as top level userChunk posts.
+    assert.ok(await h.until(() => h.postsOf("replay")
+      .flatMap((m) => m.items || []).some((p) => p.type === "userChunk"), 8000), "the request replayed");
+    const chunk = h.postsOf("replay").flatMap((m) => m.items || []).find((p) => p.type === "userChunk");
+    assert.strictEqual(chunk.text, "what about these", "the resource text stayed out of the message body");
+    assert.deepStrictEqual(chunk.attachments.map((a) => a.label), ["notes.txt", "Image", "Image"]);
+    assert.deepStrictEqual(chunk.attachments.map((a) => a.type), ["file", "image", "image"]);
+    assert.strictEqual(chunk.attachments[1].thumb, `data:image/png;base64,${IMG_A}`);
+    assert.strictEqual(chunk.attachments[2].thumb, `data:image/png;base64,${IMG_B}`);
+    assert.ok(!JSON.stringify(chunk).includes("the notes file contents"), "file contents did not leak");
+
+    // The same chunk survives being recorded and replayed for a transfer.
+    const rt = h.controller.runtimes.get("legacy-session");
+    assert.ok(rt, "the session has a runtime");
+    const logged = rt.log.filter((p) => p.type === "userChunk");
+    assert.strictEqual(logged.length, 1);
+    assert.strictEqual(logged[0].attachments.length, 3, "all three pills were recorded");
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("message persistence a user only replay tail flushes at load completion", posixOnly, async () => {
+  // The last request of a history can be a user message with no reply after
+  // it, and config or usage traffic can land in the middle of one request's
+  // chunks. Neither may lose or split what the replay puts back.
+  const h = createChat({
+    loadUpdates: [
+      { sessionUpdate: "user_message_chunk", messageId: "u1", content: { type: "text", text: "first half " } },
+      { sessionUpdate: "usage_update", used: 10, size: 100 },
+      { sessionUpdate: "config_option_update", configOptions: [{
+        id: "mode", name: "Session Mode", type: "select", currentValue: "default",
+        options: [{ value: "default", name: "Default" }]
+      }] },
+      { sessionUpdate: "user_message_chunk", messageId: "u1", content: { type: "text", text: "second half" } },
+      { sessionUpdate: "agent_message_chunk", messageId: "a1", content: { type: "text", text: "reply one" } },
+      { sessionUpdate: "user_message_chunk", messageId: "u2", content: { type: "text", text: "unanswered tail" } }
+    ]
+  });
+  try {
+    await h.ready();
+    h.send({ type: "loadSession", id: "tail-session" });
+    const chunks = () => h.postsOf("replay")
+      .flatMap((m) => m.items || []).filter((p) => p.type === "userChunk");
+    assert.ok(await h.until(() => chunks().length === 2, 8000), "both requests replayed");
+    assert.strictEqual(chunks()[0].text, "first half second half",
+      "usage and config updates did not split the request");
+    assert.strictEqual(chunks()[1].text, "unanswered tail",
+      "the user only tail flushed when the load finished");
+    assert.deepStrictEqual(chunks().map((c) => c.messageId), ["u1", "u2"]);
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("message persistence keeps queue and attachments through a live transfer", posixOnly, async () => {
+  const from = createChat({ promptGate: true, midTurnPrompts: true });
+  await from.ready();
+  const id = await from.startChat("the turn");
+  await from.until(() => from.postsOf("busy").some((m) => m.value));
+
+  // A sent request with attachment display in the log.
+  from.send({ type: "attachImage", name: "sent.png", mime: "image/png", data: IMG_A });
+  await from.until(() => ((from.last("attachments") || {}).items || []).length === 1);
+  from.send({ type: "send", text: "with picture", kind: "steer" });
+  assert.ok(await from.until(() => from.agentSaw("session/prompt").length === 2, 8000));
+
+  // A queued message with its own image, and separate staged draft files.
+  from.send({ type: "attachImage", name: "queued.png", mime: "image/png", data: IMG_B });
+  await from.until(() => ((from.last("attachments") || {}).items || []).length === 1);
+  from.send({ type: "send", text: "queued with image", kind: "queue" });
+  await from.until(() => (from.last("queued") || { items: [] }).items.length === 1);
+  from.send({ type: "attachImage", name: "draft.png", mime: "image/png", data: IMG_B });
+  await from.until(() => ((from.last("attachments") || {}).items || []).length === 1);
+
+  const transfer = from.controller.exportRuntime(id);
+  const to = createChat({
+    storage: from.storage,
+    cwd: from.cwd,
+    state: Object.fromEntries(from.state.__map),
+    promptGate: path.join(from.storage, "prompt-gate")
+  });
+  try {
+    await to.ready();
+    await to.controller.importRuntime(transfer);
+    assert.ok(await to.until(() => (to.last("queued") || { items: [] }).items.length === 1, 8000),
+      "the queue arrived with the runtime");
+    const arrived = to.last("queued");
+    assert.strictEqual(arrived.paused, false, "a live transfer keeps running semantics");
+    assert.strictEqual(arrived.items[0].text, "queued with image");
+    assert.strictEqual(arrived.items[0].kind, "queue");
+    assert.strictEqual(arrived.items[0].attachments[0].label, "queued.png");
+    assert.strictEqual(arrived.items[0].attachments[0].thumb, `data:image/png;base64,${IMG_B}`);
+    // The sent request's display travelled in the recorded transcript.
+    const sentEcho = to.postsOf("replay").flatMap((m) => m.items || [])
+      .find((p) => p.type === "userMessage" && p.text === "with picture");
+    assert.ok(sentEcho, "the sent request replayed");
+    assert.strictEqual(sentEcho.attachments[0].label, "sent.png");
+    assert.strictEqual(sentEcho.attachments[0].thumb, `data:image/png;base64,${IMG_A}`);
+    // The staged draft files travelled with the surface, not into the queue.
+    assert.deepStrictEqual(((to.last("attachments") || {}).items || []).map((a) => a.label), ["draft.png"]);
+    assert.strictEqual(to.controller.runtimes.get(id)?.messages.queued[0].attachments[0].block.data, IMG_B,
+      "the queued image kept its bytes under the new owner");
+
+    // And back again: the destination becomes the source.
+    const back = to.controller.exportRuntime(id);
+    const third = createChat({
+      storage: from.storage,
+      cwd: from.cwd,
+      state: Object.fromEntries(to.state.__map),
+      promptGate: path.join(from.storage, "prompt-gate")
+    });
+    try {
+      await third.ready();
+      await third.controller.importRuntime(back);
+      assert.ok(await third.until(() => (third.last("queued") || { items: [] }).items.length === 1, 8000));
+      assert.strictEqual(third.last("queued").paused, false);
+      assert.strictEqual(third.last("queued").items[0].text, "queued with image");
+      assert.strictEqual(third.last("queued").items[0].attachments[0].label, "queued.png");
+      assert.deepStrictEqual(((third.last("attachments") || {}).items || []).map((a) => a.label), ["draft.png"]);
+    } finally {
+      await third.dispose();
+    }
+  } finally {
+    await to.dispose();
+    await from.dispose();
+  }
+});
+
+test("message persistence serializes a late write behind the new owner's", posixOnly, async () => {
+  // A save the old surface already had in flight when it handed the session over
+  // must land before the new owner's own save, never on top of it: the shared
+  // per file write queue is what orders them.
+  const h = createChat({ promptGate: true });
+  await h.ready();
+  const id = await h.startChat("the turn");
+  await h.until(() => h.postsOf("busy").some((m) => m.value));
+  h.send({ type: "send", text: "first queued" });
+  h.send({ type: "send", text: "second queued" });
+  await h.until(() => (h.last("queued") || { items: [] }).items.length === 2);
+
+  // Hold every write to the messages snapshot so the next save stays in flight.
+  const vscode = globalThis.__dvVscode;
+  const fsApi = vscode.workspace.fs;
+  const originalWrite = fsApi.writeFile;
+  let releaseWrites;
+  const gate = new Promise((resolve) => { releaseWrites = resolve; });
+  let entered = false;
+  fsApi.writeFile = async (uri, bytes) => {
+    if (String(uri.path).includes("/messages/")) {
+      entered = true;
+      await gate;
+    }
+    return originalWrite(uri, bytes);
+  };
+  try {
+    // The old surface queues one more message: its save is now stuck mid write.
+    h.send({ type: "send", text: "from the old surface" });
+    assert.ok(await h.until(() => entered, 8000), "the old surface's save reached the disk");
+
+    const transfer = h.controller.exportRuntime(id);
+    const to = createChat({
+      storage: h.storage,
+      cwd: h.cwd,
+      state: Object.fromEntries(h.state.__map),
+      promptGate: path.join(h.storage, "prompt-gate")
+    });
+    try {
+      await to.ready();
+      await to.controller.importRuntime(transfer);
+      // The destination adds its own entry while the old write is still held.
+      to.send({ type: "send", text: "from the new surface", kind: "queue" });
+      await to.until(() => (to.last("queued") || { items: [] }).items.length === 4, 8000);
+    } finally {
+      releaseWrites();
+      await to.dispose();
+    }
+    await h.dispose();
+
+    const third = createChat({ storage: h.storage, cwd: h.cwd, state: Object.fromEntries(h.state.__map) });
+    try {
+      await third.ready();
+      third.send({ type: "loadSession", id });
+      assert.ok(await third.until(() => third.activeId() === id, 8000));
+      assert.ok(await third.until(() => {
+        const q = third.last("queued");
+        return q && (q.items || []).length === 4;
+      }, 8000));
+      // The stale write landed first, the new owner's last: the destination's
+      // latest state is what the file holds.
+      assert.deepStrictEqual(third.last("queued").items.map((q) => q.text),
+        ["first queued", "second queued", "from the old surface", "from the new surface"]);
+      assert.strictEqual(third.last("queued").paused, true);
+    } finally {
+      await third.dispose();
+    }
+  } finally {
+    fsApi.writeFile = originalWrite;
+    await h.dispose();
+  }
+});
+
+test("message persistence keeps a dead session's queue editable until resume", posixOnly, async () => {
+  const h = createChat({ promptGate: true });
+  await h.ready();
+  const id = await h.startChat("the turn");
+  await h.until(() => h.postsOf("busy").some((m) => m.value));
+  h.send({ type: "send", text: "keep me" });
+  h.send({ type: "send", text: "drop me" });
+  h.send({ type: "send", text: "edit me" });
+  await h.until(() => (h.last("queued") || { items: [] }).items.length === 3);
+  const items = h.last("queued").items;
+
+  // The agent dies on its own: the session stays on screen with no runtime, and
+  // the queue it left is paused in the store.
+  const rt = h.controller.runtimes.get(id);
+  const agentsBefore = h.agentSaw("session/new").length + h.agentSaw("session/load").length;
+  h.controller.destroyRuntime(rt);
+  h.controller.onRuntimeExit(rt);
+  assert.ok(await h.until(() => !h.controller.runtimes.has(id), 8000));
+  assert.strictEqual(h.activeId(), id, "the session is still on screen");
+  const state = h.controller.messageStore.get(id);
+  assert.strictEqual(state.paused, true, "the dead runtime's queue is paused");
+  assert.strictEqual(state.queued.length, 3);
+
+  // Rows still work with no process behind them.
+  h.send({ type: "removeQueued", id: items[1].id });
+  h.send({ type: "reorderQueued", id: items[2].id, targetId: items[0].id, before: false });
+  h.send({ type: "editQueued", id: items[2].id, text: "edit me, revised" });
+  await h.until(() => state.queued.map((q) => q.text).join("|") === "keep me|edit me, revised");
+  assert.strictEqual(h.agentSaw("session/new").length + h.agentSaw("session/load").length, agentsBefore,
+    "no agent was started for the offline edits");
+
+  // Send Immediately on the offline queue wakes that session and sends only it.
+  h.send({ type: "sendQueuedNow", id: items[2].id });
+  assert.ok(await h.until(() => h.agentSaw("session/prompt").length === 2, 10000),
+    "the picked message woke the session and went out");
+  const woke = h.agentSaw("session/prompt")[1];
+  assert.strictEqual(woke.params.sessionId, id);
+  assert.strictEqual(woke.params.prompt.at(-1).text, "edit me, revised");
+  h.releasePrompt(id, 1);
+  h.releasePrompt(id, 2);
+  assert.ok(await h.until(() => (h.last("queued") || { items: [] }).items.length === 1, 8000));
+  assert.strictEqual(h.last("queued").items[0].text, "keep me", "the rest stayed queued");
+  assert.strictEqual(state.paused, true, "and stayed paused");
+  await h.dispose();
+});
+
+test("message persistence resume during a wake keeps prompts on their own session", posixOnly, async () => {
+  const h = createChat({ promptGate: true });
+  await h.ready();
+  const id = await h.startChat("the turn");
+  await h.until(() => h.postsOf("busy").some((m) => m.value));
+  h.send({ type: "send", text: "queued for resume" });
+  await h.until(() => (h.last("queued") || { items: [] }).items.length === 1);
+
+  // The agent dies with the queue waiting: paused, with no process behind it.
+  const rt = h.controller.runtimes.get(id);
+  h.controller.destroyRuntime(rt);
+  h.controller.onRuntimeExit(rt);
+  assert.ok(await h.until(() => !h.controller.runtimes.has(id), 8000));
+  assert.strictEqual(h.controller.messageStore.get(id).paused, true);
+  assert.strictEqual(h.activeId(), id, "the session is still on screen");
+
+  // Resume starts a wake, and the user moves to another chat while the load is
+  // still in flight. The queued message must still go to the session it was
+  // written in, and the panel must not be pulled back to it.
+  h.setDelays({ loadDelay: 900 });
+  h.send({ type: "resumeQueue" });
+  await h.settle(250);
+  const other = await h.startChat("the chat opened instead");
+  assert.strictEqual(h.activeId(), other, "the user is on the other chat");
+
+  assert.ok(await h.until(() => h.agentSaw("session/prompt")
+    .filter((p) => p.params.sessionId === id).length === 2, 10000),
+    "the resumed queue went out on its own session");
+  const resumed = h.agentSaw("session/prompt").filter((p) => p.params.sessionId === id).at(-1);
+  assert.strictEqual(resumed.params.prompt.at(-1).text, "queued for resume");
+  assert.strictEqual(h.activeId(), other, "and the panel stayed where the user put it");
+  assert.strictEqual(h.controller.messageStore.get(id).paused, false, "the resume landed");
+
+  h.releasePrompt(id, 1);
+  await h.until(() => {
+    const woke = h.controller.runtimes.get(id);
+    return woke && woke.busy === false;
+  }, 8000);
+  await h.dispose();
+});
+
+test("message persistence a failed resume wake leaves the queue paused", posixOnly, async () => {
+  const h = createChat({ promptGate: true });
+  try {
+    await h.ready();
+    const id = await h.startChat("the turn");
+    assert.ok(await h.until(() => h.postsOf("busy").some((m) => m.value)));
+    h.send({ type: "attachImage", name: "queued.png", mime: "image/png", data: PNG });
+    assert.ok(await h.until(() => ((h.last("attachments") || {}).items || []).length === 1));
+    h.send({ type: "send", text: "queued for resume" });
+    assert.ok(await h.until(() => (h.last("queued") || { items: [] }).items.length === 1));
+    await h.controller.messageStore.flush();
+    const file = messagesFile(h.storage, id);
+
+    const rt = h.controller.runtimes.get(id);
+    h.controller.destroyRuntime(rt);
+    h.controller.onRuntimeExit(rt);
+    assert.ok(await h.until(() => !h.controller.runtimes.has(id), 8000));
+    assert.strictEqual(h.controller.messageStore.get(id).paused, true);
+
+    h.controller.loadWithTakeover = async () => { throw new Error("the load failed"); };
+    await h.controller.resumeQueue();
+    await h.controller.refreshSessions(true);
+    await h.controller.messageStore.flush();
+
+    const state = h.controller.messageStore.get(id);
+    assert.strictEqual(state.paused, true, "a failed wake did not unpause the queue");
+    assert.strictEqual(state.queued.length, 1, "the message is still there");
+    assert.strictEqual(h.store.has(id), true, "the queued session remains tracked");
+    assert.ok(h.last("sessions").sessions.some((session) => session.id === id),
+      "the saved queue remains reachable from the session list");
+    assert.ok(fs.existsSync(file), "the queue snapshot remains on disk");
+    assert.strictEqual(JSON.parse(fs.readFileSync(file, "utf8")).queued[0].attachments[0].block.data, PNG,
+      "the saved attachment kept its bytes");
+    assert.strictEqual(h.agentSaw("session/prompt").length, 1, "nothing else was sent");
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("message persistence a cold list retains saved queues missing from discovery", posixOnly, async () => {
+  const h = createChat();
+  try {
+    await h.ready();
+    const id = "saved-queue-without-discovery";
+    h.store.add(id, h.cwd);
+    const file = seedMessageFile(h.storage, id);
+    const queued = {
+      id: "saved-message", kind: "queue", text: "saved follow up", implicit: [],
+      attachments: [{
+        id: "saved-attachment", label: "saved.png", type: "image",
+        block: { type: "image", mimeType: "image/png", data: PNG }
+      }]
+    };
+    const snapshot = JSON.stringify({ version: 1, queued: [queued], sent: [] });
+    fs.writeFileSync(file, snapshot);
+    h.controller.listOverProtocol = () => Promise.resolve({ sessions: [], prunedIds: [id] });
+
+    await h.controller.refreshSessions(true);
+    await h.controller.messageStore.flush();
+
+    assert.strictEqual(h.store.has(id), true, "discovery did not remove the queued session");
+    assert.ok(h.last("sessions").sessions.some((session) => session.id === id),
+      "the cold queue has a session row");
+    assert.strictEqual(fs.readFileSync(file, "utf8"), snapshot, "discovery left the snapshot intact");
+    const state = await h.controller.messageStore.load(id);
+    assert.strictEqual(state.paused, true, "the cold queue remains paused");
+    assert.deepStrictEqual(state.queued, [queued], "the full message and attachment survive");
+    assert.strictEqual(h.agentSaw("session/prompt").length, 0, "listing the queue sends nothing");
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("message persistence reports a corrupt snapshot instead of overwriting it", posixOnly, async () => {
+  const h = createChat();
+  await h.ready();
+  const id = await h.startChat("the turn");
+  assert.ok(await h.until(() => prompts(h).length === 1, 8000));
+  // Flush first: the live session's own shutdown save must not be what writes
+  // over the fixtures below.
+  await h.controller.shutdown();
+  await h.dispose();
+
+  // Snapshots that fail validation the way a torn or foreign write would. Each
+  // is checked byte for byte after its reader has also shut down, so a save
+  // during teardown cannot quietly replace the bad file with an empty state.
+  const dir = path.join(h.storage, "messages");
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `${crypto.createHash("sha256").update(id).digest("hex")}.json`);
+  const fixtures = [
+    ["malformed JSON", "{not json"],
+    ["a bad version", JSON.stringify({ version: 2, queued: [], sent: [] })],
+    ["a bad schema", JSON.stringify({
+      version: 1,
+      queued: [{ id: "q1", kind: "queue", text: "", implicit: [], attachments: [] }],
+      sent: []
+    })]
+  ];
+  for (const [name, raw] of fixtures) {
+    fs.writeFileSync(file, raw);
+    const next = createChat({
+      storage: h.storage,
+      cwd: h.cwd,
+      state: Object.fromEntries(h.state.__map),
+      loadUpdates: [{ sessionUpdate: "user_message_chunk", messageId: "u1", content: { type: "text", text: "old question" } }]
+    });
+    try {
+      await next.ready();
+      next.send({ type: "loadSession", id });
+      assert.ok(await next.until(() => next.postsOf("error")
+        .some((m) => /saved messages and attachments/.test(m.text || "")), 8000),
+        `${name}: the corrupt snapshot was reported`);
+      // The transcript still replayed from the agent's own history.
+      assert.ok(await next.until(() => next.postsOf("replay")
+        .flatMap((m) => m.items || []).some((p) => p.type === "userChunk"), 8000),
+        `${name}: the transcript replayed`);
+      const replayed = next.postsOf("replay").flatMap((m) => m.items || []).find((p) => p.type === "userChunk");
+      assert.strictEqual(replayed.text, "old question");
+    } finally {
+      await next.dispose();
+    }
+    assert.strictEqual(fs.readFileSync(file, "utf8"), raw, `${name}: the file was left in place, byte for byte`);
+  }
+});
+
+test("message persistence a failed snapshot write keeps the last good file", posixOnly, async () => {
+  const h = createChat({ promptGate: true });
+  await h.ready();
+  const id = await h.startChat("the turn");
+  await h.until(() => h.postsOf("busy").some((m) => m.value));
+  h.send({ type: "send", text: "first queued" });
+  await h.until(() => (h.last("queued") || { items: [] }).items.length === 1);
+  // Commit the first snapshot before breaking writes, so the file on disk
+  // provably holds it when the second save fails.
+  await h.controller.messageStore.flush();
+  const good = h.controller.messageStore.get(id);
+  assert.strictEqual(good.queued.length, 1);
+
+  // Break writes to the snapshot file only.
+  const vscode = globalThis.__dvVscode;
+  const fsApi = vscode.workspace.fs;
+  const originalWrite = fsApi.writeFile;
+  fsApi.writeFile = async (uri, bytes) => {
+    if (String(uri.path).includes("/messages/")) {
+      const err = new Error("ENOSPC: no space left on device");
+      err.code = "ENOSPC";
+      throw err;
+    }
+    return originalWrite(uri, bytes);
+  };
+  try {
+    h.send({ type: "send", text: "second queued" });
+    assert.ok(await h.until(() => h.postsOf("error").some((m) => /couldn't save this chat's messages and attachments/i.test(m.text || "")), 8000),
+      "the failed save was reported");
+  } finally {
+    fsApi.writeFile = originalWrite;
+  }
+  // The queue still in memory kept working, and the last committed file still has
+  // only what it had before the failed write.
+  assert.strictEqual(good.queued.length, 2, "the queue in memory still took the message");
+  assert.strictEqual((h.last("queued") || { items: [] }).items.length, 2);
+  const dir = path.join(h.storage, "messages");
+  const files = fs.readdirSync(dir).filter((f) => f.endsWith(".json"));
+  assert.strictEqual(files.length, 1, "no temp file was left behind");
+  const saved = JSON.parse(fs.readFileSync(path.join(dir, files[0]), "utf8"));
+  assert.strictEqual(saved.queued.length, 1, "the last committed snapshot is intact");
+  assert.strictEqual(saved.queued[0].text, "first queued");
+  await h.dispose();
+});
+
+test("message persistence slow storage does not reorder a sent request and a steer", posixOnly, async () => {
+  // The sent manifest is recorded in memory and its save requested, but the
+  // dispatch barrier must be installed without waiting on disk: a steer that
+  // lands while storage is still blocked has to join the same turn, in order.
+  const h = createChat({ promptGate: true, midTurnPrompts: true });
+  await h.ready();
+  const id = await h.startChat("warmup");
+  assert.ok(await h.until(() => prompts(h).length === 1, 8000));
+  h.releasePrompt(id, 1);
+  const rt = () => h.controller.runtimes.get(id);
+  assert.ok(await h.until(() => rt()?.busy === false, 8000), "the warmup turn ended");
+
+  const vscode = globalThis.__dvVscode;
+  const fsApi = vscode.workspace.fs;
+  const originalWrite = fsApi.writeFile;
+  let releaseWrites;
+  const gate = new Promise((resolve) => { releaseWrites = resolve; });
+  let entered = false;
+  fsApi.writeFile = async (uri, bytes) => {
+    if (String(uri.path).includes("/messages/")) {
+      entered = true;
+      await gate;
+    }
+    return originalWrite(uri, bytes);
+  };
+  try {
+    h.send({ type: "attachImage", name: "shot.png", mime: "image/png", data: IMG_A });
+    await h.until(() => ((h.last("attachments") || {}).items || []).length === 1);
+    h.send({ type: "send", text: "first with image" });
+    assert.ok(await h.until(() => entered, 8000), "the manifest write reached the disk");
+    assert.ok(rt().turn, "the turn barrier is installed while storage is still blocked");
+
+    h.send({ type: "send", text: "second steer", kind: "steer" });
+    assert.ok(await h.until(() => h.agentSaw("session/prompt").length === 3, 8000),
+      "both requests reached the wire");
+    const wire = h.agentSaw("session/prompt").slice(1).map((m) => m.params.prompt.at(-1).text);
+    assert.deepStrictEqual(wire, ["first with image", "second steer"],
+      "the sent request and the steer went out in order");
+
+    h.releasePrompt(id, 2);
+    await h.settle(400);
+    assert.strictEqual(rt().busy, true, "one reply is not the end of the shared turn");
+    h.releasePrompt(id, 3);
+    assert.ok(await h.until(() => rt()?.busy === false, 8000), "the shared turn ended");
+  } finally {
+    releaseWrites();
+    fsApi.writeFile = originalWrite;
+    await h.dispose();
+  }
+});
+
+test("message persistence a delayed remove completes before a later adopted save", posixOnly, async () => {
+  // A remove that is still waiting on hydration must not delete the file after
+  // a newer owner has already saved over it: the store's per session chain is
+  // what orders the two, so the save scheduled second lands last.
+  const h = createChat();
+  await h.ready();
+  const id = "ghost-session";
+  const digest = crypto.createHash("sha256").update(id).digest("hex");
+  const file = path.join(h.storage, "messages", `${digest}.json`);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({
+    version: 1,
+    queued: [{ id: "old-q", kind: "queue", text: "old queued", implicit: [], attachments: [] }],
+    sent: []
+  }));
+
+  const vscode = globalThis.__dvVscode;
+  const fsApi = vscode.workspace.fs;
+  const originalRead = fsApi.readFile;
+  let releaseRead;
+  const gate = new Promise((resolve) => { releaseRead = resolve; });
+  let readEntered = false;
+  fsApi.readFile = async (uri) => {
+    const bytes = await originalRead(uri);
+    if (String(uri.path).includes(`/messages/${digest}.json`)) {
+      readEntered = true;
+      await gate;
+    }
+    return bytes;
+  };
+  try {
+    const store = h.controller.messageStore;
+    store.get(id);
+    const loaded = store.load(id);
+    store.remove(id);
+    store.adopt(id, {
+      queued: [{ id: "new-q", kind: "queue", text: "adopted queued", implicit: [], attachments: [] }],
+      sent: [],
+      paused: false
+    });
+    const saved = store.save(id);
+    assert.ok(await h.until(() => readEntered, 8000), "hydration reached the gated read");
+    releaseRead();
+    await loaded.catch(() => {});
+    await saved.catch(() => {});
+    await store.flush();
+
+    const onDisk = JSON.parse(fs.readFileSync(file, "utf8"));
+    assert.deepStrictEqual(onDisk.queued.map((q) => q.id), ["new-q"],
+      "the adopted state is what the file holds, not a deletion that landed late");
+    assert.strictEqual(onDisk.queued[0].text, "adopted queued");
+  } finally {
+    releaseRead();
+    fsApi.readFile = originalRead;
+    await h.dispose();
+  }
+});
+
+for (const variant of ["before rejection", "during recovery"]) {
+  test(`message persistence a deleted session is not resurrected by a late not sent error (${variant})`, posixOnly, async () => {
+    const h = createChat({ promptDelay: 150 });
+    let releaseCleanup;
+    let boundSave;
+    try {
+      await h.ready();
+      const id = await h.startChat("warmup");
+      assert.ok(await h.until(() => prompts(h).length === 1, 8000));
+      const idle = () => h.until(() => {
+        const rt = h.controller.runtimes.get(id);
+        return !!rt && rt.busy === false;
+      }, 8000);
+      assert.ok(await idle(), "the warmup turn ended");
+
+      // A sent request leaves its manifest on disk, so the delete below has a
+      // real file to remove and the late failure has something it must not
+      // recreate.
+      h.send({ type: "attachImage", name: "shot.png", mime: "image/png", data: IMG_A });
+      await h.until(() => ((h.last("attachments") || {}).items || []).length === 1);
+      h.send({ type: "send", text: "with file" });
+      assert.ok(await h.until(() => prompts(h).length === 2, 8000));
+      assert.ok(await idle(), "the attachment turn ended");
+      await h.controller.messageStore.flush();
+      const file = path.join(h.storage, "messages", `${crypto.createHash("sha256").update(id).digest("hex")}.json`);
+      assert.ok(fs.existsSync(file), "the manifest is on disk before the delete");
+
+      // The next prompt never answers, so its not sent failure lands when the
+      // test releases it, after the session is gone.
+      const rt = h.controller.runtimes.get(id);
+      let rejectPrompt;
+      let promptStarted = false;
+      rt.client.prompt = () => {
+        promptStarted = true;
+        return new Promise((_, reject) => { rejectPrompt = reject; });
+      };
+      h.send({ type: "attachImage", name: "late.png", mime: "image/png", data: IMG_B });
+      await h.until(() => ((h.last("attachments") || {}).items || []).length === 1);
+      h.send({ type: "send", text: "never sent" });
+      assert.ok(await h.until(() => promptStarted, 8000), "the prompt reached the stub");
+      const pendingTurn = rt.turn;
+
+      const deleteSession = async () => {
+        h.answerWith("Delete");
+        h.send({ type: "deleteSession", id, title: "warmup" });
+        assert.ok(await h.until(() => !h.store.has(id), 8000), "the session was deleted");
+        await h.controller.messageStore.flush();
+        assert.ok(!fs.existsSync(file), "the delete removed the snapshot");
+      };
+
+      if (variant === "during recovery") {
+        // Park the recovery's own manifest save: the delete lands while the
+        // not sent callback is still inside it, so only a recheck after that
+        // await can see the session is gone.
+        boundSave = h.controller.saveRuntimeMessages.bind(h.controller);
+        let cleanupEntered = false;
+        const cleanupGate = new Promise((resolve) => { releaseCleanup = resolve; });
+        h.controller.saveRuntimeMessages = (target) => {
+          if (target !== rt) {
+            return boundSave(target);
+          }
+          cleanupEntered = true;
+          return cleanupGate.then(() => boundSave(target));
+        };
+        rejectPrompt(new h.AcpRequestNotSentError("ACP connection is closed"));
+        assert.ok(await h.until(() => cleanupEntered, 8000), "the recovery reached its save");
+        await deleteSession();
+        releaseCleanup();
+      } else {
+        await deleteSession();
+        rejectPrompt(new h.AcpRequestNotSentError("ACP connection is closed"));
+      }
+      await pendingTurn.catch(() => {});
+      await h.controller.messageStore.flush();
+
+      assert.ok(!fs.existsSync(file), "the late failure did not recreate the snapshot");
+      assert.ok(!((h.store.draft(id) || "").includes("never sent")), "and no draft came back");
+      assert.strictEqual(h.controller.staged.has(id), false, "and no staged files were restored");
+    } finally {
+      releaseCleanup?.();
+      if (boundSave) {
+        delete h.controller.saveRuntimeMessages;
+      }
+      await h.dispose();
+    }
+  });
+}
+
+test("message persistence dispose during a borrowed queue edit restores without a duplicate attachment", posixOnly, async () => {
+  const h = createChat({ promptGate: true });
+  await h.ready();
+  const id = await h.startChat("the turn");
+  await h.until(() => h.postsOf("busy").some((m) => m.value));
+
+  h.send({ type: "attachImage", name: "queued.png", mime: "image/png", data: IMG_A });
+  await h.until(() => ((h.last("attachments") || {}).items || []).length === 1);
+  h.send({ type: "send", text: "queued with image" });
+  await h.until(() => (h.last("queued") || { items: [] }).items.length === 1);
+
+  // Borrow the row into the composer: its attachment is now staged for the
+  // session as well as recorded on the queue row itself.
+  const qid = h.last("queued").items[0].id;
+  h.send({ type: "queueEditing", id: qid });
+  await h.until(() => ((h.last("attachments") || {}).items || []).length === 1);
+  assert.strictEqual(h.last("attachments").items[0].label, "queued.png");
+
+  // Dispose with the edit still open, then shut the surface down and flush.
+  h.controller.dispose();
+  await h.dispose();
+
+  const next = createChat({
+    storage: h.storage,
+    cwd: h.cwd,
+    state: Object.fromEntries(h.state.__map),
+    promptGate: true
+  });
+  try {
+    await next.ready();
+    next.send({ type: "loadSession", id });
+    assert.ok(await next.until(() => {
+      const q = next.last("queued");
+      return q && q.paused === true && (q.items || []).length === 1;
+    }, 8000), "the queue came back paused with its row");
+    // The borrowed copy was dropped at dispose, so the composer holds nothing
+    // that would show the same file twice next to the queue row.
+    const stagedItems = (next.last("attachments") || {}).items || [];
+    assert.deepStrictEqual(stagedItems.map((a) => a.label), [], "no duplicate composer attachment");
+    assert.strictEqual(next.last("queued").items[0].attachments[0].label, "queued.png",
+      "the queue row still owns its attachment");
+  } finally {
+    await next.dispose();
+  }
+});
+
+test("message persistence replay uses stable prompt ids after a history cut", posixOnly, async () => {
+  const h = createChat({ promptDelay: 100 });
+  let next;
+  try {
+    await h.ready();
+    const id = await h.startChat("warmup");
+    const idle = () => h.until(() => h.controller.runtimes.get(id)?.busy === false, 10000);
+    assert.ok(await idle());
+    for (const name of ["discarded.png", "retained.png"]) {
+      h.send({ type: "attachImage", name, mime: "image/png", data: PNG });
+      assert.ok(await h.until(() => ((h.last("attachments") || {}).items || []).length === 1, 8000));
+      const before = h.agentSaw("session/prompt").length;
+      h.send({ type: "send", text: "same typed text" });
+      assert.ok(await h.until(() => h.agentSaw("session/prompt").length > before, 8000));
+      assert.ok(await idle());
+    }
+    const latest = h.postsOf("userMessage").filter((m) => m.text === "same typed text").at(-1);
+    assert.ok(latest?.clientMessageId);
+    const blocks = h.agentSaw("session/prompt").at(-1).params.prompt;
+    await h.dispose();
+    const state = Object.fromEntries(h.state.__map);
+    delete state["devin.viewingSession.v1"];
+    delete state["devin.activeSession.v1"];
+    // A restore can remove the earlier prompt from history while both sent
+    // records remain. The identical blocks must keep the surviving prompt's label.
+    next = createChat({
+      storage: h.storage, cwd: h.cwd, state,
+      loadUpdates: [
+        { sessionUpdate: "user_message_chunk", messageId: "history-new",
+          _meta: { "cognition.ai/clientMessageId": latest.clientMessageId }, content: blocks },
+        { sessionUpdate: "agent_message_chunk", messageId: "history-answer", content: { type: "text", text: "reply" } }
+      ]
+    });
+    await next.ready();
+    next.send({ type: "loadSession", id });
+    const chunks = () => next.postsOf("replay").flatMap((m) => m.items || []).filter((p) => p.type === "userChunk");
+    assert.ok(await next.until(() => chunks().length === 1, 10000));
+    assert.deepStrictEqual(chunks()[0].attachments.map((a) => a.label), ["retained.png"]);
+    assert.strictEqual(chunks()[0].attachments[0].thumb, `data:image/png;base64,${PNG}`);
+    assert.strictEqual(chunks()[0].messageId, latest.clientMessageId);
+  } finally {
+    if (next) await next.dispose();
     await h.dispose();
   }
 });

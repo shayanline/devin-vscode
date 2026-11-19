@@ -2250,6 +2250,40 @@ body.vscode-high-contrast-light .queued-bubble { border: 1px dotted var(--vscode
   background: var(--vscode-chat-requestBubbleBackground, rgba(127, 127, 127, 0.08));
 }
 
+.queued-resume {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--dv-space-3);
+  border-color: var(--vscode-focusBorder, var(--dv-border));
+  border-left-width: 3px;
+  background: color-mix(in srgb, var(--vscode-button-background) 8%, var(--vscode-editorWidget-background, var(--vscode-editor-background)));
+  color: var(--vscode-foreground);
+  font-size: var(--dv-fs-s);
+}
+
+.queued-resume > .codicon {
+  flex: 0 0 auto;
+  color: var(--vscode-focusBorder, var(--vscode-foreground));
+}
+
+.queued-resume > span {
+  flex: 1 1 120px;
+  min-width: 0;
+  font-weight: 600;
+}
+
+.queued-resume > .btn {
+  flex: 0 0 auto;
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.queued-resume > .btn:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 2px;
+}
+
 /* An MCP server that would not start is a warning about what this chat can do,
    so it sits above the composer for as long as it is true. */
 .mcp-card {
@@ -4219,6 +4253,7 @@ body.vscode-high-contrast-light .queued-bubble { border: 1px dotted var(--vscode
 /* In the sessions list the composer is a clean "new chat" box: session-scoped
    docked widgets and the context ring are hidden. Their data is kept, so they
    reappear when a thread is reopened; only the presentation is suppressed. */
+#composer.list-mode #queue-resume,
 #composer.list-mode #working-set,
 #composer.list-mode #todo-widget,
 #composer.list-mode #usage {
