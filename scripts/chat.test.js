@@ -200,8 +200,7 @@ test("file URI links open the referenced file", posixOnly, async () => {
   const upperFileUri = fileUri.replace(/^file:/, "FILE:");
 
   for (const href of [fileUri, upperFileUri]) {
-    h.send({ type: "openFile", path: href });
-    await h.until(() => globalThis.__dvOpened.at(-1) === fileUri);
+    await h.webview._handler({ type: "openFile", path: href });
   }
 
   assert.deepStrictEqual(globalThis.__dvOpened.slice(-2), [fileUri, fileUri]);
