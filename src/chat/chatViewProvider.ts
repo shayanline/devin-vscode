@@ -4434,14 +4434,29 @@ export class ChatController implements AcpHost {
     if (!fsPath) {
       return;
     }
-    fsPath = fileFromUri(fsPath);
-    if (!path.isAbsolute(fsPath)) {
-      fsPath = path.join(this.active()?.cwd || this.cwd(), fsPath);
-    }
+    fsPath = path.resolve(this.active()?.cwd || this.cwd(), fileFromUri(fsPath));
     const uri = vscode.Uri.file(fsPath);
+    const stat = await fs.promises.stat(fsPath).catch(() => undefined);
+    if (stat?.isDirectory()) {
+      if (vscode.workspace.getWorkspaceFolder(uri)) {
+        try {
+          // Revealing a child expands this folder. Select the folder last.
+          const [child] = await fs.promises.readdir(fsPath);
+          if (child) {
+            await vscode.commands.executeCommand("revealInExplorer", vscode.Uri.joinPath(uri, child));
+          }
+          await vscode.commands.executeCommand("revealInExplorer", uri);
+          return;
+        } catch (err) {
+          this.log(`[reveal-directory-failed] ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+      await vscode.commands.executeCommand("revealFileInOS", uri);
+      return;
+    }
     try {
       const doc = await vscode.workspace.openTextDocument(uri);
-      const options: vscode.TextDocumentShowOptions = {};
+      const options: vscode.TextDocumentShowOptions = { preview: false };
       if (typeof line === "number" && line > 0) {
         const pos = new vscode.Position(line - 1, 0);
         options.selection = new vscode.Range(pos, pos);
@@ -4451,7 +4466,7 @@ export class ChatController implements AcpHost {
       // Not openable as text (an image, a PDF, a binary): let VS Code pick the
       // editor for it rather than refusing to open a file the user clicked.
       try {
-        await vscode.commands.executeCommand("vscode.open", uri);
+        await vscode.commands.executeCommand("vscode.open", uri, { preview: false });
       } catch {
         this.log(`[open-file-failed] ${err instanceof Error ? err.message : String(err)}`);
       }

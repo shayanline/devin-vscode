@@ -14,13 +14,16 @@ Thanks for your interest. Issues and pull requests are welcome.
 
 ## Releasing
 
-Releases are automated. To cut one:
+Releases are automated after a version change reaches `main`:
 
-1. Add the new version's entry to [`CHANGELOG.md`](CHANGELOG.md). The release notes are taken from it.
-2. Bump the version and create the tag: `npm version patch` (or `minor` / `major`).
-3. Push it: `git push --follow-tags`.
+1. On a feature branch, run `npm version patch --no-git-tag-version` (or `minor` / `major`) to update the manifest and lockfile without creating a tag.
+2. Add the matching version entry to [`CHANGELOG.md`](CHANGELOG.md).
+3. Open a pull request to `main` and wait for CI to pass.
+4. Merge the pull request. The release workflow checks the merged commit, creates its version tag, and publishes the release.
 
-The [release workflow](.github/workflows/release.yml) then type checks, tests, builds the extension, creates a GitHub Release with the `.vsix` attached, and publishes to the VS Code Marketplace. When `OVSX_PAT` is configured, it also publishes to Open VSX as a best effort step. The release body is the matching `CHANGELOG.md` section (via `scripts/changelog-notes.js`) with GitHub's "Full Changelog" link appended, so if the entry is missing the notes fall back to a link to the changelog. The [CI workflow](.github/workflows/ci.yml) runs the same checks on every push and pull request, and the type check and tests again on Windows and macOS, since the extension runs wherever VS Code does.
+The [release workflow](.github/workflows/release.yml) skips publishing when the package version is unchanged. It type checks, tests, builds the extension, creates a GitHub Release with the `.vsix` attached, and publishes to the VS Code Marketplace. When `OVSX_PAT` is configured, it also publishes to Open VSX as a best effort step. The release body is the matching `CHANGELOG.md` section (via `scripts/changelog-notes.js`) with GitHub's "Full Changelog" link appended. All merge methods are supported because the tag is created on the merged commit. Do not create or push a release tag from the pull request branch. If a release run fails, rerun that run after resolving the failure instead of moving its tag.
+
+The [CI workflow](.github/workflows/ci.yml) runs the checks on every push to `main` and every pull request targeting `main`, including tests on Windows and macOS.
 
 One time setup for Marketplace publishing:
 

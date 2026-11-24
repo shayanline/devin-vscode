@@ -1,35 +1,61 @@
 name: Release
 
-# Streamlined release: push a version tag and this builds the extension, creates
-# a GitHub Release with the packaged VSIX attached, and publishes to the VS Code
-# Marketplace. Open VSX publishing runs when OVSX_PAT is configured. The tag must
-# match package.json, e.g.
-#
-#     npm version patch            # bumps package.json and creates the tag
-#     git push --follow-tags       # triggers this workflow
-#
-# One-time setup (repo Settings -> Secrets and variables -> Actions):
-#   VSCE_PAT  Azure DevOps token for the "shayanline" Marketplace publisher.
-#   OVSX_PAT  Open VSX token. This optional step is best effort.
-
+# A version change merged into main is checked, tagged, and published here.
+# VSCE_PAT enables Marketplace publishing. OVSX_PAT enables Open VSX.
 on:
   push:
-    tags:
-      - "v*"
+    branches: [main]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
+  version:
+    name: Detect a version change on main
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      vsix: ${{ steps.version.outputs.vsix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Detect release version
+        id: version
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+        run: node scripts/release-version.js
+
   release:
     name: Build, release and publish
+    needs: version
+    if: needs.version.outputs.version != ''
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: release-${{ needs.version.outputs.tag }}
+      cancel-in-progress: false
     env:
+      RELEASE_VERSION: ${{ needs.version.outputs.version }}
+      RELEASE_TAG: ${{ needs.version.outputs.tag }}
       VSCE_PAT: ${{ secrets.VSCE_PAT }}
       OVSX_PAT: ${{ secrets.OVSX_PAT }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
 
       - name: Setup Node
         uses: actions/setup-node@v7
@@ -46,35 +72,46 @@ jobs:
       - name: Test
         run: npm test
 
-      - name: Verify package.json version matches the tag
-        id: version
+      - name: Verify package.json version matches the release
         run: |
           PKG="$(node -p "require('./package.json').version")"
-          TAG="${GITHUB_REF_NAME#v}"
-          if [ "$PKG" != "$TAG" ]; then
-            echo "::error::package.json version ($PKG) does not match tag ($GITHUB_REF_NAME). Run 'npm version' so they match."
+          if [ "$PKG" != "$RELEASE_VERSION" ]; then
+            echo "::error::package.json version ($PKG) does not match release ($RELEASE_VERSION)."
             exit 1
           fi
-          echo "vsix=devin-vscode-${PKG}.vsix" >> "$GITHUB_OUTPUT"
 
       - name: Package VSIX
         run: npm run package
 
       - name: Build release notes from CHANGELOG.md
-        run: node scripts/changelog-notes.js "${GITHUB_REF_NAME#v}" > release-notes.md
+        run: node scripts/changelog-notes.js "$RELEASE_VERSION" > release-notes.md
+
+      - name: Create release tag on main
+        run: |
+          if ! git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
+            git tag "$RELEASE_TAG" "$GITHUB_SHA"
+          fi
+          if [ "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" != "$GITHUB_SHA" ]; then
+            echo "::error::The release tag points to a different commit."
+            exit 1
+          fi
+          git push origin "refs/tags/$RELEASE_TAG"
 
       - name: Create GitHub Release with the VSIX
         uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ needs.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           body_path: release-notes.md
           generate_release_notes: true
-          files: ${{ steps.version.outputs.vsix }}
+          fail_on_unmatched_files: true
+          files: ${{ needs.version.outputs.vsix }}
 
       - name: Publish to the VS Code Marketplace
         if: env.VSCE_PAT != ''
-        run: npx vsce publish --no-dependencies --packagePath "${{ steps.version.outputs.vsix }}"
+        run: npx vsce publish --no-dependencies --packagePath "${{ needs.version.outputs.vsix }}"
 
       - name: Publish to Open VSX
         if: env.OVSX_PAT != ''
         continue-on-error: true
-        run: npx ovsx publish "${{ steps.version.outputs.vsix }}" --pat "$OVSX_PAT"
+        run: npx ovsx publish "${{ needs.version.outputs.vsix }}" --pat "$OVSX_PAT"

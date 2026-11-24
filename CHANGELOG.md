@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.17.1] - 2026-11-24
+
+### Highlights
+- Keep files opened from chat in separate editor tabs.
+- Reveal and expand workspace folders in VS Code Explorer.
+- Use the system file manager when a folder cannot open in Explorer.
+
+### Under the hood
+- Publish releases after merging a version bump into main.
+
 ## [0.17.0] - 2026-11-18
 
 ### Highlights

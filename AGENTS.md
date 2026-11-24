@@ -215,19 +215,15 @@ until that was done.
 
 ## Releasing
 
-Releases are automated. Bump the version and push the tag:
+Releases are automated after a version change reaches `main`:
 
-```
-npm version patch   # or minor / major
-git push --follow-tags
-```
+1. On a feature branch, run `npm version patch --no-git-tag-version` (or `minor` / `major`).
+2. Add the matching version entry to `CHANGELOG.md`, then open a pull request to `main`.
+3. Wait for CI to pass, then merge the pull request.
 
-The tag push triggers the release workflow, which type checks, tests, builds, creates a GitHub Release with the `.vsix` attached, and publishes to the Marketplace. It also publishes to Open VSX when `OVSX_PAT` is configured.
+The release workflow skips publishing when the version is unchanged. For a new version it type checks, tests, builds, creates the version tag on the merged commit, and publishes a GitHub Release with the `.vsix` attached. It also publishes to the Marketplace when `VSCE_PAT` is configured and to Open VSX when `OVSX_PAT` is configured. All merge methods are supported. Do not create or push a release tag from the pull request branch. Rerun a failed release run after resolving its failure instead of moving the tag.
 
-The release body is taken from the matching `CHANGELOG.md` section by
-`scripts/changelog-notes.js`, with GitHub's own "Full Changelog" link appended.
-So add the `CHANGELOG.md` entry for the new version before you tag, or the
-release notes fall back to a link to the changelog.
+The release body is taken from the matching `CHANGELOG.md` section by `scripts/changelog-notes.js`, with GitHub's own "Full Changelog" link appended. Add the entry before merging the release pull request.
 
 ## Code philosophy
 
