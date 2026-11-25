@@ -412,7 +412,7 @@ test("an edit row opens what that edit did, not the whole file", async () => {
   assert.strictEqual(read("turn1", "before"), "one\n", "and the first still shows its own");
 
   globalThis.__dvOpened = [];
-  await tracker.openEdit("turn2", file);
+  await tracker.openEdit("turn2");
   assert.ok(
     (globalThis.__dvOpened || []).some((u) => u.startsWith("devin-edit")),
     "the row opens its own two sides: " + JSON.stringify(globalThis.__dvOpened)
@@ -420,10 +420,13 @@ test("an edit row opens what that edit did, not the whole file", async () => {
   // The working set is still the whole change, which is what the tray opens.
   assert.strictEqual(original(tracker, file), "one\n");
 
-  // An edit whose text is no longer held falls back to the file's own diff.
+  // An unavailable operation must not silently open the cumulative file diff.
   globalThis.__dvOpened = [];
-  await tracker.openEdit("forgotten", file);
-  assert.ok((globalThis.__dvOpened || []).some((u) => u.startsWith("devin-original")));
+  const messages = globalThis.__dvVscode.window.shown.info;
+  messages.length = 0;
+  await tracker.openEdit("forgotten");
+  assert.deepStrictEqual(globalThis.__dvOpened, []);
+  assert.match(messages[0], /diff is no longer available/);
 });
 
 test("a file is the same file however its path is spelled", async () => {

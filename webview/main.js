@@ -7101,8 +7101,8 @@ import { createWorkingMark } from "./workingMark.js";
 
   // The one way an edit is ever shown: the pencil, what happened to the file, and
   // the file itself with its line counts. A file can report changes several times
-  // in a turn (a tool call, its updates, and the change event all carry the same
-  // diff), so there is one row per file per turn, rewritten in place.
+  // for one operation (a tool call, its updates, and the change event all carry
+  // the same id), so only those reports share a row.
   function renderEdit(e) {
     const path = e.path;
     finalizeBlock();
@@ -7110,8 +7110,19 @@ import { createWorkingMark } from "./workingMark.js";
     ensureTurn();
     const turn = currentTurn;
     turn.editPills = turn.editPills || new Map();
-    const key = path || e.name;
+    const key = e.editId || path || e.name;
     let node = key ? turn.editPills.get(key) : null;
+    if (!node && e.editId) {
+      for (const t of turns) {
+        node = t.editPills?.get(key);
+        if (node) break;
+      }
+    }
+    if (!node && e.editId && turn.editPills.has(path)) {
+      node = turn.editPills.get(path);
+      turn.editPills.delete(path);
+      turn.editPills.set(key, node);
+    }
     const isNew = !node;
     if (isNew) {
       node = document.createElement("div");
@@ -7124,10 +7135,18 @@ import { createWorkingMark } from "./workingMark.js";
     // An edit reported by the agent alone (a reloaded transcript) has no working
     // set behind it, so it cannot offer Keep and Undo. Once a row has them it
     // keeps them: the same edit arrives again as the tool call completes.
-    const actionable = e.actionable || node.dataset.actionable === "1";
-    if (actionable && path) node.dataset.actionable = "1";
+    if (path) node.dataset.path = path;
+    if (e.actionable && path) node.dataset.actionable = "1";
+    let newest = node;
+    turns.forEach((t) => {
+      if (!t.editPills) return;
+      t.editPills.forEach((other) => {
+        if (other.dataset.path === path) newest = other;
+      });
+    });
+    const actionable = node.dataset.actionable === "1" && newest === node;
     if (e.created) node.dataset.created = "1";
-    // The row stands for this turn's work on the file, and opens exactly that.
+    // Each row opens only its own operation, including within the same turn.
     if (e.editId) node.dataset.editId = e.editId;
     node.innerHTML = "";
     const icon = document.createElement("i");
@@ -7169,8 +7188,8 @@ import { createWorkingMark } from "./workingMark.js";
       // beside a diff showing only its own, so the later work went without a word.
       turns.forEach((t) => {
         if (!t.editPills) return;
-        t.editPills.forEach((other, key) => {
-          if (key !== path || other === node) return;
+        t.editPills.forEach((other) => {
+          if (other.dataset.path !== path || other === node) return;
           const stale = other.querySelector(".edit-pill-actions");
           if (stale) stale.remove();
           other.title = "This file was edited again later. Keep or undo it from the newest change, or the changed files list.";
@@ -7193,8 +7212,8 @@ import { createWorkingMark } from "./workingMark.js";
     const label = action === "reject" ? "Undone" : "Kept";
     turns.forEach((t) => {
       if (!t.editPills) return;
-      t.editPills.forEach((node, key) => {
-        if (want.has(key)) markEditResolved(node, label);
+      t.editPills.forEach((node) => {
+        if (want.has(node.dataset.path)) markEditResolved(node, label);
       });
     });
   }

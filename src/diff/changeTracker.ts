@@ -372,12 +372,12 @@ export class ChangeTracker
     }
   }
 
-  // Open what one edit did. Falls back to the file's working set diff when the
-  // text behind it has been dropped (a reloaded transcript, or a long session).
-  async openEdit(id: string, fsPath?: string): Promise<void> {
+  // Open only this operation. A cumulative file diff would misrepresent an edit
+  // whose snapshots are no longer held after a reload or a long session.
+  async openEdit(id: string): Promise<void> {
     const edit = this.edits.get(id);
     if (!edit) {
-      await this.openDiff(fsPath);
+      void vscode.window.showInformationMessage("This edit's diff is no longer available. Use the changed files list to review pending changes.");
       return;
     }
     const side = (s: "before" | "after") =>
