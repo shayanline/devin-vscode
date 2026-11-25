@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.17.3] - 2026-11-25
+
+### Highlights
+- Keep each diff open in its own editor tab.
+- Avoid repeated loading when clicking a diff again.
+
+### Under the hood
+- Log diff opening times and line counts without file contents.
+
 ## [0.17.2] - 2026-11-25
 
 ### Highlights

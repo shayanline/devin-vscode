@@ -166,6 +166,69 @@ test("opening the same diff twice resolves its original once", async () => {
   assert.ok(originals[0].includes(file.replace(/\\/g, "/")) || originals[0].includes(file));
 });
 
+test("diffs prepare both documents together and share concurrent opens in a persistent tab", async (t) => {
+  const logs = [];
+  const tracker = new ChangeTracker((line) => logs.push(line));
+  const { workspace, commands } = globalThis.__dvVscode;
+  const openTextDocument = workspace.openTextDocument;
+  const executeCommand = commands.executeCommand;
+  t.after(() => {
+    workspace.openTextDocument = openTextDocument;
+    commands.executeCommand = executeCommand;
+    tracker.dispose();
+  });
+  const file = write("prepared.ts", "after\n");
+  tracker.recordDiff(file, "before\n", "after\n", "A");
+  tracker.recordEdit("prepared", file, "before\n", "after\n");
+
+  for (const open of [() => tracker.openDiff(file), () => tracker.openEdit("prepared")]) {
+    const loggedBefore = logs.length;
+    const pending = [];
+    const shown = [];
+    workspace.openTextDocument = (uri) => new Promise((resolve) => pending.push({ uri, resolve }));
+    commands.executeCommand = async (...args) => shown.push(args);
+    const requests = [open(), open()];
+    try {
+      await new Promise(setImmediate);
+      assert.strictEqual(pending.length, 2, "both sides start loading without waiting on the other");
+      assert.notStrictEqual(pending[0].uri.toString(), pending[1].uri.toString(), "each side loads once");
+      assert.strictEqual(shown.length, 0, "the editor waits for its documents");
+      pending[0].resolve({ lineCount: 1000 });
+      await new Promise(setImmediate);
+      assert.strictEqual(shown.length, 0, "one ready side cannot start a redundant comparison");
+      pending[1].resolve({ lineCount: 992 });
+      await Promise.all(requests);
+      assert.strictEqual(shown.length, 1, "concurrent clicks compute one comparison");
+      assert.strictEqual(shown[0][0], "vscode.diff");
+      assert.strictEqual(shown[0][4].preview, false, "the next diff cannot replace this tab");
+      assert.strictEqual(logs.length, loggedBefore + 1, "one comparison records one timing");
+      assert.match(logs.at(-1), /\[perf\] diff-open \d+ms documents=\d+ms editor=\d+ms lines=1000->992/);
+    } finally {
+      pending.forEach(({ resolve }) => resolve());
+      await Promise.allSettled(requests);
+    }
+  }
+});
+
+test("a failed diff opening can be retried", async (t) => {
+  const tracker = new ChangeTracker();
+  const { commands } = globalThis.__dvVscode;
+  const executeCommand = commands.executeCommand;
+  t.after(() => {
+    commands.executeCommand = executeCommand;
+    tracker.dispose();
+  });
+  const file = write("retry-diff.ts", "after\n");
+  tracker.recordEdit("retry", file, "before\n", "after\n");
+  let calls = 0;
+  commands.executeCommand = async () => {
+    if (++calls === 1) throw new Error("editor unavailable");
+  };
+  await assert.rejects(tracker.openEdit("retry"), /editor unavailable/);
+  await tracker.openEdit("retry");
+  assert.strictEqual(calls, 2, "a rejected request does not block the next click");
+});
+
 test("the working set survives a window reload, counts and all", async () => {
   const dir = fs.mkdtempSync(path.join(TMP, "store-"));
   const store = { scheme: "file", path: dir, fsPath: dir, query: "", toString: () => "file://" + dir };

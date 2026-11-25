@@ -138,9 +138,12 @@ export class ChangeTracker
   private spillDir?: string;
   // Originals being resolved right now, so two clicks do not race each other to
   // create the same model.
-  private readonly warming = new Map<string, Promise<void>>();
+  private readonly warming = new Map<string, Promise<vscode.TextDocument | undefined>>();
+  private readonly opening = new Map<string, Promise<void>>();
   private saveTimer?: NodeJS.Timeout;
   private saving?: Promise<void>;
+
+  constructor(private readonly log?: (line: string) => void) {}
 
   async useStore(dir: vscode.Uri | undefined): Promise<void> {
     if (!dir) {
@@ -386,9 +389,7 @@ export class ChangeTracker
         path: "/" + edit.path.replace(/\\/g, "/").replace(/^\/+/, ""),
         query: `${id}\u0000${s}`
       });
-    const left = side("before");
-    await this.warmOriginal(left);
-    await vscode.commands.executeCommand("vscode.diff", left, side("after"), `${path.basename(edit.path)} (this edit)`);
+    await this.showDiff(side("before"), side("after"), `${path.basename(edit.path)} (this edit)`);
   }
 
   recordDiff(fsPath: string, oldText: string | null, newText: string, sessionId: string, stat?: { added: number; removed: number }): void {
@@ -485,8 +486,32 @@ export class ChangeTracker
     }
     const left = this.originalUri(fsPath);
     const right = vscode.Uri.file(fsPath);
-    await this.warmOriginal(left);
-    await vscode.commands.executeCommand("vscode.diff", left, right, `${path.basename(fsPath)} (Devin)`);
+    await this.showDiff(left, right, `${path.basename(fsPath)} (Devin)`);
+  }
+
+  private async showDiff(left: vscode.Uri, right: vscode.Uri, title: string): Promise<void> {
+    const id = JSON.stringify([left.toString(), right.toString()]);
+    const pending = this.opening.get(id);
+    if (pending) {
+      return pending;
+    }
+    const startedAt = Date.now();
+    const request = (async () => {
+      const [original, modified] = await Promise.all([this.warmDocument(left), this.warmDocument(right)]);
+      const preparedAt = Date.now();
+      try {
+        await vscode.commands.executeCommand("vscode.diff", left, right, title, { preview: false });
+      } finally {
+        const finishedAt = Date.now();
+        this.log?.(`[perf] diff-open ${finishedAt - startedAt}ms documents=${preparedAt - startedAt}ms editor=${finishedAt - preparedAt}ms lines=${original?.lineCount ?? "?"}->${modified?.lineCount ?? "?"} ${title}`);
+      }
+    })();
+    this.opening.set(id, request);
+    try {
+      await request;
+    } finally {
+      this.opening.delete(id);
+    }
   }
 
   // Resolve the original once, before anything else asks for it. The diff
@@ -494,20 +519,19 @@ export class ChangeTracker
   // document, and when they ask at the same moment each finds no model and each
   // sets out to make one, so the second is told it already exists and the editor
   // fails to open. Opening it here, and waiting, means both find one waiting.
-  private async warmOriginal(uri: vscode.Uri): Promise<void> {
+  private async warmDocument(uri: vscode.Uri): Promise<vscode.TextDocument | undefined> {
     const key = uri.toString();
     const inflight = this.warming.get(key);
     if (inflight) {
-      await inflight;
-      return;
+      return inflight;
     }
     const p = Promise.resolve(vscode.workspace.openTextDocument(uri)).then(
-      () => undefined,
+      (document) => document,
       () => undefined
     );
     this.warming.set(key, p);
     try {
-      await p;
+      return await p;
     } finally {
       this.warming.delete(key);
     }
@@ -520,7 +544,7 @@ export class ChangeTracker
     if (!paths.length) {
       return;
     }
-    await Promise.all(paths.map((p) => this.warmOriginal(this.originalUri(p))));
+    await Promise.all(paths.map((p) => this.warmDocument(this.originalUri(p))));
     const list = paths.map((p) => [vscode.Uri.file(p), this.originalUri(p), vscode.Uri.file(p)]);
     try {
       await vscode.commands.executeCommand("vscode.changes", "Devin Changes", list);
