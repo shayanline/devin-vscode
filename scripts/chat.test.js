@@ -3739,10 +3739,11 @@ test("session lifecycle: a failed visible wake returns to the list while a faile
 
     // The visible cold wake fails: the half spawned runtime goes away, the
     // panel returns to the list, and the failure is diagnosed.
-    h.send({ type: "wakeSession", id: a });
+    const visibleWake = h.webview._handler({ type: "wakeSession", id: a });
     assert.ok(await h.until(() => entered === 1, 15000), "the wake never reached the agent seam");
     assert.ok(await h.until(() => h.controller.runtimes.has(a), 5000), "the waking runtime never spawned");
     gates[0]();
+    await visibleWake;
     assert.ok(await h.until(() => !h.controller.runtimes.has(a), 10000), "the failed wake runtime was not removed");
     assert.ok(await h.until(() => h.activeId() === undefined && h.last("body")?.body === "list", 10000), "the panel did not return to the list");
     assert.ok(h.logs.some((l) => l.includes("[load-failed]")), "the wake failure was not diagnosed");
@@ -3827,7 +3828,7 @@ test("session lifecycle: a failed live reload keeps the log partial, survives on
 });
 
 test("session lifecycle: reopening a live idle session replays its complete local log without a second ACP load", posixOnly, async () => {
-  const h = createChat({ promptDelay: 200, config: { defaultMode: "" } });
+  const h = createChat({ promptDelay: 200, stepsDelay: 200, config: { defaultMode: "" } });
   try {
     await h.ready();
     const id = await h.startChat("big log session");
@@ -3865,14 +3866,14 @@ test("session lifecycle: reopening a live idle session replays its complete loca
     rt.logFull = false;
     h.send({ type: "leaveToList" });
     assert.ok(await h.until(() => !h.activeId(), 5000), "the panel never left");
-    h.send({ type: "loadSession", id });
+    await h.webview._handler({ type: "loadSession", id });
     assert.ok(await h.until(() => sessionLoads() === loadsBefore + 1, 15000), "a partial log did not go through ACP");
     assert.ok(await h.until(() => h.activeId() === id, 10000), "the reloaded session never came back");
 
     // A successful rewind invalidates the local record: what follows must ask
     // the agent again rather than trust a transcript the rewind superseded.
     const revertedBefore = h.postsOf("reverted").length;
-    h.send({ type: "revertExecute", sessionId: id, userMessageId: "m-x" });
+    await h.webview._handler({ type: "revertExecute", sessionId: id, userMessageId: "m-x" });
     assert.ok(await h.until(() => h.postsOf("reverted").length > revertedBefore, 10000), "the rewind never completed");
     assert.strictEqual(rt.log.length, 0, "the superseded transcript was kept");
     assert.strictEqual(rt.logFull, false, "the log still claimed to be complete");

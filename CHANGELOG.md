@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.2] - 2026-11-25
+
+### Highlights
+- Show accurate diffs without marking unchanged lines as additions.
+- Review each edit separately when a file changes more than once.
+- Restore complete file contents when undoing an edit.
+
 ## [0.17.1] - 2026-11-24
 
 ### Highlights

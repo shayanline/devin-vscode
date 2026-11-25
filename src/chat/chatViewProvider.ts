@@ -103,8 +103,7 @@ interface Runtime {
   // The prompt in flight, if any. A session can change surface mid turn, and the
   // surface it lands on has to be the one that ends it.
   turn?: Promise<PromptResult>;
-  // How many prompts this session has run, which is what an edit row belongs to:
-  // one row per file per turn, and the row's diff is that turn's work on it.
+  // How many prompts this session has run.
   turnCount: number;
   // Set when a session arrived on this surface mid turn and its own record of the
   // transcript was incomplete, so the rest is fetched from the CLI once the turn
@@ -1813,10 +1812,10 @@ export class ChatController implements AcpHost {
           this.muteMcpWarnings(String(msg.scope || "window"));
           return;
         case "openDiff":
-          // An edit row opens what that edit did; the working set opens what the
+          // An edit row opens what that edit did. The working set opens what the
           // file is still holding, which is every edit not yet reviewed.
           if (msg.editId) {
-            await this.changes.openEdit(String(msg.editId), String(msg.path || ""));
+            await this.changes.openEdit(String(msg.editId));
           } else {
             await this.changes.openDiff(String(msg.path || ""));
           }
@@ -6505,11 +6504,11 @@ export class ChatController implements AcpHost {
           meta: toolMeta(u),
           status: u.status || "pending",
           rawInput: u.rawInput,
-          content: normalizeToolContent(u.content, rt ? (p) => this.editId(rt, p) : undefined),
+          content: normalizeToolContent(u.content, rt ? (p) => this.editId(rt, p, u.toolCallId) : undefined),
           locations: normalizeLocations(u.locations),
           terminalId: claimTerminal(rt, u)
         });
-        this.recordDiffs(u, rt);
+        this.reportDiffs(u, rt);
         return;
       case "tool_call_update":
         this.trackBackgroundShell(rt, u);
@@ -6522,10 +6521,10 @@ export class ChatController implements AcpHost {
           meta: toolMeta(u),
           status: u.status,
           rawInput: u.rawInput,
-          content: normalizeToolContent(u.content, rt ? (p) => this.editId(rt, p) : undefined),
+          content: normalizeToolContent(u.content, rt ? (p) => this.editId(rt, p, u.toolCallId) : undefined),
           locations: normalizeLocations(u.locations)
         });
-        this.recordDiffs(u, rt);
+        this.reportDiffs(u, rt);
         return;
       case "usage_update":
         if (!parentId) this.emit(rt, {
@@ -6646,17 +6645,16 @@ export class ChatController implements AcpHost {
     return rt.subagentIds.get(agentId) || agentId;
   }
 
-  // The edit row a file's change belongs to. There is one row per file per turn,
-  // so that is what the row's own diff covers: what this turn did to this file,
-  // as against the working set, which is everything still awaiting review.
-  private editId(rt: Runtime, fsPath: string): string {
-    return `${rt.id}#${rt.turnCount}#${fsPath}`;
+  // Tool notifications and file writes share the CLI's tool call id. Include the
+  // path because one operation can edit several files.
+  private editId(rt: Runtime, fsPath: string, operation: string = crypto.randomUUID()): string {
+    return `${rt.id}#${operation}#${this.resolvePath(fsPath, rt.id)}`;
   }
 
-  private recordDiffs(u: any, rt?: Runtime): void {
-    // Historical diffs from a session/load replay are already resolved, so they
-    // are not part of an actionable working set. A background session's edits
-    // are tracked under that session and shown when it is next opened.
+  private reportDiffs(u: any, rt?: Runtime): void {
+    // Tool diffs can contain only replacement fragments. They summarize edits,
+    // while writeTextFile alone records the complete file snapshots for review
+    // and Undo. Replayed notifications must not report historical edits as live.
     if (!rt || rt.replaying) {
       return;
     }
@@ -6668,19 +6666,8 @@ export class ChatController implements AcpHost {
         // gives a path in the VS Code install, which is then what an undo writes to.
         const full = this.resolvePath(c.path, rt.id);
         const s = diffStat(c.oldText, c.newText);
-        const editId = this.editId(rt, full);
-        this.changes.recordEdit(editId, full, c.oldText ?? null, c.newText ?? "");
-        // Post the per-file counts before recordDiff fires the working-set list,
-        // so the list renders with the deltas already known.
+        const editId = this.editId(rt, full, u.toolCallId);
         this.emit(rt, { type: "fileChange", path: full, added: s.added, removed: s.removed, created: c.oldText == null || c.oldText === "", editId });
-        // `oldText` is optional on the wire, and a missing one must not become the
-        // sentinel that makes Undo delete the file: only our own read of the disk
-        // can say a file did not exist. Without a baseline there is nothing to
-        // review against, so the row stands on its own and the file is left out of
-        // the working set until the write itself records it.
-        if (typeof c.oldText === "string") {
-          this.changes.recordDiff(full, c.oldText, c.newText ?? "", rt.id, s);
-        }
       }
     }
   }
@@ -6960,7 +6947,8 @@ export class ChatController implements AcpHost {
     const rt = this.runtimeBySessionId(params.sessionId);
     if (rt) {
       const s = diffStat(original, content);
-      const editId = this.editId(rt, full);
+      const operation = params._meta?.["cognition.ai/toolCallId"];
+      const editId = this.editId(rt, full, typeof operation === "string" ? operation : undefined);
       this.changes.recordEdit(editId, full, original, content);
       this.emit(rt, { type: "fileChange", path: full, added: s.added, removed: s.removed, created: original == null, editId });
       this.changes.recordDiff(full, original, content, rt.id, s);

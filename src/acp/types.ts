@@ -407,6 +407,7 @@ export interface WriteTextFileParams {
   sessionId: string;
   path: string;
   content: string;
+  _meta?: Record<string, unknown>;
 }
 
 // `_cognition.ai/output`: the CLI's own log stream. The MCP channel is the only
