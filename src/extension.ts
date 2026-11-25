@@ -31,7 +31,7 @@ export function activate(context: vscode.ExtensionContext): void {
       // best effort
     }
   }, 0).unref?.();
-  const changes = new ChangeTracker();
+  const changes = new ChangeTracker((line) => output.appendLine(line));
   working = changes;
   const store = new SessionStore(context.workspaceState, () =>
     !!vscode.workspace.workspaceFolders?.length || !!vscode.workspace.workspaceFile);
