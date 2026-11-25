@@ -23,6 +23,8 @@ Releases are automated after a version change reaches `main`:
 
 The [release workflow](.github/workflows/release.yml) skips publishing when the package version is unchanged. It type checks, tests, builds the extension, creates a GitHub Release with the `.vsix` attached, and publishes to the VS Code Marketplace. When `OVSX_PAT` is configured, it also publishes to Open VSX as a best effort step. The release body is the matching `CHANGELOG.md` section (via `scripts/changelog-notes.js`) with GitHub's "Full Changelog" link appended. All merge methods are supported because the tag is created on the merged commit. Do not create or push a release tag from the pull request branch. If a release run fails, rerun that run after resolving the failure instead of moving its tag.
 
+If an unchanged version has not been published, manually run the Release workflow from `main` and enter the exact version in `package.json`. Manual runs retain the checkout and tag checks, so they cannot publish another branch or move an existing tag.
+
 The [CI workflow](.github/workflows/ci.yml) runs the checks on every push to `main` and every pull request targeting `main`, including tests on Windows and macOS.
 
 One time setup for Marketplace publishing:

@@ -225,6 +225,8 @@ The release workflow skips publishing when the version is unchanged. For a new v
 
 The release body is taken from the matching `CHANGELOG.md` section by `scripts/changelog-notes.js`, with GitHub's own "Full Changelog" link appended. Add the entry before merging the release pull request.
 
+If an unchanged version has not been published, manually run the Release workflow from `main` and enter the exact version in `package.json`. Manual runs retain the checkout and tag checks, so they cannot publish another branch or move an existing tag.
+
 ## Code philosophy
 
 Write the simplest code that solves the problem. Every line should earn its

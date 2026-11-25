@@ -11,14 +11,20 @@ if (process.env.GITHUB_REF !== "refs/heads/main") {
   throw new Error("Releases must run from main.");
 }
 if (git("rev-parse", "HEAD") !== process.env.GITHUB_SHA) {
-  throw new Error("The checkout does not match the main push commit.");
+  throw new Error("The checkout does not match the main commit.");
 }
 
 const version = JSON.parse(fs.readFileSync("package.json", "utf8")).version;
-const previous = JSON.parse(git("show", `${process.env.BEFORE_SHA}:package.json`)).version;
-if (version === previous) {
-  console.log("The package version is unchanged. Skipping release.");
-  process.exit(0);
+if (process.env.GITHUB_EVENT_NAME === "workflow_dispatch") {
+  if (process.env.REQUESTED_VERSION !== version) {
+    throw new Error("The requested version must match package.json.");
+  }
+} else {
+  const previous = JSON.parse(git("show", `${process.env.BEFORE_SHA}:package.json`)).version;
+  if (version === previous) {
+    console.log("The package version is unchanged. Skipping release.");
+    process.exit(0);
+  }
 }
 if (typeof version !== "string" || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version)) {
   throw new Error("The release version must use the format X.Y.Z.");

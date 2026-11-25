@@ -5,6 +5,12 @@ name: Release
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact package version to publish from main
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -33,6 +39,7 @@ jobs:
         id: version
         env:
           BEFORE_SHA: ${{ github.event.before }}
+          REQUESTED_VERSION: ${{ inputs.version }}
         run: node scripts/release-version.js
 
   release:
